@@ -1,0 +1,48 @@
+{
+  "name": "aivue",
+  "version": "0.0.1",
+  "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aivue": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "claude-code",
+    "ai",
+    "analytics",
+    "llm",
+    "observability",
+    "tuneloop"
+  ],
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.105.0",
+    "better-sqlite3": "^11.8.1",
+    "commander": "^12.1.0",
+    "openai": "^6.44.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^20.11.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

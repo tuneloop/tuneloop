@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+
+# aivue's local data store (default location when run from a repo)
+.aivue/
+
+# Claude Code local (machine-specific) settings; shared .claude/settings.json is fine to commit
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+*.swp
+*.log
