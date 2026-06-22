@@ -23,10 +23,10 @@ export const enrichSession: Processor = {
   kind: 'enrichment',
   needs: { llm: true },
   facets: [
-    { key: 'use_case', label: 'Use Case', type: 'enum', source: 'annotation', multi: true, roles: ['chart', 'filter'] },
-    { key: 'complexity', label: 'Complexity', type: 'enum', source: 'annotation', roles: ['chart', 'filter'] },
-    { key: 'autonomy', label: 'Autonomy', type: 'enum', source: 'annotation', roles: ['chart', 'filter'] },
-    { key: 'success', label: 'Success', type: 'enum', source: 'annotation', roles: ['chart', 'filter'] },
+    { key: 'use_case', label: 'Use Case', type: 'enum', source: 'annotation', multi: true, roles: ['chart', 'filter', 'detail'] },
+    { key: 'complexity', label: 'Complexity', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
+    { key: 'autonomy', label: 'Autonomy', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
+    { key: 'success', label: 'Success', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'topics', label: 'Topics', type: 'string', source: 'annotation', multi: true, roles: ['chart'] },
   ],
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {

@@ -51,7 +51,7 @@ export interface FacetSpec {
 
 /** Structural facets that exist without any processor having run. */
 export const INTRINSIC_FACETS: FacetSpec[] = [
-  { key: 'repo', label: 'Repo', type: 'string', source: 'session', column: 'repo', roles: ['chart', 'filter'] },
+  { key: 'repo', label: 'Repo', type: 'string', source: 'session', column: 'repo', roles: ['chart', 'filter', 'detail'] },
   {
     // Usage-grain (usage_facts.model), NOT the sessions.models array — so a usage
     // MEASURE (cost/tokens) groups by model with a correct per-model split, while
@@ -61,7 +61,7 @@ export const INTRINSIC_FACETS: FacetSpec[] = [
     type: 'enum',
     source: 'usage',
     column: 'model',
-    roles: ['chart', 'filter'],
+    roles: ['chart', 'filter', 'detail'],
   },
   {
     key: 'skill',
@@ -71,6 +71,6 @@ export const INTRINSIC_FACETS: FacetSpec[] = [
     column: 'name',
     base: "action = 'skill'",
     multi: true,
-    roles: ['chart', 'filter'],
+    roles: ['chart', 'filter', 'detail'],
   },
 ]

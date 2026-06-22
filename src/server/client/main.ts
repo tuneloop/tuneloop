@@ -9,7 +9,8 @@ import { buildFilters, loadSessions, closeDrawer, setView } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
 
 function init() {
-  $('#drawerClose').onclick = closeDrawer;
+  // The drawer's close button is rendered per-open inside the sticky header
+  // (wired in openDetail); the overlay click still closes from anywhere.
   $('#overlay').onclick = closeDrawer;
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     b.onclick = function () { setView(b.getAttribute('data-view')); };

@@ -4,7 +4,7 @@ import type { Session } from '../core/model'
 import type { ProcessorResult } from '../core/processor'
 import type { DB } from './db'
 import { grainOf } from '../core/facets'
-import type { FacetSpec } from '../core/facets'
+import type { FacetSpec, FacetType } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import type { ProcessorRunRow, UsageFactInput } from './types'
@@ -1146,8 +1146,53 @@ export class Store {
       annotations,
       outcomes,
       artifacts,
+      facets: this.facetValues(id),
       transcript,
     }
+  }
+
+  /**
+   * The session's value for every facet flagged for the `detail` role — the
+   * registry-driven metadata list the drawer renders. Keeps the drawer from
+   * hardcoding which dimensions exist: a new processor facet with a `detail`
+   * role appears here with no store or client edits. Ordered by registration
+   * (intrinsic first, then processors) rather than alphabetically.
+   */
+  facetValues(id: string): FacetValue[] {
+    const facets = (this.db.prepare('SELECT * FROM facets ORDER BY rowid').all() as Array<Record<string, any>>)
+      .map(rowToFacet)
+      .filter((f) => (f.roles ?? []).includes('detail'))
+    return facets.map((f) => ({ key: f.key, label: f.label ?? f.key, type: f.type, value: this.facetValueFor(f, id) }))
+  }
+
+  /** Resolve one facet's value(s) for a session, branching on (source, multi) like facetPredicate. */
+  private facetValueFor(f: FacetSpec, id: string): string | string[] | null {
+    const col = f.column ?? f.key
+    if (f.source === 'session') {
+      if (f.multi) {
+        const rows = this.db
+          .prepare(`SELECT je.value AS v FROM sessions s, json_each(s.${col}) je WHERE s.id = ?`)
+          .all(id) as Array<{ v: unknown }>
+        return rows.map((r) => String(r.v))
+      }
+      const row = this.db.prepare(`SELECT ${col} AS v FROM sessions WHERE id = ?`).get(id) as { v: unknown } | undefined
+      return row?.v == null || row.v === '' ? null : String(row.v)
+    }
+    if (f.source === 'annotation') {
+      const row = this.db.prepare('SELECT value FROM annotations WHERE session_id = ? AND key = ?').get(id, f.key) as
+        | { value: string }
+        | undefined
+      const parsed = row ? safeJson<unknown>(row.value, null) : null
+      if (f.multi) return Array.isArray(parsed) ? parsed.map(String) : []
+      return parsed == null || parsed === '' ? null : String(parsed)
+    }
+    // usage / tool-call child grain: the distinct values this session exhibits.
+    const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
+    const base = f.base ? `${f.base} AND ` : ''
+    const rows = this.db
+      .prepare(`SELECT DISTINCT ${col} AS v FROM ${table} WHERE session_id = ? AND ${base}${col} IS NOT NULL AND ${col} <> '' ORDER BY ${col}`)
+      .all(id) as Array<{ v: unknown }>
+    return rows.map((r) => String(r.v))
   }
 
   /**
@@ -1508,7 +1553,16 @@ export interface TranscriptTurn {
   ts?: string
   sidechain: boolean
   text: string
-  tools: Array<{ name: string; action: string; ok: boolean; target?: string }>
+  tools: Array<{ name: string; action: string; ok: boolean; target?: string; error?: string }>
+}
+
+/** A facet's resolved value for one session — the registry-driven detail row. */
+export interface FacetValue {
+  key: string
+  label: string
+  type: FacetType
+  /** scalar, list (multi / child-grain facets), or null when the session has none. */
+  value: string | string[] | null
 }
 
 export interface SessionDetail {
@@ -1516,6 +1570,7 @@ export interface SessionDetail {
   annotations: Record<string, unknown>
   outcomes: Array<{ type: string; artifactId: string | null }>
   artifacts: Array<Record<string, unknown>>
+  facets: FacetValue[]
   transcript: TranscriptTurn[]
 }
 
@@ -1598,7 +1653,7 @@ function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: str
 }
 
 function buildTranscript(session: Session): TranscriptTurn[] {
-  const okById = new Map(session.toolCalls.map((t) => [t.id, t.result.ok]))
+  const resById = new Map(session.toolCalls.map((t) => [t.id, t.result]))
   const turns: TranscriptTurn[] = []
   for (const ev of session.events) {
     if (ev.kind === 'assistant') {
@@ -1609,15 +1664,21 @@ function buildTranscript(session: Session): TranscriptTurn[] {
         else if (b.type === 'tool_use') {
           const input = b.input as { file_path?: string; command?: string; path?: string } | undefined
           const target = input?.file_path ?? input?.path ?? input?.command
-          tools.push({ name: b.name, action: '', ok: okById.get(b.id) ?? true, target: clip(target, 140) })
+          const res = resById.get(b.id)
+          const ok = res ? res.ok : true
+          // Keep the full command/path (capped for payload) so the UI can show a
+          // short preview on the chip and expand to the whole thing on demand.
+          const tool: TranscriptTurn['tools'][number] = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          if (!ok) tool.error = clipError(resultText(res?.raw))
+          tools.push(tool)
         }
       }
       if (!text && tools.length === 0) continue
-      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 6000), tools })
+      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 20000), tools })
     } else if (ev.kind === 'user') {
       const text = ev.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ').trim()
       if (!text) continue
-      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 6000), tools: [] })
+      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 20000), tools: [] })
     }
   }
   return turns
@@ -1626,4 +1687,43 @@ function buildTranscript(session: Session): TranscriptTurn[] {
 function clip(s: string | undefined, n: number): string {
   if (!s) return ''
   return s.length > n ? s.slice(0, n) + ' …' : s
+}
+
+/**
+ * Clip a long tool error keeping BOTH ends: the head (e.g. "Error: Exit code 1")
+ * and the tail, where the actual failure usually is. The UI auto-scrolls the
+ * panel to the bottom so that tail is what you see first.
+ */
+function clipError(s: string): string {
+  const MAX = 1000
+  if (s.length <= MAX) return s
+  const head = 160
+  const tail = MAX - head
+  return s.slice(0, head).trimEnd() + `\n  … ${s.length - head - tail} chars omitted … \n` + s.slice(-tail).trimStart()
+}
+
+/** Best-effort readable text from a tool result's raw payload (string, content-block array, or object). */
+function resultText(raw: unknown): string {
+  if (raw == null) return ''
+  if (typeof raw === 'string') return raw
+  if (Array.isArray(raw)) {
+    return raw
+      .map((b) => (typeof b === 'string' ? b : b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (typeof raw === 'object') {
+    const o = raw as Record<string, unknown>
+    for (const k of ['stderr', 'error', 'message', 'content']) {
+      const v = o[k]
+      if (typeof v === 'string' && v) return v
+      if (Array.isArray(v)) return resultText(v)
+    }
+    try {
+      return JSON.stringify(o)
+    } catch {
+      return ''
+    }
+  }
+  return String(raw)
 }

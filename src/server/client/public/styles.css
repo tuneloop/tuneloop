@@ -121,18 +121,107 @@ tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: var(--muted); }
 .overlay { position: fixed; inset: 0; background: rgba(20,18,15,.4); opacity: 0; pointer-events: none; transition: opacity .15s; }
 .overlay.on { opacity: 1; pointer-events: auto; }
-.drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(640px, 94vw); background: var(--bg); border-left: 1px solid var(--line); transform: translateX(100%); transition: transform .18s ease; overflow-y: auto; z-index: 10; }
+.drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(900px, 96vw); background: var(--bg); border-left: 1px solid var(--line); transform: translateX(100%); transition: transform .18s ease; overflow-y: auto; z-index: 10; }
 .drawer.on { transform: translateX(0); }
-.drawer-inner { padding: 22px 24px 60px; }
-.drawer h2 { margin: 0 8px 4px 0; font-size: 19px; }
-.x { float: right; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 4px 10px; cursor: pointer; color: var(--muted); }
+.drawer-inner { padding: 0 24px 60px; }
+/* Sticky header: title + close, tab subnav, and the transcript nav pin together. */
+.drawer-head { position: sticky; top: 0; z-index: 7; background: var(--bg); padding: 16px 0 12px; }
+.drawer-head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.drawer h2 { margin: 0; font-size: 19px; flex: 1; min-width: 0; }
+.x { flex: none; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 4px 10px; cursor: pointer; color: var(--muted); }
+.x:hover { border-color: var(--emerald); color: var(--emerald); }
 .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 12px; font-size: 13px; margin: 14px 0; }
 .kv .k { color: var(--muted); }
-.turn { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: var(--paper); }
+.turn { border: 1px solid var(--line); border-radius: 8px; padding: 10px 13px; margin: 10px 0; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
+/* User vs assistant get distinct fills + a left accent so the conversation reads at a glance. */
+.turn.user { background: #eaf3ec; border-color: #cde2d3; border-left: 3px solid var(--emerald); }
+.turn.asst { background: var(--paper); border-left: 3px solid var(--track); }
+.turn.side { border-left-style: dashed; }
+/* Coalesced run of tool-only assistant turns — a muted action strip, not a message. */
+.turn.toolrun { background: transparent; border-style: dashed; }
+.turn.toolrun .role { color: var(--muted); }
+.turn.toolrun .tools { margin-top: 0; }
 .turn .role { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 5px; }
 .turn.user .role { color: var(--emerald); }
 .turn .text { white-space: pre-wrap; font-size: 13px; }
+/* Long message text: preview + Show more/less toggle */
+.text.msg .msg-full { display: none; }
+.text.msg.on .msg-prev { display: none; }
+.text.msg.on .msg-full { display: inline; }
+.msg-more { display: inline-block; margin-top: 4px; border: 0; background: transparent; color: var(--emerald); font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 0; }
+.msg-more:hover { text-decoration: underline; }
 .turn .tools { margin-top: 8px; }
 .tool-chip { display: inline-block; font-family: ui-monospace, Menlo, monospace; font-size: 11px; background: var(--track); border-radius: 5px; padding: 1px 7px; margin: 2px 4px 2px 0; }
+.tool-chip.exp { display: block; }
+.tool-chip .tgt { color: var(--muted); }
 .tool-chip.err { background: #f4ddd6; color: var(--red); }
+.tool-chip.err .tgt { color: #9b5b49; }
+/* Expandable command preview on a chip */
+.tgt-full { display: none; }
+.tgt.on .tgt-prev { display: none; }
+.tgt.on .tgt-full { display: inline; white-space: pre-wrap; word-break: break-word; }
+.tgt-more { border: 0; background: transparent; color: inherit; opacity: .65; cursor: pointer; padding: 0 4px; font-size: 11px; font-family: ui-monospace, Menlo, monospace; }
+.tgt-more:hover { opacity: 1; color: var(--emerald); }
+.tool-rest { display: none; }
+.tool-rest.on { display: inline; }
+.tool-more { border: 0; background: transparent; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; cursor: pointer; padding: 1px 6px; }
+.tool-more:hover { color: var(--emerald); }
+/* Inline error detail panel — the stepper's jump target; shows WHAT failed. */
+.tx-error { border: 1px solid #e6c3b8; background: #fbeae4; border-radius: 7px; padding: 8px 10px; margin: 8px 0 2px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
+.tx-error-h { font-size: 12px; font-weight: 600; color: var(--red); }
+.tx-error-cmd { margin-top: 5px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #6b3f33; background: rgba(180,69,47,.06); border-radius: 5px; padding: 6px 8px; max-height: 150px; overflow: auto; }
+.tx-error-b { margin-top: 6px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; color: #6b3f33; max-height: 220px; overflow: auto; }
+.tx-error-b.muted { color: var(--muted); font-style: italic; }
 .sect-h { font-family: Georgia, serif; font-size: 14px; margin: 18px 0 6px; }
+
+/* Drawer tabs: Summary | Transcript */
+.drawer-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 12px 0 0; }
+.dtab { border: 0; background: transparent; padding: 8px 16px; font-family: Georgia, serif; font-size: 14px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.dtab:hover { color: var(--ink); }
+.dtab.on { color: var(--ink); border-bottom-color: var(--emerald); }
+.dpane { display: none; }
+.dpane.on { display: block; }
+
+/* Truncated chip lists (files / features): overflow hidden behind a toggle */
+.chip-rest { display: none; }
+.chip-rest.on { display: inline; }
+.chip-more { border: 0; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; padding: 1px 4px; margin-left: 2px; }
+.chip-more:hover { color: var(--emerald); }
+
+/* Summary "See transcript" link — a hard-to-miss handoff into the other tab. */
+.see-tx-wrap { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.see-tx { border: 1px solid var(--emerald); background: var(--paper); color: var(--emerald); border-radius: 8px; padding: 8px 16px; font-family: Georgia, serif; font-size: 14px; cursor: pointer; }
+.see-tx:hover { background: var(--emerald); color: #fbfaf6; }
+
+/* Transcript navigator: sticky bar with a Turn stepper (scroll-synced + outline
+   dropdown), an Error stepper, and a live "you are here" line. */
+/* Lives inside the sticky .drawer-head; shown only on the Transcript tab. */
+.tx-nav { display: none; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.tx-nav.on { display: block; }
+.tx-nav-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.tx-grp { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
+.tx-grp.none { color: var(--muted); font-style: italic; }
+.tx-grp-lbl { color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-size: 11px; }
+.tx-grp .btn { padding: 2px 9px; }
+.tx-pos { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.tx-pos b { color: var(--ink); font-weight: 600; }
+.tx-errs .tx-pos b { color: var(--red); }
+.tx-now { margin-top: 9px; font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-ol-wrap { position: relative; }
+.tx-ol-btn { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 7px; padding: 2px 9px; font-size: 13px; cursor: pointer; }
+.tx-ol-btn:hover, .tx-ol-btn.on { border-color: var(--emerald); color: var(--emerald); }
+.tx-outline { position: absolute; top: 100%; left: 0; z-index: 20; margin-top: 4px; width: min(460px, 84vw); max-height: 46vh; overflow-y: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(20,18,15,.14); display: none; }
+.tx-outline.on { display: block; }
+.tx-ol-item { display: flex; align-items: baseline; gap: 9px; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 7px 11px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
+.tx-ol-item:last-child { border-bottom: 0; }
+.tx-ol-item:hover { background: #fbf8f1; }
+.tx-ol-item.cur { background: #eaf3ec; }
+.tx-ol-item.cur .tx-ol-n { color: var(--emerald); }
+.tx-ol-n { flex: none; min-width: 18px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.tx-ol-tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn .tnum { margin-left: 6px; color: var(--emerald); font-family: ui-monospace, Menlo, monospace; }
+/* Jump highlight: an outline pulse that doesn't fight the turn/error backgrounds. */
+@keyframes flashpulse { 0% { box-shadow: 0 0 0 2px var(--emerald); } 100% { box-shadow: 0 0 0 2px transparent; } }
+@keyframes flashpulseR { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 2px transparent; } }
+.turn.flash { animation: flashpulse 1.2s ease; }
+.tx-error.flash { animation: flashpulseR 1.2s ease; }
