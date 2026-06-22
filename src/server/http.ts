@@ -1,6 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
-import { DASHBOARD_HTML } from './dashboard'
 
 /** Read-only JSON API + dashboard SPA over the analyzed store. */
 export function createDashboardServer(store: Store, dbPath: string): Server {
@@ -37,7 +40,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
 
   if (path === '/' || path === '/index.html') {
-    sendHtml(res, DASHBOARD_HTML)
+    await sendFile(res, join(clientDir(), 'index.html'), 'text/html; charset=utf-8')
+    return
+  }
+  if (path.startsWith('/client/')) {
+    await serveClientAsset(res, path)
     return
   }
   if (path === '/api/overview') {
@@ -76,22 +83,187 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, store.breakdown(measure, q.get('by') ?? undefined, filters))
     return
   }
-  if (path === '/api/kpi') {
-    // Windowed cost-per-shipped-artifact, hero = feature; PR/ticket are the same metric.
-    const days = parseInt(url.searchParams.get('days') ?? '', 10)
-    const win =
-      Number.isFinite(days) && days > 0
-        ? (() => {
-            const to = new Date()
-            const from = new Date(to.getTime() - days * 86_400_000)
-            return { from: from.toISOString(), to: to.toISOString() }
-          })()
-        : undefined
-    // No ticket source in this CLI (would need a Jira/Linear adapter), so PR + feature only.
+  if (path === '/api/kpis') {
+    // Headline KPI row, windowed (default 7 days) plus the same-length prior
+    // period so the UI can show a delta. Session-grain metrics window by session
+    // start; cost-per-artifact by completion (see Store.costPerArtifact). No
+    // ticket source in this CLI (would need a Jira/Linear adapter), so the
+    // cost-per-artifact KPIs are PR + feature only.
+    const parsed = parseInt(url.searchParams.get('days') ?? '', 10)
+    const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 7
+    const span = days * 86_400_000
+    const now = Date.now()
+    const to = new Date(now).toISOString()
+    const from = new Date(now - span).toISOString()
+    const prevFrom = new Date(now - 2 * span).toISOString()
     sendJson(res, 200, {
-      feature: store.costPerArtifact('feature', win?.from, win?.to),
-      pr: store.costPerArtifact('pr', win?.from, win?.to),
+      days,
+      window: { from, to },
+      current: store.kpis(from, to),
+      previous: store.kpis(prevFrom, from),
     })
+    return
+  }
+  if (path === '/api/ops-over-time') {
+    // Operational tool-call metrics over time. view = tool_calls | error_rate |
+    // skill_usage; by=name splits by tool/skill name; bucket day|week|month.
+    const q = url.searchParams
+    const rawView = q.get('view')
+    const view: 'tool_calls' | 'error_rate' | 'skill_usage' =
+      rawView === 'tool_calls' || rawView === 'skill_usage' ? rawView : 'error_rate'
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to'])
+    const filters: Record<string, string> = {}
+    for (const [k, v] of q.entries()) {
+      if (!reserved.has(k) && v) filters[k] = v
+    }
+    sendJson(
+      res,
+      200,
+      store.opsOverTime({
+        view,
+        bucket,
+        by: q.get('by') === 'name' ? 'name' : undefined,
+        from: q.get('from') ?? undefined,
+        to: q.get('to') ?? undefined,
+        filters,
+      }),
+    )
+    return
+  }
+  if (path === '/api/sessions-over-time') {
+    // Session count per bucket, optionally split into one series per facet value.
+    const q = url.searchParams
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    const reserved = new Set(['bucket', 'by', 'from', 'to'])
+    const filters: Record<string, string> = {}
+    for (const [k, v] of q.entries()) {
+      if (!reserved.has(k) && v) filters[k] = v
+    }
+    sendJson(
+      res,
+      200,
+      store.sessionsOverTime({
+        bucket,
+        by: q.get('by') || undefined,
+        from: q.get('from') ?? undefined,
+        to: q.get('to') ?? undefined,
+        filters,
+      }),
+    )
+    return
+  }
+  if (path === '/api/spend-over-time') {
+    // The burn / total-spend-breakdown view: spend per bucket, optionally split
+    // into one series per facet value. `bucket` day|week|month; `by` optional
+    // facet; any other query param is a session-level filter.
+    const q = url.searchParams
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    const reserved = new Set(['bucket', 'by', 'from', 'to'])
+    const filters: Record<string, string> = {}
+    for (const [k, v] of q.entries()) {
+      if (!reserved.has(k) && v) filters[k] = v
+    }
+    sendJson(
+      res,
+      200,
+      store.spendOverTime({
+        bucket,
+        by: q.get('by') || undefined,
+        from: q.get('from') ?? undefined,
+        to: q.get('to') ?? undefined,
+        filters,
+      }),
+    )
+    return
+  }
+  if (path === '/api/cost-artifact') {
+    // Cost-per-shipped-artifact detail: the windowed unit-cost KPI (current +
+    // prior period for a delta) plus the two full-history decomposition curves
+    // (burn, throughput) and the burn-efficiency period sum. `days` is a number
+    // or 'all' (whole history, no prior period); `kind` is feature | pr.
+    const q = url.searchParams
+    const kind = q.get('kind') === 'pr' ? 'pr' : 'feature'
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    const curves = store.costCurves(kind, bucket)
+    const daysRaw = q.get('days') ?? '7'
+    if (daysRaw === 'all') {
+      sendJson(res, 200, {
+        kind,
+        days: 'all',
+        window: null,
+        kpi: { current: store.costPerArtifact(kind), previous: null },
+        period: store.costPeriod(kind),
+        burn: curves.burn,
+        throughput: curves.throughput,
+        buckets: curves.buckets,
+      })
+      return
+    }
+    const parsed = parseInt(daysRaw, 10)
+    const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 7
+    const span = days * 86_400_000
+    const now = Date.now()
+    const to = new Date(now).toISOString()
+    const from = new Date(now - span).toISOString()
+    const prevFrom = new Date(now - 2 * span).toISOString()
+    sendJson(res, 200, {
+      kind,
+      days,
+      window: { from, to },
+      kpi: { current: store.costPerArtifact(kind, from, to), previous: store.costPerArtifact(kind, prevFrom, from) },
+      period: store.costPeriod(kind, from, to),
+      burn: curves.burn,
+      throughput: curves.throughput,
+      buckets: curves.buckets,
+    })
+    return
+  }
+  if (path === '/api/outcome-types') {
+    sendJson(res, 200, store.outcomeTypes())
+    return
+  }
+  if (path === '/api/success-rate') {
+    // Session Outcome Rate over time. `outcomes` = the success set (numerator,
+    // default session_success); `bucket` = day|week|month; `by` = optional facet
+    // to split into series; any other query param is a session-level filter.
+    const q = url.searchParams
+    const outcomes = (q.get('outcomes') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    const reserved = new Set(['outcomes', 'bucket', 'by', 'from', 'to'])
+    const filters: Record<string, string> = {}
+    for (const [k, v] of q.entries()) {
+      if (!reserved.has(k) && v) filters[k] = v
+    }
+    sendJson(
+      res,
+      200,
+      store.successRate({
+        outcomes: outcomes.length ? outcomes : ['session_success'],
+        bucket,
+        by: q.get('by') || undefined,
+        from: q.get('from') ?? undefined,
+        to: q.get('to') ?? undefined,
+        filters,
+      }),
+    )
+    return
+  }
+  if (path === '/api/artifact-suggest') {
+    // Typeahead for the session-list artifact search.
+    const q = url.searchParams.get('q') ?? ''
+    const kind = url.searchParams.get('kind') || undefined
+    const lim = parseInt(url.searchParams.get('limit') ?? '', 10)
+    const limit = Number.isFinite(lim) && lim > 0 ? Math.min(lim, 25) : 10
+    sendJson(res, 200, store.suggestArtifacts(q, kind, limit))
     return
   }
   if (path === '/api/artifacts') {
@@ -172,7 +344,47 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(json)
 }
 
-function sendHtml(res: ServerResponse, html: string): void {
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-  res.end(html)
+// The dashboard SPA is built by tsup into dist/client (app.js + index.html +
+// styles.css) and served from there. Resolve that directory once, tolerating
+// both prod (this module runs from dist/) and dev (tsx from src/, where the
+// build still emits to <pkg>/dist/client).
+let CLIENT_DIR: string | null = null
+function clientDir(): string {
+  if (CLIENT_DIR) return CLIENT_DIR
+  let dir = dirname(fileURLToPath(import.meta.url))
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(join(dir, 'client', 'index.html'))) return (CLIENT_DIR = join(dir, 'client'))
+    if (existsSync(join(dir, 'dist', 'client', 'index.html'))) return (CLIENT_DIR = join(dir, 'dist', 'client'))
+    dir = dirname(dir)
+  }
+  return (CLIENT_DIR = join(process.cwd(), 'dist', 'client'))
+}
+
+const CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+}
+
+async function serveClientAsset(res: ServerResponse, urlPath: string): Promise<void> {
+  const base = clientDir()
+  const file = join(base, urlPath.slice('/client/'.length))
+  if (!file.startsWith(base)) {
+    sendJson(res, 403, { error: 'forbidden' })
+    return
+  }
+  const ext = file.slice(file.lastIndexOf('.'))
+  await sendFile(res, file, CONTENT_TYPES[ext] ?? 'application/octet-stream')
+}
+
+async function sendFile(res: ServerResponse, file: string, type: string): Promise<void> {
+  try {
+    const buf = await readFile(file)
+    res.writeHead(200, { 'content-type': type })
+    res.end(buf)
+  } catch {
+    sendJson(res, 404, { error: 'not found' })
+  }
 }

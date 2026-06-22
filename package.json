@@ -18,9 +18,12 @@
     "node": ">=20"
   },
   "scripts": {
+    "prebuild": "node scripts/clean.mjs",
     "build": "tsup",
-    "dev": "tsx src/cli.ts",
+    "dev": "tsup && tsx src/cli.ts",
+    "watch": "tsup --watch",
     "typecheck": "tsc --noEmit",
+    "typecheck:client": "tsc -p src/server/client --noEmit",
     "test": "vitest run"
   },
   "keywords": [

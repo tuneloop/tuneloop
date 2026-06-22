@@ -402,6 +402,430 @@ export class Store {
     return { count, costPerUnit: num / count }
   }
 
+  /**
+   * The headline KPI row for one time window. Session-grain metrics (count,
+   * spend, success rate) window by session start; cost-per-artifact windows by
+   * completion (see costPerArtifact). The API calls this twice — current and the
+   * same-length prior period — to derive deltas. No window = all time.
+   */
+  kpis(from?: string, to?: string): KpiSnapshot {
+    const range = from && to ? 'WHERE s.started_at >= ? AND s.started_at < ?' : ''
+    const params = from && to ? [from, to] : []
+    const agg = this.db
+      .prepare(
+        `SELECT COUNT(*) AS sessions,
+                COALESCE(SUM(s.cost_usd),0) AS totalSpend,
+                AVG(CASE WHEN EXISTS (
+                      SELECT 1 FROM outcomes o
+                      WHERE o.session_id = s.id AND o.type = 'session_success'
+                    ) THEN 1.0 ELSE 0.0 END) AS successRate
+         FROM sessions s ${range}`,
+      )
+      .get(...params) as { sessions: number; totalSpend: number; successRate: number | null }
+    // Tool-call error rate over the same session-start window (tool calls join up
+    // to their session for the time basis, consistent with the other KPIs).
+    const tc = this.db
+      .prepare(
+        `SELECT COUNT(*) AS calls, COALESCE(SUM(t.is_error),0) AS errs
+         FROM tool_calls t JOIN sessions s ON s.id = t.session_id ${range}`,
+      )
+      .get(...params) as { calls: number; errs: number }
+    return {
+      sessions: agg.sessions,
+      totalSpend: agg.totalSpend,
+      // Null (not 0) when the window has no sessions, so the UI shows "—" not "0%".
+      successRate: agg.sessions ? (agg.successRate ?? 0) : null,
+      errorRate: tc.calls ? tc.errs / tc.calls : null,
+      costPerFeature: this.costPerArtifact('feature', from, to),
+      costPerPr: this.costPerArtifact('pr', from, to),
+    }
+  }
+
+  /**
+   * The two decomposition curves for the cost-per-artifact section
+   * (cost_per_shipped_artifact.md). Both are PURE SUMS (0 is a real value, no
+   * attribution): burn = AI spend per bucket dated at SESSION time (with a
+   * `shippedSpend` sub-band = spend of sessions linked to a completed `kind`
+   * artifact — the gap to `spend` is in-flight/never-shipped spend); throughput
+   * = count of `kind` artifacts per bucket dated at COMPLETION. Always full
+   * history (the curves carry the time axis; the KPI is the windowed number).
+   */
+  costCurves(
+    kind: string,
+    bucket: Bucket,
+  ): {
+    burn: Array<{ bucket: string; spend: number; shippedSpend: number }>
+    throughput: Array<{ bucket: string; count: number }>
+    buckets: string[]
+  } {
+    const burn = this.db
+      .prepare(
+        `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
+                COALESCE(SUM(s.cost_usd),0) AS spend,
+                COALESCE(SUM(CASE WHEN EXISTS (
+                    SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+                    WHERE sa.session_id = s.id AND a.kind = ? AND a.completed_at IS NOT NULL
+                  ) THEN s.cost_usd ELSE 0 END),0) AS shippedSpend
+         FROM sessions s WHERE s.started_at IS NOT NULL
+         GROUP BY bucket ORDER BY bucket`,
+      )
+      .all(kind) as Array<{ bucket: string; spend: number; shippedSpend: number }>
+    const throughput = this.db
+      .prepare(
+        `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL GROUP BY bucket ORDER BY bucket`,
+      )
+      .all(kind) as Array<{ bucket: string; count: number }>
+    const set = new Set<string>()
+    burn.forEach((r) => set.add(r.bucket))
+    throughput.forEach((r) => set.add(r.bucket))
+    return { burn, throughput, buckets: Array.from(set).sort() }
+  }
+
+  /**
+   * The "burn efficiency" lens for a window: Σ session spend in the window ÷
+   * count of `kind` artifacts completed in the window. Deliberately distinct
+   * from the unit-cost KPI (whose numerator includes pre-window spend) — the doc
+   * insists both be shown so dividing the curves doesn't read as a contradiction.
+   * `throughput` here equals the KPI denominator exactly. No window = all time.
+   */
+  costPeriod(kind: string, from?: string, to?: string): { burn: number; throughput: number; efficiency: number | null } {
+    const burnRange = from && to ? 'WHERE started_at >= ? AND started_at < ?' : 'WHERE started_at IS NOT NULL'
+    const burnParams = from && to ? [from, to] : []
+    const burn = (
+      this.db.prepare(`SELECT COALESCE(SUM(cost_usd),0) AS s FROM sessions ${burnRange}`).get(...burnParams) as {
+        s: number
+      }
+    ).s
+    const thRange = from && to ? 'AND completed_at >= ? AND completed_at < ?' : ''
+    const thParams = from && to ? [kind, from, to] : [kind]
+    const throughput = (
+      this.db
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange}`)
+        .get(...thParams) as { n: number }
+    ).n
+    return { burn, throughput, efficiency: throughput ? burn / throughput : null }
+  }
+
+  /**
+   * Spend over time, optionally split into one series per facet value — the doc's
+   * non-headline "total spend breakdown" / burn view (cost_per_shipped_artifact.md
+   * §Separate). Anchored on usage_facts so cost-by-model splits HONESTLY (each
+   * usage row attributed to its own model), not by charging a multi-model
+   * session's whole cost to each model. Spend is dated at session start (matching
+   * the burn curve). Only usage/session-grain facets are valid (the cost measure's
+   * grain guard); tool-call facets (skill) are rejected. Multi-valued facets
+   * (use_case) presence-inflate — flagged via `presenceInflated`.
+   */
+  spendOverTime(q: SpendOverTimeQuery): SpendOverTimeResult | { error: string } {
+    const bucket = q.bucket
+    const topK = q.topK ?? 6
+    const time = bucketExpr('s.started_at', bucket)
+
+    const where: string[] = ['s.started_at IS NOT NULL']
+    const params: unknown[] = []
+    if (q.from && q.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(q.from, q.to)
+    }
+    for (const [k, v] of Object.entries(q.filters ?? {})) {
+      if (!v) continue
+      const spec = this.facet(k)
+      if (!spec) continue
+      const p = this.facetPredicate(spec, v)
+      where.push(p.sql)
+      params.push(...p.params)
+    }
+    const fromSql = 'FROM usage_facts u JOIN sessions s ON s.id = u.session_id'
+    const whereSql = 'WHERE ' + where.join(' AND ')
+
+    const overallRows = this.db
+      .prepare(`SELECT ${time} AS tb, SUM(u.cost_usd) AS spend ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
+      .all(...params) as Array<{ tb: string; spend: number }>
+    const overallPoints = overallRows.map((r) => ({ bucket: r.tb, spend: r.spend }))
+    const overall = { points: overallPoints, total: overallPoints.reduce((a, p) => a + p.spend, 0) }
+
+    let series: SpendSeries[] | undefined
+    let truncated: { shown: number; total: number } | undefined
+    let presenceInflated: boolean | undefined
+    if (q.by) {
+      const f = this.facet(q.by)
+      if (!f) return { error: 'unknown facet' }
+      const gf = grainOf(f.source)
+      if (gf !== 'usage' && gf !== 'session') return { error: 'incompatible grain' }
+      const fg = facetGroupExpr(f)
+      const sql = `SELECT ${time} AS tb, ${fg.expr} AS val, SUM(u.cost_usd) AS spend
+                   ${fromSql} ${fg.join} ${whereSql}${fg.where ? ' AND ' + fg.where : ''}
+                   GROUP BY tb, val`
+      const rows = this.db.prepare(sql).all(...params) as Array<{ tb: string; val: string | null; spend: number }>
+      const byVal = new Map<string, SpendPoint[]>()
+      for (const r of rows) {
+        if (r.val == null) continue
+        const arr = byVal.get(String(r.val)) ?? []
+        arr.push({ bucket: r.tb, spend: r.spend })
+        byVal.set(String(r.val), arr)
+      }
+      let all: SpendSeries[] = Array.from(byVal.entries()).map(([key, points]) => ({
+        key,
+        points,
+        total: points.reduce((a, p) => a + p.spend, 0),
+      }))
+      all.sort((a, b) => b.total - a.total)
+      if (all.length > topK) {
+        truncated = { shown: topK, total: all.length }
+        all = all.slice(0, topK)
+      }
+      series = all
+      presenceInflated = !!f.multi
+    }
+
+    return { bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated, presenceInflated }
+  }
+
+  /**
+   * Session COUNT over time, optionally split into one series per facet value —
+   * the time-series form of the distribution cards. Counts explode safely, so
+   * (unlike spendOverTime) ANY facet works: each value adds a session-scoped
+   * predicate (via the facet compiler) to a COUNT over sessions, so "sessions
+   * that used model X / skill Y" is well-defined and multi-per-session facets
+   * (model, skill, use_case) overlap across series (`presenceInflated`).
+   */
+  sessionsOverTime(q: SessionsOverTimeQuery): SessionsOverTimeResult {
+    const bucket = q.bucket
+    const topK = q.topK ?? 6
+    const time = bucketExpr('s.started_at', bucket)
+
+    const baseWhere: string[] = ['s.started_at IS NOT NULL']
+    const baseParams: unknown[] = []
+    if (q.from && q.to) {
+      baseWhere.push('s.started_at >= ? AND s.started_at < ?')
+      baseParams.push(q.from, q.to)
+    }
+    for (const [k, v] of Object.entries(q.filters ?? {})) {
+      if (!v) continue
+      const spec = this.facet(k)
+      if (!spec) continue
+      const p = this.facetPredicate(spec, v)
+      baseWhere.push(p.sql)
+      baseParams.push(...p.params)
+    }
+
+    const runBuckets = (extraSql: string, extraParams: unknown[]): CountPoint[] => {
+      const where = [...baseWhere]
+      const params = [...baseParams]
+      if (extraSql) {
+        where.push(extraSql)
+        params.push(...extraParams)
+      }
+      const rows = this.db
+        .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt FROM sessions s WHERE ${where.join(' AND ')} GROUP BY tb ORDER BY tb`)
+        .all(...params) as Array<{ tb: string; cnt: number }>
+      return rows.map((r) => ({ bucket: r.tb, count: r.cnt }))
+    }
+    const totals = (pts: CountPoint[]) => pts.reduce((a, p) => a + p.count, 0)
+
+    const overallPoints = runBuckets('', [])
+    const overall = { points: overallPoints, total: totals(overallPoints) }
+
+    let series: CountSeries[] | undefined
+    let truncated: { shown: number; total: number } | undefined
+    let presenceInflated: boolean | undefined
+    if (q.by) {
+      const f = this.facet(q.by)
+      if (f) {
+        const values = this.facetDistribution(q.by)
+          .map((d) => d.value)
+          .filter((v) => v != null)
+        const shown = values.slice(0, topK)
+        if (values.length > shown.length) truncated = { shown: shown.length, total: values.length }
+        series = shown.map((v) => {
+          const p = this.facetPredicate(f, String(v))
+          const pts = runBuckets(p.sql, p.params)
+          return { key: String(v), points: pts, total: totals(pts) }
+        })
+        // A session can fall under several values when the facet is multi-valued
+        // or lives at a child grain (model/skill) → series sum past overall.
+        presenceInflated = !!f.multi || grainOf(f.source) !== 'session'
+      }
+    }
+
+    return { bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated, presenceInflated }
+  }
+
+  /**
+   * Operational tool-call metrics over time. One anchor (tool_calls t JOIN
+   * sessions s, dated at session start); the `view` selects what to plot:
+   * tool_calls = COUNT(*), error_rate = SUM(is_error)/COUNT(*), skill_usage =
+   * COUNT(*) WHERE action='skill'. `by:'name'` splits by tool_calls.name (tool
+   * name in general; skill name when skills-only), ranked top-K by call volume.
+   */
+  opsOverTime(q: OpsOverTimeQuery): OpsOverTimeResult {
+    const bucket = q.bucket
+    const topK = q.topK ?? 6
+    const isRate = q.view === 'error_rate'
+    const time = bucketExpr('s.started_at', bucket)
+
+    const where: string[] = ['s.started_at IS NOT NULL']
+    const params: unknown[] = []
+    if (q.view === 'skill_usage') where.push("t.action = 'skill'")
+    if (q.from && q.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(q.from, q.to)
+    }
+    for (const [k, v] of Object.entries(q.filters ?? {})) {
+      if (!v) continue
+      const spec = this.facet(k)
+      if (!spec) continue
+      const p = this.facetPredicate(spec, v)
+      where.push(p.sql)
+      params.push(...p.params)
+    }
+    const fromSql = 'FROM tool_calls t JOIN sessions s ON s.id = t.session_id'
+    const whereSql = 'WHERE ' + where.join(' AND ')
+    const val = (cnt: number, errs: number) => (isRate ? (cnt ? errs / cnt : null) : cnt)
+
+    const overallRows = this.db
+      .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt, COALESCE(SUM(t.is_error),0) AS errs ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
+      .all(...params) as Array<{ tb: string; cnt: number; errs: number }>
+    const overallPoints: OpsPoint[] = overallRows.map((r) => ({
+      bucket: r.tb,
+      value: val(r.cnt, r.errs),
+      calls: r.cnt,
+      errors: r.errs,
+    }))
+    const tCnt = overallRows.reduce((a, r) => a + r.cnt, 0)
+    const tErr = overallRows.reduce((a, r) => a + r.errs, 0)
+    const overall = { points: overallPoints, total: val(tCnt, tErr) }
+
+    let series: OpsSeries[] | undefined
+    let truncated: { shown: number; total: number } | undefined
+    if (q.by === 'name') {
+      const rows = this.db
+        .prepare(`SELECT ${time} AS tb, t.name AS nm, COUNT(*) AS cnt, COALESCE(SUM(t.is_error),0) AS errs ${fromSql} ${whereSql} GROUP BY tb, nm`)
+        .all(...params) as Array<{ tb: string; nm: string | null; cnt: number; errs: number }>
+      const byVal = new Map<string, { points: OpsPoint[]; cnt: number; errs: number }>()
+      for (const r of rows) {
+        if (r.nm == null) continue
+        const e = byVal.get(r.nm) ?? { points: [], cnt: 0, errs: 0 }
+        e.points.push({ bucket: r.tb, value: val(r.cnt, r.errs), calls: r.cnt, errors: r.errs })
+        e.cnt += r.cnt
+        e.errs += r.errs
+        byVal.set(r.nm, e)
+      }
+      let all: OpsSeries[] = Array.from(byVal.entries()).map(([key, e]) => ({
+        key,
+        points: e.points,
+        total: val(e.cnt, e.errs),
+        calls: e.cnt,
+      }))
+      all.sort((a, b) => b.calls - a.calls) // rank by call volume — the tools that matter
+      if (all.length > topK) {
+        truncated = { shown: topK, total: all.length }
+        all = all.slice(0, topK)
+      }
+      series = all
+    }
+
+    return { view: q.view, bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated, format: isRate ? 'pct' : 'int' }
+  }
+
+  /**
+   * Outcome types present in the data, with the count of distinct sessions that
+   * produced each — feeds the success-rate "what counts as success" selector.
+   * (A first-class outcome-type registry, parallel to facets/measures, is a
+   * deferred follow-up; for now the selector reflects what's actually in the DB.)
+   */
+  outcomeTypes(): Array<{ type: string; sessions: number }> {
+    return this.db
+      .prepare(
+        'SELECT type, COUNT(DISTINCT session_id) AS sessions FROM outcomes GROUP BY type ORDER BY sessions DESC',
+      )
+      .all() as Array<{ type: string; sessions: number }>
+  }
+
+  /**
+   * Session Outcome Rate over time (headline_metrics.md): the fraction of
+   * sessions — cohorted by START date — that produced any outcome in the
+   * selected set. Numerator = sessions with an outcome in `outcomes`; denominator
+   * = all sessions in the bucket. Session-level filters apply to BOTH (so the
+   * rate is honest). With `by`, returns one series per facet value (top-K by
+   * volume): each value adds a session-scoped predicate to numerator AND
+   * denominator via the facet compiler, so multi-valued facets overlap
+   * (any_match) and nothing fans out past session grain.
+   */
+  successRate(q: SuccessRateQuery): SuccessRateResult {
+    const outcomes = q.outcomes.length ? q.outcomes : ['session_success']
+    const bucket = q.bucket
+    const topK = q.topK ?? 6
+    const numPred = `EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type IN (${outcomes
+      .map(() => '?')
+      .join(',')}))`
+
+    // Filter clauses shared by numerator and denominator (window + session facets).
+    const filterClauses: string[] = []
+    const filterParams: unknown[] = []
+    if (q.from && q.to) {
+      filterClauses.push('s.started_at >= ? AND s.started_at < ?')
+      filterParams.push(q.from, q.to)
+    }
+    for (const [k, v] of Object.entries(q.filters ?? {})) {
+      if (!v) continue
+      const spec = this.facet(k)
+      if (!spec) continue
+      const p = this.facetPredicate(spec, v)
+      filterClauses.push(p.sql)
+      filterParams.push(...p.params)
+    }
+
+    // Run the bucketed num/denom for the base population plus an optional extra
+    // (per-series) predicate. Param order follows SQL text: numPred's outcome
+    // params sit in the SELECT, so they bind before the WHERE params.
+    const runBuckets = (extraSql: string, extraParams: unknown[]): RatePoint[] => {
+      const where = ['s.started_at IS NOT NULL', ...filterClauses]
+      const params: unknown[] = [...outcomes, ...filterParams]
+      if (extraSql) {
+        where.push(extraSql)
+        params.push(...extraParams)
+      }
+      const sql = `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
+                          COUNT(*) AS denom,
+                          SUM(CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS num
+                   FROM sessions s WHERE ${where.join(' AND ')}
+                   GROUP BY bucket ORDER BY bucket`
+      const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; denom: number; num: number }>
+      return rows.map((r) => ({ bucket: r.bucket, num: r.num, denom: r.denom, rate: r.denom ? r.num / r.denom : null }))
+    }
+
+    const totals = (points: RatePoint[]) => {
+      const num = points.reduce((a, p) => a + p.num, 0)
+      const denom = points.reduce((a, p) => a + p.denom, 0)
+      return { num, denom, rate: denom ? num / denom : null }
+    }
+
+    const overallPoints = runBuckets('', [])
+    const overall: RateSeries = { key: 'overall', points: overallPoints, ...totals(overallPoints) }
+
+    let series: RateSeries[] | undefined
+    let truncated: { shown: number; total: number } | undefined
+    if (q.by) {
+      const f = this.facet(q.by)
+      if (f) {
+        const values = this.facetDistribution(q.by)
+          .map((d) => d.value)
+          .filter((v) => v != null)
+        const shown = values.slice(0, topK)
+        if (values.length > shown.length) truncated = { shown: shown.length, total: values.length }
+        series = shown.map((v) => {
+          const p = this.facetPredicate(f, String(v))
+          const pts = runBuckets(p.sql, p.params)
+          return { key: String(v), points: pts, ...totals(pts) }
+        })
+      }
+    }
+
+    return { outcomes, bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated }
+  }
+
   // ---- dashboard read API ---------------------------------------------------
 
   /** Spend, session count, and shipped-PR count per time bucket. */
@@ -759,6 +1183,48 @@ export class Store {
       .all(...kinds) as ArtifactListItem[]
   }
 
+  /**
+   * Typeahead suggestions for the session-list artifact search. Only artifacts
+   * actually linked to a session (so a pick yields results), matched on the same
+   * columns the filter uses (ident/title/external_id/repo). `value` is what to
+   * put in the filter input (feature→title, pr→external_id|ident, file→path);
+   * `label` is for display. Features/PRs rank above the many file rows.
+   */
+  suggestArtifacts(q: string, kind: string | undefined, limit = 10): Array<{ kind: string; value: string; label: string }> {
+    const term = q.trim()
+    if (!term) return []
+    const like = `%${term}%`
+    const allowed = ['file', 'pr', 'feature']
+    const kindFilter = kind && allowed.includes(kind) ? 'AND a.kind = ?' : ''
+    const params: unknown[] = [like, like, like, like]
+    if (kindFilter) params.push(kind)
+    params.push(limit)
+    const rows = this.db
+      .prepare(
+        `SELECT a.kind AS kind, a.ident AS ident, a.title AS title, a.external_id AS externalId,
+                a.repo AS repo, a.status AS status
+         FROM artifacts a
+         WHERE a.id IN (SELECT artifact_id FROM session_artifacts)
+           AND (a.ident LIKE ? OR a.title LIKE ? OR a.external_id LIKE ? OR a.repo LIKE ?)
+           ${kindFilter}
+         GROUP BY a.id
+         ORDER BY CASE a.kind WHEN 'feature' THEN 0 WHEN 'pr' THEN 1 ELSE 2 END,
+                  COALESCE(a.title, a.ident)
+         LIMIT ?`,
+      )
+      .all(...params) as Array<Record<string, any>>
+    return rows
+      .map((r) => {
+        if (r.kind === 'pr') {
+          const label = (r.repo ? r.repo + ' ' : '') + '#' + (r.ident ?? '') + (r.status ? ' (' + r.status + ')' : '')
+          return { kind: 'pr', value: String(r.externalId || r.ident || ''), label }
+        }
+        if (r.kind === 'feature') return { kind: 'feature', value: String(r.title ?? ''), label: String(r.title || '(untitled)') }
+        return { kind: 'file', value: String(r.ident ?? ''), label: String(r.ident ?? '') }
+      })
+      .filter((x) => x.value)
+  }
+
   // ---- feature management (dashboard writes) --------------------------------
 
   /** Create a user-authored feature (source='user' — never clobbered by analyze). */
@@ -844,6 +1310,164 @@ export interface ArtifactListItem {
   parentId: string | null
   sessions: number
   costUsd: number
+}
+
+/** One window's worth of headline KPIs (see Store.kpis). */
+export interface KpiSnapshot {
+  sessions: number
+  totalSpend: number
+  /** Fraction of sessions judged success; null when the window has no sessions. */
+  successRate: number | null
+  /** Tool-call error rate (fraction); null when the window has no tool calls. */
+  errorRate: number | null
+  costPerFeature: { count: number; costPerUnit: number | null }
+  costPerPr: { count: number; costPerUnit: number | null }
+}
+
+/** One bucket of a success-rate series: the cohort's numerator/denominator/rate. */
+export interface RatePoint {
+  bucket: string
+  num: number
+  denom: number
+  /** num/denom, or null when the bucket has no sessions (drawn as a gap). */
+  rate: number | null
+}
+
+/** A success-rate line: per-bucket points plus the windowed totals/rate. */
+export interface RateSeries {
+  key: string
+  points: RatePoint[]
+  num: number
+  denom: number
+  rate: number | null
+}
+
+export interface SuccessRateQuery {
+  /** Outcome types counting as success (numerator). Empty → ['session_success']. */
+  outcomes: string[]
+  bucket: Bucket
+  /** Facet key to split into one series per value (top-K by volume). */
+  by?: string
+  from?: string
+  to?: string
+  /** Session-level facet filters, applied to numerator and denominator alike. */
+  filters?: Record<string, string>
+  topK?: number
+}
+
+export interface SuccessRateResult {
+  outcomes: string[]
+  bucket: Bucket
+  /** The x-axis: every bucket label the overall line spans. */
+  buckets: string[]
+  overall: RateSeries
+  /** Present when `by` is set. */
+  series?: RateSeries[]
+  /** Set when more facet values existed than were drawn. */
+  truncated?: { shown: number; total: number }
+}
+
+/** One bucket of an operational (tool-call) series: count + error split. */
+export interface OpsPoint {
+  bucket: string
+  /** The plotted metric: call count (count views) or error rate (rate view), null if no calls. */
+  value: number | null
+  calls: number
+  errors: number
+}
+
+export interface OpsSeries {
+  key: string
+  points: OpsPoint[]
+  /** Total count, or overall error rate, depending on the view. */
+  total: number | null
+  /** Call volume — used to rank series (top-K most-used tools/skills). */
+  calls: number
+}
+
+export interface OpsOverTimeQuery {
+  /** tool_calls = count all; error_rate = AVG(is_error); skill_usage = count where action='skill'. */
+  view: 'tool_calls' | 'error_rate' | 'skill_usage'
+  bucket: Bucket
+  /** 'name' splits by tool_calls.name (tool name, or skill name when skills-only). */
+  by?: string
+  from?: string
+  to?: string
+  filters?: Record<string, string>
+  topK?: number
+}
+
+export interface OpsOverTimeResult {
+  view: string
+  bucket: Bucket
+  buckets: string[]
+  overall: { points: OpsPoint[]; total: number | null }
+  series?: OpsSeries[]
+  truncated?: { shown: number; total: number }
+  format: 'int' | 'pct'
+}
+
+/** One bucket of a session-count series. */
+export interface CountPoint {
+  bucket: string
+  count: number
+}
+
+export interface CountSeries {
+  key: string
+  points: CountPoint[]
+  total: number
+}
+
+export interface SessionsOverTimeQuery {
+  bucket: Bucket
+  by?: string
+  from?: string
+  to?: string
+  filters?: Record<string, string>
+  topK?: number
+}
+
+export interface SessionsOverTimeResult {
+  bucket: Bucket
+  buckets: string[]
+  overall: { points: CountPoint[]; total: number }
+  series?: CountSeries[]
+  truncated?: { shown: number; total: number }
+  presenceInflated?: boolean
+}
+
+/** One bucket of a spend series. */
+export interface SpendPoint {
+  bucket: string
+  spend: number
+}
+
+/** A spend line: per-bucket points plus the total over the range. */
+export interface SpendSeries {
+  key: string
+  points: SpendPoint[]
+  total: number
+}
+
+export interface SpendOverTimeQuery {
+  bucket: Bucket
+  /** Facet key to split into one series per value (top-K by total spend). */
+  by?: string
+  from?: string
+  to?: string
+  filters?: Record<string, string>
+  topK?: number
+}
+
+export interface SpendOverTimeResult {
+  bucket: Bucket
+  buckets: string[]
+  overall: { points: SpendPoint[]; total: number }
+  series?: SpendSeries[]
+  truncated?: { shown: number; total: number }
+  /** True when the breakdown facet is multi-valued, so series sum past overall. */
+  presenceInflated?: boolean
 }
 
 export type Bucket = 'day' | 'week' | 'month'

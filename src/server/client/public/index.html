@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>aivue</title>
+<link rel="stylesheet" href="/client/styles.css" />
+</head>
+<body>
+<header class="top">
+  <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+    <path d="M 23.5 11 A 8.5 8.5 0 1 0 24.5 16" fill="none" stroke="#10b981" stroke-width="3.2" stroke-linecap="round"/>
+    <path d="M 24.5 8.5 L 24.5 12.5 L 20.5 12.5" fill="none" stroke="#10b981" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+  <span class="brand">aivue</span>
+  <span class="tag">outcomes, not tokens</span>
+  <span class="meta" id="meta"></span>
+</header>
+<nav class="tabnav"><div class="inner">
+  <button class="tab on" data-view="dashboard">Dashboard</button>
+  <button class="tab" data-view="artifacts">Artifacts</button>
+  <button class="tab" data-view="sessions">Sessions</button>
+</div></nav>
+<main>
+  <section id="view-dashboard" class="view on">
+    <div class="kpi-caption" id="kpi-caption"></div>
+    <section id="kpis" class="tiles"></section>
+    <section id="metric-detail"></section>
+    <!-- Breakdown explorer commented out for now:
+    <section class="panel">
+      <div class="panel-head"><h2>Breakdown explorer</h2>
+        <div class="ex-ctrl"><select id="ex-measure"></select><span class="by">by</span><select id="ex-by"></select></div>
+      </div>
+      <div id="explorer"></div>
+    </section>
+    -->
+  </section>
+  <section id="view-artifacts" class="view">
+    <section class="panel">
+      <div class="seg" id="artKindSeg" style="margin-bottom:16px"></div>
+      <div id="artifacts"></div>
+      <div class="empty" style="margin-top:10px">Cost is the fully-loaded cost of every session linked to each artifact. A session that contributed to several artifacts is counted under each, so this column can exceed total spend.</div>
+    </section>
+  </section>
+  <section id="view-sessions" class="view">
+    <section class="panel">
+      <div class="panel-head"><h2>Sessions</h2></div>
+      <div id="filters" class="filters"></div>
+      <div id="sessions"></div>
+    </section>
+  </section>
+</main>
+<div class="overlay" id="overlay"></div>
+<div class="drawer" id="drawer"><div class="drawer-inner"><button class="x" id="drawerClose">close</button><div id="drawerBody"></div></div></div>
+<script src="/client/app.js"></script>
+</body>
+</html>

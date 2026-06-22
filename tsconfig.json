@@ -16,5 +16,8 @@
     "rootDir": "src",
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // The dashboard client is browser code with its own (DOM) tsconfig; the Node
+  // typecheck here would flag its globals. tsup builds it via that config.
+  "exclude": ["src/server/client"]
 }

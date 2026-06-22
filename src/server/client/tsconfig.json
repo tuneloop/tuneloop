@@ -1,0 +1,21 @@
+{
+  // Browser-targeted config for the dashboard client. esbuild (via tsup) does the
+  // actual build and ignores types; this exists for editor IntelliSense and an
+  // optional `tsc -p src/server/client --noEmit` check. The DOM lib + relaxed
+  // implicit-any keep the hand-rolled vanilla DOM glue ergonomic. The Node-based
+  // server typecheck (root tsconfig) excludes this directory.
+  "compilerOptions": {
+    "target": "ES2018",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2018", "DOM", "DOM.Iterable"],
+    "types": [],
+    "strict": false,
+    "noImplicitAny": false,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["."]
+}
