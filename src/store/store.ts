@@ -7,7 +7,7 @@ import { grainOf } from '../core/facets'
 import type { FacetSpec, FacetType } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import type { ProcessorRunRow, UsageFactInput } from './types'
+import type { FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
 
 export interface Dist {
   value: string
@@ -215,6 +215,27 @@ export class Store {
           .run(sessionId, processor, a.key, JSON.stringify(a.value))
       }
       for (const a of result.artifacts ?? []) {
+        if (a.kind === 'feature') {
+          // Features are shared, evolving rows: a re-derive that re-proposes the
+          // same feature must NOT wipe completion/status/owner a user set on the
+          // dashboard, and must never clobber a user-authored feature at all.
+          // Upsert title + parent (parent only when a fresh one is supplied) and
+          // leave everything else intact; the WHERE guard skips user features.
+          this.db
+            .prepare(
+              `INSERT INTO artifacts
+                 (id, kind, repo, source, title, created_at, parent_artifact_id, producer)
+               VALUES (?, 'feature', ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 title = excluded.title,
+                 repo = COALESCE(artifacts.repo, excluded.repo),
+                 parent_artifact_id = COALESCE(excluded.parent_artifact_id, artifacts.parent_artifact_id),
+                 producer = excluded.producer
+               WHERE COALESCE(artifacts.source, '') <> 'user'`,
+            )
+            .run(a.id, a.repo ?? null, a.source ?? null, a.title ?? null, a.createdAt ?? null, a.parentArtifactId ?? null, processor)
+          continue
+        }
         this.db
           .prepare(
             `INSERT OR REPLACE INTO artifacts
@@ -229,6 +250,7 @@ export class Store {
             a.json === undefined ? null : JSON.stringify(a.json), processor,
           )
       }
+      this.applyFeatureRevisions(result.featureRevisions ?? [])
       for (const l of result.links ?? []) {
         this.db
           .prepare(
@@ -269,12 +291,115 @@ export class Store {
     tx()
   }
 
-  /** Existing features (for biasing derived feature linkage). */
-  listFeatures(): Array<{ id: string; title: string }> {
+  /**
+   * Apply an enrichment processor's hierarchy edits: REPARENT existing features.
+   * (Auto-rename is intentionally unsupported — see FeatureRevisionInput.) Skips
+   * user-authored features (locked) and any reparent that would form a cycle or
+   * self-parent. Caller runs this inside a transaction.
+   */
+  private applyFeatureRevisions(revisions: FeatureRevisionInput[]) {
+    for (const rev of revisions) {
+      if (rev.parentId === undefined) continue
+      const row = this.db
+        .prepare("SELECT source FROM artifacts WHERE id = ? AND kind = 'feature'")
+        .get(rev.id) as { source: string | null } | undefined
+      if (!row || row.source === 'user') continue
+      const parent = rev.parentId
+      if (parent !== rev.id && !this.wouldCreateFeatureCycle(rev.id, parent)) {
+        this.db.prepare('UPDATE artifacts SET parent_artifact_id = ? WHERE id = ?').run(parent ?? null, rev.id)
+      }
+    }
+  }
+
+  /** True if parenting `id` under `newParentId` would create a cycle (walks ancestors). */
+  private wouldCreateFeatureCycle(id: string, newParentId: string | null): boolean {
+    let cur = newParentId
+    const seen = new Set<string>()
+    while (cur) {
+      if (cur === id || seen.has(cur)) return true
+      seen.add(cur)
+      const r = this.db.prepare('SELECT parent_artifact_id AS p FROM artifacts WHERE id = ?').get(cur) as
+        | { p: string | null }
+        | undefined
+      cur = r?.p ?? null
+    }
+    return false
+  }
+
+  /**
+   * The WHOLE feature hierarchy — what an enrichment processor needs to attach a
+   * session to the most specific feature, slot a new feature under the right
+   * parent, and refine the tree. The hierarchy is global and human-managed (a
+   * single epic may span repos), so the processor sees everything; repo isolation
+   * is enforced only on auto-derived *linkage* (see `repos`). `source` flags
+   * user-authored features so the processor leaves them locked.
+   *
+   * `repos` = repos associated anywhere in a feature's subtree (itself + every
+   * descendant), unioned from linked sessions and any explicit `repo` column.
+   * Empty = unscoped/global. A feature is a safe auto-link target for a session
+   * iff its `repos` is empty or already contains the session's repo.
+   */
+  listFeatures(): Array<{ id: string; title: string; parentId: string | null; source: string | null; repos: string[] }> {
+    const repoSets = this.featureRepoSets()
     const rows = this.db
-      .prepare("SELECT id, COALESCE(title, '') AS title FROM artifacts WHERE kind = 'feature'")
-      .all() as Array<{ id: string; title: string }>
-    return rows
+      .prepare("SELECT id, COALESCE(title, '') AS title, parent_artifact_id AS parentId, source FROM artifacts WHERE kind = 'feature'")
+      .all() as Array<{ id: string; title: string; parentId: string | null; source: string | null }>
+    return rows.map((r) => ({ ...r, repos: repoSets.get(r.id) ?? [] }))
+  }
+
+  /**
+   * Per-feature subtree repo set: the repos associated anywhere in a feature's
+   * subtree (itself + every descendant), unioned from each feature's explicit
+   * `repo` column and the repos of sessions linked to it. Shared by feature
+   * extraction (linkage isolation) and the dashboard (the Features repo column).
+   */
+  private featureRepoSets(): Map<string, string[]> {
+    const rows = this.db
+      .prepare("SELECT id, parent_artifact_id AS parentId, repo FROM artifacts WHERE kind = 'feature'")
+      .all() as Array<{ id: string; parentId: string | null; repo: string | null }>
+
+    const own = new Map<string, Set<string>>()
+    const addRepo = (id: string, repo: string | null) => {
+      if (!repo) return
+      let set = own.get(id)
+      if (!set) own.set(id, (set = new Set()))
+      set.add(repo)
+    }
+    for (const r of rows) addRepo(r.id, r.repo)
+    const links = this.db
+      .prepare(
+        `SELECT sa.artifact_id AS id, s.repo AS repo
+         FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
+         JOIN artifacts a ON a.id = sa.artifact_id
+         WHERE a.kind = 'feature' AND s.repo IS NOT NULL AND s.repo <> ''`,
+      )
+      .all() as Array<{ id: string; repo: string }>
+    for (const l of links) addRepo(l.id, l.repo)
+
+    const children = new Map<string, string[]>()
+    for (const r of rows) {
+      if (!r.parentId) continue
+      const arr = children.get(r.parentId)
+      if (arr) arr.push(r.id)
+      else children.set(r.parentId, [r.id])
+    }
+    const memo = new Map<string, Set<string>>()
+    const onStack = new Set<string>()
+    const subtreeRepos = (id: string): Set<string> => {
+      const cached = memo.get(id)
+      if (cached) return cached
+      const acc = new Set<string>(own.get(id) ?? [])
+      if (!onStack.has(id)) {
+        onStack.add(id)
+        for (const c of children.get(id) ?? []) for (const rp of subtreeRepos(c)) acc.add(rp)
+        onStack.delete(id)
+      }
+      memo.set(id, acc)
+      return acc
+    }
+    const out = new Map<string, string[]>()
+    for (const r of rows) out.set(r.id, [...subtreeRepos(r.id)].sort())
+    return out
   }
 
   /** Persist facets (intrinsic + processor-declared) so the dashboard discovers them generically. */
@@ -1309,7 +1434,7 @@ export class Store {
     const allowed = ['pr', 'feature', 'ticket']
     const kinds = kind && allowed.includes(kind) ? [kind] : ['pr', 'feature']
     const placeholders = kinds.map(() => '?').join(',')
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
                 a.external_id AS externalId, a.completed_at AS completedAt,
@@ -1330,6 +1455,67 @@ export class Store {
          ORDER BY costUsd DESC, sessions DESC`,
       )
       .all(...kinds) as ArtifactListItem[]
+    // Attach the repos each row spans and its last session time. Features use the
+    // subtree union/max (an epic spans/aggregates everything under it); other
+    // kinds (PRs) just carry their own repo and aren't shown a last-session time.
+    const hasFeature = rows.some((r) => r.kind === 'feature')
+    const repoSets = hasFeature ? this.featureRepoSets() : null
+    const lastSession = hasFeature ? this.featureLastSession() : null
+    for (const r of rows) {
+      r.repos = r.kind === 'feature' ? (repoSets?.get(r.id) ?? []) : r.repo ? [r.repo] : []
+      r.lastSessionAt = r.kind === 'feature' ? (lastSession?.get(r.id) ?? null) : null
+    }
+    return rows
+  }
+
+  /**
+   * Per-feature last session time: the most recent start of any session linked to
+   * the feature OR any descendant (subtree max), so a parent reflects the latest
+   * activity beneath it. Null when nothing under it has a dated session.
+   */
+  private featureLastSession(): Map<string, string | null> {
+    const rows = this.db
+      .prepare("SELECT id, parent_artifact_id AS parentId FROM artifacts WHERE kind = 'feature'")
+      .all() as Array<{ id: string; parentId: string | null }>
+    const direct = new Map<string, string>()
+    const dl = this.db
+      .prepare(
+        `SELECT sa.artifact_id AS id, MAX(s.started_at) AS last
+         FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
+         JOIN artifacts a ON a.id = sa.artifact_id
+         WHERE a.kind = 'feature' AND s.started_at IS NOT NULL
+         GROUP BY sa.artifact_id`,
+      )
+      .all() as Array<{ id: string; last: string | null }>
+    for (const r of dl) if (r.last) direct.set(r.id, r.last)
+
+    const children = new Map<string, string[]>()
+    for (const r of rows) {
+      if (!r.parentId) continue
+      const arr = children.get(r.parentId)
+      if (arr) arr.push(r.id)
+      else children.set(r.parentId, [r.id])
+    }
+    const memo = new Map<string, string | null>()
+    const onStack = new Set<string>()
+    const subtreeMax = (id: string): string | null => {
+      const cached = memo.get(id)
+      if (cached !== undefined) return cached
+      let max = direct.get(id) ?? null
+      if (!onStack.has(id)) {
+        onStack.add(id)
+        for (const c of children.get(id) ?? []) {
+          const cm = subtreeMax(c)
+          if (cm && (!max || cm > max)) max = cm // ISO timestamps compare lexically
+        }
+        onStack.delete(id)
+      }
+      memo.set(id, max)
+      return max
+    }
+    const out = new Map<string, string | null>()
+    for (const r of rows) out.set(r.id, subtreeMax(r.id))
+    return out
   }
 
   /**
@@ -1477,6 +1663,10 @@ export interface ArtifactListItem {
   title: string | null
   ident: string | null
   repo: string | null
+  /** Repos this artifact spans — a feature's full subtree union; one entry for a PR. */
+  repos: string[]
+  /** Most recent linked session start; for a feature, the max across its subtree. Null if none. */
+  lastSessionAt: string | null
   status: string | null
   source: string | null
   externalId: string | null

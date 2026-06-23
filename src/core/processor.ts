@@ -13,6 +13,7 @@ import type {
   AnnotationInput,
   ArtifactInput,
   ArtifactLinkInput,
+  FeatureRevisionInput,
   FileIndexInput,
   OutcomeInput,
   SessionArtifactInput,
@@ -27,10 +28,25 @@ export interface ShResult {
   code: number
 }
 
-/** An existing feature a processor can link a session to (bias toward these). */
+/**
+ * An existing feature a processor can link a session to. Carries enough of the
+ * hierarchy for an enrichment processor to attach a session to the most specific
+ * feature, place a new feature under the right parent, and refine the tree.
+ */
 export interface FeatureRef {
   id: string
   title: string
+  /** Parent feature id (null = top-level) — the shape of the hierarchy. */
+  parentId?: string | null
+  /** Provenance; `user`-authored features are locked from auto-rename/reparent. */
+  source?: string | null
+  /**
+   * Repos associated anywhere in this feature's subtree (itself + descendants),
+   * from linked sessions and any explicit repo. Empty = unscoped/global (e.g. a
+   * cross-repo epic or a fresh user feature). Auto-derived linkage is allowed
+   * only to a feature that is global or already includes the session's repo.
+   */
+  repos?: string[]
 }
 
 export interface ProcessorContext {
@@ -52,6 +68,8 @@ export interface ProcessorResult {
   artifacts?: ArtifactInput[]
   links?: ArtifactLinkInput[]
   sessionArtifacts?: SessionArtifactInput[]
+  /** In-place edits to existing (non-user) features — rename / reparent. */
+  featureRevisions?: FeatureRevisionInput[]
   outcomes?: OutcomeInput[]
   files?: FileIndexInput[]
   /** For enrichment processors: the LLM spend this processor incurred. */

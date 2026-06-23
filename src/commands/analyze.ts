@@ -51,7 +51,6 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   }
   const llmEnabled = !!llm
   const llmModel = llm?.model ?? null
-  const existingFeatures = store.listFeatures()
   if (llmEnabled) {
     log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
   } else {
@@ -119,7 +118,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     // Backfill repo onto already-ingested (unchanged) sessions too, without a
     // version bump. Populate-only: never overwrite a known repo with null.
     if (repo) store.setSessionRepo(session.id, repo)
-    await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, existingFeatures, sh })
+    await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
     processed++
   }
 

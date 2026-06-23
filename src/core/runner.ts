@@ -35,13 +35,18 @@ export interface RunOptions {
   llmEnabled: boolean
   llmModel: string | null
   llm: LlmClient | null
-  existingFeatures: FeatureRef[]
   sh: ProcessorContext['sh']
 }
 
 /** Run every applicable processor for one session, honoring deps + the cache. */
 export async function runProcessors(opts: RunOptions): Promise<void> {
-  const { session, store, log, llmEnabled, llmModel, llm, existingFeatures, sh } = opts
+  const { session, store, log, llmEnabled, llmModel, llm, sh } = opts
+  // Read the feature hierarchy fresh for every session, not once per run, so a
+  // session sees features that earlier sessions in this run created, renamed, or
+  // reparented — letting the extractor grow one coherent tree instead of dupes.
+  // The whole (cross-repo) hierarchy is sent; repo isolation is enforced on
+  // linkage inside the processor, not by hiding other repos' features.
+  const existingFeatures: FeatureRef[] = store.listFeatures()
   const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, sh }
   const inputHash = session.raw.contentHash
 

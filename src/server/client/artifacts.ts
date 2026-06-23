@@ -47,8 +47,9 @@ function renderFeatureManager(rows) {
   if (!rows.length) {
     html += '<div class="empty">No features yet. Add one below, or enrich sessions to propose features.</div>';
   } else {
+    html += '<input id="feat-search" class="feat-search" type="search" placeholder="Search features…" autocomplete="off" />';
     html += '<div class="feat-list">' +
-      '<div class="feat-head"><span>Feature</span><span class="fh-num">Sessions</span><span class="fh-num">Cost</span><span></span></div>';
+      '<div class="feat-head"><span>Feature</span><span>Repos</span><span>Last session</span><span class="fh-num">Sessions</span><span class="fh-num">Cost</span><span></span></div>';
     flattenFeatures(rows).forEach(function (e) {
       var r = e.node, indent = e.depth * 22;
       var twig = e.depth ? '<span class="feat-twig">&#8627;</span> ' : '';
@@ -57,6 +58,8 @@ function renderFeatureManager(rows) {
         ? '<span class="badge b-success">shipped ' + esc(dayOf(r.completedAt)) + '</span>'
         : '<span class="badge b-null">open</span>';
       var proposed = r.source === 'derived' ? '<span class="tag">proposed</span>' : '';
+      var repos = (r.repos && r.repos.length) ? r.repos.join(', ') : '—';
+      var last = r.lastSessionAt ? dayOf(r.lastSessionAt) : '—';
       // Secondary actions (ship toggle · nest-under · move-to-top · delete) collapse
       // into a per-row hamburger; only the indent shifts, so columns stay aligned.
       var nest = '<select class="feat-nest" data-id="' + esc(r.id) + '">' +
@@ -64,10 +67,13 @@ function renderFeatureManager(rows) {
       var toTop = r.parentId
         ? '<button class="menu-item" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
         : '';
-      html += '<div class="feat-row">' +
+      html += '<div class="feat-row" data-name="' + esc((r.title || '').toLowerCase()) +
+        '" data-id="' + esc(r.id) + '" data-parent="' + esc(r.parentId || '') + '">' +
         '<div class="feat-name" style="padding-left:' + indent + 'px">' + twig +
-          '<span class="nm" data-art="' + esc(r.title || '') + '" data-kind="feature" title="' + esc(r.title || '') + '">' +
+          '<span class="nm" title="' + esc(r.title || '') + '">' +
           esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + '</div>' +
+        '<span class="feat-repos" title="' + esc(repos) + '">' + esc(repos) + '</span>' +
+        '<span class="feat-last" title="' + esc(r.lastSessionAt || '') + '">' + esc(last) + '</span>' +
         '<span class="feat-num">' + r.sessions + '</span>' +
         '<span class="feat-num">' + usd(r.costUsd) + '</span>' +
         '<div class="feat-actions">' +
@@ -133,12 +139,17 @@ function descendantsOf(rows, id) {
 }
 
 function flattenFeatures(rows) {
+  // Most-recent-activity first: order roots and each sibling group by last session
+  // time descending (undated sorts last). Hierarchy is preserved — a parent still
+  // renders before its children; only the order among siblings changes.
+  function recency(a, b) { return String(b.lastSessionAt || '').localeCompare(String(a.lastSessionAt || '')); }
   var byId = {}; rows.forEach(function (r) { byId[r.id] = r; });
   var children = {};
   rows.forEach(function (r) {
     var p = r.parentId && byId[r.parentId] ? r.parentId : '';
     (children[p] = children[p] || []).push(r);
   });
+  Object.keys(children).forEach(function (k) { children[k].sort(recency); });
   var out = [], visited = {};
   (function walk(key, depth) {
     (children[key] || []).forEach(function (r) {
@@ -147,7 +158,7 @@ function flattenFeatures(rows) {
       walk(r.id, depth + 1);
     });
   })('', 0);
-  rows.forEach(function (r) { if (!visited[r.id]) { visited[r.id] = true; out.push({ node: r, depth: 0 }); } });
+  rows.slice().sort(recency).forEach(function (r) { if (!visited[r.id]) { visited[r.id] = true; out.push({ node: r, depth: 0 }); } });
   return out;
 }
 
@@ -218,9 +229,40 @@ function wireFeatureManager() {
       post('/api/features/update', { id: b.getAttribute('data-id'), parentId: null }).then(loadArtifacts);
     };
   });
-  each('#artifacts .nm', function (el) {
-    el.onclick = function () { filterByArtifact(el.getAttribute('data-art'), el.getAttribute('data-kind')); };
-  });
+
+  // Local name filter. A match reveals its WHOLE subtree (so searching an epic
+  // shows everything under it) plus its ancestors (so the match keeps its place
+  // in the tree). Pure show/hide in place — no refetch, keeps input focus.
+  var search = $('#feat-search');
+  if (search) search.oninput = function () {
+    var q = search.value.trim().toLowerCase();
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#artifacts .feat-row'));
+    if (!q) { rows.forEach(function (r) { r.style.display = ''; }); return; }
+    var childrenOf = {}, parentOf = {};
+    rows.forEach(function (r) {
+      var id = r.getAttribute('data-id'), p = r.getAttribute('data-parent') || '';
+      parentOf[id] = p;
+      (childrenOf[p] = childrenOf[p] || []).push(id);
+    });
+    var visible = {};
+    function revealSubtree(id) {
+      if (visible[id]) return;
+      visible[id] = true;
+      (childrenOf[id] || []).forEach(revealSubtree);
+    }
+    function revealAncestors(id) {
+      var p = parentOf[id];
+      while (p) { visible[p] = true; p = parentOf[p]; }
+    }
+    rows.forEach(function (r) {
+      if ((r.getAttribute('data-name') || '').indexOf(q) !== -1) {
+        var id = r.getAttribute('data-id');
+        revealSubtree(id);
+        revealAncestors(id);
+      }
+    });
+    rows.forEach(function (r) { r.style.display = visible[r.getAttribute('data-id')] ? '' : 'none'; });
+  };
 
   // One-time global closers: outside click and Escape dismiss any open menu.
   // Idempotent across reloads — they query the live DOM each time.
