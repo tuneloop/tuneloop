@@ -87,8 +87,8 @@ export function loadKpis() {
       // Tiles with a metric key are clickable nav into that metric's detail view.
       var cls = 'tile' + (t.metric ? ' clickable' : '') + (t.metric && t.metric === state.metric ? ' on' : '');
       var attr = t.metric ? ' data-metric="' + t.metric + '"' : '';
-      return '<div class="' + cls + '"' + attr + '><div class="label">' + esc(t.label) + '</div><div class="value">' +
-        esc(t.value) + (t.delta || '') + '</div><div class="sub">' + esc(t.sub) + '</div></div>';
+      return '<div class="' + cls + '"' + attr + '><div class="label">' + esc(t.label) + '</div><div class="value"><span class="num">' +
+        esc(t.value) + '</span>' + (t.delta || '') + '</div><div class="sub">' + esc(t.sub) + '</div></div>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#kpis .tile[data-metric]'), function (el) {
       el.onclick = function () { openMetric(el.getAttribute('data-metric')); };
