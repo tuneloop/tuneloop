@@ -13,17 +13,28 @@ program
 
 program
   .command('analyze')
-  .description('Analyze session transcripts and build the local store.')
+  .description('Analyze session transcripts, build the local store, then serve the dashboard.')
   .argument('[dirs]', 'comma-separated session directories (default: ~/.claude/projects)')
   .option('--db <path>', 'path to the aivue SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
+  .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
+  .option('--no-serve', 'analyze only; do not serve the dashboard or open the browser')
   .option('-v, --verbose', 'verbose logging')
-  .action(async (dirs: string | undefined, options: { db?: string; limit?: number; verbose?: boolean }) => {
-    const dirList = dirs
-      ? dirs.split(',').map((s) => s.trim()).filter(Boolean)
-      : undefined
-    await analyze({ dirs: dirList, db: options.db, limit: options.limit, verbose: options.verbose })
-  })
+  .action(
+    async (
+      dirs: string | undefined,
+      options: { db?: string; limit?: number; port?: number; serve?: boolean; verbose?: boolean },
+    ) => {
+      const dirList = dirs
+        ? dirs.split(',').map((s) => s.trim()).filter(Boolean)
+        : undefined
+      await analyze({ dirs: dirList, db: options.db, limit: options.limit, verbose: options.verbose })
+      // Serve + open the browser by default so results are visible immediately; --no-serve opts out.
+      if (options.serve !== false) {
+        await serve({ db: options.db, port: options.port })
+      }
+    },
+  )
 
 program
   .command('serve')
