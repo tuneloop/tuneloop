@@ -37,14 +37,8 @@ function renderArtifacts(rows, kind) {
       '<td><button class="btn sess-btn" data-art="' + esc(key) + '">Sessions &rarr;</button></td></tr>';
   }).join('');
   $('#artifacts').innerHTML = '<table>' + head + body + '</table>';
-  Array.prototype.forEach.call(document.querySelectorAll('.arow'), function (tr) {
-    tr.onclick = function () { filterByArtifact(tr.getAttribute('data-art'), tr.getAttribute('data-kind')); };
-  });
-  Array.prototype.forEach.call(document.querySelectorAll('.pr-link'), function (a) {
-    a.onclick = function (e) { e.stopPropagation(); };
-  });
   Array.prototype.forEach.call(document.querySelectorAll('.sess-btn'), function (btn) {
-    btn.onclick = function (e) { e.stopPropagation(); filterByArtifact(btn.getAttribute('data-art'), 'pr'); };
+    btn.onclick = function () { filterByArtifact(btn.getAttribute('data-art'), 'pr'); };
   });
 }
 
