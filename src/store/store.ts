@@ -7,6 +7,7 @@ import { grainOf } from '../core/facets'
 import type { FacetSpec, FacetType } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
+import { isSyntheticUser } from '../core/turns'
 import type { FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
 
 export interface Dist {
@@ -2033,15 +2034,6 @@ function buildTranscript(session: Session): Transcript {
       toolUseId: s.toolUseId,
     })),
   }
-}
-
-// Claude-injected "user" turns that aren't the human's intent: slash-command
-// echoes, their stdout, skill preambles, interrupts, and tool rejections. Used
-// to skip them when resolving the prompt an edit links to.
-const SYNTHETIC_USER_RE =
-  /^Caveat: The messages below|^Base directory for this skill:|^\[Request interrupted|<command-(name|message|args)>|<\/?local-command-(stdout|stderr)>|The user doesn't want to proceed with this tool use/i
-function isSyntheticUser(text: string): boolean {
-  return SYNTHETIC_USER_RE.test(text)
 }
 
 /**

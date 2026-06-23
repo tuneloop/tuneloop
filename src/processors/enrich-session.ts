@@ -1,6 +1,7 @@
 import { registerProcessor } from '../core/registry'
 import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
+import { isSyntheticUser } from '../core/turns'
 import { costOfUsage } from '../pricing/pricing'
 import type {
   AnnotationInput,
@@ -27,6 +28,22 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  * decided, not just what was attempted. Each entry is one self-contained line
  * with the rationale inline; an empty list means nothing consequential was decided.
  *
+ * `autonomy` measures how much the agent ran on its own, classified from how much
+ * the user STEERED it rather than from the model's general impression (which
+ * biased everything to "guided" — AL-33). It is a spectrum: "autonomous" (agent
+ * ran end-to-end on minimal input beyond approvals) → "guided" (human gave
+ * substantive direction at key points, agent executed) → "minimal" (heavy
+ * involvement, frequent corrections/redirections). The digest surfaces a "steering
+ * signal" — the count of substantive follow-up turns after the opener — but the
+ * prompt asks the model to weigh their NATURE, since a follow-up may be genuine
+ * direction ("use Postgres instead") or mere workflow progression ("commit and
+ * open a PR", "mark it done"), and only the latter-vs-former call decides
+ * autonomous-vs-guided. Two upstream fixes make this work: `userTurns` drops
+ * Claude-injected pseudo-user turns (slash-command echoes, local-command
+ * caveats/stdout) so the opener is the first REAL prompt, and the count excludes
+ * bare approvals. Both matter because the user spine is truncated for long
+ * sessions, so the model cannot reliably reconstruct the count itself.
+ *
  * The feature half is hierarchy-aware. The model sees the existing features as an
  * indented tree and is asked to (a) attach the session to the MOST SPECIFIC
  * feature that fits, (b) when nothing fits, propose a new (source='derived')
@@ -38,7 +55,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 8,
+  version: 9,
   kind: 'enrichment',
   needs: { llm: true },
   facets: [
@@ -179,6 +196,19 @@ function buildPrompt(session: Session, features: FeatureRef[]): { system: string
     '  "features": [ { "matched_feature_id": "<id of the most specific existing feature this session advanced, or empty>", "new_title": "<title for a NEW feature when none fit, else empty>", "parent_id": "<existing feature id to nest the new feature under, or empty for top-level>" } ],',
     '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ]',
     '}',
+    'How to classify autonomy — it measures how much the AGENT ran on its own. Look at the user turns AFTER the',
+    'opening request and judge how much they STEERED the work. Steering = a correction, a redirection, a design',
+    'choice, or a new requirement. NOT steering: the opening request itself, bare approvals ("yes", "continue",',
+    '"looks good"), and routine progression that only advances the workflow ("commit and open a PR", "mark it',
+    'done", "now do the next one") — those mean the user is letting the agent run, not directing it.',
+    '- "autonomous": the agent executed end-to-end on minimal input beyond approvals — no or very few genuinely',
+    '  steering turns; the agent decided HOW to do the work. A session kicked off with one request and then only',
+    '  nudged forward ("commit", "open a PR", "mark it done") is autonomous, even if it ran long.',
+    '- "guided": the user gave substantive direction at KEY POINTS — choosing an approach, correcting course, or',
+    '  adding requirements — and the agent handled execution in between.',
+    '- "minimal": minimal agent autonomy — frequent corrections or redirections, a tight back-and-forth where the',
+    '  user steered most steps.',
+    'Do NOT default to "guided": when the user mostly approved and let the agent run, choose "autonomous".',
     'What a key decision IS: a consequential choice that shaped the work and that a teammate reviewing this',
     'session later would want to know — a technical approach chosen, a tradeoff accepted, a scope cut, a',
     'library/tool/data-model picked, or an alternative explicitly rejected. Prefer the user\'s steering and the',
@@ -237,6 +267,7 @@ function renderFeatureTree(features: FeatureRef[]): string {
 
 function digest(s: Session): string {
   const turns = userTurns(s)
+  const followups = followupTurns(turns)
   const files = unique(s.toolCalls.filter((t) => t.action === 'file_write').flatMap((t) => t.target.paths ?? [])).slice(0, 40)
   const cmds = s.toolCalls
     .filter((t) => t.action === 'shell' && t.target.command)
@@ -247,6 +278,11 @@ function digest(s: Session): string {
   return [
     `Models: ${s.models.join(', ') || 'unknown'}`,
     `User turns: ${turns.length} | Tool calls: ${s.toolCalls.length}`,
+    `Steering signal: ${followups.length} of ${turns.length} user turn(s) were follow-ups after the opening ` +
+      `request (bare approvals like "yes"/"continue" already excluded). Judge how many GENUINELY steered the ` +
+      `work — a correction, redirection, design choice, or new requirement — versus routine "do the next step" ` +
+      `progression ("commit and open a PR", "mark it done"), which is the user letting the agent run. Only ` +
+      `genuine steering pushes toward guided/minimal.`,
     '',
     'User messages (the human side, in order — read these for intent, steering, and reactions):',
     userSpine(turns),
@@ -262,13 +298,19 @@ function digest(s: Session): string {
   ].join('\n')
 }
 
-/** All main-thread human turns, in order. Excludes sidechain (subagent) turns and strips injected reminders. */
+/**
+ * All main-thread human turns, in order. Excludes sidechain (subagent) turns,
+ * strips injected reminders, and drops Claude-injected pseudo-user turns —
+ * slash-command echoes, local-command caveats/stdout, interrupts, tool
+ * rejections. Those are machinery, not the human steering the agent; counting
+ * them skewed the opener (the first REAL prompt) and the autonomy signal (AL-33).
+ */
 function userTurns(s: Session): string[] {
   const out: string[] = []
   for (const ev of s.events) {
     if (ev.kind !== 'user' || ev.isSidechain) continue
     const t = stripReminders(ev.text)
-    if (t) out.push(t)
+    if (t && !isSyntheticUser(t)) out.push(t)
   }
   return out
 }
@@ -279,6 +321,33 @@ function stripReminders(text: string): string {
     .replace(/[ \t]+\n/g, '\n')
     .trim()
 }
+
+/**
+ * Substantive follow-up turns: the user turns AFTER the opening request, minus
+ * bare approvals/continuations ("yes", "continue"). This is a CEILING on
+ * steering, not steering itself — a follow-up may be genuine direction
+ * ("use Postgres instead") or mere workflow progression ("commit and open a PR",
+ * "mark it done"), and only the model can tell those apart from the text. The
+ * count feeds the autonomy classification (autonomous → guided → minimal as
+ * genuine steering rises; see AL-33). Deliberately conservative: only whole-turn
+ * known approvals are dropped, so nothing substantive is hidden from the model.
+ */
+function followupTurns(turns: string[]): string[] {
+  return turns.slice(1).filter((t) => !isApproval(t))
+}
+
+/** A short, content-free affirmation/continuation ("yes", "ok continue") that lets the agent proceed rather than redirecting it. */
+function isApproval(text: string): boolean {
+  const t = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!t) return true
+  if (t.split(' ').length > 6) return false // too long to be a bare approval
+  return APPROVAL_RE.test(t)
+}
+
+// Whole-turn approval/continuation phrases (matched against punctuation-stripped,
+// lowercased text). Kept conservative — when unsure, a turn counts as steering.
+const APPROVAL_RE =
+  /^(y|yes|yep|yup|yeah|ya|ok|okay|k|kk|sure|fine|cool|great|perfect|nice|good|awesome|excellent|thanks|thank you|thanks a lot|thank you so much|ty|thx|continue|please continue|proceed|go|go ahead|go for it|go on|do it|do that|keep going|carry on|next|lgtm|looks good|looks great|that works|sounds good|ship it|approved|correct|right|exactly|agreed|got it|makes sense|yes please|ok thanks|perfect thanks|great thanks|yes continue|ok continue|ok go ahead|sure go ahead)$/
 
 /** Keep every turn within budget; for very long sessions keep the opening + most recent and elide the middle. */
 function userSpine(turns: string[], perMsg = 800, totalBudget = 6000): string {
