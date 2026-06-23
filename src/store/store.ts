@@ -409,6 +409,14 @@ export class Store {
       'INSERT OR REPLACE INTO facets (key, label, type, source, col, base, multi, roles, producer) VALUES (?,?,?,?,?,?,?,?,?)',
     )
     const tx = this.db.transaction(() => {
+      // Sync, don't just upsert: drop any facet this producer registered before
+      // but no longer declares, so a removed facet (e.g. a retired enrichment
+      // field) leaves the registry instead of lingering as a dead breakdown /
+      // filter / distribution option that still groups orphaned annotation rows.
+      // Scoped to `producer`, so intrinsic and other processors' facets are safe.
+      const keep = specs.map((f) => f.key)
+      const notIn = keep.length ? ` AND key NOT IN (${keep.map(() => '?').join(',')})` : ''
+      this.db.prepare(`DELETE FROM facets WHERE producer = ?${notIn}`).run(producer, ...keep)
       for (const f of specs) {
         ins.run(
           f.key,
@@ -1070,7 +1078,7 @@ export class Store {
       sql = `SELECT ${col} AS value, COUNT(DISTINCT session_id) AS count
              FROM ${table} ${where} GROUP BY ${col} ORDER BY count DESC`
     }
-    sql += ' LIMIT 50' // bound high-cardinality facets (e.g. free-text topics)
+    sql += ' LIMIT 50' // bound high-cardinality facets defensively
     return this.db.prepare(sql).all(...params) as Dist[]
   }
 

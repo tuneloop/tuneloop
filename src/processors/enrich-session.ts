@@ -63,7 +63,6 @@ export const enrichSession: Processor = {
     { key: 'complexity', label: 'Complexity', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'autonomy', label: 'Autonomy', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'success', label: 'Success', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
-    { key: 'topics', label: 'Topics', type: 'string', source: 'annotation', multi: true, roles: ['chart'] },
   ],
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
     const { llm, session } = ctx
@@ -86,7 +85,6 @@ export const enrichSession: Processor = {
       { key: 'success', value: oneOf(parsed.success, SUCCESS) },
       { key: 'intent_summary', value: str(parsed.intent_summary) },
       { key: 'decisions', value: decisionList(parsed.decisions) },
-      { key: 'topics', value: strArray(parsed.topics).slice(0, 12) },
     ]
 
     const outcomes: OutcomeInput[] = []
@@ -192,7 +190,6 @@ function buildPrompt(session: Session, features: FeatureRef[]): { system: string
     '  "intent_summary": one sentence stating what the user set out to accomplish (the goal, not the decisions),',
     '  "decisions": string[] — the KEY decisions made during the session, newest insight last; [] if none,',
     `  "success": one of [${SUCCESS.join(', ')}],`,
-    '  "topics": short list of free-text areas touched,',
     '  "features": [ { "matched_feature_id": "<id of the most specific existing feature this session advanced, or empty>", "new_title": "<title for a NEW feature when none fit, else empty>", "parent_id": "<existing feature id to nest the new feature under, or empty for top-level>" } ],',
     '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ]',
     '}',

@@ -45,7 +45,7 @@ all served locally from the SQLite store. `Ctrl+C` to stop.
 ### Optional: LLM enrichment
 
 Static analysis (tokens, cost, tools, files, git/PR outcomes) needs no setup.
-To also derive topics, use-case, complexity, autonomy, and an LLM-judged success
+To also derive use-case, complexity, autonomy, and an LLM-judged success
 signal, point aivue at **your own** LLM key — your session data goes only to the
 vendor you choose:
 
