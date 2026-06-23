@@ -43,41 +43,60 @@ function renderArtifacts(rows, kind) {
 }
 
 function renderFeatureManager(rows) {
-  var html = '<div class="feat-new">' +
-    '<input id="nf-title" placeholder="New feature title" />' +
-    '<select id="nf-parent">' + featureParentOptions(rows, '', '', null) + '</select>' +
-    '<button class="btn" id="nf-add">Add feature</button></div>';
+  var html = '';
   if (!rows.length) {
-    html += '<div class="empty">No features yet. Add one above, or enrich sessions to propose features.</div>';
+    html += '<div class="empty">No features yet. Add one below, or enrich sessions to propose features.</div>';
   } else {
+    html += '<div class="feat-list">' +
+      '<div class="feat-head"><span>Feature</span><span class="fh-num">Sessions</span><span class="fh-num">Cost</span><span></span></div>';
     flattenFeatures(rows).forEach(function (e) {
-      var r = e.node, pad = 8 + e.depth * 22;
+      var r = e.node, indent = e.depth * 22;
       var twig = e.depth ? '<span class="feat-twig">&#8627;</span> ' : '';
       var shipped = !!r.completedAt;
       var statusHtml = shipped
         ? '<span class="badge b-success">shipped ' + esc(dayOf(r.completedAt)) + '</span>'
         : '<span class="badge b-null">open</span>';
       var proposed = r.source === 'derived' ? '<span class="tag">proposed</span>' : '';
-      // Actions: ship toggle · nest-under (a parent picker, no "(top level)" noise) ·
-      // move-to-top (only when nested) · delete.
+      // Secondary actions (ship toggle · nest-under · move-to-top · delete) collapse
+      // into a per-row hamburger; only the indent shifts, so columns stay aligned.
       var nest = '<select class="feat-nest" data-id="' + esc(r.id) + '">' +
         nestUnderOptions(rows, r.id, descendantsOf(rows, r.id)) + '</select>';
       var toTop = r.parentId
-        ? '<button class="btn" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
+        ? '<button class="menu-item" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
         : '';
-      html += '<div class="feat-row" style="padding-left:' + pad + 'px">' +
-        '<div class="feat-name">' + twig +
+      html += '<div class="feat-row">' +
+        '<div class="feat-name" style="padding-left:' + indent + 'px">' + twig +
           '<span class="nm" data-art="' + esc(r.title || '') + '" data-kind="feature" title="' + esc(r.title || '') + '">' +
           esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + '</div>' +
-        '<span class="feat-meta">' + r.sessions + ' sess &middot; ' + usd(r.costUsd) + '</span>' +
+        '<span class="feat-num">' + r.sessions + '</span>' +
+        '<span class="feat-num">' + usd(r.costUsd) + '</span>' +
         '<div class="feat-actions">' +
-          '<button class="btn" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
-          (shipped ? 'reopen' : 'mark shipped') + '</button>' +
-          nest + toTop +
-          '<button class="btn danger" data-act="delete" data-id="' + esc(r.id) + '" data-title="' + esc(r.title || '') + '">delete</button>' +
+          '<button class="btn sess-btn" data-art="' + esc(r.title || '') + '" data-kind="feature">Sessions &rarr;</button>' +
+          '<div class="feat-menu-wrap">' +
+            '<button class="feat-menu-btn" aria-label="More actions">&#8943;</button>' +
+            '<div class="feat-menu">' +
+              '<button class="menu-item" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
+                (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
+              '<div class="menu-nest"><label>Nest under</label>' + nest + '</div>' +
+              toTop +
+              '<div class="menu-sep"></div>' +
+              '<button class="menu-item danger" data-act="delete" data-id="' + esc(r.id) + '" data-title="' + esc(r.title || '') + '">Delete</button>' +
+            '</div>' +
+          '</div>' +
         '</div></div>';
     });
+    html += '</div>';
   }
+  // New-feature form lives at the bottom, collapsed behind an "Add feature" button
+  // to keep the list uncluttered.
+  html += '<div class="feat-add">' +
+    '<button class="btn" id="nf-toggle">+ Add feature</button>' +
+    '<div class="feat-new" id="nf-form" hidden>' +
+      '<input id="nf-title" placeholder="New feature title" />' +
+      '<select id="nf-parent">' + featureParentOptions(rows, '', '', null) + '</select>' +
+      '<button class="btn" id="nf-add">Add</button>' +
+      '<button class="btn" id="nf-cancel">Cancel</button>' +
+    '</div></div>';
   $('#artifacts').innerHTML = html;
   wireFeatureManager();
 }
@@ -134,12 +153,49 @@ function flattenFeatures(rows) {
 
 function wireFeatureManager() {
   function each(sel, fn) { Array.prototype.forEach.call(document.querySelectorAll(sel), fn); }
+
+  // Add-feature: a collapsed button that expands into the full form on click.
+  var nfToggle = $('#nf-toggle'), nfForm = $('#nf-form'), nfTitle = $('#nf-title');
+  if (nfToggle) nfToggle.onclick = function () {
+    nfForm.hidden = false; nfToggle.hidden = true;
+    if (nfTitle) nfTitle.focus();
+  };
+  var nfCancel = $('#nf-cancel');
+  if (nfCancel) nfCancel.onclick = function () {
+    nfForm.hidden = true; nfToggle.hidden = false;
+    if (nfTitle) nfTitle.value = '';
+  };
   var add = $('#nf-add');
   if (add) add.onclick = function () {
-    var title = $('#nf-title').value.trim();
+    var title = nfTitle.value.trim();
     if (!title) return;
     post('/api/features', { title: title, parentId: $('#nf-parent').value || undefined }).then(loadArtifacts);
   };
+  if (nfTitle) nfTitle.onkeydown = function (ev) { if (ev.key === 'Enter' && add) add.onclick(); };
+
+  // Hamburger menus: fixed-positioned (so the scroll container's overflow can't
+  // clip them) and only one open at a time. Clicks inside a menu don't bubble to
+  // the document closer, keeping the nest <select> usable.
+  each('#artifacts .feat-menu-btn', function (btn) {
+    btn.onclick = function (ev) {
+      ev.stopPropagation();
+      var menu = btn.parentNode.querySelector('.feat-menu');
+      var wasOpen = menu.classList.contains('on');
+      closeFeatMenus();
+      if (wasOpen) return;
+      menu.classList.add('on');
+      var rect = btn.getBoundingClientRect();
+      menu.style.top = (rect.bottom + 4) + 'px';
+      menu.style.left = (rect.right - menu.offsetWidth) + 'px';
+    };
+  });
+  each('#artifacts .feat-menu', function (m) { m.onclick = function (ev) { ev.stopPropagation(); }; });
+  var list = $('#artifacts .feat-list');
+  if (list) list.onscroll = closeFeatMenus; // fixed menus don't track the scrolled button
+
+  each('#artifacts .sess-btn', function (b) {
+    b.onclick = function () { filterByArtifact(b.getAttribute('data-art'), b.getAttribute('data-kind')); };
+  });
   each('#artifacts [data-act="toggle"]', function (b) {
     b.onclick = function () {
       post('/api/features/update', { id: b.getAttribute('data-id'), completed: b.getAttribute('data-completed') !== '1' }).then(loadArtifacts);
@@ -165,6 +221,22 @@ function wireFeatureManager() {
   each('#artifacts .nm', function (el) {
     el.onclick = function () { filterByArtifact(el.getAttribute('data-art'), el.getAttribute('data-kind')); };
   });
+
+  // One-time global closers: outside click and Escape dismiss any open menu.
+  // Idempotent across reloads — they query the live DOM each time.
+  if (!featMenusWired) {
+    featMenusWired = true;
+    document.addEventListener('click', closeFeatMenus);
+    document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') closeFeatMenus(); });
+  }
+}
+
+// Module-level so the global listeners are attached only once. closeFeatMenus is
+// hoisted out of wireFeatureManager so those one-time listeners don't capture a
+// stale closure from the first render.
+var featMenusWired = false;
+function closeFeatMenus() {
+  Array.prototype.forEach.call(document.querySelectorAll('#artifacts .feat-menu.on'), function (m) { m.classList.remove('on'); });
 }
 
 export function loadArtifacts() {

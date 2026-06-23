@@ -77,17 +77,45 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .btn { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .btn:hover { border-color: var(--emerald); color: var(--emerald); }
 .btn.danger:hover { border-color: var(--red); color: var(--red); }
-.feat-new { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-.feat-new input { flex: 1; min-width: 220px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
-.feat-new select { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
-.feat-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
-.feat-name { flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* Feature manager: a fixed-height scroll window with aligned columns. Every row
+   shares the same grid so Sessions/Cost/actions line up regardless of depth —
+   only the title cell is indented (inline padding-left) to show the hierarchy. */
+.feat-list { max-height: 460px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; }
+/* Fixed (not auto) last column so the header and row grids — separate grid
+   containers — resolve identical column edges and the labels sit over the data. */
+.feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 72px 84px 142px; align-items: center; gap: 12px; padding: 8px 12px; }
+.feat-head { position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 1px solid var(--line); }
+.feat-head span { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.feat-row { border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.feat-row:last-child { border-bottom: none; }
+.feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .feat-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .feat-name .nm:hover { color: var(--emerald); }
 .feat-twig { color: var(--muted); }
-.feat-meta { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: nowrap; }
-.feat-actions { display: flex; align-items: center; gap: 6px; }
-.feat-actions select { border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font-size: 11px; background: var(--paper); color: var(--ink); max-width: 150px; }
+.fh-num, .feat-num { text-align: right; }
+.feat-num { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.feat-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+/* Secondary actions live behind a per-row hamburger. The menu is position:fixed
+   (positioned in JS) so the scroll container's overflow doesn't clip it. */
+.feat-menu-wrap { position: relative; display: inline-flex; }
+.feat-menu-btn { border: 1px solid var(--line); background: var(--paper); color: var(--muted); border-radius: 7px; padding: 4px 9px; font-size: 14px; line-height: 1; cursor: pointer; }
+.feat-menu-btn:hover { border-color: var(--emerald); color: var(--emerald); }
+.feat-menu { position: fixed; display: none; width: 190px; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; box-shadow: 0 8px 20px rgba(20,18,15,.14); padding: 5px; z-index: 50; }
+.feat-menu.on { display: block; }
+.feat-menu .menu-item { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--ink); border-radius: 6px; padding: 7px 9px; font-size: 13px; cursor: pointer; }
+.feat-menu .menu-item:hover { background: #fbf8f1; color: var(--emerald); }
+.feat-menu .menu-item.danger { color: var(--red); }
+.feat-menu .menu-item.danger:hover { background: #f4ddd6; color: var(--red); }
+.feat-menu .menu-nest { padding: 4px 9px 6px; }
+.feat-menu .menu-nest label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+.feat-menu .menu-nest select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font-size: 12px; background: var(--paper); color: var(--ink); }
+.feat-menu .menu-sep { height: 1px; background: var(--line); margin: 5px 4px; }
+/* New-feature form: collapsed behind an "Add feature" button at the bottom. */
+.feat-add { margin-top: 14px; }
+.feat-new { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.feat-new[hidden] { display: none; }
+.feat-new input { flex: 1; min-width: 220px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
+.feat-new select { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
 .filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
 .filters select, .filters input {
   border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--paper); color: var(--ink);

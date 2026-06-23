@@ -77,7 +77,21 @@ from a local checkout:
 
 ```bash
 npm install
-npm run dev -- analyze        # builds, then runs the CLI (args after `--`)
+
+# Optional: LLM enrichment — point aivue at your own LLM key. Your session data
+# goes only to the vendor you choose. Skip these for static analysis only.
+export AIVUE_LLM_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+# optional: export AIVUE_LLM_MODEL=claude-haiku-4-5
+
+npm run dev -- analyze        # builds, runs the CLI (args after `--`), then opens the dashboard
+```
+
+`analyze` serves the dashboard when it finishes, so that one command is usually
+all you need. To serve an already-analyzed store without re-running analysis,
+run `serve` separately:
+
+```bash
 npm run dev -- serve
 ```
 
