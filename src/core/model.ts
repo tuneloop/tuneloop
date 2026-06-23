@@ -51,6 +51,13 @@ interface BaseEvent {
   parentUuid?: string | null
   ts?: string
   isSidechain: boolean
+  /**
+   * For sidechain (subagent) events, the stable id of the subagent that emitted
+   * them — Claude Code's per-subagent transcript id. Lets the viewer group a
+   * subagent's turns into their own thread instead of interleaving them with the
+   * main conversation. Undefined for main-thread events.
+   */
+  agentId?: string
 }
 
 export interface UserMessage extends BaseEvent {
@@ -88,6 +95,21 @@ export interface ToolCall {
   durationMs?: number
 }
 
+/**
+ * A subagent (sidechain) spawned within a session. Claude Code writes each
+ * subagent's transcript to its own file with a sibling `.meta.json`; this is the
+ * normalized view of that metadata. `toolUseId` is the id of the spawning tool
+ * call (the `Task`/`Agent` tool_use) in the parent thread, which lets the viewer
+ * link that call to the subagent's transcript. Workflow subagents have no
+ * spawning tool call, so `toolUseId` is absent for them.
+ */
+export interface SubagentMeta {
+  agentId: string
+  agentType?: string
+  description?: string
+  toolUseId?: string
+}
+
 export interface Session {
   /** Namespaced id, e.g. `claude-code:<uuid>` — unique across vendors. */
   id: string
@@ -108,5 +130,7 @@ export interface Session {
   events: Event[]
   /** Flattened convenience view of every tool call, incl. sidechains. */
   toolCalls: ToolCall[]
+  /** Subagents spawned in this session (one per sidechain transcript). */
+  subagents?: SubagentMeta[]
   raw: { path: string; contentHash: string }
 }

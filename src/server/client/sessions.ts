@@ -413,15 +413,23 @@ export function openDetail(id) {
       (fileCount ? '<button class="see-tx" type="button" data-tab="files">See files changed →</button>' : '') +
       '<button class="see-tx" type="button" data-tab="transcript">See transcript →</button></div>';
 
-    // ---- Transcript pane: distinct user/assistant turns, truncated tool runs,
-    // inline error panels, and a turn + error navigator. --------------------
-    // Claude Code emits each tool call as its OWN tool-only assistant message, so
-    // "a long series of tool calls" is a RUN of consecutive such turns. We keep
-    // assistant *text* turns separate (the reasoning) but coalesce each run of
-    // tool-only turns into one collapsible block: first few chips + "+N more".
+    // ---- Transcript pane: the main thread + one tab per subagent. ----------
+    // Claude Code writes each subagent (Task/Agent spawn) to its own sidechain
+    // transcript; turns carry an `agentId` so we split them out of the main
+    // thread into per-subagent scopes. The main thread's spawning call links to
+    // its subagent's scope; the subagent links back to the call.
+    // Within a scope, Claude Code emits each tool call as its OWN tool-only
+    // assistant message, so "a long series of tool calls" is a RUN of consecutive
+    // such turns — we keep text turns separate but coalesce each tool-only run
+    // into one collapsible block (first few chips + "+N more").
+    var TX = d.transcript || { turns: [], subagents: [] };
+    var allTurns = TX.turns || [];
+    var subMeta = {};      // agentId -> {agentType, description, toolUseId}
+    (TX.subagents || []).forEach(function (sa) { subMeta[sa.agentId] = sa; });
+
     var TOOLCAP = 4;
-    var errSeq = 0;        // running id per failed tool call → error-panel anchor
-    var userTurns = [];    // {i, text} powering the outline + scroll-spy
+    var errSeq = 0;        // running id per failed tool call → error-panel anchor (unique across scopes)
+    var errSink = null;    // the scope currently rendering: its error-id list (errPanelHtml pushes here)
     // A tool's target (command/path), previewed to one line with a ⋯ expand
     // toggle when it's longer — so a long `node -e '…'` is fully inspectable.
     var TGT_PREVIEW = 90;
@@ -434,13 +442,20 @@ export function openDetail(id) {
         '<button class="tgt-more" type="button" title="Show full command">⋯</button></span>';
     }
     function chipHtml(tl) {
-      return '<span class="tool-chip' + (tl.ok ? '' : ' err') + '">' + esc(tl.name) + tgtHtml(tl.target) + '</span>';
+      // A spawning call with a known subagent renders as a link to that scope.
+      var agent = tl.agentId && subMeta[tl.agentId];
+      var go = agent ? ' <span class="tool-chip-go">view →</span>' : '';
+      var attr = agent ? ' data-agent="' + esc(tl.agentId) + '"' : '';
+      return '<span class="tool-chip' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '"' + attr + '>' +
+        esc(tl.name) + tgtHtml(tl.target) + go + '</span>';
     }
     // Failed calls get an always-visible detail panel (the error stepper's jump
     // target): the full command (wrapped/scrollable, no truncation) above the
     // error output, so the user sees both WHAT ran and WHY it failed.
     function errPanelHtml(x) {
-      return '<div class="tx-error" id="txerr-' + (errSeq++) + '">' +
+      var id = errSeq++;
+      if (errSink) errSink.push(id);
+      return '<div class="tx-error" id="txerr-' + id + '">' +
         '<div class="tx-error-h">⚠ ' + esc(x.name) + '</div>' +
         (x.target ? '<div class="tx-error-cmd">' + esc(x.target) + '</div>' : '') +
         (x.error
@@ -458,6 +473,16 @@ export function openDetail(id) {
       var panels = tools.filter(function (x) { return !x.ok; }).map(errPanelHtml).join('');
       return '<div class="tools">' + head + rest + '</div>' + panels;
     }
+    // A prominent, clickable banner standing in for a subagent-spawning call, so
+    // the link into the subagent's scope is easy to find (and a stable anchor for
+    // the subagent's "back" link).
+    function spawnBlockHtml(sp) {
+      var m = subMeta[sp.agentId] || {};
+      var lbl = (m.agentType || 'subagent') + (m.description ? ' · ' + m.description : '');
+      return '<button class="tx-spawn" type="button" id="txspawn-' + esc(sp.agentId) + '" data-agent="' + esc(sp.agentId) + '">' +
+        '<span class="tx-spawn-ico">🤖</span><span class="tx-spawn-lbl">Spawned subagent · ' + esc(lbl) + '</span>' +
+        '<span class="tx-spawn-go">view transcript →</span></button>';
+    }
     // Message text, collapsed to a preview with a Show more/less toggle when long
     // (assistant/user text is capped at 20k server-side; this keeps walls of text
     // from dominating the scroll while still letting you read the whole thing).
@@ -471,66 +496,144 @@ export function openDetail(id) {
         '<button class="msg-more" type="button">Show more ↓</button>';
     }
 
-    var blocks = [];
-    var run = null;        // tools accumulated from consecutive tool-only turns
-    function flushRun() {
-      if (run && run.length) {
-        blocks.push('<div class="turn asst toolrun"><div class="role">Tool calls · ' + run.length + '</div>' +
-          toolsHtml(run) + '</div>');
-      }
-      run = null;
-    }
-    (d.transcript || []).forEach(function (t, i) {
-      var tools = t.tools || [];
-      if (t.role === 'user') {
-        flushRun();
-        userTurns.push({ i: i, text: t.text });
-        blocks.push('<div class="turn user" id="txt-' + i + '"><div class="role">You<span class="tnum">#' +
-          userTurns.length + '</span></div>' + textBlock(t.text) + '</div>');
-      } else if (t.text) {
-        flushRun();
-        var label = t.sidechain ? 'Subagent' : 'Assistant';
-        blocks.push('<div class="turn asst' + (t.sidechain ? ' side' : '') + '" id="txt-' + i + '">' +
-          '<div class="role">' + esc(label) + '</div>' + textBlock(t.text) +
-          (tools.length ? toolsHtml(tools) : '') + '</div>');
-      } else if (tools.length) {
-        run = (run || []).concat(tools);   // tool-only message → fold into the run
-      }
+    // Partition turns into scopes (main thread first, then each subagent in
+    // first-seen order), keeping every turn's GLOBAL index for its txt-<i> anchor
+    // (the Files view links there, so indices must stay stable across scopes).
+    var scopeOrder = ['main'];
+    var scopeItems = { main: [] };
+    var scopeOfTurn = {};  // global turn index -> scope key
+    allTurns.forEach(function (t, i) {
+      var key = t.agentId || 'main';
+      if (!(key in scopeItems)) { scopeItems[key] = []; scopeOrder.push(key); }
+      scopeItems[key].push({ gi: i, t: t });
+      scopeOfTurn[i] = key;
     });
-    flushRun();
-    var turnsHtml = blocks.join('');
-    var errCount = errSeq;
 
-    var outlineItems = userTurns.length
-      ? userTurns.map(function (u, k) {
-          return '<button class="tx-ol-item" type="button" data-k="' + k + '" data-goto="txt-' + u.i + '">' +
-            '<span class="tx-ol-n">' + (k + 1) + '</span><span class="tx-ol-tx">' + esc(clipLine(u.text, 90)) + '</span></button>';
-        }).join('')
-      : '<div class="empty">No user turns.</div>';
+    // Render one scope's turns to HTML, collecting its user turns (for the nav)
+    // and pushing its error-panel ids into the scope's errIds via errSink.
+    function renderScopeBlocks(items, isSub) {
+      var blocks = [];
+      var run = null;      // tools from consecutive tool-only turns
+      var userTurns = [];  // {i (global), text} powering the outline + scroll-spy
+      function flushRun() {
+        if (run && run.length) {
+          blocks.push('<div class="turn asst toolrun"><div class="role">Tool calls · ' + run.length + '</div>' +
+            toolsHtml(run) + '</div>');
+        }
+        run = null;
+      }
+      items.forEach(function (it) {
+        var i = it.gi, t = it.t, tools = t.tools || [];
+        if (t.role === 'user') {
+          flushRun();
+          userTurns.push({ i: i, text: t.text });
+          blocks.push('<div class="turn user" id="txt-' + i + '"><div class="role">' + (isSub ? 'Prompt' : 'You') +
+            '<span class="tnum">#' + userTurns.length + '</span></div>' + textBlock(t.text) + '</div>');
+        } else if (t.text) {
+          flushRun();
+          blocks.push('<div class="turn asst" id="txt-' + i + '"><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
+            '</div>' + textBlock(t.text) + (tools.length ? toolsHtml(tools) : '') + '</div>');
+        } else if (tools.length) {
+          // Surface spawning calls as their own banner; fold the rest into the run.
+          var spawns = tools.filter(function (x) { return x.agentId && subMeta[x.agentId]; });
+          if (spawns.length) {
+            flushRun();
+            spawns.forEach(function (sp) { blocks.push(spawnBlockHtml(sp)); });
+            var keep = tools.filter(function (x) { return !(x.agentId && subMeta[x.agentId]); });
+            if (keep.length) run = (run || []).concat(keep);
+          } else {
+            run = (run || []).concat(tools);
+          }
+        }
+      });
+      flushRun();
+      return { blocksHtml: blocks.join(''), userTurns: userTurns };
+    }
+
+    var scopes = scopeOrder.map(function (key) {
+      var errIds = [];
+      errSink = errIds;
+      var r = renderScopeBlocks(scopeItems[key], key !== 'main');
+      var m = key === 'main' ? {} : (subMeta[key] || {});
+      return {
+        key: key, agentType: m.agentType, description: m.description, toolUseId: m.toolUseId,
+        blocksHtml: r.blocksHtml, userTurns: r.userTurns, errIds: errIds
+      };
+    });
+    errSink = null;
+    var scopeByKey: any = {};
+    scopes.forEach(function (sc) { scopeByKey[sc.key] = sc; });
+    var hasSub = scopeOrder.length > 1;
+    var errCount = errSeq;     // total tool errors across all scopes
+
+    // The scope's active state is reassigned by switchScope; the nav reads these.
+    var activeScope = 'main';
+    var userTurns = scopeByKey.main.userTurns;
+    var errIds = scopeByKey.main.errIds;
+
+    function scopeBtnHtml(sc) {
+      var lbl, ico = '', title = '';
+      if (sc.key === 'main') lbl = 'Main thread';
+      else {
+        ico = '🤖 ';
+        lbl = (sc.agentType || 'subagent') + (sc.description ? ' · ' + clipLine(sc.description, 36) : '');
+        title = (sc.agentType || 'subagent') + (sc.description ? ': ' + sc.description : '');
+      }
+      var err = sc.errIds.length ? '<span class="tx-scope-err">⚠' + sc.errIds.length + '</span>' : '';
+      return '<button class="tx-scope-btn' + (sc.key === 'main' ? ' on' : '') + '" type="button" data-scope="' +
+        esc(sc.key) + '" title="' + esc(title) + '">' + ico + esc(lbl) + err + '</button>';
+    }
+    var scopeBar = hasSub
+      ? '<div class="tx-scopes">' + scopes.map(scopeBtnHtml).join('') + '</div>'
+      : '';
+
+    function outlineHtml(uts) {
+      return uts.length
+        ? uts.map(function (u, k) {
+            return '<button class="tx-ol-item" type="button" data-k="' + k + '" data-goto="txt-' + u.i + '">' +
+              '<span class="tx-ol-n">' + (k + 1) + '</span><span class="tx-ol-tx">' + esc(clipLine(u.text, 90)) + '</span></button>';
+          }).join('')
+        : '<div class="empty">No turns.</div>';
+    }
     var nav = '<div class="tx-nav">' +
       '<div class="tx-nav-row">' +
         '<div class="tx-grp">' +
           '<span class="tx-grp-lbl">Turn</span>' +
-          '<button class="btn tx-turn-prev" type="button" title="Previous user turn">‹</button>' +
-          '<span class="tx-pos"><b class="tx-turn-pos">' + (userTurns.length ? 1 : 0) + '</b>/' + userTurns.length + '</span>' +
-          '<button class="btn tx-turn-next" type="button" title="Next user turn">›</button>' +
+          '<button class="btn tx-turn-prev" type="button" title="Previous turn">‹</button>' +
+          '<span class="tx-pos"><b class="tx-turn-pos">' + (userTurns.length ? 1 : 0) + '</b>/<span class="tx-turn-total">' + userTurns.length + '</span></span>' +
+          '<button class="btn tx-turn-next" type="button" title="Next turn">›</button>' +
           '<div class="tx-ol-wrap"><button class="tx-ol-btn" type="button" title="Jump to a turn">▾</button>' +
-            '<div class="tx-outline" id="tx-outline">' + outlineItems + '</div></div>' +
+            '<div class="tx-outline" id="tx-outline">' + outlineHtml(userTurns) + '</div></div>' +
         '</div>' +
         (errCount
           ? '<div class="tx-grp tx-errs"><span class="tx-grp-lbl">⚠ Errors</span>' +
             '<button class="btn tx-err-prev" type="button">‹</button>' +
-            '<span class="tx-pos"><b class="tx-err-pos">—</b>/' + errCount + '</span>' +
+            '<span class="tx-pos"><b class="tx-err-pos">—</b>/<span class="tx-err-total">' + errIds.length + '</span></span>' +
             '<button class="btn tx-err-next" type="button">›</button></div>'
           : '<span class="tx-grp none">no tool errors</span>') +
       '</div>' +
       '<div class="tx-now" id="tx-now"></div>' +
       '</div>';
-    var hasTx = (d.transcript || []).length > 0;
-    var txBody = turnsHtml || '<div class="empty">No transcript stored.</div>';
-    // One sticky header (title + tabs + transcript nav) over the two panes.
+
+    // Subagent scopes get a header (type/description + a link back to the call).
+    function subPaneHeader(sc) {
+      if (sc.key === 'main') return '';
+      var back = sc.toolUseId
+        ? '<button class="tx-sub-back" type="button" data-agent="' + esc(sc.key) + '">↩ back to spawning call</button>'
+        : '';
+      return '<div class="tx-sub-head"><span class="tx-spawn-ico">🤖</span> <b>' + esc(sc.agentType || 'subagent') + '</b>' +
+        (sc.description ? ' <span class="tx-sub-desc">' + esc(sc.description) + '</span>' : '') + back + '</div>';
+    }
+    var panesHtml = scopes.map(function (sc) {
+      return '<div class="tx-scope-pane' + (sc.key === 'main' ? ' on' : '') + '" data-scope="' + esc(sc.key) + '">' +
+        subPaneHeader(sc) + (sc.blocksHtml || '<div class="empty">No turns.</div>') + '</div>';
+    }).join('');
+
+    var hasTx = allTurns.length > 0;
+    var txBody = hasTx ? panesHtml : '<div class="empty">No transcript stored.</div>';
+    // One sticky header (title + tabs + scope bar + transcript nav) over the panes.
     $('#drawerBody').innerHTML =
-      '<div class="drawer-head">' + headTop + tabs + (hasTx ? nav : '') + '</div>' +
+      '<div class="drawer-head">' + headTop + tabs + (hasTx ? scopeBar : '') + (hasTx ? nav : '') + '</div>' +
       '<div class="dpane on" id="dpane-summary">' + sum + '</div>' +
       (fileCount ? '<div class="dpane" id="dpane-files"><div class="empty">Loading file changes…</div></div>' : '') +
       '<div class="dpane" id="dpane-transcript">' + txBody + '</div>';
@@ -562,6 +665,8 @@ export function openDetail(id) {
       });
       var navEl = $('#drawerBody .tx-nav');
       if (navEl) navEl.classList.toggle('on', name === 'transcript');
+      var sbEl = $('#drawerBody .tx-scopes');
+      if (sbEl) sbEl.classList.toggle('on', name === 'transcript');
       $('#drawer').scrollTop = 0;
       syncHeadH();
       if (name === 'files' && !filesLoaded) { filesLoaded = true; loadFiles(); }
@@ -570,12 +675,13 @@ export function openDetail(id) {
     function loadFiles() {
       get('/api/session-files?id=' + encodeURIComponent(id)).then(function (res) {
         var edits = (res && res.edits) || [];
-        prepEdits(edits, d.transcript || []);
+        var txTurns = (d.transcript && d.transcript.turns) || [];
+        prepEdits(edits, txTurns);
         var pane = $('#dpane-files');
         if (!pane) return;
         pane.innerHTML =
           '<div class="fc-hint">Grouped by file · click a file to see its diff, where edits are headed by the prompt that drove them (▸ is the agent’s note) · → opens the transcript.</div>' +
-          filesHtml(edits, d.transcript || []);
+          filesHtml(edits, txTurns);
         Array.prototype.forEach.call(pane.querySelectorAll('.fc-head'), function (b) {
           b.onclick = function () { b.parentNode.classList.toggle('collapsed'); };
         });
@@ -591,13 +697,15 @@ export function openDetail(id) {
       });
     }
     // From a file edit, jump to the user message that prompted it (the intent),
-    // falling back to the edit's own turn. The scroll-spy re-syncs the Turn pill.
+    // falling back to the edit's own turn. Switch to the scope that owns the
+    // target turn first (a subagent's edit lives in its tab); the spy re-syncs.
     function jumpToIntent(u, t) {
       showTab('transcript');
-      var anchor = u >= 0 ? 'txt-' + u : (t >= 0 ? 'txt-' + t : null);
-      if (!anchor) return;
+      var gi = u >= 0 ? u : (t >= 0 ? t : -1);
+      if (gi < 0) return;
+      switchScope(scopeOfTurn[gi] || 'main');
       requestAnimationFrame(function () {
-        var el = document.getElementById(anchor);
+        var el = document.getElementById('txt-' + gi);
         if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); flashEl(el); }
       });
     }
@@ -706,28 +814,81 @@ export function openDetail(id) {
     // Outline dropdown: open/close + jump to a specific turn (highlights current).
     var olBtn = $('#drawerBody .tx-ol-btn'), olPanel = $('#tx-outline');
     if (olBtn) olBtn.onclick = function () { olPanel.classList.toggle('on'); olBtn.classList.toggle('on'); };
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-ol-item'), function (it) {
-      it.onclick = function () {
-        if (olPanel) olPanel.classList.remove('on');
-        if (olBtn) olBtn.classList.remove('on');
-        jumpToTurn(parseInt(it.getAttribute('data-k'), 10));
-      };
-    });
+    // (Re)wire the outline items to jump within the active scope. Called on open
+    // and whenever switchScope swaps the outline's contents.
+    function wireOutline() {
+      Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-ol-item'), function (it) {
+        it.onclick = function () {
+          if (olPanel) olPanel.classList.remove('on');
+          if (olBtn) olBtn.classList.remove('on');
+          jumpToTurn(parseInt(it.getAttribute('data-k'), 10));
+        };
+      });
+    }
+    wireOutline();
     if (userTurns.length) updateIndicator(0);
 
-    // Error stepper: ‹ / › cycle through the inline error panels, flashing each.
+    // Error stepper: ‹ / › cycle through the ACTIVE scope's error panels (errIds
+    // are global panel ids, so the anchors resolve even with all scopes in the DOM).
     var errIdx = -1;
     function gotoErr(next) {
-      if (!errCount) return;
-      errIdx = ((next % errCount) + errCount) % errCount;
+      if (!errIds.length) return;
+      errIdx = ((next % errIds.length) + errIds.length) % errIds.length;
       var pos = $('#drawerBody .tx-err-pos');
       if (pos) pos.textContent = String(errIdx + 1);
-      var el = document.getElementById('txerr-' + errIdx);
+      var el = document.getElementById('txerr-' + errIds[errIdx]);
       if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
     }
     var ep = $('#drawerBody .tx-err-prev'), en = $('#drawerBody .tx-err-next');
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
     if (en) en.onclick = function () { gotoErr(errIdx + 1); };
+
+    // ----- Subagent scopes: switch tab, link from spawn calls, link back -------
+    // Point the nav (turn stepper, outline, error stepper, scroll-spy) at a scope
+    // and show its pane. Indices are global, so the steppers/anchors carry over.
+    function switchScope(key) {
+      if (!scopeByKey[key]) key = 'main';
+      activeScope = key;
+      userTurns = scopeByKey[key].userTurns;
+      errIds = scopeByKey[key].errIds;
+      errIdx = -1;
+      curTurn = 0;
+      Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
+        b.classList.toggle('on', b.getAttribute('data-scope') === key);
+      });
+      Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-pane'), function (p) {
+        p.classList.toggle('on', p.getAttribute('data-scope') === key);
+      });
+      var tt = $('#drawerBody .tx-turn-total'); if (tt) tt.textContent = String(userTurns.length);
+      var et = $('#drawerBody .tx-err-total'); if (et) et.textContent = String(errIds.length);
+      var ep2 = $('#drawerBody .tx-err-pos'); if (ep2) ep2.textContent = '—';
+      var ol = $('#tx-outline'); if (ol) ol.innerHTML = outlineHtml(userTurns);
+      wireOutline();
+      $('#drawer').scrollTop = 0;
+      if (userTurns.length) { updateIndicator(0); }
+      else {
+        var pos = $('#drawerBody .tx-turn-pos'); if (pos) pos.textContent = '0';
+        var now = $('#tx-now'); if (now) now.textContent = '';
+      }
+      syncHeadH();
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
+      b.onclick = function () { switchScope(b.getAttribute('data-scope')); };
+    });
+    // A spawning call (banner or chip) opens its subagent's scope.
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-chip.agent'), function (b) {
+      b.onclick = function (e) { e.stopPropagation(); switchScope(b.getAttribute('data-agent')); };
+    });
+    // A subagent's "back" link returns to the main thread and flashes the call.
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-sub-back'), function (b) {
+      b.onclick = function () {
+        switchScope('main');
+        requestAnimationFrame(function () {
+          var el = document.getElementById('txspawn-' + b.getAttribute('data-agent'));
+          if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+        });
+      };
+    });
 
     syncHeadH();
     $('#drawer').classList.add('on');

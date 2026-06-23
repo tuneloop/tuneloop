@@ -1294,7 +1294,7 @@ export class Store {
       )
       .all(id) as Array<Record<string, any>>
 
-    let transcript: TranscriptTurn[] = []
+    let transcript: Transcript = { turns: [], subagents: [] }
     const blob = this.db.prepare('SELECT gz FROM session_blobs WHERE id = ?').get(id) as { gz: Buffer } | undefined
     if (blob?.gz) {
       try {
@@ -1872,12 +1872,43 @@ export interface SessionListItem {
   prMerged: number
 }
 
+export interface TranscriptTool {
+  name: string
+  action: string
+  ok: boolean
+  target?: string
+  error?: string
+  /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
+  agentId?: string
+}
+
 export interface TranscriptTurn {
   role: 'user' | 'assistant' | 'system'
   ts?: string
   sidechain: boolean
+  /** Which subagent emitted this turn; undefined for main-thread turns. */
+  agentId?: string
   text: string
-  tools: Array<{ name: string; action: string; ok: boolean; target?: string; error?: string }>
+  tools: TranscriptTool[]
+}
+
+/** One subagent's identity, for the transcript's per-subagent tab + spawn link. */
+export interface SubagentInfo {
+  agentId: string
+  agentType?: string
+  description?: string
+  /** tool_use id of the spawning call in the parent thread (absent for workflow subagents). */
+  toolUseId?: string
+}
+
+/**
+ * A session's viewer-ready transcript: one flat, globally-indexed list of turns
+ * (each tagged with its `agentId`, so the client can split the main thread from
+ * each subagent into its own tab) plus the subagent roster.
+ */
+export interface Transcript {
+  turns: TranscriptTurn[]
+  subagents: SubagentInfo[]
 }
 
 /** A facet's resolved value for one session — the registry-driven detail row. */
@@ -1895,7 +1926,7 @@ export interface SessionDetail {
   outcomes: Array<{ type: string; artifactId: string | null }>
   artifacts: Array<Record<string, unknown>>
   facets: FacetValue[]
-  transcript: TranscriptTurn[]
+  transcript: Transcript
 }
 
 /**
@@ -1992,8 +2023,16 @@ function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: str
   return { join: '', expr: `${aliasFor(grainOf(f.source))}.${col}`, where: f.base }
 }
 
-function buildTranscript(session: Session): TranscriptTurn[] {
-  return buildTranscriptCore(session).turns
+function buildTranscript(session: Session): Transcript {
+  return {
+    turns: buildTranscriptCore(session).turns,
+    subagents: (session.subagents ?? []).map((s) => ({
+      agentId: s.agentId,
+      agentType: s.agentType,
+      description: s.description,
+      toolUseId: s.toolUseId,
+    })),
+  }
 }
 
 // Claude-injected "user" turns that aren't the human's intent: slash-command
@@ -2016,13 +2055,17 @@ function buildTranscriptCore(session: Session): {
   toolTurn: Map<string, { turn: number; userTurn: number }>
 } {
   const resById = new Map(session.toolCalls.map((t) => [t.id, t.result]))
+  // toolUseId of a spawning call → the subagent it spawned, so the main-thread
+  // chip can link to that subagent's transcript tab.
+  const spawnToAgent = new Map<string, string>()
+  for (const sa of session.subagents ?? []) if (sa.toolUseId) spawnToAgent.set(sa.toolUseId, sa.agentId)
   const turns: TranscriptTurn[] = []
   const toolTurn = new Map<string, { turn: number; userTurn: number }>()
   let lastUserIdx = -1
   for (const ev of session.events) {
     if (ev.kind === 'assistant') {
       let text = ''
-      const tools: TranscriptTurn['tools'] = []
+      const tools: TranscriptTool[] = []
       const ids: string[] = []
       for (const b of ev.blocks) {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
@@ -2034,22 +2077,24 @@ function buildTranscriptCore(session: Session): {
           const ok = res ? res.ok : true
           // Keep the full command/path (capped for payload) so the UI can show a
           // short preview on the chip and expand to the whole thing on demand.
-          const tool: TranscriptTurn['tools'][number] = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
           if (!ok) tool.error = clipError(resultText(res?.raw))
+          const spawned = spawnToAgent.get(b.id)
+          if (spawned) tool.agentId = spawned
           tools.push(tool)
         }
       }
       if (!text && tools.length === 0) continue
       const idx = turns.length
       for (const id of ids) toolTurn.set(id, { turn: idx, userTurn: lastUserIdx })
-      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 20000), tools })
+      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, text: clip(text, 20000), tools })
     } else if (ev.kind === 'user') {
       const text = ev.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ').trim()
       if (!text) continue
       // Only real prompts become the "intent" an edit links back to (the turn is
       // still shown in the transcript, just not used as a jump/grouping target).
       if (!isSyntheticUser(text)) lastUserIdx = turns.length
-      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 20000), tools: [] })
+      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, text: clip(text, 20000), tools: [] })
     }
   }
   return { turns, toolTurn }
