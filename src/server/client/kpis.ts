@@ -13,12 +13,16 @@ export function loadKpis() {
     if (!k || k.error) { $('#kpis').innerHTML = ''; return; }
     var cur = k.current || {}, prev = k.previous || {};
     var cpf = cur.costPerFeature || {}, ppf = prev.costPerFeature || {};
+    var cpr = cur.costPerPr || {}, ppr = prev.costPerPr || {};
+    var defaultKind = (cpf.count === 0 && (cpr.count || 0) > 0) ? 'pr' : 'feature';
+    state.ca.defaultKind = defaultKind;
+    var caData = defaultKind === 'pr' ? { cur: cpr, prev: ppr, label: 'per shipped PR' } : { cur: cpf, prev: ppf, label: 'per shipped feature' };
     var tiles = [
       { label: 'Session success rate', value: fmtVal(cur.successRate, 'pct'),
         delta: kpiDelta(cur.successRate, prev.successRate, 'points', 'up'), sub: 'of sessions in window',
         metric: 'success_rate' },
-      { label: 'Cost per shipped artifact', value: cpf.costPerUnit != null ? usd(cpf.costPerUnit) : '—',
-        delta: kpiDelta(cpf.costPerUnit, ppf.costPerUnit, 'rel', 'down'), sub: 'per shipped feature · ' + (cpf.count || 0),
+      { label: 'Cost per shipped artifact', value: caData.cur.costPerUnit != null ? usd(caData.cur.costPerUnit) : '—',
+        delta: kpiDelta(caData.cur.costPerUnit, caData.prev.costPerUnit, 'rel', 'down'), sub: caData.label + ' · ' + (caData.cur.count || 0),
         metric: 'cost_artifact' },
       { label: 'Total spend', value: usd(cur.totalSpend),
         delta: kpiDelta(cur.totalSpend, prev.totalSpend, 'rel', null), sub: '', metric: 'total_spend' },
@@ -50,7 +54,7 @@ export function openMetric(m) {
   syncKpiActive();
   if (m === 'success_rate') renderSuccessRate();
   else if (m === 'cost_artifact') {
-    state.ca.kind = 'feature'; // feature_shipped is the default; toggle to PR inside
+    state.ca.kind = state.ca.defaultKind;
     renderCostArtifact();
   } else if (m === 'total_spend') renderTotalSpend();
   else if (m === 'sessions') renderSessionsMetric();

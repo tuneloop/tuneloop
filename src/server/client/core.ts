@@ -24,7 +24,7 @@ export interface ClientState {
   metric: string | null // which headline KPI's detail view is open (null = overview)
   outcomeTypes: any[]
   sr: { outcomes: string[]; bucket: string; by: string } // success-rate detail controls
-  ca: { kind: string; days: number | 'all'; bucket: string } // cost-per-artifact detail controls
+  ca: { kind: string; days: number | 'all'; bucket: string; defaultKind: string } // cost-per-artifact detail controls
   spend: { bucket: string; by: string } // total-spend detail controls
   sm: { bucket: string; by: string } // sessions detail controls
   ops: { view: string; bucket: string; by: boolean } // operational detail controls
@@ -36,7 +36,7 @@ export var state: ClientState = {
   metric: null,
   outcomeTypes: [],
   sr: { outcomes: ['session_success'], bucket: 'week', by: '' },
-  ca: { kind: 'feature', days: 7, bucket: 'week' },
+  ca: { kind: 'feature', days: 7, bucket: 'week', defaultKind: 'feature' },
   spend: { bucket: 'week', by: '' },
   sm: { bucket: 'week', by: '' },
   ops: { view: 'error_rate', bucket: 'week', by: false },
