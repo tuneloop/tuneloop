@@ -29,8 +29,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
 .tile { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .tile .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-.tile .value { font-family: ui-monospace, Menlo, monospace; font-size: 26px; margin-top: 6px; }
-.tile .value .delta { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 12px; font-weight: 600; margin-left: 8px; vertical-align: middle; white-space: nowrap; }
+.tile .value { font-family: ui-monospace, Menlo, monospace; font-size: 26px; margin-top: 6px; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px; }
+.tile .value .delta { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .delta.good { color: var(--emerald); }
 .delta.bad { color: var(--red); }
 .delta.flat { color: var(--muted); }
