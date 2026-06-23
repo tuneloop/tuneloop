@@ -12,17 +12,27 @@ tool and skill usage. Everything runs and stays **on your machine**.
 ## Quick start
 
 ```bash
-npx aivue analyze            # analyzes ~/.claude/projects
+npx aivue analyze            # analyzes ~/.claude/projects, then opens the dashboard
 ```
 
-That builds a local store and prints a summary. Point it at specific
-directories with a comma-separated list:
+That builds a local store, prints a summary, and serves the dashboard in your
+browser. Point it at specific directories with a comma-separated list:
 
 ```bash
 npx aivue analyze ~/.claude/projects,/path/to/more/sessions
 ```
 
+Pass `--no-serve` to analyze only (no dashboard, no browser), or `--port <n>` to
+serve on a different port:
+
+```bash
+npx aivue analyze --no-serve   # build the store and exit
+```
+
 ### See the dashboard
+
+The dashboard opens automatically after `analyze`. To serve an
+already-analyzed store without re-running analysis:
 
 ```bash
 npx aivue serve              # opens a local dashboard over the analyzed store
@@ -59,6 +69,26 @@ npx aivue analyze
 Transcripts are processed locally and results are written to a local SQLite
 store (`~/.aivue/` by default). Nothing is sent anywhere unless you enable LLM
 enrichment, and then only to the provider whose key you supply.
+
+## Run from source
+
+`aivue` isn't published yet, so `npx aivue` won't resolve. Until it is, run it
+from a local checkout:
+
+```bash
+npm install
+npm run dev -- analyze        # builds, then runs the CLI (args after `--`)
+npm run dev -- serve
+```
+
+Or build once and call the binary directly:
+
+```bash
+npm run build
+node dist/cli.js analyze
+```
+
+`npm link` also works if you want a global `aivue` backed by your local build.
 
 ## Extending it
 
