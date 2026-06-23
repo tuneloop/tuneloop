@@ -1044,9 +1044,9 @@ export class Store {
         params.push(f.artifactKind)
       }
       if (f.artifact) {
-        conds.push('(a3.ident LIKE ? OR a3.title LIKE ? OR a3.external_id LIKE ? OR a3.repo LIKE ?)')
-        const like = `%${f.artifact}%`
-        params.push(like, like, like, like)
+        const { sql: artSql, params: artParams } = this.artifactSearchCond(f.artifact, 'a3')
+        conds.push(artSql)
+        params.push(...artParams)
       }
       clauses.push(
         `EXISTS (SELECT 1 FROM session_artifacts sa3 JOIN artifacts a3 ON a3.id = sa3.artifact_id
@@ -1281,6 +1281,31 @@ export class Store {
   }
 
   /**
+   * Build a SQL condition + params for artifact text search that handles plain
+   * terms, `#N` (PR number with hash prefix), and `repo#N` (repo + number).
+   */
+  private artifactSearchCond(term: string, alias: string): { sql: string; params: unknown[] } {
+    const a = alias
+    const base = `%${term}%`
+    const parts: string[] = [`${a}.ident LIKE ?`, `${a}.title LIKE ?`, `${a}.external_id LIKE ?`, `${a}.repo LIKE ?`]
+    const params: unknown[] = [base, base, base, base]
+    if (term.startsWith('#')) {
+      parts.push(`${a}.ident LIKE ?`)
+      params.push(`%${term.slice(1)}%`)
+    }
+    const hashIdx = term.indexOf('#')
+    if (hashIdx > 0) {
+      const repoPart = term.slice(0, hashIdx)
+      const numPart = term.slice(hashIdx + 1)
+      if (repoPart && numPart) {
+        parts.push(`(${a}.repo LIKE ? AND ${a}.ident LIKE ?)`)
+        params.push(`%${repoPart}%`, `%${numPart}%`)
+      }
+    }
+    return { sql: '(' + parts.join(' OR ') + ')', params }
+  }
+
+  /**
    * Typeahead suggestions for the session-list artifact search. Only artifacts
    * actually linked to a session (so a pick yields results), matched on the same
    * columns the filter uses (ident/title/external_id/repo). `value` is what to
@@ -1290,10 +1315,9 @@ export class Store {
   suggestArtifacts(q: string, kind: string | undefined, limit = 10): Array<{ kind: string; value: string; label: string }> {
     const term = q.trim()
     if (!term) return []
-    const like = `%${term}%`
     const allowed = ['file', 'pr', 'feature']
     const kindFilter = kind && allowed.includes(kind) ? 'AND a.kind = ?' : ''
-    const params: unknown[] = [like, like, like, like]
+    const { sql: searchSql, params } = this.artifactSearchCond(term, 'a')
     if (kindFilter) params.push(kind)
     params.push(limit)
     const rows = this.db
@@ -1302,7 +1326,7 @@ export class Store {
                 a.repo AS repo, a.status AS status
          FROM artifacts a
          WHERE a.id IN (SELECT artifact_id FROM session_artifacts)
-           AND (a.ident LIKE ? OR a.title LIKE ? OR a.external_id LIKE ? OR a.repo LIKE ?)
+           AND ${searchSql}
            ${kindFilter}
          GROUP BY a.id
          ORDER BY CASE a.kind WHEN 'feature' THEN 0 WHEN 'pr' THEN 1 ELSE 2 END,
@@ -1313,7 +1337,8 @@ export class Store {
     return rows
       .map((r) => {
         if (r.kind === 'pr') {
-          const label = (r.repo ? r.repo + ' ' : '') + '#' + (r.ident ?? '') + (r.status ? ' (' + r.status + ')' : '')
+          const label = (r.repo ? r.repo + ' ' : '') + '#' + (r.ident ?? '') +
+            (r.title ? ' — ' + r.title : '') + (r.status ? ' (' + r.status + ')' : '')
           return { kind: 'pr', value: String(r.externalId || r.ident || ''), label }
         }
         if (r.kind === 'feature') return { kind: 'feature', value: String(r.title ?? ''), label: String(r.title || '(untitled)') }
