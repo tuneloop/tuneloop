@@ -210,6 +210,10 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-error-b.muted { color: var(--muted); font-style: italic; }
 .sect-h { font-family: Georgia, serif; font-size: 14px; margin: 18px 0 6px; }
 
+/* Key decisions: one consequential choice per line, rationale folded in. */
+.decisions { margin: 0; padding-left: 18px; }
+.decisions li { margin: 3px 0; line-height: 1.45; }
+
 /* Drawer tabs: Summary | Transcript */
 .drawer-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 12px 0 0; }
 .dtab { border: 0; background: transparent; padding: 8px 16px; font-family: Georgia, serif; font-size: 14px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }

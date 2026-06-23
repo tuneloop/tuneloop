@@ -17,7 +17,15 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
 
 /**
  * LLM enrichment in one batched structured call per session: use-case (multi),
- * complexity, autonomy, intent summary, judged success — plus feature linkage.
+ * complexity, autonomy, intent summary, key decisions, judged success — plus
+ * feature linkage.
+ *
+ * `decisions` captures the consequential choices that shaped the session — a
+ * technical approach taken, a tradeoff accepted, a scope cut, a library/tool
+ * picked, an alternative explicitly rejected. It is deliberately separate from
+ * `intent_summary` (which now states only the goal) so a reader can see WHAT was
+ * decided, not just what was attempted. Each entry is one self-contained line
+ * with the rationale inline; an empty list means nothing consequential was decided.
  *
  * The feature half is hierarchy-aware. The model sees the existing features as an
  * indented tree and is asked to (a) attach the session to the MOST SPECIFIC
@@ -30,7 +38,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 7,
+  version: 8,
   kind: 'enrichment',
   needs: { llm: true },
   facets: [
@@ -60,6 +68,7 @@ export const enrichSession: Processor = {
       { key: 'autonomy', value: oneOf(parsed.autonomy, AUTONOMY) },
       { key: 'success', value: oneOf(parsed.success, SUCCESS) },
       { key: 'intent_summary', value: str(parsed.intent_summary) },
+      { key: 'decisions', value: decisionList(parsed.decisions) },
       { key: 'topics', value: strArray(parsed.topics).slice(0, 12) },
     ]
 
@@ -163,12 +172,22 @@ function buildPrompt(session: Session, features: FeatureRef[]): { system: string
     `  "use_cases": string[] chosen from [${USE_CASES.join(', ')}],`,
     `  "complexity": one of [${COMPLEXITY.join(', ')}],`,
     `  "autonomy": one of [${AUTONOMY.join(', ')}],`,
-    '  "intent_summary": one sentence capturing the user\'s intent and key decisions,',
+    '  "intent_summary": one sentence stating what the user set out to accomplish (the goal, not the decisions),',
+    '  "decisions": string[] — the KEY decisions made during the session, newest insight last; [] if none,',
     `  "success": one of [${SUCCESS.join(', ')}],`,
     '  "topics": short list of free-text areas touched,',
     '  "features": [ { "matched_feature_id": "<id of the most specific existing feature this session advanced, or empty>", "new_title": "<title for a NEW feature when none fit, else empty>", "parent_id": "<existing feature id to nest the new feature under, or empty for top-level>" } ],',
     '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ]',
     '}',
+    'What a key decision IS: a consequential choice that shaped the work and that a teammate reviewing this',
+    'session later would want to know — a technical approach chosen, a tradeoff accepted, a scope cut, a',
+    'library/tool/data-model picked, or an alternative explicitly rejected. Prefer the user\'s steering and the',
+    'reasoning behind a turn over mechanical steps.',
+    'Rules for decisions:',
+    '- Each entry is ONE self-contained sentence; fold the rationale in with "because"/"to"/"over" ("Chose SQLite over Postgres to stay local-first").',
+    '- Capture only what was actually settled in THIS session — not restated background, open questions, or routine edits (renames, formatting, obvious fixups).',
+    '- Aim for the few decisions that genuinely mattered (typically 0–6). Use [] when the work carried no real decision (a chore, a trivial fix, pure research).',
+    '- State each decision factually; do not begin entries with "The user" or "We".',
     'What a feature IS: one coherent product capability, named as a SHORT noun phrase (2–5 words, Title Case).',
     '  Good names: "Cost-per-PR metric", "Session outcome rate", "Dashboard KPI tiles", "Feature hierarchy extraction".',
     'A feature name is NOT a summary of the session. Never string capabilities together with commas or "and".',
@@ -303,6 +322,26 @@ function str(v: unknown): string {
 
 function strArray(v: unknown): string[] {
   return Array.isArray(v) ? v.map(str).filter(Boolean) : []
+}
+
+/**
+ * Sanitize the model's `decisions` into a small set of clean, distinct one-liners.
+ * Drops blanks and exact duplicates, trims trailing punctuation noise, and caps
+ * the count so a verbose model can't bury the genuinely key decisions.
+ */
+function decisionList(v: unknown): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of strArray(v)) {
+    const d = raw.replace(/\s+/g, ' ').trim()
+    if (!d) continue
+    const key = d.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(d)
+    if (out.length >= 8) break
+  }
+  return out
 }
 
 function oneOf(v: unknown, allowed: string[]): string {

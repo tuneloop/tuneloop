@@ -372,6 +372,13 @@ export function openDetail(id) {
     });
     sum += '</div>';
     if (a.intent_summary) sum += '<div class="sect-h">Intent</div><div>' + esc(a.intent_summary) + '</div>';
+    var decisions = Array.isArray(a.decisions) ? a.decisions : [];
+    if (decisions.length) {
+      sum += '<div class="sect-h">Key decisions (' + decisions.length + ')</div>';
+      sum += '<ul class="decisions">' +
+        decisions.map(function (d) { return '<li>' + esc(d) + '</li>'; }).join('') +
+        '</ul>';
+    }
 
     var arts = d.artifacts || [];
     var feats = arts.filter(function (x) { return x.kind === 'feature'; });
