@@ -1,10 +1,12 @@
 // Session success rate detail (headline metric #1): outcome-set picker, bucket
 // selector, optional breakdown into per-cohort rate lines, and the overall
 // stacked-volume bar when not broken down.
-import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs } from '../core'
+import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, modeSegHtml, legItem } from '../core'
 import { loadKpis } from '../kpis'
-import { lineChart, barChart } from '../charts'
+import { lineChart, barChart, groupedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
+import { wireChartPick } from '../chartHover'
+import { filterByFacet } from '../sessions'
 
 // Fixed display order for the "Count as success" outcomes: concrete shipped
 // artifacts first, softening down to the LLM-judged catch-all. Types not listed
@@ -49,7 +51,8 @@ export function renderSrControls() {
       '<span class="sr-checks">' + (checks || '<span class="empty">no outcomes yet</span>') + '</span></div>' +
     '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="sr-bucket">' + bucketBtns + '</span>' +
       '<span class="sr-lbl" style="margin-left:18px">Break down by</span>' +
-      '<select class="sr-by" id="sr-by">' + byOpts + '</select></div>';
+      '<select class="sr-by" id="sr-by">' + byOpts + '</select>' +
+      '<span class="sr-lbl" style="margin-left:18px">View</span>' + modeSegHtml(state.sr.mode, 'sr-mode') + '</div>';
   Array.prototype.forEach.call(document.querySelectorAll('.sr-oc'), function (c) {
     c.onchange = function () {
       var set = [];
@@ -64,6 +67,9 @@ export function renderSrControls() {
     btn.onclick = function () { state.sr.bucket = btn.getAttribute('data-b'); renderSrControls(); loadSuccessRate(); };
   });
   $('#sr-by').onchange = function () { state.sr.by = this.value; saveSrPrefs(); loadSuccessRate(); };
+  Array.prototype.forEach.call($('#sr-mode').children, function (btn) {
+    btn.onclick = function () { state.sr.mode = btn.getAttribute('data-m') as 'grouped' | 'line'; renderSrControls(); loadSuccessRate(); };
+  });
 }
 
 export function loadSuccessRate() {
@@ -83,27 +89,66 @@ export function renderRateChart(d) {
   // across many series), with faint volume bars behind for that sample-size cue.
   var note = '';
   if (d.series && d.series.length) {
-    var lines = d.series.map(function (s, i) {
-      return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };
+    var all = d.series.map(function (s, i) {
+      return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.rate, raw: s };
     });
-    $('#sr-chart').innerHTML = lineChart(d.buckets || [], lines);
-    $('#sr-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
+    var series = all
+      .filter(function (s) { return !state.sr.hidden[s.label]; })
+      .map(function (s) {
+        return { label: s.label, color: s.color, rate: s.rate,
+          points: (s.raw.points || []).map(function (p) { return { bucket: p.bucket, v: p.rate, sub: p.num + '/' + p.denom }; }) };
+      });
+    if (state.sr.mode === 'line') {
+      // lineChart needs the {bucket,rate,num,denom} points; pull them from the
+      // unhidden source series (matched by label).
+      var srcByLabel = {}; all.forEach(function (s) { srcByLabel[s.label] = s.raw; });
+      var lines = series.map(function (s) { return { label: s.label, color: s.color, rate: s.rate, points: (srcByLabel[s.label] || {}).points || [] }; });
+      $('#sr-chart').innerHTML = lineChart(d.buckets || [], lines);
+    } else {
+      $('#sr-chart').innerHTML = groupedBarChart(d.buckets || [], series, 'pct');
+    }
+    $('#sr-legend').innerHTML = all.map(function (l) {
+      return legItem(l.label, l.color, l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '', !!state.sr.hidden[l.label]);
     }).join('');
+    wireSrLegend(d);
     note = d.truncated
       ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' values by session volume. '
       : '';
-    note += 'Each line is one cohort. Hover a point to see its sessions (successes / total).';
+    note += state.sr.mode === 'line'
+      ? 'Each line is one cohort. Click a point to open its sessions.'
+      : 'Each bar cluster is one cohort. Click a bar to open its sessions.';
   } else {
     $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || []);
     $('#sr-legend').innerHTML =
       '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>successful</span>' +
       '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no success outcome</span>';
-    note = 'Bar height is sessions started in the bucket; the filled portion produced a success outcome.';
+    note = 'Bar height is sessions started in the bucket; the filled portion produced a success outcome. Click a bar to open its sessions.';
   }
   if ((d.outcomes || []).indexOf('pr_merged') >= 0) {
     note += ' Recent buckets may rise as PRs merge — those outcomes backfill after the session.';
   }
   $('#sr-note').innerHTML = esc(note);
+  wireSrPick(d);
+}
+
+// Legend toggle: hide/show a cohort (re-renders from the cached payload, no refetch).
+function wireSrLegend(d) {
+  Array.prototype.forEach.call($('#sr-legend').querySelectorAll('.leg[data-leg]'), function (el) {
+    el.onclick = function () {
+      var label = el.getAttribute('data-leg');
+      state.sr.hidden[label] = !state.sr.hidden[label];
+      renderRateChart(d);
+    };
+  });
+}
+
+// Click-to-drill: a bucket (and, when broken down, a cohort) → filtered sessions.
+function wireSrPick(d) {
+  wireChartPick($('#sr-chart'), function (pick) {
+    var bucket = autoBucket(state.sr.bucket);
+    var by = state.sr.by;
+    // In overall mode the single "series" is the success label, not a cohort.
+    var value = by ? pick.seriesLabel : null;
+    filterByFacet(by || null, value, bucket, pick.bucket);
+  });
 }

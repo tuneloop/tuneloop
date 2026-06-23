@@ -21,6 +21,8 @@ export interface AnalyzeOptions {
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
   limit?: number
+  /** Only analyze sessions that started within the last N days (age cutoff). */
+  days?: number
 }
 
 /**
@@ -60,6 +62,18 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   let discovered = 0
   let parsed = 0
   let reingested = 0
+
+  // Optional age cutoff: only analyze sessions that started within the last N
+  // days. aivue itself imposes no retention — it analyzes whatever transcripts
+  // the source tool (Claude Code, ~30-day default retention) leaves on disk —
+  // so this is a user-chosen scope knob for long-lived transcript directories.
+  const cutoff = opts.days && opts.days > 0 ? Date.now() - opts.days * 86_400_000 : null
+  let skippedByAge = 0
+  const oldEnough = (startedAt: string | undefined): boolean => {
+    if (cutoff == null || !startedAt) return false
+    const t = Date.parse(startedAt)
+    return Number.isFinite(t) && t < cutoff
+  }
 
   // Parse every file, then group files that share a session id and merge them
   // so each logical session is ingested and processed exactly once.
@@ -102,6 +116,10 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   for (const group of groups.values()) {
     if (opts.limit != null && processed >= opts.limit) break
     const session = mergeSessions(group)
+    if (oldEnough(session.startedAt)) {
+      skippedByAge++
+      continue
+    }
     const repo = await resolveRepo(session.project.cwd)
     if (repo) session.project.repo = repo
     const prior = store.storedMeta(session.id)
@@ -128,6 +146,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   log.info(
     `Scanned ${discovered} file(s), parsed ${parsed} session(s) into ${groups.size} unique session(s), ${reingested} new/changed.`,
   )
+  if (skippedByAge > 0) log.info(`Skipped ${skippedByAge} session(s) older than ${opts.days} day(s) (--days).`)
   printSummary(store.summary())
   store.close()
 }

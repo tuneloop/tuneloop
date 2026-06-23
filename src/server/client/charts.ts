@@ -1,5 +1,11 @@
 // Hand-rolled HTML/SVG chart renderers. Every function is pure: it takes data
 // and returns a markup string, so callers just drop the result into innerHTML.
+//
+// Interactivity (hover tooltip + crosshair) is delegated: each <svg> carries a
+// `data-chart` JSON blob (geometry + per-bucket series values) plus a transparent
+// overlay rect that captures pointer events. A single handler in chartHover.ts
+// (wired once at init) reads that blob, snaps to the nearest bucket, shows a
+// shared styled tooltip, and moves a crosshair. So renderers stay pure strings.
 import { esc, usd, num, fmtVal } from './core'
 
 // An x-axis tick label that won't clip at the SVG edges. A centered label near
@@ -24,6 +30,24 @@ function niceCeilRate(v) {
   var n = quarter / pow;
   var nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
   return Math.min(nice * pow * 4, 1);
+}
+
+// Serialize the hover blob onto the <svg> opening tag. esc() makes it
+// attribute-safe (quotes, angle brackets).
+function chartAttr(data) {
+  return ' class="chart" data-chart="' + esc(JSON.stringify(data)) + '"';
+}
+
+// The transparent overlay (captures pointer events over the plot area), the
+// crosshair line (moved by the hover handler), and — for line charts — an empty
+// dots group the handler fills with a highlight dot per series. Emitted last so
+// they sit above the marks; marks themselves carry pointer-events:none (CSS).
+function interact(geo, dots) {
+  var s = '<rect class="chart-overlay" x="' + geo.padL + '" y="' + geo.padT +
+    '" width="' + geo.plotW + '" height="' + geo.plotH + '"></rect>' +
+    '<line class="chart-cross" x1="0" y1="' + geo.padT + '" x2="0" y2="' + geo.base + '"></line>';
+  if (dots) s += '<g class="chart-dots"></g>';
+  return s;
 }
 
 export function bars(rows, keyName) {
@@ -72,7 +96,10 @@ export function barChart(buckets, points) {
   maxD = maxD || 1;
   var yOf = function (v) { return padT + (1 - v / maxD) * plotH; };
   var base = yOf(0), bw = plotW / n;
-  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  var svg = '<svg' + chartAttr({ xmode: 'band', n: n, padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, fmt: 'pct',
+    buckets: buckets, series: [{ label: 'success', color: '#0f7a55',
+      points: buckets.map(function (b) { var p = byBucket[b]; return p && p.denom > 0 ? { bucket: b, v: p.rate, sub: p.num + '/' + p.denom + ' succeeded' } : { bucket: b, v: null }; }) }] }) +
+    ' viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
   [0, 0.5, 1].forEach(function (g) {
     var v = Math.round(maxD * g), y = yOf(v);
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
@@ -85,11 +112,10 @@ export function barChart(buckets, points) {
       var totalTop = yOf(p.denom), succTop = yOf(p.num);
       svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" rx="2" fill="#ece7dc"/>';
       svg += '<rect x="' + x + '" y="' + succTop + '" width="' + w + '" height="' + (base - succTop) + '" rx="2" fill="#0f7a55"/>';
-      var tip = b + ': ' + p.num + '/' + p.denom + ' succeeded (' + (p.rate != null ? Math.round(p.rate * 100) : 0) + '%)';
-      svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
     }
     if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
+  svg += interact({ padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, n: n }, false);
   svg += '</svg>';
   return svg;
 }
@@ -116,9 +142,17 @@ export function lineChart(buckets, lines, opts?) {
     });
     maxRate = niceCeilRate(dmax);
   }
+  var base = padT + plotH;
   var xOf = function (i) { return padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW); };
   var yOf = function (r) { return padT + (1 - r / maxRate) * plotH; };
-  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  var svg = '<svg' + chartAttr({ xmode: 'point', n: n, padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, fmt: 'pct', yMax: maxRate,
+    buckets: buckets, series: lines.map(function (l) {
+      var byB = {}; (l.points || []).forEach(function (p) { byB[p.bucket] = p; });
+      return { label: l.label, color: l.color, points: buckets.map(function (b) {
+        var p = byB[b];
+        return p && p.rate != null && p.denom > 0 ? { bucket: b, v: p.rate, sub: p.num + '/' + p.denom } : { bucket: b, v: null };
+      }) };
+    }) }) + ' viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
   [0, 0.25, 0.5, 0.75, 1].forEach(function (g) {
     var val = g * maxRate, y = yOf(val), pct = val * 100;
     // One decimal on a small adaptive axis so the quarter ticks don't all round
@@ -134,22 +168,20 @@ export function lineChart(buckets, lines, opts?) {
   lines.forEach(function (l) {
     var byBucket = {};
     (l.points || []).forEach(function (p) { byBucket[p.bucket] = p; });
-    var path = '', run = 0, dots = '';
+    var path = '', run = 0;
     buckets.forEach(function (b, i) {
       var p = byBucket[b];
       if (p && p.rate != null && p.denom > 0) {
         var x = xOf(i), y = yOf(p.rate);
         path += (run ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
         run++;
-        var tip = b + ' · ' + l.label + ': ' + Math.round(p.rate * 100) + '% (' + p.num + '/' + p.denom + ')';
-        dots += '<circle cx="' + x + '" cy="' + y + '" r="2.6" fill="' + l.color + '"><title>' + esc(tip) + '</title></circle>';
       } else {
         run = 0; // gap: next plotted point starts a fresh subpath
       }
     });
     if (path) svg += '<path d="' + path.trim() + '" fill="none" stroke="' + l.color + '" stroke-width="2"/>';
-    svg += dots;
   });
+  svg += interact({ padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, n: n }, true);
   svg += '</svg>';
   return svg;
 }
@@ -169,7 +201,9 @@ export function stackChart(buckets, points, format) {
   var yOf = function (v) { return padT + (1 - v / maxV) * plotH; };
   var base = yOf(0), bw = plotW / n;
   var fmt = function (v) { return format === 'usd' ? usd(v) : num(Math.round(v)); };
-  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  var svg = '<svg' + chartAttr({ xmode: 'band', n: n, padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, fmt: format,
+    buckets: buckets, series: [{ label: format === 'usd' ? 'spend' : 'count', color: '#0f7a55',
+      points: buckets.map(function (b) { var p = byB[b]; return p && p.total > 0 ? { bucket: b, v: p.total, sub: format === 'usd' ? usd(p.filled) + ' converted of ' + usd(p.total) : '' } : { bucket: b, v: null }; }) }] }) + ' viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
   [0, 0.5, 1].forEach(function (g) {
     var v = maxV * g, y = yOf(v);
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
@@ -182,13 +216,10 @@ export function stackChart(buckets, points, format) {
       var top = yOf(p.total), ftop = yOf(Math.min(p.filled, p.total));
       svg += '<rect x="' + x + '" y="' + top + '" width="' + w + '" height="' + (base - top) + '" rx="2" fill="#ece7dc"/>';
       if (p.filled > 0) svg += '<rect x="' + x + '" y="' + ftop + '" width="' + w + '" height="' + (base - ftop) + '" rx="2" fill="#0f7a55"/>';
-      var tip = format === 'usd'
-        ? b + ': ' + usd(p.filled) + ' converted of ' + usd(p.total) + ' spent'
-        : b + ': ' + num(p.total);
-      svg += '<rect x="' + x + '" y="' + top + '" width="' + w + '" height="' + (base - top) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
     }
     if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
+  svg += interact({ padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, n: n }, false);
   svg += '</svg>';
   return svg;
 }
@@ -200,13 +231,18 @@ export function valueLineChart(buckets, lines, format) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
+  var base = padT + plotH;
   var xOf = function (i) { return padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW); };
   var maxV = 0;
   lines.forEach(function (l) { (l.points || []).forEach(function (p) { if (p.y > maxV) maxV = p.y; }); });
   maxV = maxV || 1;
   var yOf = function (v) { return padT + (1 - v / maxV) * plotH; };
   var fmt = function (v) { return format === 'usd' ? usd(v) : num(Math.round(v)); };
-  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  var svg = '<svg' + chartAttr({ xmode: 'point', n: n, padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, fmt: format, yMax: maxV,
+    buckets: buckets, series: lines.map(function (l) {
+      var byB = {}; (l.points || []).forEach(function (p) { byB[p.bucket] = p; });
+      return { label: l.label, color: l.color, points: buckets.map(function (b) { var p = byB[b]; return { bucket: b, v: p ? p.y : 0 }; }) };
+    }) }) + ' viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
   [0, 0.5, 1].forEach(function (g) {
     var v = maxV * g, y = yOf(v);
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
@@ -219,17 +255,69 @@ export function valueLineChart(buckets, lines, format) {
   lines.forEach(function (l) {
     var byB = {};
     (l.points || []).forEach(function (p) { byB[p.bucket] = p; });
-    var path = '', dots = '';
+    var path = '';
     buckets.forEach(function (b, i) {
       var v = byB[b] ? byB[b].y : 0;
       var x = xOf(i), y = yOf(v);
       path += (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
-      var tip = b + ' · ' + l.label + ': ' + fmt(v);
-      dots += '<circle cx="' + x + '" cy="' + y + '" r="2.4" fill="' + l.color + '"><title>' + esc(tip) + '</title></circle>';
     });
     svg += '<path d="' + path.trim() + '" fill="none" stroke="' + l.color + '" stroke-width="2"/>';
-    svg += dots;
   });
+  svg += interact({ padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, n: n }, true);
+  svg += '</svg>';
+  return svg;
+}
+
+// Grouped bars: one cluster per bucket, each series its own side-by-side bar.
+// series = [{label,color,points:[{bucket,v,sub}]}]; format ('usd'|'int'|'pct')
+// drives the y-axis + hover. pct uses a 0–100% axis (or adaptive when opts.adaptive).
+// The default breakdown renderer — multi-series bars read cleaner than the
+// spaghetti of N overlaid lines, and a click on a cluster can drill to sessions.
+export function groupedBarChart(buckets, series, format, opts?) {
+  if (!buckets || !buckets.length || !series || !series.length) return '<div class="empty">No data in range.</div>';
+  var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
+  var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
+  var ns = series.length;
+  var isPct = format === 'pct';
+  var maxV = 0;
+  series.forEach(function (l) { (l.points || []).forEach(function (p) { if (p && p.v != null && p.v > maxV) maxV = p.v; }); });
+  if (isPct) maxV = (opts && opts.adaptive) ? niceCeilRate(maxV) : 1;
+  maxV = maxV || 1;
+  var yOf = function (v) { return padT + (1 - v / maxV) * plotH; };
+  var base = yOf(0), bw = plotW / n;
+  var fmt = function (v) { return format === 'usd' ? usd(v) : format === 'pct' ? Math.round(v * 100) + '%' : num(Math.round(v)); };
+  // Index each series by bucket for the render loop (kept off the JSON blob).
+  var seriesByB = series.map(function (l) {
+    var byB = {}; (l.points || []).forEach(function (p) { if (p && p.bucket != null) byB[p.bucket] = p; });
+    return byB;
+  });
+  var svg = '<svg' + chartAttr({ xmode: 'band', n: n, padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, fmt: format, yMax: maxV,
+    buckets: buckets, series: series.map(function (l, si) {
+      return { label: l.label, color: l.color, points: buckets.map(function (b) { var p = seriesByB[si][b]; return p && p.v != null ? { bucket: b, v: p.v, sub: p.sub } : { bucket: b, v: null }; }) };
+    }) }) + ' viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  var ticks = isPct ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.5, 1];
+  ticks.forEach(function (g) {
+    var v = maxV * g, y = yOf(v), lbl = isPct ? ((maxV < 0.04 ? (v * 100).toFixed(1) : String(Math.round(v * 100))) + '%') : esc(fmt(v));
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + lbl + '</text>';
+  });
+  var step = Math.ceil(n / 9);
+  var slot = (bw - 6) / ns;
+  var barW = Math.max(2, slot - 2);
+  buckets.forEach(function (b, i) {
+    var bx = padL + i * bw + 3;
+    series.forEach(function (l, si) {
+      var p = seriesByB[si][b];
+      if (p && p.v != null) {
+        var x = bx + si * slot + (slot - barW) / 2;
+        var y = yOf(Math.max(0, p.v));
+        var h = base - y;
+        if (h > 0) svg += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="1" fill="' + l.color + '"/>';
+      }
+    });
+    if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
+  });
+  svg += interact({ padL: padL, plotW: plotW, padT: padT, plotH: plotH, base: base, n: n }, false);
   svg += '</svg>';
   return svg;
 }

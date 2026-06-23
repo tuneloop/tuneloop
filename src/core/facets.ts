@@ -15,7 +15,7 @@
  */
 
 /** Where a facet's value lives — implies its grain. */
-export type FacetSource = 'session' | 'annotation' | 'tool-call' | 'usage'
+export type FacetSource = 'session' | 'annotation' | 'tool-call' | 'usage' | 'feature'
 export type FacetType = 'string' | 'number' | 'boolean' | 'enum'
 
 /** The entity a row lives at. session is the coarsest; usage/tool_call are its children. */
@@ -72,5 +72,17 @@ export const INTRINSIC_FACETS: FacetSpec[] = [
     base: "action = 'skill'",
     multi: true,
     roles: ['chart', 'filter', 'detail'],
+  },
+  {
+    // A session's linked features (session_artifacts → artifacts of kind 'feature'),
+    // by title. Multi-valued — a session can build several features — so cohorts
+    // overlap (presenceInflated). Reaches the feature artifact directly (consistent
+    // with how artifactList attributes cost), not transitively through PR/ticket.
+    key: 'feature',
+    label: 'Feature',
+    type: 'string',
+    source: 'feature',
+    multi: true,
+    roles: ['chart', 'filter'],
   },
 ]

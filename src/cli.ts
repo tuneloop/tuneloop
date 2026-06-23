@@ -17,18 +17,19 @@ program
   .argument('[dirs]', 'comma-separated session directories (default: ~/.claude/projects)')
   .option('--db <path>', 'path to the aivue SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
+  .option('--days <n>', 'only analyze sessions started within the last N days', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
   .option('--no-serve', 'analyze only; do not serve the dashboard or open the browser')
   .option('-v, --verbose', 'verbose logging')
   .action(
     async (
       dirs: string | undefined,
-      options: { db?: string; limit?: number; port?: number; serve?: boolean; verbose?: boolean },
+      options: { db?: string; limit?: number; days?: number; port?: number; serve?: boolean; verbose?: boolean },
     ) => {
       const dirList = dirs
         ? dirs.split(',').map((s) => s.trim()).filter(Boolean)
         : undefined
-      await analyze({ dirs: dirList, db: options.db, limit: options.limit, verbose: options.verbose })
+      await analyze({ dirs: dirList, db: options.db, limit: options.limit, days: options.days, verbose: options.verbose })
       // Serve + open the browser by default so results are visible immediately; --no-serve opts out.
       if (options.serve !== false) {
         await serve({ db: options.db, port: options.port })

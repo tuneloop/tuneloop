@@ -22,7 +22,9 @@ export function buildFilters() {
       '<input id="f-artifact" placeholder="file path / PR # / feature" autocomplete="off" />' +
       '<div class="ac-menu" id="f-artifact-menu"></div>' +
     '</span>' +
-    '<input id="f-q" placeholder="search title / intent" />';
+    '<input id="f-q" placeholder="search title / intent" />' +
+    '<span id="f-bucket-chip"></span>' +
+    '<button class="btn" id="f-reset" type="button" title="Clear all filters">Reset</button>';
   $('#filters').innerHTML = html;
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) { s.onchange = applyFilters; });
   $('#f-artKind').onchange = applyFilters;
@@ -33,6 +35,37 @@ export function buildFilters() {
   $('#f-artifact').oninput = function () { clearTimeout(t2); t2 = setTimeout(function () { acFetch(); applyFilters(); }, 200); };
   $('#f-artifact').onkeydown = acKeydown;
   $('#f-artifact').onblur = function () { setTimeout(acClose, 150); }; // delay so a click registers
+  var reset = $('#f-reset');
+  if (reset) reset.onclick = resetFilters;
+}
+
+// Clear every filter control and reload the unfiltered list.
+export function resetFilters() {
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) { s.value = ''; });
+  var ak = $('#f-artKind'); if (ak) ak.value = '';
+  var af = $('#f-artifact'); if (af) af.value = '';
+  var q = $('#f-q'); if (q) q.value = '';
+  if (state.filters) { state.filters.bucket = ''; state.filters.bucketValue = ''; }
+  acClose();
+  applyFilters();
+}
+
+// Drill from a chart click: jump to Sessions filtered by a facet value and/or a
+// time bucket. `bucket` is the bucket granularity ('day'|'week'|'month') whose
+// label `bucketValue` came from the clicked bar; either may be omitted.
+export function filterByFacet(key, value, bucket, bucketValue) {
+  closeDrawer();
+  setView('sessions');
+  if (key && value) {
+    var sel = document.querySelector('.facet-filter[data-key="' + key + '"]') as HTMLSelectElement | null;
+    if (sel) sel.value = value;
+  }
+  if (bucket && bucketValue) {
+    state.filters = state.filters || {};
+    state.filters.bucket = bucket;
+    state.filters.bucketValue = bucketValue;
+  }
+  applyFilters();
 }
 
 // ---- artifact-search typeahead (session-list filter) -----------------------
@@ -106,13 +139,32 @@ export function applyFilters() {
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) {
     if (s.value) facets[s.getAttribute('data-key')] = s.value;
   });
+  var prev = state.filters || {};
   state.filters = {
     facets: facets,
     q: $('#f-q') ? $('#f-q').value : '',
     artifact: $('#f-artifact') ? $('#f-artifact').value : '',
-    artifactKind: $('#f-artKind') ? $('#f-artKind').value : ''
+    artifactKind: $('#f-artKind') ? $('#f-artKind').value : '',
+    bucket: prev.bucket || '',
+    bucketValue: prev.bucketValue || ''
   };
+  renderBucketChip();
   loadSessions();
+}
+
+// Show the active chart-bucket drill as a removable chip (× clears it).
+function renderBucketChip() {
+  var box = $('#f-bucket-chip');
+  if (!box) return;
+  var f = state.filters || {};
+  if (f.bucket && f.bucketValue) {
+    box.innerHTML = '<span class="bucket-chip">' + esc(f.bucket) + ': ' + esc(f.bucketValue) +
+      ' <button class="bucket-chip-x" type="button" title="Clear bucket drill">×</button></span>';
+    var x = box.querySelector('.bucket-chip-x');
+    if (x) x.onclick = function () { state.filters.bucket = ''; state.filters.bucketValue = ''; renderBucketChip(); loadSessions(); };
+  } else {
+    box.innerHTML = '';
+  }
 }
 
 export function renderSessions(rows) {
@@ -471,7 +523,21 @@ export function openDetail(id) {
           ' more tool call' + (restArr.length > 1 ? 's' : '') + '</button>'
         : '';
       var panels = tools.filter(function (x) { return !x.ok; }).map(errPanelHtml).join('');
-      return '<div class="tools">' + head + rest + '</div>' + panels;
+      // Successful tool outputs: a collapsed "Tool results (N)" section, each
+      // result collapsed individually. Subagent spawns are excluded server-side.
+      var withResult = tools.filter(function (x) { return x.ok && x.result; });
+      var resultsHtml = '';
+      if (withResult.length) {
+        var rows = withResult.map(function (x) {
+          var label = esc(x.name) + (x.target ? ' <span class="tx-result-tgt">' + esc(clipLine(x.target, 90)) + '</span>' : '');
+          return '<div class="tx-result"><button class="tx-result-h" type="button"><span class="tx-result-caret">▸</span> ' + label +
+            '</button><pre class="tx-result-b">' + esc(x.result) + '</pre></div>';
+        }).join('');
+        resultsHtml = '<div class="tx-results"><button class="tx-results-toggle" type="button">' +
+          '<span class="tx-results-caret">▸</span> Tool results (' + withResult.length + ')</button>' +
+          '<div class="tx-results-body">' + rows + '</div></div>';
+      }
+      return '<div class="tools">' + head + rest + '</div>' + panels + resultsHtml;
     }
     // A prominent, clickable banner standing in for a subagent-spawning call, so
     // the link into the subagent's scope is easy to find (and a stable anchor for
@@ -750,6 +816,14 @@ export function openDetail(id) {
         b.textContent = on ? 'Show less ↑' : 'Show more ↓';
       };
     });
+    // Tool results: the section toggle and each per-result row are collapsed by
+    // default; both expand in place (no re-fetch).
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-results-toggle'), function (b) {
+      b.onclick = function () { b.parentNode.classList.toggle('on'); };
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-result-h'), function (b) {
+      b.onclick = function () { b.parentNode.classList.toggle('on'); };
+    });
 
     // Artifact chips pivot to a filtered session list.
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tag.click'), function (el) {
@@ -925,5 +999,9 @@ export function loadSessions() {
   if (f.q) qs.push('q=' + encodeURIComponent(f.q));
   if (f.artifact) qs.push('artifact=' + encodeURIComponent(f.artifact));
   if (f.artifactKind) qs.push('artifact_kind=' + encodeURIComponent(f.artifactKind));
+  if (f.bucket && f.bucketValue) {
+    qs.push('bucket=' + encodeURIComponent(f.bucket));
+    qs.push('bucket_value=' + encodeURIComponent(f.bucketValue));
+  }
   get('/api/sessions' + (qs.length ? '?' + qs.join('&') : '')).then(renderSessions);
 }

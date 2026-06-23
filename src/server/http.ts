@@ -302,11 +302,13 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const limit = q.get('limit')
     // Any non-reserved query param is treated as a facet filter; sessionList
     // validates keys against the registry and ignores unknown ones.
-    const reserved = new Set(['q', 'artifact', 'artifact_kind', 'limit'])
+    const reserved = new Set(['q', 'artifact', 'artifact_kind', 'limit', 'bucket', 'bucket_value'])
     const facets: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) facets[k] = v
     }
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket | undefined = rawBucket === 'day' || rawBucket === 'week' || rawBucket === 'month' ? rawBucket : undefined
     sendJson(
       res,
       200,
@@ -315,6 +317,8 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         q: q.get('q') ?? undefined,
         artifact: q.get('artifact') ?? undefined,
         artifactKind: q.get('artifact_kind') ?? undefined,
+        bucket,
+        bucketValue: q.get('bucket_value') ?? undefined,
         limit: limit ? parseInt(limit, 10) : undefined,
       }),
     )

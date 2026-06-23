@@ -12,6 +12,8 @@ export interface SessionFilters {
   q: string
   artifact: string
   artifactKind: string
+  bucket: string
+  bucketValue: string
 }
 
 export interface ClientState {
@@ -24,18 +26,25 @@ export interface ClientState {
   metric: string | null // which headline KPI's detail view is open (null = overview)
   outcomeTypes: any[]
   days: number | 'all' // top-level KPI window (drives the whole headline row + cost-artifact curves)
-  sr: { outcomes: string[]; bucket: string; by: string } // success-rate detail controls
+  // `mode` picks the breakdown renderer: 'grouped' (side-by-side bars, default)
+  // or 'line'. `hidden` is the per-series hide set (legend toggle).
+  sr: { outcomes: string[]; bucket: string; by: string; mode: 'grouped' | 'line'; hidden: Record<string, boolean> }
   // cost-per-artifact detail controls. `kind` follows defaultKind until the user
   // toggles it (userPicked), after which it sticks and the headline tile mirrors
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
   // a manual pick overrides until the window changes.
   ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string }
-  spend: { bucket: string; by: string } // total-spend detail controls
-  sm: { bucket: string; by: string } // sessions detail controls
-  // operational detail: one shared bucket, plus a per-graph "break down by name"
-  // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
-  ops: { bucket: string; by: Record<string, boolean> }
+  spend: { bucket: string; by: string; mode: 'grouped' | 'line'; hidden: Record<string, boolean> }
+  sm: { bucket: string; by: string; mode: 'grouped' | 'line'; hidden: Record<string, boolean> }
+  // operational detail: one shared bucket, plus per-graph "break down by name"
+  // and per-graph breakdown renderer mode (the three graphs — tool calls, error
+  // rate, skill usage — each toggle independently). error_rate defaults to a line
+  // (rates read better as lines); the count views default to grouped bars.
+  // `hidden[view]` is the per-series hide set for that graph's legend toggle.
+  ops: { bucket: string; by: Record<string, boolean>; mode: Record<string, 'grouped' | 'line'>; hidden: Record<string, Record<string, boolean>> }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
+  // PR list controls (client-side sort + filter over the loaded rows).
+  pr: { sort: string; dir: 1 | -1; status: string; q: string }
 }
 
 export var state: ClientState = {
@@ -45,12 +54,13 @@ export var state: ClientState = {
   days: 7,
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
-  sr: { outcomes: ['session_success'], bucket: '', by: '' },
+  sr: { outcomes: ['session_success'], bucket: '', by: '', mode: 'grouped', hidden: {} },
   ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '' },
-  spend: { bucket: '', by: '' },
-  sm: { bucket: '', by: '' },
-  ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
-  ac: { items: [], sel: -1 }
+  spend: { bucket: '', by: '', mode: 'grouped', hidden: {} },
+  sm: { bucket: '', by: '', mode: 'grouped', hidden: {} },
+  ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true }, mode: { tool_calls: 'grouped', error_rate: 'line', skill_usage: 'grouped' }, hidden: {} },
+  ac: { items: [], sel: -1 },
+  pr: { sort: 'cost', dir: -1, status: '', q: '' }
 };
 
 // The success-rate detail controls persist across reloads: the user's "what
@@ -63,7 +73,13 @@ function loadSrPrefs() {
   try {
     var saved = JSON.parse(localStorage.getItem(SR_PREFS_KEY) || 'null');
     if (!saved || typeof saved !== 'object') return;
-    if (Array.isArray(saved.outcomes)) state.sr.outcomes = saved.outcomes.filter(function (x) { return typeof x === 'string'; });
+    // Only honor a NON-empty saved outcome set. An empty array is treated as "no
+    // preference" so the default — session_success checked — holds on a fresh
+    // load rather than persisting an accidental "unchecked everything".
+    if (Array.isArray(saved.outcomes) && saved.outcomes.length) {
+      var kept = saved.outcomes.filter(function (x) { return typeof x === 'string'; });
+      if (kept.length) state.sr.outcomes = kept;
+    }
     if (typeof saved.by === 'string') state.sr.by = saved.by;
   } catch (e) { /* malformed or unavailable storage → keep defaults */ }
 }
@@ -101,6 +117,22 @@ export function fmtVal(v, format) {
 }
 
 export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', '#1b8a8a', '#a65c2e', '#6b8e23'];
+
+// The breakdown view-mode segmented control (Bars = grouped, Lines = line).
+// Returns the markup; the caller wires the buttons to its own reload path.
+export function modeSegHtml(current, id) {
+  var opts = [['grouped', 'Bars'], ['line', 'Lines']];
+  return '<span class="seg" id="' + id + '">' + opts.map(function (o) {
+    return '<button class="' + (o[0] === current ? 'on' : '') + '" data-m="' + o[0] + '">' + o[1] + '</button>';
+  }).join('') + '</span>';
+}
+
+// One legend swatch. `data-leg` + the `.off` class (when hidden) drive the
+// click-to-toggle-series behavior the metric modules wire after render.
+export function legItem(label, color, extra, hidden) {
+  return '<span class="leg' + (hidden ? ' off' : '') + '" data-leg="' + esc(label) + '"><span class="swatch" style="background:' +
+    color + '"></span>' + esc(label) + (extra || '') + '</span>';
+}
 
 // A delta badge comparing this window's value to the prior window's. mode:
 // 'points' for rates (absolute percentage-point change), 'rel' for everything

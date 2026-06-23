@@ -14,32 +14,121 @@ export function renderArtKindSeg() {
   });
 }
 
+// The last PR rows loaded from the server; client-side sort/filter re-renders
+// from these without refetching.
+var lastPrRows: any[] = []
+
 function renderArtifacts(rows, kind) {
   if (kind === 'feature') { renderFeatureManager(rows || []); return; }
-  if (!rows || !rows.length) {
-    $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>';
-    return;
+  lastPrRows = rows || [];
+  renderPrTable(lastPrRows);
+}
+
+var PR_COLS: Array<{ key: string; label: string; num?: 1 }> = [
+  { key: 'title', label: 'Pull request' },
+  { key: 'status', label: 'Status' },
+  { key: 'sessions', label: 'Sessions', num: 1 },
+  { key: 'costUsd', label: 'Cost', num: 1 },
+  { key: 'completedAt', label: 'Merged', num: 1 }
+]
+
+function prSortValue(r: any, key: string) {
+  if (key === 'title') return (r.repo || '') + ' #' + (r.ident || '') + ' ' + (r.title || '')
+  return r[key]
+}
+
+function renderPrTable(rows: any[]) {
+  var p = state.pr
+  // Filter: status exact-match + free-text over ident/title/repo.
+  var statusSet: Record<string, 1> = {}
+  rows.forEach(function (r) { if (r.status) statusSet[r.status] = 1 })
+  var q = (p.q || '').trim().toLowerCase()
+  var filtered = rows.filter(function (r) {
+    if (p.status && r.status !== p.status) return false
+    if (q) {
+      var hay = ((r.repo || '') + ' #' + (r.ident || '') + ' ' + (r.title || '')).toLowerCase()
+      if (hay.indexOf(q) < 0) return false
+    }
+    return true
+  })
+  // Sort: a manual sort column wins; otherwise the server's cost-desc order.
+  if (p.sort) {
+    filtered.sort(function (a, b) {
+      var av = prSortValue(a, p.sort), bv = prSortValue(b, p.sort)
+      var cmp
+      if (p.sort === 'sessions' || p.sort === 'costUsd') cmp = (Number(av) || 0) - (Number(bv) || 0)
+      else if (p.sort === 'completedAt') cmp = String(av || '').localeCompare(String(bv || ''))
+      else cmp = String(av || '').localeCompare(String(bv || ''))
+      return cmp * p.dir
+    })
   }
-  var head = '<tr><th>Pull request</th><th>Status</th><th>Sessions</th><th>Cost</th><th>Merged</th><th></th></tr>';
-  var body = rows.map(function (r) {
-    var key = r.externalId || r.ident;
-    var idLabel = (r.repo ? esc(r.repo) + ' ' : '') + '#' + esc(r.ident);
+  if (!filtered.length) {
+    $('#artifacts').innerHTML = prFilterBar(statusSet) + '<div class="empty">No PRs match. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>'
+    wirePrControls(statusSet)
+    return
+  }
+  var head = '<tr>' + PR_COLS.map(function (c) {
+    var on = c.key === p.sort
+    var arrow = on ? (p.dir < 0 ? ' ↓' : ' ↑') : ''
+    return '<th><button class="th-sort' + (on ? ' on' : '') + '" data-sort="' + c.key + '" type="button">' + c.label + arrow + '</button></th>'
+  }).join('') + '<th></th></tr>'
+  var body = filtered.map(function (r) {
+    var key = r.externalId || r.ident
+    var idLabel = (r.repo ? esc(r.repo) + ' ' : '') + '#' + esc(r.ident)
     var idHtml = r.externalId
       ? '<a class="pr-link" href="' + esc(r.externalId) + '" target="_blank" rel="noopener">' + idLabel + '</a>'
-      : idLabel;
-    var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : '';
+      : idLabel
+    var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : ''
     return '<tr class="arow" data-art="' + esc(key) + '" data-kind="pr">' +
       '<td>' + idHtml + titleHtml + '</td>' +
-      '<td>' + (r.status ? esc(r.status) : '—') + '</td>' +
+      '<td>' + (r.status ? '<span class="badge ' + prStatusClass(r.status) + '">' + esc(r.status) + '</span>' : '—') + '</td>' +
       '<td class="num">' + r.sessions + '</td>' +
       '<td class="num">' + usd(r.costUsd) + '</td>' +
       '<td class="num">' + esc(dayOf(r.completedAt)) + '</td>' +
-      '<td><button class="btn sess-btn" data-art="' + esc(key) + '">Sessions &rarr;</button></td></tr>';
-  }).join('');
-  $('#artifacts').innerHTML = '<table>' + head + body + '</table>';
-  Array.prototype.forEach.call(document.querySelectorAll('.sess-btn'), function (btn) {
-    btn.onclick = function () { filterByArtifact(btn.getAttribute('data-art'), 'pr'); };
-  });
+      '<td><button class="btn sess-btn" data-art="' + esc(key) + '">Sessions &rarr;</button></td></tr>'
+  }).join('')
+  $('#artifacts').innerHTML = prFilterBar(statusSet) + '<table>' + head + body + '</table>'
+  wirePrControls(statusSet)
+}
+
+function prStatusClass(s: string) {
+  if (s === 'merged') return 'b-success'
+  if (s === 'open') return 'b-unknown'
+  if (s === 'closed' || s === 'failed') return 'b-failure'
+  return 'b-null'
+}
+
+function prFilterBar(statusSet: Record<string, 1>) {
+  var p = state.pr
+  var opts = '<option value="">status: any</option>'
+  Object.keys(statusSet).sort().forEach(function (s) {
+    opts += '<option value="' + esc(s) + '"' + (s === p.status ? ' selected' : '') + '>' + esc(s) + '</option>'
+  })
+  return '<div class="pr-filters">' +
+    '<select id="pr-status">' + opts + '</select>' +
+    '<input id="pr-q" type="search" placeholder="search PR # / title / repo" autocomplete="off" value="' + esc(p.q || '') + '" />' +
+    '<button class="btn" id="pr-reset" type="button">Reset</button>' +
+    '</div>'
+}
+
+function wirePrControls(statusSet: Record<string, 1>) {
+  var st = $('#pr-status')
+  if (st) st.onchange = function () { state.pr.status = st.value; renderPrTable(lastPrRows) }
+  var q = $('#pr-q')
+  if (q) q.oninput = function () { state.pr.q = q.value; renderPrTable(lastPrRows) }
+  var rs = $('#pr-reset')
+  if (rs) rs.onclick = function () { state.pr.status = ''; state.pr.q = ''; state.pr.sort = 'cost'; state.pr.dir = -1; renderPrTable(lastPrRows) }
+  Array.prototype.forEach.call(document.querySelectorAll('#artifacts .th-sort'), function (b) {
+    b.onclick = function () {
+      var key = b.getAttribute('data-sort')
+      if (state.pr.sort === key) state.pr.dir = (state.pr.dir === 1 ? -1 : 1) as 1 | -1
+      else { state.pr.sort = key; state.pr.dir = key === 'sessions' || key === 'costUsd' ? -1 : 1 }
+      renderPrTable(lastPrRows)
+    }
+  })
+  Array.prototype.forEach.call(document.querySelectorAll('#artifacts .sess-btn'), function (btn) {
+    btn.onclick = function () { filterByArtifact(btn.getAttribute('data-art'), 'pr') }
+  })
 }
 
 function renderFeatureManager(rows) {
@@ -47,7 +136,8 @@ function renderFeatureManager(rows) {
   if (!rows.length) {
     html += '<div class="empty">No features yet. Add one below, or enrich sessions to propose features.</div>';
   } else {
-    html += '<input id="feat-search" class="feat-search" type="search" placeholder="Search features…" autocomplete="off" />';
+    html += '<div class="feat-search-row"><input id="feat-search" class="feat-search" type="search" placeholder="Search features…" autocomplete="off" />' +
+      '<button class="btn" id="feat-reset" type="button">Reset</button></div>';
     html += '<div class="feat-list">' +
       '<div class="feat-head"><span>Feature</span><span>Repos</span><span>Last session</span><span class="fh-num">Sessions</span><span class="fh-num">Cost</span><span></span></div>';
     flattenFeatures(rows).forEach(function (e) {
@@ -57,21 +147,27 @@ function renderFeatureManager(rows) {
       var statusHtml = shipped
         ? '<span class="badge b-success">shipped ' + esc(dayOf(r.completedAt)) + '</span>'
         : '<span class="badge b-null">open</span>';
+      // Nudge: a session under this feature merged a PR, but it isn't marked
+      // shipped — offer the one-click ship right on the row.
+      var nudge = !shipped && r.hasMergedPr
+        ? ' <button class="btn nudge" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="0" title="A session under this feature merged a PR">mark shipped</button>'
+        : '';
       var proposed = r.source === 'derived' ? '<span class="tag">proposed</span>' : '';
       var repos = (r.repos && r.repos.length) ? r.repos.join(', ') : '—';
       var last = r.lastSessionAt ? dayOf(r.lastSessionAt) : '—';
-      // Secondary actions (ship toggle · nest-under · move-to-top · delete) collapse
-      // into a per-row hamburger; only the indent shifts, so columns stay aligned.
+      // Secondary actions (ship toggle · rename · nest-under · move-to-top · delete)
+      // collapse into a per-row hamburger; only the indent shifts, so columns stay
+      // aligned. The row is drag-source for drag-and-drop re-parenting (B2).
       var nest = '<select class="feat-nest" data-id="' + esc(r.id) + '">' +
         nestUnderOptions(rows, r.id, descendantsOf(rows, r.id)) + '</select>';
       var toTop = r.parentId
         ? '<button class="menu-item" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
         : '';
-      html += '<div class="feat-row" data-name="' + esc((r.title || '').toLowerCase()) +
+      html += '<div class="feat-row" draggable="true" data-name="' + esc((r.title || '').toLowerCase()) +
         '" data-id="' + esc(r.id) + '" data-parent="' + esc(r.parentId || '') + '">' +
         '<div class="feat-name" style="padding-left:' + indent + 'px">' + twig +
           '<span class="nm" title="' + esc(r.title || '') + '">' +
-          esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + '</div>' +
+          esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + nudge + '</div>' +
         '<span class="feat-repos" title="' + esc(repos) + '">' + esc(repos) + '</span>' +
         '<span class="feat-last" title="' + esc(r.lastSessionAt || '') + '">' + esc(last) + '</span>' +
         '<span class="feat-num">' + r.sessions + '</span>' +
@@ -83,6 +179,7 @@ function renderFeatureManager(rows) {
             '<div class="feat-menu">' +
               '<button class="menu-item" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
                 (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
+              '<button class="menu-item" data-act="rename" data-id="' + esc(r.id) + '">Rename</button>' +
               '<div class="menu-nest"><label>Nest under</label>' + nest + '</div>' +
               toTop +
               '<div class="menu-sep"></div>' +
@@ -229,6 +326,67 @@ function wireFeatureManager() {
       post('/api/features/update', { id: b.getAttribute('data-id'), parentId: null }).then(loadArtifacts);
     };
   });
+  // Rename: turn the row's title into an inline editable. Enter/blur saves
+  // (POST title); Escape cancels. Backend updateFeature already accepts a title.
+  each('#artifacts [data-act="rename"]', function (b) {
+    b.onclick = function () {
+      closeFeatMenus();
+      var row = b.closest('.feat-row');
+      var nm = row ? row.querySelector('.nm') : null;
+      if (!nm) return;
+      var id = b.getAttribute('data-id');
+      var original = nm.textContent || '';
+      nm.setAttribute('contenteditable', 'true');
+      nm.classList.add('editing');
+      nm.focus();
+      // Select all so typing replaces the old name.
+      var sel = window.getSelection(); var range = document.createRange();
+      range.selectNodeContents(nm); sel.removeAllRanges(); sel.addRange(range);
+      var done = function (save) {
+        nm.removeAttribute('contenteditable');
+        nm.classList.remove('editing');
+        if (save) {
+          var title = (nm.textContent || '').trim();
+          if (title && title !== original) post('/api/features/update', { id: id, title: title }).then(loadArtifacts);
+          else nm.textContent = original;
+        } else nm.textContent = original;
+      };
+      nm.onblur = function () { done(true); };
+      nm.onkeydown = function (ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); nm.blur(); }
+        else if (ev.key === 'Escape') { ev.preventDefault(); done(false); nm.blur(); }
+      };
+    };
+  });
+  // Drag-and-drop re-parenting: drop a row onto another to nest it under that
+  // target (reuses the parentId path + the server's cycle guard).
+  (function () {
+    var dragId = null;
+    each('#artifacts .feat-row', function (row) {
+      row.addEventListener('dragstart', function (e) {
+        dragId = row.getAttribute('data-id');
+        row.classList.add('dragging');
+        if ((e as any).dataTransfer) (e as any).dataTransfer.effectAllowed = 'move';
+      });
+      row.addEventListener('dragend', function () {
+        row.classList.remove('dragging');
+        each('#artifacts .feat-row', function (r2) { r2.classList.remove('drop-target'); });
+        dragId = null;
+      });
+      row.addEventListener('dragover', function (e) {
+        var tid = row.getAttribute('data-id');
+        if (tid && tid !== dragId) { e.preventDefault(); row.classList.add('drop-target'); }
+      });
+      row.addEventListener('dragleave', function () { row.classList.remove('drop-target'); });
+      row.addEventListener('drop', function (e) {
+        e.preventDefault();
+        row.classList.remove('drop-target');
+        var tid = row.getAttribute('data-id');
+        if (!dragId || !tid || tid === dragId) return;
+        post('/api/features/update', { id: dragId, parentId: tid }).then(loadArtifacts);
+      });
+    });
+  })();
 
   // Local name filter. A match reveals its WHOLE subtree (so searching an epic
   // shows everything under it) plus its ancestors (so the match keeps its place
@@ -263,6 +421,8 @@ function wireFeatureManager() {
     });
     rows.forEach(function (r) { r.style.display = visible[r.getAttribute('data-id')] ? '' : 'none'; });
   };
+  var featReset = $('#feat-reset');
+  if (featReset && search) featReset.onclick = function () { search.value = ''; search.oninput(null); };
 
   // One-time global closers: outside click and Escape dismiss any open menu.
   // Idempotent across reloads — they query the live DOM each time.

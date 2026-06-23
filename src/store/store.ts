@@ -1051,7 +1051,12 @@ export class Store {
     const col = f.column ?? f.key
     let sql: string
     const params: unknown[] = []
-    if (f.source === 'session') {
+    if (f.source === 'feature') {
+      sql = `SELECT a.title AS value, COUNT(DISTINCT sa.session_id) AS count
+             FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+             WHERE a.kind = 'feature' AND a.title IS NOT NULL
+             GROUP BY a.title ORDER BY count DESC`
+    } else if (f.source === 'session') {
       sql = f.multi
         ? `SELECT je.value AS value, COUNT(*) AS count
            FROM sessions s, json_each(s.${col}) je GROUP BY je.value ORDER BY count DESC`
@@ -1081,6 +1086,15 @@ export class Store {
    */
   private facetPredicate(f: FacetSpec, value: string): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
+    if (f.source === 'feature') {
+      // A session matches a feature cohort when it's directly linked (session_artifacts)
+      // to a feature artifact of that title.
+      return {
+        sql: `EXISTS (SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+               WHERE sa.session_id = s.id AND a.kind = 'feature' AND a.title = ?)`,
+        params: [value],
+      }
+    }
     if (f.source === 'session') {
       return f.multi
         ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE je.value = ?)`, params: [value] }
@@ -1235,6 +1249,12 @@ export class Store {
         `EXISTS (SELECT 1 FROM session_artifacts sa3 JOIN artifacts a3 ON a3.id = sa3.artifact_id
                  WHERE sa3.session_id = s.id AND ${conds.join(' AND ')})`,
       )
+    }
+    if (f.bucket && f.bucketValue) {
+      // Drill from a chart bucket: match the server's own bucket label so the
+      // filtered sessions are exactly that bar's sessions (same timezone/bucketing).
+      clauses.push(`${bucketExpr('s.started_at', f.bucket)} = ?`)
+      params.push(f.bucketValue)
     }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''
     const limit = Math.min(Math.max(1, f.limit ?? 200), 1000)
@@ -1467,9 +1487,22 @@ export class Store {
     const hasFeature = rows.some((r) => r.kind === 'feature')
     const repoSets = hasFeature ? this.featureRepoSets() : null
     const lastSession = hasFeature ? this.featureLastSession() : null
+    const mergedPrStmt = hasFeature
+      ? this.db.prepare(
+          `SELECT EXISTS (SELECT 1 FROM session_artifacts saf
+                         JOIN outcomes o ON o.session_id = saf.session_id
+                         WHERE saf.artifact_id = ? AND o.type = 'pr_merged') AS has`,
+        )
+      : null
     for (const r of rows) {
       r.repos = r.kind === 'feature' ? (repoSets?.get(r.id) ?? []) : r.repo ? [r.repo] : []
       r.lastSessionAt = r.kind === 'feature' ? (lastSession?.get(r.id) ?? null) : null
+      // A "mark shipped" nudge: the feature isn't shipped but a session under it
+      // merged a PR — likely shippable from the dashboard's perspective.
+      if (r.kind === 'feature' && mergedPrStmt) {
+        const row = mergedPrStmt.get(r.id) as { has: number } | undefined
+        r.hasMergedPr = !r.completedAt && !!row?.has
+      }
     }
     return rows
   }
@@ -1680,6 +1713,8 @@ export interface ArtifactListItem {
   parentId: string | null
   sessions: number
   costUsd: number
+  /** Feature only: a session linked to it produced a merged PR (a "mark shipped" nudge). */
+  hasMergedPr?: boolean
 }
 
 /** One window's worth of headline KPIs (see Store.kpis). */
@@ -1857,6 +1892,9 @@ export interface SessionFilter {
   artifact?: string
   /** Restrict the artifact match to a kind: file | pr | feature | ticket | commit. */
   artifactKind?: string
+  /** Drill from a chart bucket: restrict to sessions whose start falls in this bucket. */
+  bucket?: Bucket
+  bucketValue?: string
   limit?: number
 }
 
@@ -1879,6 +1917,8 @@ export interface TranscriptTool {
   ok: boolean
   target?: string
   error?: string
+  /** Clipped successful result text, shown collapsed-by-default in the transcript. */
+  result?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
 }
@@ -2004,6 +2044,16 @@ function aggExpr(m: MeasureSpec): string {
 /** Group expression + any join/where a facet contributes to a breakdown (alias `s`/`u`/`t`). */
 function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: string } {
   const col = f.column ?? f.key
+  if (f.source === 'feature') {
+    // Join the session's linked features (by title). A session under multiple
+    // features fans its usage rows across each → series overlap (presenceInflated),
+    // the same honest behavior as other multi-valued cohort splits.
+    return {
+      join: `JOIN session_artifacts sfa ON sfa.session_id = s.id JOIN artifacts a ON a.id = sfa.artifact_id AND a.kind = 'feature'`,
+      expr: 'a.title',
+      where: 'a.title IS NOT NULL',
+    }
+  }
   if (f.source === 'session') {
     return f.multi
       ? { join: `, json_each(s.${col}) fje`, expr: 'fje.value' }
@@ -2071,6 +2121,15 @@ function buildTranscriptCore(session: Session): {
           // short preview on the chip and expand to the whole thing on demand.
           const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
           if (!ok) tool.error = clipError(resultText(res?.raw))
+          else {
+            // Surface a clipped successful result so the transcript can show it
+            // collapsed-by-default (expand on demand). Subagent spawns carry no
+            // result text worth showing — their transcript lives in its own scope.
+            if (!spawnToAgent.has(b.id)) {
+              const rt = resultText(res?.raw).trim()
+              if (rt) tool.result = clip(rt, 4000)
+            }
+          }
           const spawned = spawnToAgent.get(b.id)
           if (spawned) tool.agentId = spawned
           tools.push(tool)

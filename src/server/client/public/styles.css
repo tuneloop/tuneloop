@@ -55,8 +55,24 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-by { border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
 .sr-by-ctrl { display: inline-flex; align-items: center; gap: 8px; }
 .sr-legend { margin-top: 10px; }
-.sr-legend .leg { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
+.sr-legend .leg { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; cursor: pointer; user-select: none; }
+.sr-legend .leg:hover { color: var(--ink); }
+.sr-legend .leg.off { opacity: .35; text-decoration: line-through; }
 .sr-legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+/* Bucket-drill chip on the session filter bar. */
+.bucket-chip { display: inline-flex; align-items: center; gap: 6px; background: #eaf3ec; border: 1px solid #cde2d3; color: var(--emerald); border-radius: 999px; padding: 3px 6px 3px 10px; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+.bucket-chip-x { border: 0; background: transparent; color: var(--emerald); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+.bucket-chip-x:hover { color: var(--ink); }
+/* Feature manager: inline rename, drag-and-drop, ship nudge. */
+.feat-name .nm.editing { outline: 2px solid var(--emerald); background: var(--paper); border-radius: 3px; padding: 0 2px; cursor: text; }
+.feat-row.dragging { opacity: .45; }
+.feat-row.drop-target { box-shadow: inset 0 0 0 2px var(--emerald); }
+.btn.nudge { border-color: var(--emerald); color: var(--emerald); font-weight: 600; }
+.btn.nudge:hover { background: var(--emerald); color: #fbfaf6; }
+/* Spend-by-feature rows are clickable (drill to that feature's sessions). */
+#feat-spend-body .fs-row { cursor: pointer; }
+#feat-spend-body .fs-row:hover { background: #fbf8f1; }
+#feat-spend-body .fs-row .name { display: inline-flex; align-items: center; gap: 6px; }
 .ca-controls { margin: 12px 0 4px; }
 .panel-head h2 .metric-sub { margin-left: 8px; }
 .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 22px; }
@@ -154,6 +170,53 @@ tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .tag.click:hover { background: #dfe9e0; color: var(--emerald); }
 .num { font-family: ui-monospace, Menlo, monospace; }
 svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: var(--muted); }
+
+/* Chart hover: a transparent overlay captures pointer events; marks themselves
+   are non-interactive so the overlay always receives the move. The crosshair +
+   highlight dots are moved/shown by the delegated handler in chartHover.ts. */
+svg.chart { display: block; }
+svg.chart rect:not(.chart-overlay),
+svg.chart path,
+svg.chart circle { pointer-events: none; }
+.chart-overlay { fill: transparent; pointer-events: all; }
+.chart-cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; display: none; }
+.chart-dots circle { stroke: var(--paper); stroke-width: 1.5; }
+/* The shared floating tooltip (one element, appended to <body>). */
+.chart-tip { position: fixed; z-index: 60; min-width: 140px; max-width: 320px; background: var(--paper);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(20,18,15,.16); padding: 8px 10px; font-size: 12px; pointer-events: none; }
+.chart-tip .ct-b { font-weight: 600; margin-bottom: 5px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+.chart-tip .ct-s { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.chart-tip .ct-sw { flex: none; width: 9px; height: 9px; border-radius: 2px; }
+.chart-tip .ct-l { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-tip .ct-v { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+.chart-tip .ct-sub { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+
+/* PR list: sortable column headers + a filter bar. */
+.pr-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.pr-filters select, .pr-filters input { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
+.pr-filters input { flex: 1; min-width: 200px; }
+.th-sort { border: 0; background: none; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; padding: 0; cursor: pointer; }
+.th-sort:hover { color: var(--emerald); }
+.th-sort.on { color: var(--emerald); }
+.feat-search-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.feat-search-row .feat-search { flex: 1; }
+
+/* Tool results (collapsed by default): a section toggle + per-result rows. */
+.tx-results { margin-top: 8px; }
+.tx-results-toggle { border: 1px solid var(--line); background: var(--paper); color: var(--muted); border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.tx-results-toggle:hover { border-color: var(--emerald); color: var(--emerald); }
+.tx-results-caret { display: inline-block; transition: transform .12s; }
+.tx-results.on .tx-results-caret { transform: rotate(90deg); }
+.tx-results-body { display: none; margin-top: 6px; }
+.tx-results.on .tx-results-body { display: block; }
+.tx-result { border: 1px solid var(--line); border-radius: 6px; margin: 4px 0; overflow: hidden; }
+.tx-result-h { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; border: 0; background: var(--track); padding: 5px 9px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; cursor: pointer; color: var(--ink); }
+.tx-result-h:hover { background: #ece7dc; }
+.tx-result-caret { color: var(--muted); transition: transform .12s; }
+.tx-result.on .tx-result-caret { transform: rotate(90deg); }
+.tx-result-tgt { color: var(--muted); }
+.tx-result-b { display: none; margin: 0; padding: 8px 10px; font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #5c574d; max-height: 260px; overflow: auto; background: var(--paper); }
+.tx-result.on .tx-result-b { display: block; }
 .overlay { position: fixed; inset: 0; background: rgba(20,18,15,.4); opacity: 0; pointer-events: none; transition: opacity .15s; }
 .overlay.on { opacity: 1; pointer-events: auto; }
 .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(900px, 96vw); background: var(--bg); border-left: 1px solid var(--line); transform: translateX(100%); transition: transform .18s ease; overflow-y: auto; z-index: 10; }
@@ -170,9 +233,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .turn { border: 1px solid var(--line); border-radius: 8px; padding: 10px 13px; margin: 10px 0; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 /* User vs assistant get distinct fills + a left accent so the conversation reads at a glance. */
 .turn.user { background: #eaf3ec; border-color: #cde2d3; border-left: 3px solid var(--emerald); }
-.turn.asst { background: var(--paper); border-left: 3px solid var(--track); }
+.turn.asst { background: var(--paper); border-left: 3px solid var(--track); margin-left: 20px; }
 /* Coalesced run of tool-only assistant turns — a muted action strip, not a message. */
-.turn.toolrun { background: transparent; border-style: dashed; }
+.turn.toolrun { background: transparent; border-style: dashed; margin-left: 20px; }
 .turn.toolrun .role { color: var(--muted); }
 .turn.toolrun .tools { margin-top: 0; }
 .turn .role { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 5px; }

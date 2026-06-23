@@ -7,8 +7,13 @@ import { loadKpis, renderWindow } from './kpis'
 import { renderSuccessRate, renderSrControls } from './metrics/successRate'
 import { buildFilters, loadSessions, closeDrawer, setView } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
+import { initChartHover } from './chartHover'
+import { loadFeatureSpend } from './featureSpend'
 
 function init() {
+  // One delegated hover handler for every chart (tooltip + crosshair), attached
+  // once so innerHTML chart swaps need no per-chart wiring.
+  initChartHover();
   // The drawer's close button is rendered per-open inside the sticky header
   // (wired in openDetail); the overlay click still closes from anywhere.
   $('#overlay').onclick = closeDrawer;
@@ -33,6 +38,7 @@ function init() {
   loadKpis();
   loadSessions();
   loadArtifacts();
+  loadFeatureSpend();
   get('/api/outcome-types').then(function (t) {
     state.outcomeTypes = t || [];
     if (state.metric === 'success_rate') renderSrControls();

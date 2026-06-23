@@ -1,15 +1,18 @@
-// Operational metrics detail: three independent time-series graphs — tool-call
-// counts, tool error rate, and skill-usage counts — sharing one bucket control.
-// Each graph can break down by tool/skill name on its own (same "Break down by"
-// dropdown the other metric graphs use). Error rate reuses the percent line
-// chart; counts use int bars (overall) or int lines (breakdown).
-import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
-import { lineChart, valueLineChart, stackChart } from '../charts'
+// Operational metrics detail: three independent time-series graphs — skill
+// usage, tool-call counts, and tool error rate — sharing one bucket control.
+// Skill usage sits on top: it's the more outcome-relevant signal. Each graph can
+// break down by tool/skill name on its own and pick a Bars (grouped) or Lines
+// renderer for the breakdown. Error rate defaults to a line (rates read better
+// as lines); the count views default to grouped bars.
+import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs, modeSegHtml, legItem } from '../core'
+import { lineChart, valueLineChart, stackChart, groupedBarChart } from '../charts'
+import { wireChartPick } from '../chartHover'
+import { filterByFacet } from '../sessions'
 
 var OPS_VIEWS = [
+  { key: 'skill_usage', title: 'Skill Usage Count' },
   { key: 'tool_calls', title: 'Tool Call Counts' },
-  { key: 'error_rate', title: 'Tool error rate' },
-  { key: 'skill_usage', title: 'Skill Usage Count' }
+  { key: 'error_rate', title: 'Tool error rate' }
 ];
 
 function opsByLabel(view) { return view === 'skill_usage' ? 'skill name' : 'tool name'; }
@@ -23,6 +26,7 @@ export function renderOps() {
           '<option value="">none</option>' +
           '<option value="name"' + (state.ops.by[v.key] ? ' selected' : '') + '>' + esc(opsByLabel(v.key)) + '</option>' +
         '</select></span>' +
+        '<span class="sr-lbl" style="margin-left:14px">View</span>' + modeSegHtml(state.ops.mode[v.key] || 'grouped', 'ops-mode-' + v.key) +
       '</div>' +
       '<div id="ops-chart-' + v.key + '"></div>' +
       '<div class="sr-legend" id="ops-legend-' + v.key + '"></div>' +
@@ -37,6 +41,10 @@ export function renderOps() {
   OPS_VIEWS.forEach(function (v) {
     var sel = $('#ops-by-' + v.key);
     if (sel) sel.onchange = function () { state.ops.by[v.key] = this.value === 'name'; loadOps(v.key); };
+    var modeSeg = $('#ops-mode-' + v.key);
+    if (modeSeg) Array.prototype.forEach.call(modeSeg.children, function (btn) {
+      btn.onclick = function () { state.ops.mode[v.key] = btn.getAttribute('data-m') as 'grouped' | 'line'; loadOps(v.key); };
+    });
     loadOps(v.key);
   });
 }
@@ -69,35 +77,54 @@ export function loadOps(view) {
 export function renderOpsChart(view, d) {
   var ov = d.overall || { total: null, points: [] };
   var legend = '', note = '';
+  var mode = state.ops.mode[view] || 'grouped';
+  var hidden = state.ops.hidden[view] || (state.ops.hidden[view] = {});
+  var visSeries = (d.series || []).filter(function (s) { return !hidden[s.key]; });
+  var allSeries = d.series || [];
   if (d.format === 'pct') {
-    // Error rate → percent line chart (reusing the success-rate renderer).
-    var rlines;
-    if (d.series && d.series.length) {
-      rlines = d.series.map(function (s, i) {
-        return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
-          points: s.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }) };
-      });
+    // Error rate → percent axis. Breakdown honors the per-view mode (line by
+    // default); overall is a single rate line.
+    if (allSeries.length) {
+      if (mode === 'line') {
+        var rlines = visSeries.map(function (s, i) {
+          return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
+            points: s.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }) };
+        });
+        $('#ops-chart-' + view).innerHTML = lineChart(d.buckets || [], rlines, { adaptive: true });
+      } else {
+        var rseries = visSeries.map(function (s, i) {
+          return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
+            points: s.points.map(function (p) { return { bucket: p.bucket, v: p.value, sub: p.errors + '/' + p.calls }; }) };
+        });
+        $('#ops-chart-' + view).innerHTML = groupedBarChart(d.buckets || [], rseries, 'pct', { adaptive: true });
+      }
+      legend = allSeries.map(function (s, i) {
+        return legItem(s.key, SR_PALETTE[i % SR_PALETTE.length], s.total != null ? ' <span class="sr-cnt">' + Math.round(s.total * 100) + '%</span>' : '', !!hidden[s.key]);
+      }).join('');
     } else {
-      rlines = [{ label: 'error rate', color: SR_PALETTE[2],
+      var rline = [{ label: 'error rate', color: SR_PALETTE[2],
         points: ov.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }), rate: ov.total }];
+      $('#ops-chart-' + view).innerHTML = lineChart(d.buckets || [], rline, { adaptive: true });
     }
-    $('#ops-chart-' + view).innerHTML = lineChart(d.buckets || [], rlines, { adaptive: true });
-    legend = rlines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
-    }).join('');
     note = 'Error rate = errored tool calls / all tool calls, dated at session start.';
   } else {
-    // Counts → int bars (overall) / int lines (breakdown).
-    if (d.series && d.series.length) {
-      var clines = d.series.map(function (s, i) {
-        return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
-          points: s.points.map(function (p) { return { bucket: p.bucket, y: p.value }; }) };
-      });
-      $('#ops-chart-' + view).innerHTML = valueLineChart(d.buckets || [], clines, 'int');
-      legend = clines.map(function (l) {
-        return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-          ' <span class="sr-cnt">' + num(l.total) + '</span></span>';
+    // Counts → int bars (overall) / grouped bars or int lines (breakdown).
+    if (allSeries.length) {
+      if (mode === 'line') {
+        var clines = visSeries.map(function (s, i) {
+          return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
+            points: s.points.map(function (p) { return { bucket: p.bucket, y: p.value }; }) };
+        });
+        $('#ops-chart-' + view).innerHTML = valueLineChart(d.buckets || [], clines, 'int');
+      } else {
+        var cseries = visSeries.map(function (s, i) {
+          return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
+            points: s.points.map(function (p) { return { bucket: p.bucket, v: p.value }; }) };
+        });
+        $('#ops-chart-' + view).innerHTML = groupedBarChart(d.buckets || [], cseries, 'int');
+      }
+      legend = allSeries.map(function (s, i) {
+        return legItem(s.key, SR_PALETTE[i % SR_PALETTE.length], ' <span class="sr-cnt">' + num(s.total) + '</span>', !!hidden[s.key]);
       }).join('');
     } else {
       var barPts = ov.points.map(function (p) { return { bucket: p.bucket, total: p.value, filled: p.value }; });
@@ -108,4 +135,26 @@ export function renderOpsChart(view, d) {
   if (d.truncated) note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
   $('#ops-legend-' + view).innerHTML = legend;
   $('#ops-note-' + view).innerHTML = esc(note);
+  wireOpsLegend(view, d);
+  wireOpsPick(view);
+}
+
+// Legend toggle per ops graph (re-renders that graph from its cached payload).
+function wireOpsLegend(view, d) {
+  Array.prototype.forEach.call($('#ops-legend-' + view).querySelectorAll('.leg[data-leg]'), function (el) {
+    el.onclick = function () {
+      var hidden = state.ops.hidden[view] || (state.ops.hidden[view] = {});
+      var label = el.getAttribute('data-leg');
+      hidden[label] = !hidden[label];
+      renderOpsChart(view, d);
+    };
+  });
+}
+
+// Click a bucket → sessions in that bucket (ops "by name" isn't a session facet,
+// so the drill is date-only).
+function wireOpsPick(view) {
+  wireChartPick($('#ops-chart-' + view), function (pick) {
+    filterByFacet(null, null, autoBucket(state.ops.bucket), pick.bucket);
+  });
 }
