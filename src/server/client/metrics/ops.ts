@@ -1,69 +1,73 @@
-// Operational metrics detail: tool-call counts, error rate, and skill usage over
-// time, optionally split by tool/skill name. Error rate reuses the percent line
+// Operational metrics detail: three independent time-series graphs — tool-call
+// counts, tool error rate, and skill-usage counts — sharing one bucket control.
+// Each graph can break down by tool/skill name on its own (same "Break down by"
+// dropdown the other metric graphs use). Error rate reuses the percent line
 // chart; counts use int bars (overall) or int lines (breakdown).
-import { state, $, esc, num, SR_PALETTE, get } from '../core'
+import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { lineChart, valueLineChart, stackChart } from '../charts'
 
+var OPS_VIEWS = [
+  { key: 'tool_calls', title: 'Tool Call Counts' },
+  { key: 'error_rate', title: 'Tool error rate' },
+  { key: 'skill_usage', title: 'Skill Usage Count' }
+];
+
+function opsByLabel(view) { return view === 'skill_usage' ? 'skill name' : 'tool name'; }
+
 export function renderOps() {
-  $('#metric-detail').innerHTML =
-    '<div class="metric-head">' +
-      '<h2>Operational</h2>' +
-      '<div class="metric-big" id="ops-big">—</div>' +
-    '</div>' +
-    '<div class="panel">' +
-      '<div class="sr-controls" id="ops-controls"></div>' +
-      '<div id="ops-chart"></div>' +
-      '<div class="sr-legend" id="ops-legend"></div>' +
-      '<div class="card-note" id="ops-note"></div>' +
+  var panels = OPS_VIEWS.map(function (v) {
+    return '<div class="panel">' +
+      '<div class="panel-head"><h2>' + esc(v.title) + '</h2>' +
+        '<span class="sr-by-ctrl"><span class="sr-lbl">Break down by</span>' +
+        '<select class="sr-by" id="ops-by-' + v.key + '">' +
+          '<option value="">none</option>' +
+          '<option value="name"' + (state.ops.by[v.key] ? ' selected' : '') + '>' + esc(opsByLabel(v.key)) + '</option>' +
+        '</select></span>' +
+      '</div>' +
+      '<div id="ops-chart-' + v.key + '"></div>' +
+      '<div class="sr-legend" id="ops-legend-' + v.key + '"></div>' +
+      '<div class="card-note" id="ops-note-' + v.key + '"></div>' +
     '</div>';
+  }).join('');
+  $('#metric-detail').innerHTML =
+    '<div class="metric-head"><h2>Operational Metrics</h2></div>' +
+    '<div class="ops-controls" id="ops-controls"></div>' +
+    panels;
   renderOpsControls();
-  loadOps();
+  OPS_VIEWS.forEach(function (v) {
+    var sel = $('#ops-by-' + v.key);
+    if (sel) sel.onchange = function () { state.ops.by[v.key] = this.value === 'name'; loadOps(v.key); };
+    loadOps(v.key);
+  });
 }
 
 export function renderOpsControls() {
-  var op = state.ops;
-  var views = [['tool_calls', 'Tool calls'], ['error_rate', 'Error rate'], ['skill_usage', 'Skill usage']].map(function (o) {
-    return '<button class="' + (o[0] === op.view ? 'on' : '') + '" data-v="' + o[0] + '">' + o[1] + '</button>';
-  }).join('');
+  var activeBucket = autoBucket(state.ops.bucket);
   var bucketBtns = ['day', 'week', 'month'].map(function (b) {
-    return '<button class="' + (b === op.bucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
-  }).join('');
-  var byBtns = [['', 'Total'], ['name', 'By name']].map(function (o) {
-    var on = (o[0] === 'name') === !!op.by;
-    return '<button class="' + (on ? 'on' : '') + '" data-y="' + o[0] + '">' + o[1] + '</button>';
+    return '<button class="' + (b === activeBucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
   $('#ops-controls').innerHTML =
-    '<div class="sr-ctrl-row"><span class="sr-lbl">View</span><span class="seg" id="ops-view">' + views + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Bucket</span><span class="seg" id="ops-bucket">' + bucketBtns + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Breakdown</span><span class="seg" id="ops-by">' + byBtns + '</span></div>';
-  Array.prototype.forEach.call($('#ops-view').children, function (btn) {
-    btn.onclick = function () { state.ops.view = btn.getAttribute('data-v'); renderOpsControls(); loadOps(); };
-  });
+    '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="ops-bucket">' + bucketBtns + '</span></div>';
   Array.prototype.forEach.call($('#ops-bucket').children, function (btn) {
-    btn.onclick = function () { state.ops.bucket = btn.getAttribute('data-b'); renderOpsControls(); loadOps(); };
-  });
-  Array.prototype.forEach.call($('#ops-by').children, function (btn) {
-    btn.onclick = function () { state.ops.by = btn.getAttribute('data-y') === 'name'; renderOpsControls(); loadOps(); };
+    btn.onclick = function () {
+      state.ops.bucket = btn.getAttribute('data-b');
+      renderOpsControls();
+      OPS_VIEWS.forEach(function (v) { loadOps(v.key); }); // bucket is shared — reload all three
+    };
   });
 }
 
-export function loadOps() {
-  var op = state.ops;
-  var qs = 'view=' + encodeURIComponent(op.view) + '&bucket=' + encodeURIComponent(op.bucket) + (op.by ? '&by=name' : '');
+export function loadOps(view) {
+  var by = state.ops.by[view];
+  var qs = 'view=' + encodeURIComponent(view) + '&bucket=' + encodeURIComponent(autoBucket(state.ops.bucket)) + (by ? '&by=name' : '') + windowQs();
   get('/api/ops-over-time?' + qs).then(function (d) {
-    if (!d || d.error) { $('#ops-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
-    renderOpsChart(d);
+    if (!d || d.error) { $('#ops-chart-' + view).innerHTML = '<div class="empty">No data.</div>'; return; }
+    renderOpsChart(view, d);
   });
 }
 
-export function renderOpsChart(d) {
+export function renderOpsChart(view, d) {
   var ov = d.overall || { total: null, points: [] };
-  var big = $('#ops-big');
-  if (big) {
-    var bv = d.format === 'pct' ? (ov.total != null ? Math.round(ov.total * 100) + '%' : '—') : num(ov.total || 0);
-    var lbl = d.view === 'error_rate' ? 'tool-call error rate' : (d.view === 'skill_usage' ? 'skill calls' : 'tool calls');
-    big.innerHTML = esc(bv) + ' <span class="metric-sub">' + esc(lbl) + ', all time</span>';
-  }
   var legend = '', note = '';
   if (d.format === 'pct') {
     // Error rate → percent line chart (reusing the success-rate renderer).
@@ -77,7 +81,7 @@ export function renderOpsChart(d) {
       rlines = [{ label: 'error rate', color: SR_PALETTE[2],
         points: ov.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }), rate: ov.total }];
     }
-    $('#ops-chart').innerHTML = lineChart(d.buckets || [], rlines);
+    $('#ops-chart-' + view).innerHTML = lineChart(d.buckets || [], rlines, { adaptive: true });
     legend = rlines.map(function (l) {
       return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
         (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
@@ -90,18 +94,18 @@ export function renderOpsChart(d) {
         return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
           points: s.points.map(function (p) { return { bucket: p.bucket, y: p.value }; }) };
       });
-      $('#ops-chart').innerHTML = valueLineChart(d.buckets || [], clines, 'int');
+      $('#ops-chart-' + view).innerHTML = valueLineChart(d.buckets || [], clines, 'int');
       legend = clines.map(function (l) {
         return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
           ' <span class="sr-cnt">' + num(l.total) + '</span></span>';
       }).join('');
     } else {
       var barPts = ov.points.map(function (p) { return { bucket: p.bucket, total: p.value, filled: p.value }; });
-      $('#ops-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int');
+      $('#ops-chart-' + view).innerHTML = stackChart(d.buckets || [], barPts, 'int');
     }
     note = (d.view === 'skill_usage' ? 'Skill invocations' : 'Tool calls') + ' per bucket, dated at session start.';
   }
   if (d.truncated) note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
-  $('#ops-legend').innerHTML = legend;
-  $('#ops-note').innerHTML = esc(note);
+  $('#ops-legend-' + view).innerHTML = legend;
+  $('#ops-note-' + view).innerHTML = esc(note);
 }

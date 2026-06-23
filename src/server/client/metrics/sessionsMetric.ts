@@ -1,31 +1,29 @@
-// Sessions detail: session count over time (optionally split into one cohort
-// line per facet value), with the all-time distribution cards beneath it.
-import { state, $, esc, num, SR_PALETTE, get } from '../core'
+// Sessions detail: session count over time, optionally split into one cohort
+// line per facet value.
+import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { valueLineChart, stackChart } from '../charts'
-import { srBreakdownFacets, renderDists } from '../facets'
+import { srBreakdownFacets } from '../facets'
 
 export function renderSessionsMetric() {
   $('#metric-detail').innerHTML =
     '<div class="metric-head">' +
       '<h2>Sessions</h2>' +
-      '<div class="metric-big" id="sm-big">—</div>' +
     '</div>' +
     '<div class="panel">' +
       '<div class="sr-controls" id="sm-controls"></div>' +
       '<div id="sm-chart"></div>' +
       '<div class="sr-legend" id="sm-legend"></div>' +
       '<div class="card-note" id="sm-note"></div>' +
-    '</div>' +
-    '<section class="dist-grid" id="sm-dists"></section>';
+    '</div>';
   renderSmControls();
   loadSessionsOverTime();
-  renderDists(state.overview || {}); // the distribution cards now live here
 }
 
 export function renderSmControls() {
   var sm = state.sm;
+  var activeBucket = autoBucket(sm.bucket);
   var bucketBtns = ['day', 'week', 'month'].map(function (b) {
-    return '<button class="' + (b === sm.bucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
+    return '<button class="' + (b === activeBucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
   var byOpts = '<option value="">none</option>';
   srBreakdownFacets().forEach(function (f) { // any chart/filter facet (counts explode safely)
@@ -43,9 +41,9 @@ export function renderSmControls() {
 
 export function loadSessionsOverTime() {
   var sm = state.sm;
-  var qs = ['bucket=' + encodeURIComponent(sm.bucket)];
+  var qs = ['bucket=' + encodeURIComponent(autoBucket(sm.bucket))];
   if (sm.by) qs.push('by=' + encodeURIComponent(sm.by));
-  get('/api/sessions-over-time?' + qs.join('&')).then(function (d) {
+  get('/api/sessions-over-time?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sm-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderSm(d);
   });
@@ -53,8 +51,6 @@ export function loadSessionsOverTime() {
 
 export function renderSm(d) {
   var ov = d.overall || { total: 0, points: [] };
-  var big = $('#sm-big');
-  if (big) big.innerHTML = num(ov.total) + ' <span class="metric-sub">all time</span>';
   if (d.series && d.series.length) {
     var lines = d.series.map(function (s, i) {
       return {
@@ -75,6 +71,6 @@ export function renderSm(d) {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.count, filled: p.count }; });
     $('#sm-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int');
     $('#sm-legend').innerHTML = '';
-    $('#sm-note').innerHTML = esc('Sessions started per ' + state.sm.bucket + '. Break down by a dimension to split it; the distributions below are all-time.');
+    $('#sm-note').innerHTML = esc('Sessions started per ' + autoBucket(state.sm.bucket) + '. Break down by a dimension to split it.');
   }
 }

@@ -23,11 +23,18 @@ export interface ClientState {
   measures: any[]
   metric: string | null // which headline KPI's detail view is open (null = overview)
   outcomeTypes: any[]
+  days: number | 'all' // top-level KPI window (drives the whole headline row + cost-artifact curves)
   sr: { outcomes: string[]; bucket: string; by: string } // success-rate detail controls
-  ca: { kind: string; days: number | 'all'; bucket: string; defaultKind: string } // cost-per-artifact detail controls
+  // cost-per-artifact detail controls. `kind` follows defaultKind until the user
+  // toggles it (userPicked), after which it sticks and the headline tile mirrors
+  // it. `bucket` is the curve granularity: '' = auto-derived from the window;
+  // a manual pick overrides until the window changes.
+  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string }
   spend: { bucket: string; by: string } // total-spend detail controls
   sm: { bucket: string; by: string } // sessions detail controls
-  ops: { view: string; bucket: string; by: boolean } // operational detail controls
+  // operational detail: one shared bucket, plus a per-graph "break down by name"
+  // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
+  ops: { bucket: string; by: Record<string, boolean> }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
 }
 
@@ -35,13 +42,35 @@ export var state: ClientState = {
   artKind: 'feature', overview: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
-  sr: { outcomes: ['session_success'], bucket: 'week', by: '' },
-  ca: { kind: 'feature', days: 7, bucket: 'week', defaultKind: 'feature' },
-  spend: { bucket: 'week', by: '' },
-  sm: { bucket: 'week', by: '' },
-  ops: { view: 'error_rate', bucket: 'week', by: false },
+  days: 7,
+  // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
+  // overrides until the window changes. Uniform across every expansion.
+  sr: { outcomes: ['session_success'], bucket: '', by: '' },
+  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '' },
+  spend: { bucket: '', by: '' },
+  sm: { bucket: '', by: '' },
+  ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
   ac: { items: [], sel: -1 }
 };
+
+// The success-rate detail controls persist across reloads: the user's "what
+// counts as success" (and the breakdown) becomes their default until they change
+// it again. Stored client-side, so the windowed KPI passes the same outcomes to
+// the server to stay consistent (see loadKpis). Bucket is intentionally NOT
+// persisted — it auto-derives from the window.
+var SR_PREFS_KEY = 'aivue.sr';
+function loadSrPrefs() {
+  try {
+    var saved = JSON.parse(localStorage.getItem(SR_PREFS_KEY) || 'null');
+    if (!saved || typeof saved !== 'object') return;
+    if (Array.isArray(saved.outcomes)) state.sr.outcomes = saved.outcomes.filter(function (x) { return typeof x === 'string'; });
+    if (typeof saved.by === 'string') state.sr.by = saved.by;
+  } catch (e) { /* malformed or unavailable storage → keep defaults */ }
+}
+export function saveSrPrefs() {
+  try { localStorage.setItem(SR_PREFS_KEY, JSON.stringify({ outcomes: state.sr.outcomes, by: state.sr.by })); } catch (e) { /* ignore */ }
+}
+loadSrPrefs();
 
 export function $(s) { return document.querySelector(s); }
 export function esc(s) {
@@ -75,8 +104,10 @@ export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', 
 
 // A delta badge comparing this window's value to the prior window's. mode:
 // 'points' for rates (absolute percentage-point change), 'rel' for everything
-// else (relative % change). good = which direction is favorable ('up'|'down'),
-// or null for neutral metrics (spend/sessions) which show the change uncolored.
+// else (relative % change). good = which direction is favorable ('up'|'down'):
+// the change is green when favorable, red when not. good=null marks a neutral
+// metric (spend/sessions) with no better/worse direction — its change shows in
+// the brand green (the accent) rather than greyed out, to match the other tiles.
 export function kpiDelta(cur, prev, mode, good) {
   if (cur == null || prev == null) return '';
   var diff;
@@ -92,7 +123,31 @@ export function kpiDelta(cur, prev, mode, good) {
     text = (diff > 0 ? '+' : '') + Math.round(diff) + '%';
   }
   var dir = diff > 0 ? 'up' : 'down';
-  var cls = good == null ? 'flat' : (dir === good ? 'good' : 'bad');
+  var cls = good == null ? 'good' : (dir === good ? 'good' : 'bad');
   var arrow = diff > 0 ? '▲' : '▼';
   return '<span class="delta ' + cls + '">' + arrow + ' ' + esc(text) + '</span>';
+}
+
+// ---- window + bucket helpers (shared by every KPI expansion) ----------------
+
+// An appropriate curve granularity for the selected window: fine buckets for
+// short spans, coarse for long ones, so charts stay readable.
+export function bucketForWindow(days) {
+  if (days === 'all') return 'month';
+  if (days <= 31) return 'day';
+  if (days <= 180) return 'week';
+  return 'month';
+}
+
+// The effective bucket for an expansion: the user's manual pick ('' = none), or
+// the window-derived default. Manual picks are cleared on window change.
+export function autoBucket(b) { return b || bucketForWindow(state.days); }
+
+// Query fragment ('&from=…&to=…') pinning an expansion's data to the selected
+// window; '' for the all-time window. Appended to an already-non-empty query.
+export function windowQs() {
+  if (state.days === 'all') return '';
+  var span = state.days * 86400000, now = Date.now();
+  return '&from=' + encodeURIComponent(new Date(now - span).toISOString()) +
+    '&to=' + encodeURIComponent(new Date(now).toISOString());
 }

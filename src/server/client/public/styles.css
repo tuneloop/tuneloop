@@ -35,7 +35,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .delta.bad { color: var(--red); }
 .delta.flat { color: var(--muted); }
 .tile .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.kpi-caption { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.kpi-caption { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.win-cap { white-space: nowrap; }
 .tile.clickable { cursor: pointer; transition: border-color .12s, box-shadow .12s; }
 .tile.clickable:hover { border-color: var(--emerald); }
 .tile.clickable .label::after { content: " ›"; color: var(--muted); }
@@ -52,6 +53,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-check input { accent-color: var(--emerald); }
 .sr-cnt { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .sr-by { border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
+.sr-by-ctrl { display: inline-flex; align-items: center; gap: 8px; }
 .sr-legend { margin-top: 10px; }
 .sr-legend .leg { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
 .sr-legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }

@@ -1,6 +1,6 @@
 // Total spend detail (the burn / spend-breakdown view): spend over time, with
 // an optional split into one usage/session-grain cohort line per facet value.
-import { state, $, esc, usd, SR_PALETTE, get } from '../core'
+import { state, $, esc, usd, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { valueLineChart, stackChart } from '../charts'
 import { spendBreakdownFacets } from '../facets'
 
@@ -8,7 +8,6 @@ export function renderTotalSpend() {
   $('#metric-detail').innerHTML =
     '<div class="metric-head">' +
       '<h2>Total spend</h2>' +
-      '<div class="metric-big" id="sp-big">—</div>' +
     '</div>' +
     '<div class="panel">' +
       '<div class="sr-controls" id="sp-controls"></div>' +
@@ -22,8 +21,9 @@ export function renderTotalSpend() {
 
 export function renderSpendControls() {
   var sp = state.spend;
+  var activeBucket = autoBucket(sp.bucket);
   var bucketBtns = ['day', 'week', 'month'].map(function (b) {
-    return '<button class="' + (b === sp.bucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
+    return '<button class="' + (b === activeBucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
   var byOpts = '<option value="">none</option>';
   spendBreakdownFacets().forEach(function (f) {
@@ -41,9 +41,9 @@ export function renderSpendControls() {
 
 export function loadTotalSpend() {
   var sp = state.spend;
-  var qs = ['bucket=' + encodeURIComponent(sp.bucket)];
+  var qs = ['bucket=' + encodeURIComponent(autoBucket(sp.bucket))];
   if (sp.by) qs.push('by=' + encodeURIComponent(sp.by));
-  get('/api/spend-over-time?' + qs.join('&')).then(function (d) {
+  get('/api/spend-over-time?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sp-chart').innerHTML = '<div class="empty">' + esc(d && d.error ? d.error : 'No data.') + '</div>'; return; }
     renderSpend(d);
   });
@@ -51,10 +51,6 @@ export function loadTotalSpend() {
 
 export function renderSpend(d) {
   var ov = d.overall || { total: 0, points: [] };
-  var analysis = (state.overview && state.overview.analysisCostUsd) || 0;
-  var big = $('#sp-big');
-  if (big) big.innerHTML = usd(ov.total) +
-    ' <span class="metric-sub">all time' + (analysis > 0 ? ' &middot; ' + usd(analysis) + ' analysis (enrichment)' : '') + '</span>';
   if (d.series && d.series.length) {
     var lines = d.series.map(function (s, i) {
       return {
@@ -75,6 +71,6 @@ export function renderSpend(d) {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.spend, filled: p.spend }; });
     $('#sp-chart').innerHTML = stackChart(d.buckets || [], barPts, 'usd');
     $('#sp-legend').innerHTML = '';
-    $('#sp-note').innerHTML = esc('Spend per ' + state.spend.bucket + ', dated at session start. Break down by a dimension to split it.');
+    $('#sp-note').innerHTML = esc('Spend per ' + autoBucket(state.spend.bucket) + ', dated at session start. Break down by a dimension to split it.');
   }
 }

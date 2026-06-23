@@ -2,6 +2,30 @@
 // and returns a markup string, so callers just drop the result into innerHTML.
 import { esc, usd, num, fmtVal } from './core'
 
+// An x-axis tick label that won't clip at the SVG edges. A centered label near
+// the left/right plot bound would spill past the viewBox and get cut off (e.g.
+// a final week label like "2026-W25" losing its number); flipping to start/end
+// anchoring at the bound keeps the whole label inside.
+function xTick(x, y, text, leftEdge, rightEdge) {
+  var s = String(text);
+  var half = s.length * 3; // ≈ half the rendered width at 10px
+  var anchor = 'middle', tx = x;
+  if (x - half < leftEdge) { anchor = 'start'; tx = leftEdge; }
+  else if (x + half > rightEdge) { anchor = 'end'; tx = rightEdge; }
+  return '<text x="' + tx.toFixed(1) + '" y="' + y + '" text-anchor="' + anchor + '">' + esc(s) + '</text>';
+}
+
+// Round a rate (0–1) up to a tidy axis top whose quarters land on clean
+// percentages (e.g. 0.037 → 0.04, giving 1/2/3/4% gridlines). Capped at 100%.
+function niceCeilRate(v) {
+  if (!(v > 0)) return 0.04; // no data / all-zero: a small honest 0–4% axis
+  var quarter = v / 4;
+  var pow = Math.pow(10, Math.floor(Math.log10(quarter)));
+  var n = quarter / pow;
+  var nice = n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10;
+  return Math.min(nice * pow * 4, 1);
+}
+
 export function bars(rows, keyName) {
   if (!rows || !rows.length) return '<div class="empty">No data yet.</div>';
   var max = 0;
@@ -64,32 +88,48 @@ export function barChart(buckets, points) {
       var tip = b + ': ' + p.num + '/' + p.denom + ' succeeded (' + (p.rate != null ? Math.round(p.rate * 100) : 0) + '%)';
       svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
     }
-    if (i % step === 0) svg += '<text x="' + (padL + i * bw + bw / 2) + '" y="' + (H - padB + 14) + '" text-anchor="middle">' + esc(b) + '</text>';
+    if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
   svg += '</svg>';
   return svg;
 }
 
-// Multi-series line chart on a fixed 0–100% y-axis. buckets = x-axis labels;
+// Multi-series line chart on a percent y-axis (0–100% by default, or scaled to
+// the data with opts.adaptive). buckets = x-axis labels;
 // lines = [{label,color,points:[{bucket,rate,num,denom}]}]. Each line aligns to
 // the global bucket axis; buckets a line has no data for become gaps. Sample
 // size per point lives in the hover tooltip (successes/total) — it can't share
 // this percent axis.
-export function lineChart(buckets, lines) {
+export function lineChart(buckets, lines, opts?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
   var W = 920, H = 240, padL = 36, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
+  // Y-axis top: full 100% by default (an honest absolute scale for success rate);
+  // opts.adaptive scales to the data so small rates (e.g. error rates of a few %)
+  // fill the chart instead of hugging the bottom. The nice-rounded top keeps the
+  // quartile gridlines on clean percentages.
+  var maxRate = 1;
+  if (opts && opts.adaptive) {
+    var dmax = 0;
+    lines.forEach(function (l) {
+      (l.points || []).forEach(function (p) { if (p && p.rate != null && p.denom > 0 && p.rate > dmax) dmax = p.rate; });
+    });
+    maxRate = niceCeilRate(dmax);
+  }
   var xOf = function (i) { return padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW); };
-  var yOf = function (r) { return padT + (1 - r) * plotH; };
+  var yOf = function (r) { return padT + (1 - r / maxRate) * plotH; };
   var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
   [0, 0.25, 0.5, 0.75, 1].forEach(function (g) {
-    var y = yOf(g);
+    var val = g * maxRate, y = yOf(val), pct = val * 100;
+    // One decimal on a small adaptive axis so the quarter ticks don't all round
+    // to the same integer percent; whole numbers otherwise.
+    var lbl = (maxRate < 0.04 ? pct.toFixed(1) : String(Math.round(pct))) + '%';
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
-    svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + Math.round(g * 100) + '%</text>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + lbl + '</text>';
   });
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
-    if (i % step === 0) svg += '<text x="' + xOf(i) + '" y="' + (H - padB + 14) + '" text-anchor="middle">' + esc(b) + '</text>';
+    if (i % step === 0) svg += xTick(xOf(i), H - padB + 14, b, padL, W - padR);
   });
   lines.forEach(function (l) {
     var byBucket = {};
@@ -147,7 +187,7 @@ export function stackChart(buckets, points, format) {
         : b + ': ' + num(p.total);
       svg += '<rect x="' + x + '" y="' + top + '" width="' + w + '" height="' + (base - top) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
     }
-    if (i % step === 0) svg += '<text x="' + (padL + i * bw + bw / 2) + '" y="' + (H - padB + 14) + '" text-anchor="middle">' + esc(b) + '</text>';
+    if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
   svg += '</svg>';
   return svg;
@@ -174,7 +214,7 @@ export function valueLineChart(buckets, lines, format) {
   });
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
-    if (i % step === 0) svg += '<text x="' + xOf(i) + '" y="' + (H - padB + 14) + '" text-anchor="middle">' + esc(b) + '</text>';
+    if (i % step === 0) svg += xTick(xOf(i), H - padB + 14, b, padL, W - padR);
   });
   lines.forEach(function (l) {
     var byB = {};
