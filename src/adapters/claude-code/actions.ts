@@ -31,7 +31,7 @@ export function mapAction(name: string, input: unknown): MappedAction {
     return { action: 'shell', target: { command: typeof obj.command === 'string' ? obj.command : undefined } }
   }
   if (SEARCH.has(name)) return { action: 'search', target: {} }
-  if (name === 'Task') return { action: 'task_spawn', target: {} }
+  if (name === 'Task' || name === 'Agent') return { action: 'task_spawn', target: {} }
   if (name === 'TodoWrite') return { action: 'todo', target: {} }
   if (name === 'Skill') {
     const skill = typeof obj.skill === 'string' ? obj.skill : undefined

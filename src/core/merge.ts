@@ -1,6 +1,6 @@
 import { contentHash } from './hash'
 import { addUsage, emptyUsage } from './model'
-import type { Event, Session, ToolCall } from './model'
+import type { Event, Session, SubagentMeta, ToolCall } from './model'
 
 /**
  * Merge files that share a session id into one session. Claude Code can split a
@@ -18,6 +18,9 @@ export function mergeSessions(group: Session[]): Session {
   let tokens = emptyUsage()
   const events: Event[] = []
   const toolCalls: ToolCall[] = []
+  // Subagents come from the per-sidechain files; merging gathers them all onto
+  // the one logical session (deduped by agentId).
+  const subagents = new Map<string, SubagentMeta>()
   let title: string | undefined
   let cwd: string | undefined
   let branch: string | undefined
@@ -30,6 +33,7 @@ export function mergeSessions(group: Session[]): Session {
     tokens = addUsage(tokens, s.tokens)
     events.push(...s.events)
     toolCalls.push(...s.toolCalls)
+    for (const sa of s.subagents ?? []) if (!subagents.has(sa.agentId)) subagents.set(sa.agentId, sa)
     title ??= s.title
     cwd ??= s.project.cwd
     branch ??= s.project.branch
@@ -48,6 +52,7 @@ export function mergeSessions(group: Session[]): Session {
     tokens,
     events,
     toolCalls,
+    subagents: subagents.size ? [...subagents.values()] : undefined,
     // Hash over all member files so the cache invalidates when any of them change.
     raw: { path: first.raw.path, contentHash: contentHash(sorted.map((s) => s.raw.contentHash).join(':')) },
   }

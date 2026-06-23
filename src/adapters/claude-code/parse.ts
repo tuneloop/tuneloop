@@ -7,6 +7,7 @@ import type {
   ContentBlock,
   Event,
   Session,
+  SubagentMeta,
   SystemEvent,
   TokenUsage,
   ToolCall,
@@ -14,7 +15,10 @@ import type {
 } from '../../core/model'
 import { mapAction } from './actions'
 
-export const PARSE_VERSION = 3
+// Bump when ingest-time derivation changes so stored sessions are rebuilt on the
+// same bytes (see analyze.ts). 4: capture subagent identity (agentId on events +
+// session.subagents from the sidechain `.meta.json`) for the tabbed transcript.
+export const PARSE_VERSION = 4
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -62,6 +66,10 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
 
   const events: Event[] = []
   const toolCalls: ToolCall[] = []
+  // Distinct subagent ids seen in this file. Claude Code writes each subagent to
+  // its own transcript file (records tagged with `agentId`), so in practice this
+  // is a single id, but we collect the set to stay robust.
+  const agentIds = new Set<string>()
   const models = new Set<string>()
   let tokens = emptyUsage()
   let title: string | undefined
@@ -81,6 +89,8 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
     if (r.type === 'ai-title' && typeof r.aiTitle === 'string') title = r.aiTitle
 
     const isSidechain = !!r.isSidechain
+    const agentId = typeof r.agentId === 'string' ? r.agentId : undefined
+    if (agentId) agentIds.add(agentId)
 
     if (r.type === 'assistant' && r.message) {
       const m = r.message
@@ -121,6 +131,7 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
         parentUuid: r.parentUuid ?? null,
         ts,
         isSidechain,
+        agentId,
         model,
         blocks,
         usage,
@@ -149,6 +160,7 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
         parentUuid: r.parentUuid ?? null,
         ts,
         isSidechain,
+        agentId,
         text,
         blocks,
       }
@@ -160,11 +172,21 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
         parentUuid: r.parentUuid ?? null,
         ts,
         isSidechain,
+        agentId,
         subtype: typeof r.subtype === 'string' ? r.subtype : undefined,
         text: typeof r.content === 'string' ? r.content : undefined,
       }
       events.push(ev)
     }
+  }
+
+  // A sidechain file carries one (occasionally more) subagent. Its sibling
+  // `<file>.meta.json` names the subagent type/description and the parent tool
+  // call that spawned it, which is what links the call to this transcript.
+  let subagents: SubagentMeta[] | undefined
+  if (agentIds.size) {
+    const meta = await readAgentMeta(path)
+    subagents = [...agentIds].map((agentId) => ({ agentId, ...meta }))
   }
 
   return {
@@ -180,7 +202,28 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
     tokens,
     events,
     toolCalls,
+    subagents,
     raw: { path, contentHash: contentHash(content) },
+  }
+}
+
+/**
+ * Read a subagent transcript's sibling `<file>.meta.json`, returning the fields
+ * the viewer links/labels by. Missing or malformed → empty (the subagent still
+ * gets a tab keyed by its `agentId`, just without a type/description/link).
+ */
+async function readAgentMeta(jsonlPath: string): Promise<Omit<SubagentMeta, 'agentId'>> {
+  const metaPath = jsonlPath.replace(/\.jsonl$/, '.meta.json')
+  if (metaPath === jsonlPath) return {}
+  try {
+    const m = JSON.parse(await readFile(metaPath, 'utf8')) as Raw
+    return {
+      agentType: typeof m.agentType === 'string' ? m.agentType : undefined,
+      description: typeof m.description === 'string' ? m.description : undefined,
+      toolUseId: typeof m.toolUseId === 'string' ? m.toolUseId : undefined,
+    }
+  } catch {
+    return {}
   }
 }
 
