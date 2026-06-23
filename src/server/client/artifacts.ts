@@ -4,6 +4,26 @@
 import { state, $, esc, usd, dayOf, get, post } from './core'
 import { filterByArtifact } from './sessions'
 
+// PR table client-side sort + filter (the table is fully loaded, so this is pure
+// in-memory). `lastPrRows` caches the fetched rows so header clicks / filter typing
+// re-render without a refetch.
+var prSort = { key: 'costUsd', dir: -1 };
+var prFilter = '';
+var lastPrRows: any[] = [];
+var PR_COLS = [
+  { key: 'ident', label: 'Pull request' },
+  { key: 'status', label: 'Status' },
+  { key: 'sessions', label: 'Sessions' },
+  { key: 'costUsd', label: 'Cost' },
+  { key: 'completedAt', label: 'Merged' }
+];
+function prSortVal(r, key) {
+  if (key === 'ident') return ((r.repo || '') + ' ' + (r.ident || '')).toLowerCase();
+  if (key === 'status') return (r.status || '').toLowerCase();
+  if (key === 'completedAt') return r.completedAt || '';
+  return Number(r[key]) || 0; // sessions, costUsd
+}
+
 export function renderArtKindSeg() {
   var opts = [['feature', 'Features'], ['pr', 'PRs']];
   $('#artKindSeg').innerHTML = opts.map(function (o) {
@@ -16,11 +36,42 @@ export function renderArtKindSeg() {
 
 function renderArtifacts(rows, kind) {
   if (kind === 'feature') { renderFeatureManager(rows || []); return; }
-  if (!rows || !rows.length) {
+  lastPrRows = rows || [];
+  renderPrTable();
+}
+
+function renderPrTable() {
+  if (!lastPrRows.length) {
     $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>';
     return;
   }
-  var head = '<tr><th>Pull request</th><th>Status</th><th>Sessions</th><th>Cost</th><th>Merged</th><th></th></tr>';
+  // Shell (filter input + table mount) rendered once; the body re-renders on
+  // filter/sort so the input keeps focus and caret.
+  $('#artifacts').innerHTML =
+    '<div class="pr-controls"><input id="pr-filter" class="feat-search" type="search" placeholder="Filter PRs… (repo, #, title, status)" autocomplete="off" value="' + esc(prFilter) + '" />' +
+      '<span class="pr-count" id="pr-count"></span></div>' +
+    '<table id="pr-table"></table>';
+  var filter = $('#pr-filter');
+  if (filter) filter.oninput = function () { prFilter = filter.value; renderPrBody(); };
+  renderPrBody();
+}
+
+function renderPrBody() {
+  var q = prFilter.trim().toLowerCase();
+  var rows = lastPrRows.filter(function (r) {
+    if (!q) return true;
+    return ((r.repo || '') + ' #' + (r.ident || '') + ' ' + (r.title || '') + ' ' + (r.status || '')).toLowerCase().indexOf(q) !== -1;
+  });
+  rows = rows.slice().sort(function (a, b) {
+    var va = prSortVal(a, prSort.key), vb = prSortVal(b, prSort.key);
+    if (va < vb) return -prSort.dir;
+    if (va > vb) return prSort.dir;
+    return 0;
+  });
+  var head = '<tr>' + PR_COLS.map(function (c) {
+    var arrow = prSort.key === c.key ? (prSort.dir < 0 ? ' ▾' : ' ▴') : '';
+    return '<th class="pr-sort" data-sort="' + c.key + '">' + esc(c.label) + arrow + '</th>';
+  }).join('') + '<th></th></tr>';
   var body = rows.map(function (r) {
     var key = r.externalId || r.ident;
     var idLabel = (r.repo ? esc(r.repo) + ' ' : '') + '#' + esc(r.ident);
@@ -36,10 +87,38 @@ function renderArtifacts(rows, kind) {
       '<td class="num">' + esc(dayOf(r.completedAt)) + '</td>' +
       '<td><button class="btn sess-btn" data-art="' + esc(key) + '">Sessions &rarr;</button></td></tr>';
   }).join('');
-  $('#artifacts').innerHTML = '<table>' + head + body + '</table>';
+  var table = $('#pr-table');
+  if (table) table.innerHTML = head + body;
+  var cnt = $('#pr-count');
+  if (cnt) cnt.textContent = q ? rows.length + ' of ' + lastPrRows.length : '';
+  Array.prototype.forEach.call(document.querySelectorAll('.pr-sort'), function (th) {
+    th.onclick = function () {
+      var k = th.getAttribute('data-sort');
+      if (prSort.key === k) prSort.dir = -prSort.dir;
+      else { prSort.key = k; prSort.dir = (k === 'ident' || k === 'status') ? 1 : -1; }
+      renderPrBody();
+    };
+  });
   Array.prototype.forEach.call(document.querySelectorAll('.sess-btn'), function (btn) {
     btn.onclick = function () { filterByArtifact(btn.getAttribute('data-art'), 'pr'); };
   });
+}
+
+// A compact "cost by feature" bar chart above the list — spend by feature is the
+// outcome the team cares about most, so it leads the Features view.
+function featureCostChart(rows) {
+  var withCost = rows.filter(function (r) { return (r.costUsd || 0) > 0; })
+    .sort(function (a, b) { return (b.costUsd || 0) - (a.costUsd || 0); }).slice(0, 8);
+  if (!withCost.length) return '';
+  var max = withCost[0].costUsd || 1;
+  var barsHtml = withCost.map(function (r) {
+    var pct = Math.max(2, Math.round((r.costUsd / max) * 100));
+    var title = r.title || '(untitled)';
+    return '<div class="fcost-row"><span class="fcost-name" title="' + esc(title) + '">' + esc(title) + '</span>' +
+      '<span class="fcost-track"><span class="fcost-fill" style="width:' + pct + '%"></span></span>' +
+      '<span class="fcost-val">' + usd(r.costUsd) + '</span></div>';
+  }).join('');
+  return '<div class="fcost"><div class="fcost-h">Cost by feature <span class="fcost-sub">top ' + withCost.length + ' by spend</span></div>' + barsHtml + '</div>';
 }
 
 function renderFeatureManager(rows) {
@@ -47,6 +126,7 @@ function renderFeatureManager(rows) {
   if (!rows.length) {
     html += '<div class="empty">No features yet. Add one below, or enrich sessions to propose features.</div>';
   } else {
+    html += featureCostChart(rows);
     html += '<input id="feat-search" class="feat-search" type="search" placeholder="Search features…" autocomplete="off" />';
     html += '<div class="feat-list">' +
       '<div class="feat-head"><span>Feature</span><span>Repos</span><span>Last session</span><span class="fh-num">Sessions</span><span class="fh-num">Cost</span><span></span></div>';
@@ -67,22 +147,28 @@ function renderFeatureManager(rows) {
       var toTop = r.parentId
         ? '<button class="menu-item" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
         : '';
-      html += '<div class="feat-row" data-name="' + esc((r.title || '').toLowerCase()) +
+      // Prominent ship toggle in the row (the cost-per-shipped-feature KPI counts
+      // only features marked shipped, so this needs to be one click away, not buried).
+      var shipBtn = '<button class="btn ship-btn' + (shipped ? ' on' : '') + '" data-act="toggle" data-id="' + esc(r.id) +
+        '" data-completed="' + (shipped ? '1' : '0') + '" title="' + (shipped ? 'Reopen (clears its completion date)' : 'Mark shipped (sets its completion date so cost-per-shipped-feature counts it)') + '">' +
+        (shipped ? '✓ Shipped' : 'Mark shipped') + '</button>';
+      html += '<div class="feat-row" draggable="true" data-name="' + esc((r.title || '').toLowerCase()) +
         '" data-id="' + esc(r.id) + '" data-parent="' + esc(r.parentId || '') + '">' +
         '<div class="feat-name" style="padding-left:' + indent + 'px">' + twig +
-          '<span class="nm" title="' + esc(r.title || '') + '">' +
+          '<span class="feat-grip" title="Drag to nest under another feature">⠿</span>' +
+          '<span class="nm" data-id="' + esc(r.id) + '" title="' + esc(r.title || '') + '">' +
           esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + '</div>' +
         '<span class="feat-repos" title="' + esc(repos) + '">' + esc(repos) + '</span>' +
         '<span class="feat-last" title="' + esc(r.lastSessionAt || '') + '">' + esc(last) + '</span>' +
         '<span class="feat-num">' + r.sessions + '</span>' +
         '<span class="feat-num">' + usd(r.costUsd) + '</span>' +
         '<div class="feat-actions">' +
+          shipBtn +
           '<button class="btn sess-btn" data-art="' + esc(r.title || '') + '" data-kind="feature">Sessions &rarr;</button>' +
           '<div class="feat-menu-wrap">' +
             '<button class="feat-menu-btn" aria-label="More actions">&#8943;</button>' +
             '<div class="feat-menu">' +
-              '<button class="menu-item" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
-                (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
+              '<button class="menu-item" data-act="rename" data-id="' + esc(r.id) + '">Rename…</button>' +
               '<div class="menu-nest"><label>Nest under</label>' + nest + '</div>' +
               toTop +
               '<div class="menu-sep"></div>' +
@@ -92,6 +178,8 @@ function renderFeatureManager(rows) {
         '</div></div>';
     });
     html += '</div>';
+    html += '<div class="feat-hint">Drag a row by its ⠿ handle onto another to nest it. ' +
+      '“Cost per shipped feature” counts only features you’ve marked <b>✓ Shipped</b> — until then it shows “nothing converted”.</div>';
   }
   // New-feature form lives at the bottom, collapsed behind an "Add feature" button
   // to keep the list uncluttered.
@@ -229,6 +317,43 @@ function wireFeatureManager() {
       post('/api/features/update', { id: b.getAttribute('data-id'), parentId: null }).then(loadArtifacts);
     };
   });
+  // Inline rename: turn the title into an input; Enter / blur saves, Esc cancels.
+  each('#artifacts [data-act="rename"]', function (b) {
+    b.onclick = function () {
+      closeFeatMenus();
+      var row = b.closest('.feat-row');
+      var nm = row && row.querySelector('.nm');
+      if (nm) startRename(nm, b.getAttribute('data-id'));
+    };
+  });
+
+  // Drag-drop nesting: drop one feature onto another to nest it under that parent.
+  // The store rejects cycles (a parent dropped onto its own descendant).
+  var dragId = null;
+  each('#artifacts .feat-row', function (row) {
+    row.ondragstart = function (e) {
+      dragId = row.getAttribute('data-id');
+      if (e.dataTransfer) { e.dataTransfer.effectAllowed = 'move'; try { e.dataTransfer.setData('text/plain', dragId); } catch (_) { /* ignore */ } }
+      row.classList.add('dragging');
+    };
+    row.ondragend = function () {
+      dragId = null;
+      row.classList.remove('dragging');
+      each('#artifacts .feat-row.drop-target', function (r) { r.classList.remove('drop-target'); });
+    };
+    row.ondragover = function (e) {
+      if (dragId && row.getAttribute('data-id') !== dragId) { e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'; row.classList.add('drop-target'); }
+    };
+    row.ondragleave = function () { row.classList.remove('drop-target'); };
+    row.ondrop = function (e) {
+      e.preventDefault();
+      row.classList.remove('drop-target');
+      var target = row.getAttribute('data-id');
+      var src = dragId || (e.dataTransfer && e.dataTransfer.getData('text/plain'));
+      if (!src || src === target) return;
+      post('/api/features/update', { id: src, parentId: target }).then(loadArtifacts);
+    };
+  });
 
   // Local name filter. A match reveals its WHOLE subtree (so searching an epic
   // shows everything under it) plus its ancestors (so the match keeps its place
@@ -271,6 +396,31 @@ function wireFeatureManager() {
     document.addEventListener('click', closeFeatMenus);
     document.addEventListener('keydown', function (ev) { if (ev.key === 'Escape') closeFeatMenus(); });
   }
+}
+
+// Replace a feature title with an inline editor. Enter or blur commits a non-empty
+// change (POST title); Escape or an unchanged value just reloads to restore.
+function startRename(nm, id) {
+  var cur = nm.textContent || '';
+  var inp = document.createElement('input');
+  inp.className = 'feat-rename-input';
+  inp.value = cur;
+  nm.replaceWith(inp);
+  inp.focus();
+  inp.select();
+  var done = false;
+  function commit(save) {
+    if (done) return;
+    done = true;
+    var v = inp.value.trim();
+    if (save && v && v !== cur.trim()) post('/api/features/update', { id: id, title: v }).then(loadArtifacts);
+    else loadArtifacts(); // restore the row as-is
+  }
+  inp.onkeydown = function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+  };
+  inp.onblur = function () { commit(true); };
 }
 
 // Module-level so the global listeners are attached only once. closeFeatMenus is

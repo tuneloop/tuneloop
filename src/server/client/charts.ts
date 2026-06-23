@@ -15,6 +15,15 @@ function xTick(x, y, text, leftEdge, rightEdge) {
   return '<text x="' + tx.toFixed(1) + '" y="' + y + '" text-anchor="' + anchor + '">' + esc(s) + '</text>';
 }
 
+// Shared interactive-mark attributes: a `.chart-hit` carries the bucket + series
+// key it represents and the tooltip text. A single delegated hover/click layer
+// (chartui.ts) reads these — cheaper and snappier than native <title> (no browser
+// hover delay) and the same attributes power click-through to the session list.
+function hit(bucket, key, tip) {
+  return ' class="chart-hit" data-bucket="' + esc(bucket == null ? '' : bucket) +
+    '" data-key="' + esc(key == null ? '' : key) + '" data-tip="' + esc(tip) + '"';
+}
+
 // Round a rate (0–1) up to a tidy axis top whose quarters land on clean
 // percentages (e.g. 0.037 → 0.04, giving 1/2/3/4% gridlines). Capped at 100%.
 function niceCeilRate(v) {
@@ -86,7 +95,7 @@ export function barChart(buckets, points) {
       svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" rx="2" fill="#ece7dc"/>';
       svg += '<rect x="' + x + '" y="' + succTop + '" width="' + w + '" height="' + (base - succTop) + '" rx="2" fill="#0f7a55"/>';
       var tip = b + ': ' + p.num + '/' + p.denom + ' succeeded (' + (p.rate != null ? Math.round(p.rate * 100) : 0) + '%)';
-      svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
+      svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" fill="transparent"' + hit(b, '', tip) + '></rect>';
     }
     if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
@@ -142,7 +151,7 @@ export function lineChart(buckets, lines, opts?) {
         path += (run ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
         run++;
         var tip = b + ' · ' + l.label + ': ' + Math.round(p.rate * 100) + '% (' + p.num + '/' + p.denom + ')';
-        dots += '<circle cx="' + x + '" cy="' + y + '" r="2.6" fill="' + l.color + '"><title>' + esc(tip) + '</title></circle>';
+        dots += '<circle cx="' + x + '" cy="' + y + '" r="3.2" fill="' + l.color + '"' + hit(b, l.label, tip) + '></circle>';
       } else {
         run = 0; // gap: next plotted point starts a fresh subpath
       }
@@ -185,7 +194,7 @@ export function stackChart(buckets, points, format) {
       var tip = format === 'usd'
         ? b + ': ' + usd(p.filled) + ' converted of ' + usd(p.total) + ' spent'
         : b + ': ' + num(p.total);
-      svg += '<rect x="' + x + '" y="' + top + '" width="' + w + '" height="' + (base - top) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
+      svg += '<rect x="' + x + '" y="' + top + '" width="' + w + '" height="' + (base - top) + '" fill="transparent"' + hit(b, '', tip) + '></rect>';
     }
     if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
@@ -225,10 +234,52 @@ export function valueLineChart(buckets, lines, format) {
       var x = xOf(i), y = yOf(v);
       path += (i ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1) + ' ';
       var tip = b + ' · ' + l.label + ': ' + fmt(v);
-      dots += '<circle cx="' + x + '" cy="' + y + '" r="2.4" fill="' + l.color + '"><title>' + esc(tip) + '</title></circle>';
+      dots += '<circle cx="' + x + '" cy="' + y + '" r="3" fill="' + l.color + '"' + hit(b, l.label, tip) + '></circle>';
     });
     svg += '<path d="' + path.trim() + '" fill="none" stroke="' + l.color + '" stroke-width="2"/>';
     svg += dots;
+  });
+  svg += '</svg>';
+  return svg;
+}
+
+// Grouped (side-by-side) bar chart: one cluster per bucket, one bar per series.
+// lines = [{label,color,points:[{bucket,y}]}]; format ('usd'|'int') drives the
+// y-axis + hover. Replaces the multi-series VALUE line charts for breakdowns —
+// summable cohorts (spend, session counts, tool calls) read far better as bars
+// than as overlapping lines, and each bar is its own click-through target.
+export function groupedBarChart(buckets, lines, format) {
+  if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
+  if (!lines || !lines.length) return '<div class="empty">No data in range.</div>';
+  var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
+  var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length, s = lines.length;
+  var byB = lines.map(function (l) { var m = {}; (l.points || []).forEach(function (p) { m[p.bucket] = p.y; }); return m; });
+  var maxV = 0;
+  lines.forEach(function (l) { (l.points || []).forEach(function (p) { if (p.y > maxV) maxV = p.y; }); });
+  maxV = maxV || 1;
+  var yOf = function (v) { return padT + (1 - v / maxV) * plotH; };
+  var base = yOf(0), slot = plotW / n;
+  // Reserve ~18% of each slot as the gap between clusters; split the rest evenly.
+  var clusterW = slot * 0.82, barW = Math.max(1, clusterW / s), clusterPad = (slot - clusterW) / 2;
+  var fmt = function (v) { return format === 'usd' ? usd(v) : num(Math.round(v)); };
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  [0, 0.5, 1].forEach(function (g) {
+    var v = maxV * g, y = yOf(v);
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
+  });
+  var step = Math.ceil(n / 9);
+  buckets.forEach(function (b, i) {
+    var x0 = padL + i * slot + clusterPad;
+    lines.forEach(function (l, j) {
+      var v = byB[j][b] || 0;
+      if (v <= 0) return;
+      var x = x0 + j * barW, y = yOf(v), w = Math.max(1, barW - 1);
+      var tip = b + ' · ' + l.label + ': ' + fmt(v);
+      svg += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + w.toFixed(1) +
+        '" height="' + (base - y).toFixed(1) + '" fill="' + l.color + '"' + hit(b, l.label, tip) + '/>';
+    });
+    if (i % step === 0) svg += xTick(padL + i * slot + slot / 2, H - padB + 14, b, padL, W - padR);
   });
   svg += '</svg>';
   return svg;

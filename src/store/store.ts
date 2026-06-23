@@ -1050,7 +1050,12 @@ export class Store {
     const col = f.column ?? f.key
     let sql: string
     const params: unknown[] = []
-    if (f.source === 'session') {
+    if (f.source === 'feature') {
+      sql = `SELECT a.title AS value, COUNT(DISTINCT sa.session_id) AS count
+             FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+             WHERE a.kind = 'feature' AND a.title IS NOT NULL AND a.title <> ''
+             GROUP BY a.title ORDER BY count DESC`
+    } else if (f.source === 'session') {
       sql = f.multi
         ? `SELECT je.value AS value, COUNT(*) AS count
            FROM sessions s, json_each(s.${col}) je GROUP BY je.value ORDER BY count DESC`
@@ -1080,6 +1085,13 @@ export class Store {
    */
   private facetPredicate(f: FacetSpec, value: string): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
+    if (f.source === 'feature') {
+      return {
+        sql: `EXISTS (SELECT 1 FROM session_artifacts safe JOIN artifacts afe ON afe.id = safe.artifact_id
+              WHERE safe.session_id = s.id AND afe.kind = 'feature' AND afe.title = ?)`,
+        params: [value],
+      }
+    }
     if (f.source === 'session') {
       return f.multi
         ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE je.value = ?)`, params: [value] }
@@ -1234,6 +1246,12 @@ export class Store {
         `EXISTS (SELECT 1 FROM session_artifacts sa3 JOIN artifacts a3 ON a3.id = sa3.artifact_id
                  WHERE sa3.session_id = s.id AND ${conds.join(' AND ')})`,
       )
+    }
+    // Chart drill-down: same bucketExpr the time-series charts group by, so a click
+    // on a bar lands exactly on the sessions that bar counted.
+    if (f.bucket && f.bucketValue) {
+      clauses.push(`${bucketExpr('s.started_at', f.bucket)} = ?`)
+      params.push(f.bucketValue)
     }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''
     const limit = Math.min(Math.max(1, f.limit ?? 200), 1000)
@@ -1616,7 +1634,11 @@ export class Store {
       }
     }
     if (patch.parentId !== undefined && patch.parentId !== id) {
-      this.db.prepare('UPDATE artifacts SET parent_artifact_id = ? WHERE id = ?').run(patch.parentId ?? null, id)
+      // Reject a parent that would cycle (e.g. dragging a feature onto its own
+      // descendant) — drag-drop nesting calls this with arbitrary parents.
+      if (patch.parentId === null || !this.wouldCreateFeatureCycle(id, patch.parentId)) {
+        this.db.prepare('UPDATE artifacts SET parent_artifact_id = ? WHERE id = ?').run(patch.parentId ?? null, id)
+      }
     }
     if (patch.title !== undefined && patch.title.trim()) {
       this.db.prepare('UPDATE artifacts SET title = ? WHERE id = ?').run(patch.title.trim(), id)
@@ -1856,6 +1878,10 @@ export interface SessionFilter {
   artifact?: string
   /** Restrict the artifact match to a kind: file | pr | feature | ticket | commit. */
   artifactKind?: string
+  /** Chart drill-down: restrict to sessions whose start falls in one time bucket. */
+  bucket?: Bucket
+  /** The exact bucket label to match (with the same SQL expression the chart used). */
+  bucketValue?: string
   limit?: number
 }
 
@@ -1972,6 +1998,14 @@ function aggExpr(m: MeasureSpec): string {
 /** Group expression + any join/where a facet contributes to a breakdown (alias `s`/`u`/`t`). */
 function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: string } {
   const col = f.column ?? f.key
+  if (f.source === 'feature') {
+    return {
+      join: `JOIN session_artifacts fsa ON fsa.session_id = s.id
+             JOIN artifacts fafe ON fafe.id = fsa.artifact_id AND fafe.kind = 'feature'`,
+      expr: 'fafe.title',
+      where: "fafe.title IS NOT NULL AND fafe.title <> ''",
+    }
+  }
   if (f.source === 'session') {
     return f.multi
       ? { join: `, json_each(s.${col}) fje`, expr: 'fje.value' }

@@ -5,24 +5,37 @@
 import { state, $, esc, usd, num, dayOf, badge, get } from './core'
 
 export function buildFilters() {
+  var f = state.filters || {};
+  var selFacets = f.facets || {};
   var html = '';
-  state.facets.forEach(function (f) {
-    if ((f.roles || []).indexOf('filter') < 0) return;
-    var d = state.dist[f.key] || [];
+  state.facets.forEach(function (fc) {
+    if ((fc.roles || []).indexOf('filter') < 0) return;
+    var d = state.dist[fc.key] || [];
     if (!d.length) return;
-    var opts = '<option value="">' + esc(f.label || f.key) + ': all</option>';
+    var cur = selFacets[fc.key] || '';
+    var opts = '<option value="">' + esc(fc.label || fc.key) + ': all</option>';
     d.forEach(function (r) {
       if (r.value == null) return;
-      opts += '<option value="' + esc(r.value) + '">' + esc(r.value) + '</option>';
+      opts += '<option value="' + esc(r.value) + '"' + (String(r.value) === cur ? ' selected' : '') + '>' + esc(r.value) + '</option>';
     });
-    html += '<select class="facet-filter" data-key="' + esc(f.key) + '">' + opts + '</select>';
+    html += '<select class="facet-filter" data-key="' + esc(fc.key) + '">' + opts + '</select>';
   });
-  html += '<select id="f-artKind"><option value="">artifact: any</option><option value="file">file</option><option value="pr">PR</option><option value="feature">feature</option></select>' +
+  var akSel = function (v) { return f.artifactKind === v ? ' selected' : ''; };
+  html += '<select id="f-artKind"><option value="">artifact: any</option>' +
+      '<option value="file"' + akSel('file') + '>file</option>' +
+      '<option value="pr"' + akSel('pr') + '>PR</option>' +
+      '<option value="feature"' + akSel('feature') + '>feature</option></select>' +
     '<span class="ac" id="f-artifact-ac">' +
-      '<input id="f-artifact" placeholder="file path / PR # / feature" autocomplete="off" />' +
+      '<input id="f-artifact" placeholder="file path / PR # / feature" autocomplete="off" value="' + esc(f.artifact || '') + '" />' +
       '<div class="ac-menu" id="f-artifact-menu"></div>' +
     '</span>' +
-    '<input id="f-q" placeholder="search title / intent" />';
+    '<input id="f-q" placeholder="search title / intent" value="' + esc(f.q || '') + '" />';
+  // Time-bucket drill chip (from a chart click) — removable on its own.
+  if (f.bucketVal) {
+    html += '<span class="filter-chip" id="f-bucket-chip">📅 ' + esc(f.bucketVal) +
+      '<button type="button" id="f-bucket-x" aria-label="Clear date filter">✕</button></span>';
+  }
+  html += '<button class="btn filter-reset" id="f-reset" type="button">Reset</button>';
   $('#filters').innerHTML = html;
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) { s.onchange = applyFilters; });
   $('#f-artKind').onchange = applyFilters;
@@ -33,6 +46,17 @@ export function buildFilters() {
   $('#f-artifact').oninput = function () { clearTimeout(t2); t2 = setTimeout(function () { acFetch(); applyFilters(); }, 200); };
   $('#f-artifact').onkeydown = acKeydown;
   $('#f-artifact').onblur = function () { setTimeout(acClose, 150); }; // delay so a click registers
+  var reset = $('#f-reset');
+  if (reset) reset.onclick = resetFilters;
+  var bx = $('#f-bucket-x');
+  if (bx) bx.onclick = function () { delete state.filters.bucketKind; delete state.filters.bucketVal; buildFilters(); loadSessions(); };
+}
+
+// Clear every session filter (facets, search, artifact, and the chart date drill).
+export function resetFilters() {
+  state.filters = {};
+  buildFilters();
+  loadSessions();
 }
 
 // ---- artifact-search typeahead (session-list filter) -----------------------
@@ -106,12 +130,29 @@ export function applyFilters() {
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) {
     if (s.value) facets[s.getAttribute('data-key')] = s.value;
   });
+  var prev = state.filters || {};
   state.filters = {
     facets: facets,
     q: $('#f-q') ? $('#f-q').value : '',
     artifact: $('#f-artifact') ? $('#f-artifact').value : '',
-    artifactKind: $('#f-artKind') ? $('#f-artKind').value : ''
+    artifactKind: $('#f-artKind') ? $('#f-artKind').value : '',
+    // The chart date drill isn't a DOM control; carry it across refinements until
+    // its chip ✕ or Reset clears it.
+    bucketKind: prev.bucketKind,
+    bucketVal: prev.bucketVal
   };
+  loadSessions();
+}
+
+// Land on the session list filtered to one chart data point: the bucket's date
+// window (+ the broken-down series value, when present). Invoked by chartui.ts.
+export function drillToSessions(by, key, bucketKind, bucketVal) {
+  closeDrawer();
+  setView('sessions');
+  var facets = {};
+  if (by && key) facets[by] = key;
+  state.filters = { facets: facets, q: '', artifact: '', artifactKind: '', bucketKind: bucketKind, bucketVal: bucketVal };
+  buildFilters(); // re-renders selects pre-set from state.filters + the date chip
   loadSessions();
 }
 
@@ -447,7 +488,7 @@ export function openDetail(id) {
           ? '<div class="tx-error-b">' + esc(x.error) + '</div>'
           : '<div class="tx-error-b muted">(no error detail captured)</div>') + '</div>';
     }
-    function toolsHtml(tools) {
+    function toolsChips(tools) {
       var head = tools.slice(0, TOOLCAP).map(chipHtml).join('');
       var restArr = tools.slice(TOOLCAP);
       var rest = restArr.length
@@ -455,8 +496,13 @@ export function openDetail(id) {
           '<button class="tool-more" type="button" data-n="' + restArr.length + '">+ ' + restArr.length +
           ' more tool call' + (restArr.length > 1 ? 's' : '') + '</button>'
         : '';
-      var panels = tools.filter(function (x) { return !x.ok; }).map(errPanelHtml).join('');
-      return '<div class="tools">' + head + rest + '</div>' + panels;
+      return '<div class="tools">' + head + rest + '</div>';
+    }
+    function errPanels(tools) {
+      return tools.filter(function (x) { return !x.ok; }).map(errPanelHtml).join('');
+    }
+    function toolsHtml(tools) {
+      return toolsChips(tools) + errPanels(tools);
     }
     // Message text, collapsed to a preview with a Show more/less toggle when long
     // (assistant/user text is capped at 20k server-side; this keeps walls of text
@@ -475,8 +521,12 @@ export function openDetail(id) {
     var run = null;        // tools accumulated from consecutive tool-only turns
     function flushRun() {
       if (run && run.length) {
-        blocks.push('<div class="turn asst toolrun"><div class="role">Tool calls · ' + run.length + '</div>' +
-          toolsHtml(run) + '</div>');
+        // Collapsed by default — a long run of tool calls is noise until you want
+        // it. Error panels stay OUTSIDE the collapsed body so failures (and the
+        // error stepper's jump targets) remain visible at a glance.
+        blocks.push('<div class="turn asst toolrun collapsed">' +
+          '<button class="toolrun-head" type="button"><span class="fc-caret">▾</span> Tool calls · ' + run.length + '</button>' +
+          '<div class="toolrun-body">' + toolsChips(run) + '</div>' + errPanels(run) + '</div>');
       }
       run = null;
     }
@@ -624,6 +674,10 @@ export function openDetail(id) {
         b.textContent = open ? '– show fewer' : '+ ' + n + ' more tool call' + (n > 1 ? 's' : '');
       };
     });
+    // Collapse/expand a coalesced tool-call run (collapsed by default).
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .toolrun-head'), function (b) {
+      b.onclick = function () { b.parentNode.classList.toggle('collapsed'); };
+    });
     // Expand a chip's truncated command in place (the chip becomes a full-width block).
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tgt-more'), function (b) {
       b.onclick = function (e) {
@@ -738,10 +792,10 @@ export function openDetail(id) {
 export function filterByArtifact(text, kind) {
   closeDrawer();
   setView('sessions');
-  var ak = $('#f-artKind'), af = $('#f-artifact');
-  if (ak) ak.value = kind || '';
-  if (af) af.value = text || '';
-  applyFilters();
+  // A fresh artifact pivot clears any prior filters incl. the chart date drill.
+  state.filters = { facets: {}, q: '', artifact: text || '', artifactKind: kind || '' };
+  buildFilters();
+  loadSessions();
 }
 
 export function closeDrawer() { $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on'); }
@@ -764,5 +818,9 @@ export function loadSessions() {
   if (f.q) qs.push('q=' + encodeURIComponent(f.q));
   if (f.artifact) qs.push('artifact=' + encodeURIComponent(f.artifact));
   if (f.artifactKind) qs.push('artifact_kind=' + encodeURIComponent(f.artifactKind));
+  if (f.bucketKind && f.bucketVal) {
+    qs.push('bucket=' + encodeURIComponent(f.bucketKind));
+    qs.push('bucketval=' + encodeURIComponent(f.bucketVal));
+  }
   get('/api/sessions' + (qs.length ? '?' + qs.join('&') : '')).then(renderSessions);
 }

@@ -1,7 +1,7 @@
 // Session success rate detail (headline metric #1): outcome-set picker, bucket
 // selector, optional breakdown into per-cohort rate lines, and the overall
 // stacked-volume bar when not broken down.
-import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs } from '../core'
+import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, legendHtml, wireLegend } from '../core'
 import { loadKpis } from '../kpis'
 import { lineChart, barChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
@@ -82,21 +82,25 @@ export function renderRateChart(d) {
   // mark, honest about sample size); breakdown → rate lines (bars don't compose
   // across many series), with faint volume bars behind for that sample-size cue.
   var note = '';
+  var hidden = state.sr.hidden;
+  var chart = $('#sr-chart');
+  chart.setAttribute('data-drillbucket', autoBucket(state.sr.bucket));
+  chart.setAttribute('data-drillby', state.sr.by || '');
   if (d.series && d.series.length) {
     var lines = d.series.map(function (s, i) {
       return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };
     });
-    $('#sr-chart').innerHTML = lineChart(d.buckets || [], lines);
-    $('#sr-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
-    }).join('');
+    var shown = lines.filter(function (l) { return !hidden[l.label]; });
+    chart.innerHTML = lineChart(d.buckets || [], shown);
+    $('#sr-legend').innerHTML = legendHtml(lines, hidden, function (l) { return l.label; },
+      function (l) { return l.rate != null ? Math.round(l.rate * 100) + '%' : ''; });
+    wireLegend('#sr-legend', hidden, loadSuccessRate);
     note = d.truncated
       ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' values by session volume. '
       : '';
-    note += 'Each line is one cohort. Hover a point to see its sessions (successes / total).';
+    note += 'Each line is one cohort; click a legend entry to show/hide it. Hover a point to see its sessions (successes / total), or click to list them.';
   } else {
-    $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || []);
+    chart.innerHTML = barChart(d.buckets || [], ov.points || []);
     $('#sr-legend').innerHTML =
       '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>successful</span>' +
       '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no success outcome</span>';

@@ -1,7 +1,7 @@
 // Total spend detail (the burn / spend-breakdown view): spend over time, with
 // an optional split into one usage/session-grain cohort line per facet value.
-import { state, $, esc, usd, SR_PALETTE, get, autoBucket, windowQs } from '../core'
-import { valueLineChart, stackChart } from '../charts'
+import { state, $, esc, usd, SR_PALETTE, get, autoBucket, windowQs, legendHtml, wireLegend } from '../core'
+import { groupedBarChart, stackChart } from '../charts'
 import { spendBreakdownFacets } from '../facets'
 
 export function renderTotalSpend() {
@@ -51,6 +51,10 @@ export function loadTotalSpend() {
 
 export function renderSpend(d) {
   var ov = d.overall || { total: 0, points: [] };
+  var hidden = state.spend.hidden;
+  var chart = $('#sp-chart');
+  chart.setAttribute('data-drillbucket', autoBucket(state.spend.bucket));
+  chart.setAttribute('data-drillby', state.spend.by || '');
   if (d.series && d.series.length) {
     var lines = d.series.map(function (s, i) {
       return {
@@ -58,19 +62,18 @@ export function renderSpend(d) {
         points: s.points.map(function (p) { return { bucket: p.bucket, y: p.spend }; })
       };
     });
-    $('#sp-chart').innerHTML = valueLineChart(d.buckets || [], lines, 'usd');
-    $('#sp-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        ' <span class="sr-cnt">' + usd(l.total) + '</span></span>';
-    }).join('');
+    var shown = lines.filter(function (l) { return !hidden[l.label]; });
+    chart.innerHTML = groupedBarChart(d.buckets || [], shown, 'usd');
+    $('#sp-legend').innerHTML = legendHtml(lines, hidden, function (l) { return l.label; }, function (l) { return usd(l.total); });
+    wireLegend('#sp-legend', hidden, loadTotalSpend);
     var note = d.truncated ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by spend. ' : '';
-    note += 'Each line is one cohort. Hover a point for that bucket spend.';
-    if (d.presenceInflated) note += ' Sessions can carry several values here, so the lines sum to more than total spend.';
+    note += 'Each bar is one cohort. Click a bar to see its sessions.';
+    if (d.presenceInflated) note += ' Sessions can carry several values here, so the bars sum to more than total spend.';
     $('#sp-note').innerHTML = esc(note);
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.spend, filled: p.spend }; });
-    $('#sp-chart').innerHTML = stackChart(d.buckets || [], barPts, 'usd');
+    chart.innerHTML = stackChart(d.buckets || [], barPts, 'usd');
     $('#sp-legend').innerHTML = '';
-    $('#sp-note').innerHTML = esc('Spend per ' + autoBucket(state.spend.bucket) + ', dated at session start. Break down by a dimension to split it.');
+    $('#sp-note').innerHTML = esc('Spend per ' + autoBucket(state.spend.bucket) + ', dated at session start. Click a bar to see its sessions, or break down by a dimension to split it.');
   }
 }

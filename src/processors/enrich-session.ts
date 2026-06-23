@@ -38,7 +38,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 8,
+  version: 9,
   kind: 'enrichment',
   needs: { llm: true },
   facets: [
@@ -69,7 +69,7 @@ export const enrichSession: Processor = {
       { key: 'success', value: oneOf(parsed.success, SUCCESS) },
       { key: 'intent_summary', value: str(parsed.intent_summary) },
       { key: 'decisions', value: decisionList(parsed.decisions) },
-      { key: 'topics', value: strArray(parsed.topics).slice(0, 12) },
+      { key: 'topics', value: topicList(parsed.topics) },
     ]
 
     const outcomes: OutcomeInput[] = []
@@ -175,10 +175,17 @@ function buildPrompt(session: Session, features: FeatureRef[]): { system: string
     '  "intent_summary": one sentence stating what the user set out to accomplish (the goal, not the decisions),',
     '  "decisions": string[] — the KEY decisions made during the session, newest insight last; [] if none,',
     `  "success": one of [${SUCCESS.join(', ')}],`,
-    '  "topics": short list of free-text areas touched,',
+    '  "topics": 2–5 specific technical-area tags, each a SHORT lowercase noun phrase (1–3 words) naming a subsystem, technology, or domain area touched — e.g. "authentication", "dashboard charts", "sqlite schema", "ci pipeline"; [] if none clearly apply,',
     '  "features": [ { "matched_feature_id": "<id of the most specific existing feature this session advanced, or empty>", "new_title": "<title for a NEW feature when none fit, else empty>", "parent_id": "<existing feature id to nest the new feature under, or empty for top-level>" } ],',
     '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ]',
     '}',
+    'Grade `success` strictly — do NOT default to "success": "success" only when the session clearly ACHIEVED',
+    'its stated goal (work completed and verified — tests/build pass, PR opened/merged, the user confirmed it);',
+    '"partial" when it made real progress but left the goal unmet, was interrupted, or ended with unresolved',
+    'errors; "failure" when it did not achieve the goal or was abandoned; "unknown" only when the transcript',
+    'gives no signal either way. Most exploratory, interrupted, or still-in-progress sessions are "partial", not "success".',
+    'Rules for topics: each tag is a concrete area actually worked in (a subsystem, technology, file area, or',
+    'domain), never a generic filler like "code", "task", "work", "misc", or "general"; lowercase; no duplicates.',
     'What a key decision IS: a consequential choice that shaped the work and that a teammate reviewing this',
     'session later would want to know — a technical approach chosen, a tradeoff accepted, a scope cut, a',
     'library/tool/data-model picked, or an alternative explicitly rejected. Prefer the user\'s steering and the',
@@ -340,6 +347,28 @@ function decisionList(v: unknown): string[] {
     seen.add(key)
     out.push(d)
     if (out.length >= 8) break
+  }
+  return out
+}
+
+// Generic filler a weak model falls back to — dropped so topics stay meaningful.
+const TOPIC_STOP = new Set(['misc', 'other', 'general', 'various', 'code', 'task', 'tasks', 'work', 'session', 'stuff', 'changes', 'misc.'])
+
+/**
+ * Sanitize `topics` into a few clean, specific lowercase tags: trims and lowercases,
+ * drops generic filler and over-long phrases (which signal a session summary, not a
+ * tag), dedupes, and caps the count. Parallels decisionList / sanitizeList.
+ */
+function topicList(v: unknown): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of strArray(v)) {
+    const t = raw.toLowerCase().replace(/\s+/g, ' ').replace(/[.;,]+$/, '').trim()
+    if (!t || t.length > 40 || t.split(' ').length > 4) continue
+    if (TOPIC_STOP.has(t) || seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+    if (out.length >= 6) break
   }
   return out
 }

@@ -311,3 +311,68 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 @keyframes flashpulseR { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 2px transparent; } }
 .turn.flash { animation: flashpulse 1.2s ease; }
 .tx-error.flash { animation: flashpulseR 1.2s ease; }
+
+/* ---- Chart interactions: hover tooltip + click-through ---------------------- */
+.chart-tip {
+  position: fixed; z-index: 100; pointer-events: none; opacity: 0;
+  background: var(--ink); color: #f3efe6; font-size: 12px; line-height: 1.35;
+  padding: 5px 9px; border-radius: 6px; max-width: 280px; white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(20,18,15,.22); transition: opacity .08s;
+}
+.chart-tip.on { opacity: 1; }
+/* Only marks that can drill get the pointer cue. */
+[data-drillbucket] .chart-hit { cursor: pointer; }
+/* Toggle legend entries (breakdown series show/hide). */
+.sr-legend .leg.toggle { cursor: pointer; user-select: none; }
+.sr-legend .leg.toggle:hover { color: var(--ink); }
+.sr-legend .leg.toggle.off { opacity: .45; text-decoration: line-through; }
+
+/* ---- Session filter bar: reset + chart drill chip -------------------------- */
+.filter-reset { align-self: center; }
+.filter-chip {
+  display: inline-flex; align-items: center; gap: 6px; align-self: center;
+  background: #eaf3ec; border: 1px solid #cde2d3; color: var(--emerald);
+  border-radius: 999px; padding: 4px 6px 4px 11px; font-size: 12px;
+}
+.filter-chip button { border: 0; background: none; color: var(--emerald); cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; }
+.filter-chip button:hover { color: var(--red); }
+
+/* ---- PR list: filter + sortable headers ----------------------------------- */
+.pr-controls { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.pr-controls .feat-search { margin-bottom: 0; flex: 1; }
+.pr-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+th.pr-sort { cursor: pointer; user-select: none; }
+th.pr-sort:hover { color: var(--ink); }
+
+/* ---- Feature manager: cost chart, ship button, drag-drop, rename ----------- */
+.fcost { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; background: var(--paper); }
+.fcost-h { font-family: Georgia, serif; font-size: 14px; margin-bottom: 10px; }
+.fcost-sub { font-family: ui-sans-serif, system-ui, sans-serif; font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+.fcost-row { display: grid; grid-template-columns: minmax(120px, 220px) 1fr 70px; align-items: center; gap: 10px; margin: 6px 0; font-size: 13px; }
+.fcost-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fcost-track { background: var(--track); border-radius: 4px; height: 10px; overflow: hidden; }
+.fcost-fill { display: block; background: var(--emerald); height: 100%; }
+.fcost-val { text-align: right; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.feat-grip { color: var(--gray); cursor: grab; font-size: 12px; user-select: none; }
+.feat-row.dragging { opacity: .5; }
+.feat-row.drop-target { background: #eaf3ec; box-shadow: inset 0 0 0 2px var(--emerald); border-radius: 6px; }
+.ship-btn.on { border-color: var(--emerald); color: var(--emerald); background: #e2f0e8; }
+.feat-rename-input { border: 1px solid var(--emerald); border-radius: 6px; padding: 2px 6px; font-size: 13px; background: var(--paper); color: var(--ink); min-width: 160px; }
+.feat-rename-input:focus { outline: none; }
+.feat-hint { color: var(--muted); font-size: 11.5px; font-style: italic; margin-top: 10px; line-height: 1.5; }
+.feat-hint b { font-style: normal; color: var(--emerald); }
+.meta-note { cursor: help; border-bottom: 1px dotted #8a857b; }
+
+/* ---- Transcript: indent AI prose, collapse tool runs ----------------------- */
+/* AI text turns sit indented from the user's, so the conversation reads as a
+   back-and-forth. Tool runs (.toolrun) are NOT indented — they're an action strip. */
+.turn.asst:not(.toolrun) { margin-left: 30px; }
+.toolrun-head {
+  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; padding: 2px 0;
+}
+.toolrun-head:hover { color: var(--emerald); }
+.turn.toolrun.collapsed .toolrun-head .fc-caret { display: inline-block; transform: rotate(-90deg); }
+.turn.toolrun.collapsed .toolrun-body { display: none; }
+.toolrun-body { margin-top: 6px; }

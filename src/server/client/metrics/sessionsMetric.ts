@@ -1,7 +1,7 @@
 // Sessions detail: session count over time, optionally split into one cohort
 // line per facet value.
-import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
-import { valueLineChart, stackChart } from '../charts'
+import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs, legendHtml, wireLegend } from '../core'
+import { groupedBarChart, stackChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
 
 export function renderSessionsMetric() {
@@ -51,6 +51,10 @@ export function loadSessionsOverTime() {
 
 export function renderSm(d) {
   var ov = d.overall || { total: 0, points: [] };
+  var hidden = state.sm.hidden;
+  var chart = $('#sm-chart');
+  chart.setAttribute('data-drillbucket', autoBucket(state.sm.bucket));
+  chart.setAttribute('data-drillby', state.sm.by || '');
   if (d.series && d.series.length) {
     var lines = d.series.map(function (s, i) {
       return {
@@ -58,19 +62,18 @@ export function renderSm(d) {
         points: s.points.map(function (p) { return { bucket: p.bucket, y: p.count }; })
       };
     });
-    $('#sm-chart').innerHTML = valueLineChart(d.buckets || [], lines, 'int');
-    $('#sm-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        ' <span class="sr-cnt">' + num(l.total) + '</span></span>';
-    }).join('');
+    var shown = lines.filter(function (l) { return !hidden[l.label]; });
+    chart.innerHTML = groupedBarChart(d.buckets || [], shown, 'int');
+    $('#sm-legend').innerHTML = legendHtml(lines, hidden, function (l) { return l.label; }, function (l) { return num(l.total); });
+    wireLegend('#sm-legend', hidden, loadSessionsOverTime);
     var note = d.truncated ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by session count. ' : '';
-    note += 'Each line is one cohort. Hover a point for that bucket count.';
-    if (d.presenceInflated) note += ' A session can fall under several values here, so the lines sum to more than total sessions.';
+    note += 'Each bar is one cohort. Click a bar to see its sessions.';
+    if (d.presenceInflated) note += ' A session can fall under several values here, so the bars sum to more than total sessions.';
     $('#sm-note').innerHTML = esc(note);
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.count, filled: p.count }; });
-    $('#sm-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int');
+    chart.innerHTML = stackChart(d.buckets || [], barPts, 'int');
     $('#sm-legend').innerHTML = '';
-    $('#sm-note').innerHTML = esc('Sessions started per ' + autoBucket(state.sm.bucket) + '. Break down by a dimension to split it.');
+    $('#sm-note').innerHTML = esc('Sessions started per ' + autoBucket(state.sm.bucket) + '. Click a bar to see its sessions, or break down by a dimension to split it.');
   }
 }

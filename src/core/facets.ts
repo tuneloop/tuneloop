@@ -14,14 +14,18 @@
  *   - processor-declared facets: a processor's `facets` field (e.g. enrichment)
  */
 
-/** Where a facet's value lives — implies its grain. */
-export type FacetSource = 'session' | 'annotation' | 'tool-call' | 'usage'
+/**
+ * Where a facet's value lives — implies its grain. `feature` is special: the
+ * value is a linked feature artifact's title (via session_artifacts), so it reads
+ * at session grain but needs a join the others don't.
+ */
+export type FacetSource = 'session' | 'annotation' | 'tool-call' | 'usage' | 'feature'
 export type FacetType = 'string' | 'number' | 'boolean' | 'enum'
 
 /** The entity a row lives at. session is the coarsest; usage/tool_call are its children. */
 export type Grain = 'session' | 'usage' | 'tool_call'
 
-/** A source's grain. session-column and annotation are both per-session. */
+/** A source's grain. session-column, annotation, and feature are all per-session. */
 export function grainOf(source: FacetSource): Grain {
   return source === 'usage' ? 'usage' : source === 'tool-call' ? 'tool_call' : 'session'
 }
@@ -72,5 +76,17 @@ export const INTRINSIC_FACETS: FacetSpec[] = [
     base: "action = 'skill'",
     multi: true,
     roles: ['chart', 'filter', 'detail'],
+  },
+  {
+    // The product feature(s) a session advanced (via session_artifacts → a feature
+    // artifact's title). multi: a session can touch several features, so series
+    // sum past the total (presenceInflated). Not a 'detail' role — features already
+    // have their own section in the session drawer.
+    key: 'feature',
+    label: 'Feature',
+    type: 'string',
+    source: 'feature',
+    multi: true,
+    roles: ['chart', 'filter'],
   },
 ]
