@@ -20,20 +20,25 @@ function renderArtifacts(rows, kind) {
     $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>';
     return;
   }
-  var head = '<tr><th>Pull request</th><th>Status</th><th>Sessions</th><th>Cost</th><th>Merged</th></tr>';
+  var head = '<tr><th>Pull request</th><th>Status</th><th>Sessions</th><th>Cost</th><th>Merged</th><th></th></tr>';
   var body = rows.map(function (r) {
-    var label = (r.repo ? esc(r.repo) + ' ' : '') + '#' + esc(r.ident);
     var key = r.externalId || r.ident;
+    var idLabel = (r.repo ? esc(r.repo) + ' ' : '') + '#' + esc(r.ident);
+    var idHtml = r.externalId
+      ? '<a class="pr-link" href="' + esc(r.externalId) + '" target="_blank" rel="noopener">' + idLabel + '</a>'
+      : idLabel;
+    var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : '';
     return '<tr class="arow" data-art="' + esc(key) + '" data-kind="pr">' +
-      '<td>' + label + '</td>' +
+      '<td>' + idHtml + titleHtml + '</td>' +
       '<td>' + (r.status ? esc(r.status) : '—') + '</td>' +
       '<td class="num">' + r.sessions + '</td>' +
       '<td class="num">' + usd(r.costUsd) + '</td>' +
-      '<td class="num">' + esc(dayOf(r.completedAt)) + '</td></tr>';
+      '<td class="num">' + esc(dayOf(r.completedAt)) + '</td>' +
+      '<td><button class="btn sess-btn" data-art="' + esc(key) + '">Sessions &rarr;</button></td></tr>';
   }).join('');
   $('#artifacts').innerHTML = '<table>' + head + body + '</table>';
-  Array.prototype.forEach.call(document.querySelectorAll('.arow'), function (tr) {
-    tr.onclick = function () { filterByArtifact(tr.getAttribute('data-art'), tr.getAttribute('data-kind')); };
+  Array.prototype.forEach.call(document.querySelectorAll('.sess-btn'), function (btn) {
+    btn.onclick = function () { filterByArtifact(btn.getAttribute('data-art'), 'pr'); };
   });
 }
 
