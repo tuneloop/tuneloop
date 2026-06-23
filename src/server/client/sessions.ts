@@ -163,6 +163,182 @@ function flashEl(el) {
   el.classList.add('flash');
 }
 
+// ---- Files-changed view -----------------------------------------------------
+
+// Minimal line-level diff (LCS backtrace) → rows tagged ' ' (context), '-', '+'.
+// Hunks are small (capped server-side), so O(n·m) is fine.
+function diffLines(a, b) {
+  var A = a ? a.split('\n') : [], B = b ? b.split('\n') : [];
+  var n = A.length, m = B.length, i, j;
+  var dp = [];
+  for (i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0));
+  for (i = n - 1; i >= 0; i--)
+    for (j = m - 1; j >= 0; j--)
+      dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  var rows = []; i = 0; j = 0;
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { rows.push({ t: ' ', s: A[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { rows.push({ t: '-', s: A[i] }); i++; }
+    else { rows.push({ t: '+', s: B[j] }); j++; }
+  }
+  while (i < n) { rows.push({ t: '-', s: A[i] }); i++; }
+  while (j < m) { rows.push({ t: '+', s: B[j] }); j++; }
+  return rows;
+}
+
+var DIFF_ROW_CAP = 60;
+
+// Apply an Edit (old→new, first occurrence) to running content, so a later Write
+// to the same file can be diffed against its actual prior state.
+function applyEdit(s, oldStr, newStr) {
+  if (!oldStr) return s;
+  var i = s.indexOf(oldStr);
+  return i < 0 ? s : s.slice(0, i) + newStr + s.slice(i + oldStr.length);
+}
+
+// Diff rows for one edit given the file's running content `prev`. A Write is
+// diffed against the previous content (so repeated rewrites show their DELTA,
+// not the whole file each time); an Edit is its own old→new hunk(s). Returns the
+// rows and the updated running content.
+function editRows(e, prev) {
+  if (e.op === 'write') {
+    var content = (e.hunks[0] && e.hunks[0].ins) || '';
+    return { rows: diffLines(prev, content), next: content };
+  }
+  var rows = [], next = prev;
+  (e.hunks || []).forEach(function (h, hi) {
+    if (hi) rows.push({ t: '~', s: '' });        // separator between MultiEdit hunks
+    rows = rows.concat(diffLines(h.del, h.ins));
+    if (next) next = applyEdit(next, h.del, h.ins);
+  });
+  return { rows: rows, next: next };
+}
+
+function rowHtml(r) {
+  if (r.t === '~') return '<div class="dl sep">⋯</div>';
+  var cls = r.t === '+' ? 'add' : r.t === '-' ? 'del' : 'ctx';
+  var gut = r.t === '+' ? '+' : r.t === '-' ? '−' : ' ';
+  return '<div class="dl ' + cls + '"><span class="dg">' + gut + '</span><span class="dt">' + esc(r.s) + '</span></div>';
+}
+
+// Show just the tail of a long absolute path (last 2 dirs + filename), bolding
+// the basename; the full path stays available on hover (title).
+function shortPathHtml(p) {
+  var parts = String(p || '').split('/').filter(Boolean);
+  var base = parts.length ? parts.pop() : String(p || '');
+  var dirs = parts.slice(-2);
+  var prefix = (parts.length > dirs.length ? '…/' : '') + (dirs.length ? dirs.join('/') + '/' : '');
+  return (prefix ? '<span class="fc-dir">' + esc(prefix) + '</span>' : '') +
+    '<span class="fc-base">' + esc(base) + '</span>';
+}
+
+// Compute each edit's diff rows ONCE, in chronological order, maintaining a
+// per-file running content so consecutive Writes diff against the prior state.
+// Also attach the agent's nearest narration (its "why" at the edit's altitude).
+function prepEdits(edits, transcript) {
+  var prevByFile = {};
+  edits.forEach(function (e) {
+    e._first = !prevByFile[e.path];
+    var r = editRows(e, prevByFile[e.path] || '');
+    e._rows = r.rows;
+    prevByFile[e.path] = r.next;
+    e._add = 0; e._del = 0;
+    e._rows.forEach(function (x) { if (x.t === '+') e._add++; else if (x.t === '-') e._del++; });
+    e._narr = narrationFor(e, transcript);
+  });
+}
+
+// Nearest assistant text turn AT or before the edit's turn, but not before the
+// prompting user turn — the agent's local rationale for this specific change.
+function narrationFor(e, transcript) {
+  var lo = e.userTurn >= 0 ? e.userTurn + 1 : 0;
+  for (var k = Math.min(e.turn, transcript.length - 1); k >= lo; k--) {
+    var t = transcript[k];
+    if (t && t.role === 'assistant' && t.text) return t.text;
+  }
+  return '';
+}
+
+// Stable grouping that preserves first-seen order of keys.
+function groupBy(items, keyFn) {
+  var order = [], map = {};
+  items.forEach(function (it) {
+    var k = keyFn(it);
+    if (!(k in map)) { map[k] = []; order.push(k); }
+    map[k].push(it);
+  });
+  return order.map(function (k) { return { key: k, items: map[k] }; });
+}
+
+function sumAddDel(edits) {
+  var add = 0, del = 0;
+  edits.forEach(function (e) { add += e._add; del += e._del; });
+  return { add: add, del: del };
+}
+
+// One edit's diff block. showNarr gates the agent narration caption (deduped
+// against the previous edit by the caller). The jump-to-intent lives on the
+// enclosing prompt/note header, not per edit.
+function editHtml(e, showNarr) {
+  var rows = e._rows || [];
+  var head = rows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
+  var rest = rows.length > DIFF_ROW_CAP
+    ? '<div class="dl-rest">' + rows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
+      '<button class="fc-rows-more" type="button">+ ' + (rows.length - DIFF_ROW_CAP) + ' more lines</button>'
+    : '';
+  var verb = e.op === 'write' ? (e._first ? 'Created' : 'Rewrote') : e.op === 'multiedit' ? 'Edited · ' + e.hunks.length + ' hunks' : 'Edited';
+  var stat = ' (+' + e._add + (e._del ? ' −' + e._del : '') + ')';
+  var narr = showNarr && e._narr ? '<div class="fc-narr" title="' + esc(clipLine(e._narr, 600)) + '">▸ ' + esc(clipLine(e._narr, 240)) + '</div>' : '';
+  var diff = rows.length ? '<div class="fc-diff">' + head + rest + '</div>'
+    : '<div class="fc-noop">no textual change (or beyond the captured window)</div>';
+  return '<div class="fc-edit">' + narr +
+    '<div class="fc-edit-h"><span class="fc-op">' + esc(verb) + stat + '</span></div>' + diff + '</div>';
+}
+
+// A collapsible (collapsed by default) per-file card: header with path + stats,
+// body supplied by the caller (plain diffs under a note, or prompt-grouped in the
+// by-file view).
+function fileCardHtml(path, edits, bodyHtml) {
+  var c = sumAddDel(edits);
+  return '<div class="fc-file collapsed"><button class="fc-head" type="button">' +
+    '<span class="fc-caret">▾</span><span class="fc-path" title="' + esc(path) + '">' + shortPathHtml(path) + '</span>' +
+    '<span class="fc-stat"><span class="fc-add">+' + c.add + '</span> <span class="fc-del">−' + c.del + '</span> · ' +
+    edits.length + ' edit' + (edits.length > 1 ? 's' : '') + '</span></button>' +
+    '<div class="fc-body">' + bodyHtml + '</div></div>';
+}
+
+// User-message header (truncated preview + expand, reusing the .msg show-more).
+function msgPreviewHtml(msg) {
+  var t = String(msg || '');
+  if (!t) return '<span class="fc-pseg-empty">(work before the first prompt)</span>';
+  if (t.length <= 200) return esc(t);
+  return '<span class="msg"><span class="msg-prev">' + esc(t.slice(0, 200)) + ' …</span>' +
+    '<span class="msg-full">' + esc(t) + '</span></span><button class="msg-more" type="button">Show more ↓</button>';
+}
+
+// Within a file, group edits by the prompt that drove them and head each run with
+// the user message (+ → transcript); note captions add finer per-edit context.
+function promptSegmentsHtml(edits, transcript) {
+  return groupBy(edits, function (e) { return String(e.userTurn); }).map(function (g) {
+    var ut = parseInt(g.key, 10);
+    var msg = ut >= 0 && transcript[ut] ? transcript[ut].text : '';
+    var jump = ut >= 0 ? '<button class="fc-jump" type="button" data-u="' + ut + '" title="Open this prompt in the transcript">→ transcript</button>' : '';
+    var lastNarr = '';
+    var body = g.items.map(function (e) {
+      var show = e._narr && e._narr !== lastNarr;
+      if (e._narr) lastNarr = e._narr;
+      return editHtml(e, show);
+    }).join('');
+    return '<div class="fc-pseg"><div class="fc-pseg-h"><div class="fc-pseg-msg">' + msgPreviewHtml(msg) + '</div>' + jump + '</div>' + body + '</div>';
+  }).join('');
+}
+
+function filesHtml(edits, transcript) {
+  if (!edits || !edits.length) return '<div class="empty">No file changes in this session.</div>';
+  return groupBy(edits, function (e) { return e.path; })
+    .map(function (g) { return fileCardHtml(g.key, g.items, promptSegmentsHtml(g.items, transcript)); }).join('');
+}
+
 export function openDetail(id) {
   get('/api/session?id=' + encodeURIComponent(id)).then(function (d) {
     if (!d || d.error) return;
@@ -172,8 +348,10 @@ export function openDetail(id) {
     // into one .drawer-head at the end, so they pin together as you scroll.
     var headTop = '<div class="drawer-head-top"><h2>' + esc(s.title || '(untitled)') + '</h2>' +
       '<button class="x" type="button" id="drawerCloseBtn">close</button></div>';
+    var fileCount = (d.artifacts || []).filter(function (x) { return x.kind === 'file'; }).length;
     var tabs = '<div class="drawer-tabs">' +
       '<button class="dtab on" type="button" data-dtab="summary">Summary</button>' +
+      (fileCount ? '<button class="dtab" type="button" data-dtab="files">Files (' + fileCount + ')</button>' : '') +
       '<button class="dtab" type="button" data-dtab="transcript">Transcript</button>' +
       '</div>';
 
@@ -224,7 +402,9 @@ export function openDetail(id) {
       sum += '<div class="sect-h">Outcomes</div>';
       sum += chipList(outs, 10, function (o) { return '<span class="tag">' + esc(o.type) + '</span>'; });
     }
-    sum += '<div class="see-tx-wrap"><button class="see-tx" type="button">See transcript →</button></div>';
+    sum += '<div class="see-tx-wrap">' +
+      (fileCount ? '<button class="see-tx" type="button" data-tab="files">See files changed →</button>' : '') +
+      '<button class="see-tx" type="button" data-tab="transcript">See transcript →</button></div>';
 
     // ---- Transcript pane: distinct user/assistant turns, truncated tool runs,
     // inline error panels, and a turn + error navigator. --------------------
@@ -345,6 +525,7 @@ export function openDetail(id) {
     $('#drawerBody').innerHTML =
       '<div class="drawer-head">' + headTop + tabs + (hasTx ? nav : '') + '</div>' +
       '<div class="dpane on" id="dpane-summary">' + sum + '</div>' +
+      (fileCount ? '<div class="dpane" id="dpane-files"><div class="empty">Loading file changes…</div></div>' : '') +
       '<div class="dpane" id="dpane-transcript">' + txBody + '</div>';
 
     // Keep --head-h (used for sticky-aware scroll-margin) in step with the header,
@@ -362,7 +543,9 @@ export function openDetail(id) {
     }
 
     // Tab switching — shared by the top tabs and the summary "See transcript".
-    // The transcript nav lives in the shared header but only shows on that tab.
+    // The transcript nav lives in the shared header but only shows on that tab;
+    // the Files diffs are fetched lazily the first time that tab is opened.
+    var filesLoaded = false;
     function showTab(name) {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (x) {
         x.classList.toggle('on', x.getAttribute('data-dtab') === name);
@@ -374,15 +557,51 @@ export function openDetail(id) {
       if (navEl) navEl.classList.toggle('on', name === 'transcript');
       $('#drawer').scrollTop = 0;
       syncHeadH();
+      if (name === 'files' && !filesLoaded) { filesLoaded = true; loadFiles(); }
       if (name === 'transcript') requestAnimationFrame(function () { spy(); scrollErrPanels(); });
+    }
+    function loadFiles() {
+      get('/api/session-files?id=' + encodeURIComponent(id)).then(function (res) {
+        var edits = (res && res.edits) || [];
+        prepEdits(edits, d.transcript || []);
+        var pane = $('#dpane-files');
+        if (!pane) return;
+        pane.innerHTML =
+          '<div class="fc-hint">Grouped by file · click a file to see its diff, where edits are headed by the prompt that drove them (▸ is the agent’s note) · → opens the transcript.</div>' +
+          filesHtml(edits, d.transcript || []);
+        Array.prototype.forEach.call(pane.querySelectorAll('.fc-head'), function (b) {
+          b.onclick = function () { b.parentNode.classList.toggle('collapsed'); };
+        });
+        Array.prototype.forEach.call(pane.querySelectorAll('.fc-rows-more'), function (b) {
+          b.onclick = function () { b.previousElementSibling.classList.add('on'); b.style.display = 'none'; };
+        });
+        Array.prototype.forEach.call(pane.querySelectorAll('.fc-jump'), function (b) {
+          b.onclick = function () { jumpToIntent(parseInt(b.getAttribute('data-u'), 10), -1); };
+        });
+        Array.prototype.forEach.call(pane.querySelectorAll('.msg-more'), function (b) {
+          b.onclick = function () { var on = b.previousElementSibling.classList.toggle('on'); b.textContent = on ? 'Show less ↑' : 'Show more ↓'; };
+        });
+      });
+    }
+    // From a file edit, jump to the user message that prompted it (the intent),
+    // falling back to the edit's own turn. The scroll-spy re-syncs the Turn pill.
+    function jumpToIntent(u, t) {
+      showTab('transcript');
+      var anchor = u >= 0 ? 'txt-' + u : (t >= 0 ? 'txt-' + t : null);
+      if (!anchor) return;
+      requestAnimationFrame(function () {
+        var el = document.getElementById(anchor);
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); flashEl(el); }
+      });
     }
     var closeBtn = $('#drawerCloseBtn');
     if (closeBtn) closeBtn.onclick = closeDrawer;
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (b) {
       b.onclick = function () { showTab(b.getAttribute('data-dtab')); };
     });
-    var seeTx = $('#drawerBody .see-tx');
-    if (seeTx) seeTx.onclick = function () { showTab('transcript'); };
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .see-tx'), function (b) {
+      b.onclick = function () { showTab(b.getAttribute('data-tab')); };
+    });
 
     // Truncation toggles: summary chip lists (files/features) + per-turn tool runs.
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .chip-more'), function (b) {

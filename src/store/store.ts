@@ -1195,6 +1195,58 @@ export class Store {
     return rows.map((r) => String(r.v))
   }
 
+  /** Gunzip + parse a session's stored blob (the full normalized Session), or null. */
+  private loadSession(id: string): Session | null {
+    const blob = this.db.prepare('SELECT gz FROM session_blobs WHERE id = ?').get(id) as { gz: Buffer } | undefined
+    if (!blob?.gz) return null
+    try {
+      return JSON.parse(gunzipSync(blob.gz).toString('utf8')) as Session
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The session's successful file edits as a flat, CHRONOLOGICAL list — the
+   * Files-changed view. Each carries its raw before/after (Edit), full content
+   * (Write), or hunks (MultiEdit), plus the transcript turn it happened in and
+   * the preceding (non-synthetic) user turn, so the UI can group by file or by
+   * prompt and link each change to its intent. Rejected / not-yet-read edits are
+   * excluded (they changed nothing). Reconstructs from the blob at read time.
+   */
+  fileChanges(id: string): FileEdit[] {
+    const session = this.loadSession(id)
+    if (!session) return []
+    const { toolTurn } = buildTranscriptCore(session)
+    const out: FileEdit[] = []
+    for (const tc of session.toolCalls) {
+      if (tc.action !== 'file_write' || !tc.result.ok) continue
+      const path = tc.target.paths?.[0]
+      if (!path) continue
+      const input = (tc.input ?? {}) as Record<string, unknown>
+      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
+      let op: FileEdit['op']
+      let hunks: Array<{ del: string; ins: string }>
+      if (tc.name === 'Write') {
+        op = 'write'
+        // Cap is generous because consecutive writes are diffed against each
+        // other client-side; too small a window hides changes near the file end.
+        hunks = [{ del: '', ins: clip(String(input.content ?? ''), 16000) }]
+      } else if (Array.isArray(input.edits)) {
+        op = 'multiedit'
+        hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
+          del: clip(String(e.old_string ?? ''), 4000),
+          ins: clip(String(e.new_string ?? ''), 4000),
+        }))
+      } else {
+        op = 'edit'
+        hunks = [{ del: clip(String(input.old_string ?? ''), 4000), ins: clip(String(input.new_string ?? ''), 4000) }]
+      }
+      out.push({ path, op, hunks, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
+    }
+    return out
+  }
+
   /**
    * Shippable artifacts (PRs + features) with session count and fully-loaded
    * cost. Cost sums the UNIQUE sessions linked to each artifact; a session
@@ -1574,6 +1626,22 @@ export interface SessionDetail {
   transcript: TranscriptTurn[]
 }
 
+/**
+ * One successful file write in the session — a before/after (Edit), full content
+ * (Write), or hunks (MultiEdit). Returned as a flat, chronological list so the
+ * client can group it either by file or by prompt.
+ */
+export interface FileEdit {
+  path: string
+  op: 'edit' | 'multiedit' | 'write'
+  hunks: Array<{ del: string; ins: string }>
+  ts?: string
+  /** Index into the transcript turns of the assistant turn that made the edit. */
+  turn: number
+  /** Index of the preceding (non-synthetic) user turn — the prompting intent, or -1. */
+  userTurn: number
+}
+
 function bucketExpr(col: string, bucket: Bucket): string {
   if (bucket === 'day') return `date(${col})`
   if (bucket === 'month') return `strftime('%Y-%m', ${col})`
@@ -1653,15 +1721,41 @@ function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: str
 }
 
 function buildTranscript(session: Session): TranscriptTurn[] {
+  return buildTranscriptCore(session).turns
+}
+
+// Claude-injected "user" turns that aren't the human's intent: slash-command
+// echoes, their stdout, skill preambles, interrupts, and tool rejections. Used
+// to skip them when resolving the prompt an edit links to.
+const SYNTHETIC_USER_RE =
+  /^Caveat: The messages below|^Base directory for this skill:|^\[Request interrupted|<command-(name|message|args)>|<\/?local-command-(stdout|stderr)>|The user doesn't want to proceed with this tool use/i
+function isSyntheticUser(text: string): boolean {
+  return SYNTHETIC_USER_RE.test(text)
+}
+
+/**
+ * Transcript turns PLUS a map from each tool_use id to its turn index and the
+ * index of the preceding user turn — so the Files-changed view can link an edit
+ * back to the user message that prompted it (the "intent"). Turn indices match
+ * positions in `turns`, which is exactly what the client anchors as `txt-<i>`.
+ */
+function buildTranscriptCore(session: Session): {
+  turns: TranscriptTurn[]
+  toolTurn: Map<string, { turn: number; userTurn: number }>
+} {
   const resById = new Map(session.toolCalls.map((t) => [t.id, t.result]))
   const turns: TranscriptTurn[] = []
+  const toolTurn = new Map<string, { turn: number; userTurn: number }>()
+  let lastUserIdx = -1
   for (const ev of session.events) {
     if (ev.kind === 'assistant') {
       let text = ''
       const tools: TranscriptTurn['tools'] = []
+      const ids: string[] = []
       for (const b of ev.blocks) {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
         else if (b.type === 'tool_use') {
+          ids.push(b.id)
           const input = b.input as { file_path?: string; command?: string; path?: string } | undefined
           const target = input?.file_path ?? input?.path ?? input?.command
           const res = resById.get(b.id)
@@ -1674,14 +1768,19 @@ function buildTranscript(session: Session): TranscriptTurn[] {
         }
       }
       if (!text && tools.length === 0) continue
+      const idx = turns.length
+      for (const id of ids) toolTurn.set(id, { turn: idx, userTurn: lastUserIdx })
       turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 20000), tools })
     } else if (ev.kind === 'user') {
       const text = ev.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ').trim()
       if (!text) continue
+      // Only real prompts become the "intent" an edit links back to (the turn is
+      // still shown in the transcript, just not used as a jump/grouping target).
+      if (!isSyntheticUser(text)) lastUserIdx = turns.length
       turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, text: clip(text, 20000), tools: [] })
     }
   }
-  return turns
+  return { turns, toolTurn }
 }
 
 function clip(s: string | undefined, n: number): string {

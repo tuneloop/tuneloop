@@ -182,6 +182,52 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .dpane { display: none; }
 .dpane.on { display: block; }
 
+/* Files-changed tab: per-file cards; a file's edits are headed by the prompt that drove them */
+.fc-hint { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
+.fc-jump { flex: none; border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 6px; padding: 2px 9px; font-size: 11.5px; cursor: pointer; }
+.fc-jump:hover { background: var(--emerald); color: #fbfaf6; border-color: var(--emerald); }
+/* Agent's local narration above an edit */
+.fc-narr { color: var(--muted); font-size: 12px; font-style: italic; line-height: 1.45; margin: 2px 0 6px; }
+/* A file's edits, headed by the prompt that drove them */
+.fc-pseg { margin: 2px 0; }
+.fc-pseg + .fc-pseg { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
+.fc-pseg-h { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
+.fc-pseg-msg { flex: 1; min-width: 0; font-size: 12.5px; color: var(--emerald); }
+.fc-pseg-empty { color: var(--muted); font-style: italic; }
+.fc-file { border: 1px solid var(--line); border-radius: 8px; margin: 10px 0; background: var(--paper); overflow: hidden; }
+.fc-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: var(--track); padding: 8px 12px; cursor: pointer; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+.fc-caret { color: var(--muted); }
+.fc-file.collapsed .fc-caret { display: inline-block; transform: rotate(-90deg); }
+.fc-path { flex: 1; min-width: 0; display: flex; align-items: baseline; overflow: hidden; }
+.fc-dir { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fc-base { flex: none; color: var(--ink); font-weight: 600; white-space: nowrap; }
+.fc-stat { flex: none; color: var(--muted); font-size: 11.5px; }
+.fc-add { color: var(--emerald); }
+.fc-del { color: var(--red); }
+.fc-body { padding: 6px 12px 12px; }
+.fc-file.collapsed .fc-body { display: none; }
+.fc-edit { margin-top: 12px; }
+.fc-edit:first-child { margin-top: 4px; }
+.fc-edit-h { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 5px; }
+.fc-op { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.fc-why { flex: none; border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 6px; padding: 2px 9px; font-size: 11.5px; cursor: pointer; }
+.fc-why:hover { background: var(--emerald); color: #fbfaf6; border-color: var(--emerald); }
+.fc-diff { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.5; border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; }
+.dl { display: flex; white-space: pre; padding: 0 4px; }
+.dl .dg { flex: none; width: 1.4em; text-align: center; color: var(--muted); user-select: none; }
+.dl .dt { flex: 1; }
+.dl.add { background: #e4f1ea; }
+.dl.add .dt { color: #1b5e3f; }
+.dl.del { background: #f6e0d9; }
+.dl.del .dt { color: #8a3b28; }
+.dl.ctx { color: #5c574d; }
+.dl.sep { color: var(--muted); justify-content: center; background: var(--track); }
+.fc-noop { color: var(--muted); font-size: 11.5px; font-style: italic; padding: 2px 0; }
+.dl-rest { display: none; }
+.dl-rest.on { display: block; }
+.fc-rows-more { display: block; width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--track); color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px; }
+.fc-rows-more:hover { color: var(--emerald); }
+
 /* Truncated chip lists (files / features): overflow hidden behind a toggle */
 .chip-rest { display: none; }
 .chip-rest.on { display: inline; }
@@ -189,7 +235,7 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .chip-more:hover { color: var(--emerald); }
 
 /* Summary "See transcript" link — a hard-to-miss handoff into the other tab. */
-.see-tx-wrap { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.see-tx-wrap { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
 .see-tx { border: 1px solid var(--emerald); background: var(--paper); color: var(--emerald); border-radius: 8px; padding: 8px 16px; font-family: Georgia, serif; font-size: 14px; cursor: pointer; }
 .see-tx:hover { background: var(--emerald); color: #fbfaf6; }
 

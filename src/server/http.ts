@@ -317,6 +317,15 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, detail)
     return
   }
+  if (path === '/api/session-files') {
+    const id = url.searchParams.get('id')
+    if (!id) {
+      sendJson(res, 400, { error: 'missing id' })
+      return
+    }
+    sendJson(res, 200, { edits: store.fileChanges(id) })
+    return
+  }
   sendJson(res, 404, { error: 'not found' })
 }
 
