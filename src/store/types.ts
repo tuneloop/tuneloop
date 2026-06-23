@@ -47,6 +47,19 @@ export interface SessionArtifactInput {
   confidence?: number
 }
 
+/**
+ * A reparent of an existing feature, for an enrichment processor that maintains
+ * the feature hierarchy as it sees more sessions. Applied only to machine-derived
+ * features — `user`-authored features are never touched. Auto-rename is
+ * deliberately NOT supported: a bad rename retroactively mislabels every session
+ * under the feature, so titles are fixed at creation (the dashboard can rename).
+ */
+export interface FeatureRevisionInput {
+  id: string
+  /** New parent id; `null` = make top-level; omit (`undefined`) = keep. */
+  parentId?: string | null
+}
+
 export interface OutcomeInput {
   type: string
   /** NULL for session-level outcomes (session_success, plan_drafted, ...). */
