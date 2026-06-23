@@ -144,10 +144,11 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .turn .role { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 5px; }
 .turn.user .role { color: var(--emerald); }
 .turn .text { white-space: pre-wrap; font-size: 13px; }
-/* Long message text: preview + Show more/less toggle */
-.text.msg .msg-full { display: none; }
-.text.msg.on .msg-prev { display: none; }
-.text.msg.on .msg-full { display: inline; }
+/* Long message text: preview + Show more/less toggle (used in the transcript's
+   .text.msg blocks and the Files view's bare .msg prompt headers). */
+.msg .msg-full { display: none; }
+.msg.on .msg-prev { display: none; }
+.msg.on .msg-full { display: inline; }
 .msg-more { display: inline-block; margin-top: 4px; border: 0; background: transparent; color: var(--emerald); font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 0; }
 .msg-more:hover { text-decoration: underline; }
 .turn .tools { margin-top: 8px; }
