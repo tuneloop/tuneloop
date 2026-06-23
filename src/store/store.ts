@@ -1211,8 +1211,13 @@ export class Store {
       params.push(...p.params)
     }
     if (f.q) {
-      clauses.push(`(s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?)`)
-      params.push(`%${f.q}%`, `%${f.q}%`)
+      // Search title + intent + the decisions list (matched against its raw JSON
+      // text, which is enough to surface a decision by any word it contains).
+      clauses.push(
+        `(s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
+          OR EXISTS (SELECT 1 FROM annotations WHERE session_id=s.id AND key='decisions' AND value LIKE ?))`,
+      )
+      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
     }
     if (f.artifact || f.artifactKind) {
       const conds: string[] = []
