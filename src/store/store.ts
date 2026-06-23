@@ -408,20 +408,24 @@ export class Store {
    * completion (see costPerArtifact). The API calls this twice — current and the
    * same-length prior period — to derive deltas. No window = all time.
    */
-  kpis(from?: string, to?: string): KpiSnapshot {
+  kpis(from?: string, to?: string, outcomes?: string[]): KpiSnapshot {
     const range = from && to ? 'WHERE s.started_at >= ? AND s.started_at < ?' : ''
     const params = from && to ? [from, to] : []
+    // Which outcome types count as success (the UI's editable definition).
+    // Empty → the default. The placeholders sit in the SELECT subquery, so their
+    // params bind before the WHERE range params (see successRate's same note).
+    const oc = outcomes && outcomes.length ? outcomes : ['session_success']
     const agg = this.db
       .prepare(
         `SELECT COUNT(*) AS sessions,
                 COALESCE(SUM(s.cost_usd),0) AS totalSpend,
                 AVG(CASE WHEN EXISTS (
                       SELECT 1 FROM outcomes o
-                      WHERE o.session_id = s.id AND o.type = 'session_success'
+                      WHERE o.session_id = s.id AND o.type IN (${oc.map(() => '?').join(',')})
                     ) THEN 1.0 ELSE 0.0 END) AS successRate
          FROM sessions s ${range}`,
       )
-      .get(...params) as { sessions: number; totalSpend: number; successRate: number | null }
+      .get(...oc, ...params) as { sessions: number; totalSpend: number; successRate: number | null }
     // Tool-call error rate over the same session-start window (tool calls join up
     // to their session for the time basis, consistent with the other KPIs).
     const tc = this.db
@@ -447,17 +451,23 @@ export class Store {
    * attribution): burn = AI spend per bucket dated at SESSION time (with a
    * `shippedSpend` sub-band = spend of sessions linked to a completed `kind`
    * artifact — the gap to `spend` is in-flight/never-shipped spend); throughput
-   * = count of `kind` artifacts per bucket dated at COMPLETION. Always full
-   * history (the curves carry the time axis; the KPI is the windowed number).
+   * = count of `kind` artifacts per bucket dated at COMPLETION. Both honor the
+   * optional window (burn by session start, throughput by completion); no window
+   * = full history. The `bucket` granularity is the caller's (day/week/month).
    */
   costCurves(
     kind: string,
     bucket: Bucket,
+    from?: string,
+    to?: string,
   ): {
     burn: Array<{ bucket: string; spend: number; shippedSpend: number }>
     throughput: Array<{ bucket: string; count: number }>
     buckets: string[]
   } {
+    // kind binds first (it sits in the SELECT subquery), then the window params.
+    const burnRange = from && to ? 'AND s.started_at >= ? AND s.started_at < ?' : ''
+    const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
       .prepare(
         `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
@@ -466,20 +476,62 @@ export class Store {
                     SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
                     WHERE sa.session_id = s.id AND a.kind = ? AND a.completed_at IS NOT NULL
                   ) THEN s.cost_usd ELSE 0 END),0) AS shippedSpend
-         FROM sessions s WHERE s.started_at IS NOT NULL
+         FROM sessions s WHERE s.started_at IS NOT NULL ${burnRange}
          GROUP BY bucket ORDER BY bucket`,
       )
-      .all(kind) as Array<{ bucket: string; spend: number; shippedSpend: number }>
+      .all(...burnParams) as Array<{ bucket: string; spend: number; shippedSpend: number }>
+    const thRange = from && to ? 'AND completed_at >= ? AND completed_at < ?' : ''
+    const thParams = from && to ? [kind, from, to] : [kind]
     const throughput = this.db
       .prepare(
         `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
-         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL GROUP BY bucket ORDER BY bucket`,
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} GROUP BY bucket ORDER BY bucket`,
       )
-      .all(kind) as Array<{ bucket: string; count: number }>
+      .all(...thParams) as Array<{ bucket: string; count: number }>
+    // The x-axis: over a window, every bucket from `from` to `to` (so empty
+    // periods show as gaps and the chart spans the whole window, not just the
+    // periods that happen to have data); all-time falls back to the data's own
+    // buckets. The series rows stay sparse — the chart zero-fills missing axis
+    // buckets — and we still union in any data bucket as a safety net.
     const set = new Set<string>()
+    if (from && to) this.bucketAxis(from, to, bucket).forEach((b) => set.add(b))
     burn.forEach((r) => set.add(r.bucket))
     throughput.forEach((r) => set.add(r.bucket))
     return { burn, throughput, buckets: Array.from(set).sort() }
+  }
+
+  /**
+   * The complete ordered list of bucket labels spanning [from, to] at the given
+   * granularity. Walks one calendar day at a time in SQL and buckets each with
+   * the same expression as the data, so the labels match exactly (no JS attempt
+   * to reproduce SQLite's %W week numbering). Used to give the cost curves a
+   * continuous x-axis across the window.
+   */
+  private bucketAxis(from: string, to: string, bucket: Bucket): string[] {
+    const rows = this.db
+      .prepare(
+        `WITH RECURSIVE days(d) AS (
+           SELECT date(?)
+           UNION ALL
+           SELECT date(d, '+1 day') FROM days WHERE d < date(?)
+         )
+         SELECT DISTINCT ${bucketExpr('d', bucket)} AS bucket FROM days ORDER BY bucket`,
+      )
+      .all(from, to) as Array<{ bucket: string }>
+    return rows.map((r) => r.bucket)
+  }
+
+  /**
+   * The x-axis for a windowed time series: every bucket from `from` to `to`
+   * (so the chart spans the whole window and empty periods show as gaps),
+   * unioned with the data's own buckets as a safety net. No window → the data's
+   * buckets as-is (all-time). Shared by the dashboard time-series endpoints.
+   */
+  private fullAxis(dataBuckets: string[], bucket: Bucket, from?: string, to?: string): string[] {
+    if (!(from && to)) return dataBuckets
+    const set = new Set<string>(this.bucketAxis(from, to, bucket))
+    dataBuckets.forEach((b) => set.add(b))
+    return Array.from(set).sort()
   }
 
   /**
@@ -579,7 +631,7 @@ export class Store {
       presenceInflated = !!f.multi
     }
 
-    return { bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated, presenceInflated }
+    return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, presenceInflated }
   }
 
   /**
@@ -649,7 +701,7 @@ export class Store {
       }
     }
 
-    return { bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated, presenceInflated }
+    return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, presenceInflated }
   }
 
   /**
@@ -726,7 +778,7 @@ export class Store {
       series = all
     }
 
-    return { view: q.view, bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated, format: isRate ? 'pct' : 'int' }
+    return { view: q.view, bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, format: isRate ? 'pct' : 'int' }
   }
 
   /**
@@ -823,7 +875,7 @@ export class Store {
       }
     }
 
-    return { outcomes, bucket, buckets: overallPoints.map((p) => p.bucket), overall, series, truncated }
+    return { outcomes, bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated }
   }
 
   // ---- dashboard read API ---------------------------------------------------

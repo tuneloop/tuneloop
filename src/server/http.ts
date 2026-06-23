@@ -89,7 +89,21 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     // start; cost-per-artifact by completion (see Store.costPerArtifact). No
     // ticket source in this CLI (would need a Jira/Linear adapter), so the
     // cost-per-artifact KPIs are PR + feature only.
-    const parsed = parseInt(url.searchParams.get('days') ?? '', 10)
+    // Outcome types counting as success for the rate KPI (the UI's editable
+    // success definition). Empty → Store.kpis defaults to ['session_success'].
+    const outcomes = (url.searchParams.get('outcomes') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    // Window = the dashboard's top-level selector. 'all' → whole history with no
+    // prior period (so no deltas); a number → that many days plus the same-length
+    // prior period.
+    const daysRaw = url.searchParams.get('days') ?? '7'
+    if (daysRaw === 'all') {
+      sendJson(res, 200, { days: 'all', window: null, current: store.kpis(undefined, undefined, outcomes), previous: null })
+      return
+    }
+    const parsed = parseInt(daysRaw, 10)
     const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 7
     const span = days * 86_400_000
     const now = Date.now()
@@ -99,8 +113,8 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, {
       days,
       window: { from, to },
-      current: store.kpis(from, to),
-      previous: store.kpis(prevFrom, from),
+      current: store.kpis(from, to, outcomes),
+      previous: store.kpis(prevFrom, from, outcomes),
     })
     return
   }
@@ -182,16 +196,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
   if (path === '/api/cost-artifact') {
     // Cost-per-shipped-artifact detail: the windowed unit-cost KPI (current +
-    // prior period for a delta) plus the two full-history decomposition curves
-    // (burn, throughput) and the burn-efficiency period sum. `days` is a number
-    // or 'all' (whole history, no prior period); `kind` is feature | pr.
+    // prior period for a delta) plus the two decomposition curves (burn,
+    // throughput) over the same window and the burn-efficiency period sum.
+    // `days` is a number or 'all' (whole history, no prior period); `kind` is
+    // feature | pr.
     const q = url.searchParams
     const kind = q.get('kind') === 'pr' ? 'pr' : 'feature'
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const curves = store.costCurves(kind, bucket)
     const daysRaw = q.get('days') ?? '7'
     if (daysRaw === 'all') {
+      const curves = store.costCurves(kind, bucket)
       sendJson(res, 200, {
         kind,
         days: 'all',
@@ -211,6 +226,8 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const to = new Date(now).toISOString()
     const from = new Date(now - span).toISOString()
     const prevFrom = new Date(now - 2 * span).toISOString()
+    // Curves share the KPI's window so the chart shows the same N days.
+    const curves = store.costCurves(kind, bucket, from, to)
     sendJson(res, 200, {
       kind,
       days,

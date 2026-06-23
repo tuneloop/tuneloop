@@ -8,21 +8,73 @@ import { renderTotalSpend } from './metrics/totalSpend'
 import { renderSessionsMetric } from './metrics/sessionsMetric'
 import { renderOps } from './metrics/ops'
 
+// The top-level window selector + caption. Sets the window every headline tile
+// AND every expansion's charts are computed over. Lives where the caption used
+// to, so "Last N days" is now an adjustable control, not just a label.
+var WINDOWS = [['7', '7d'], ['30', '30d'], ['90', '90d'], ['all', 'All']];
+export function renderWindow() {
+  var cap = $('#kpi-caption');
+  if (!cap) return;
+  var btns = WINDOWS.map(function (o) {
+    return '<button class="' + (String(state.days) === o[0] ? 'on' : '') + '" data-d="' + o[0] + '">' + o[1] + '</button>';
+  }).join('');
+  var caption = state.days === 'all'
+    ? 'All time'
+    : 'Last ' + state.days + ' days &middot; ▲▼ vs. previous ' + state.days + ' days';
+  cap.innerHTML = '<span class="win-seg seg" id="win-seg">' + btns + '</span>' +
+    '<span class="win-cap">' + caption + '</span>';
+  Array.prototype.forEach.call($('#win-seg').children, function (btn) {
+    btn.onclick = function () {
+      var d = btn.getAttribute('data-d');
+      state.days = d === 'all' ? 'all' : parseInt(d, 10);
+      renderWindow();
+      loadKpis();
+      // Every expansion's charts track the same window. Re-default each curve
+      // bucket for the new span (clear manual picks), then re-render whichever
+      // detail is open so its charts + labels follow N.
+      state.sr.bucket = ''; state.ca.bucket = ''; state.spend.bucket = ''; state.sm.bucket = ''; state.ops.bucket = '';
+      renderOpenMetric();
+    };
+  });
+}
+
+// Re-render the currently expanded metric's detail (shared by openMetric and the
+// window selector). No-op when no detail is open.
+function renderOpenMetric() {
+  var m = state.metric;
+  if (m === 'success_rate') renderSuccessRate();
+  else if (m === 'cost_artifact') renderCostArtifact();
+  else if (m === 'total_spend') renderTotalSpend();
+  else if (m === 'sessions') renderSessionsMetric();
+  else if (m === 'ops') renderOps();
+}
+
 export function loadKpis() {
-  get('/api/kpis').then(function (k) {
+  // The headline success-rate tile counts success the same way the detail view
+  // does (outcomes), and the whole row honors the top-level window (days).
+  var outcomes = (state.sr.outcomes || []).join(',');
+  var qs = 'outcomes=' + encodeURIComponent(outcomes) + '&days=' + encodeURIComponent(String(state.days));
+  get('/api/kpis?' + qs).then(function (k) {
     if (!k || k.error) { $('#kpis').innerHTML = ''; return; }
     var cur = k.current || {}, prev = k.previous || {};
     var cpf = cur.costPerFeature || {}, ppf = prev.costPerFeature || {};
     var cpr = cur.costPerPr || {}, ppr = prev.costPerPr || {};
     var defaultKind = (cpf.count === 0 && (cpr.count || 0) > 0) ? 'pr' : 'feature';
     state.ca.defaultKind = defaultKind;
-    var caData = defaultKind === 'pr' ? { cur: cpr, prev: ppr, label: 'per shipped PR' } : { cur: cpf, prev: ppf, label: 'per shipped feature' };
+    // The tile mirrors the kind the user picked in the detail; until then, the
+    // smart default. Keep state.ca.kind synced so the detail opens on it too.
+    if (!state.ca.userPicked) state.ca.kind = defaultKind;
+    var caData = state.ca.kind === 'pr'
+      ? { cur: cpr, prev: ppr, label: 'per merged PR', noun: 'PR', nounPl: 'PRs', verb: 'merged' }
+      : { cur: cpf, prev: ppf, label: 'per shipped feature', noun: 'feature', nounPl: 'features', verb: 'shipped' };
+    var cnt = caData.cur.count || 0;
+    var caSub = caData.label + ' · ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' ' + caData.verb;
     var tiles = [
       { label: 'Session success rate', value: fmtVal(cur.successRate, 'pct'),
         delta: kpiDelta(cur.successRate, prev.successRate, 'points', 'up'), sub: 'of sessions in window',
         metric: 'success_rate' },
       { label: 'Cost per shipped artifact', value: caData.cur.costPerUnit != null ? usd(caData.cur.costPerUnit) : '—',
-        delta: kpiDelta(caData.cur.costPerUnit, caData.prev.costPerUnit, 'rel', 'down'), sub: caData.label + ' · ' + (caData.cur.count || 0),
+        delta: kpiDelta(caData.cur.costPerUnit, caData.prev.costPerUnit, 'rel', 'down'), sub: caSub,
         metric: 'cost_artifact' },
       { label: 'Total spend', value: usd(cur.totalSpend),
         delta: kpiDelta(cur.totalSpend, prev.totalSpend, 'rel', null), sub: '', metric: 'total_spend' },
@@ -41,9 +93,6 @@ export function loadKpis() {
     Array.prototype.forEach.call(document.querySelectorAll('#kpis .tile[data-metric]'), function (el) {
       el.onclick = function () { openMetric(el.getAttribute('data-metric')); };
     });
-    var days = k.days || 7;
-    var cap = $('#kpi-caption');
-    if (cap) cap.innerHTML = 'Last ' + days + ' days &middot; ▲▼ vs. previous ' + days + ' days';
   });
 }
 
@@ -52,13 +101,7 @@ export function openMetric(m) {
   if (state.metric === m) return; // already expanded
   state.metric = m;
   syncKpiActive();
-  if (m === 'success_rate') renderSuccessRate();
-  else if (m === 'cost_artifact') {
-    state.ca.kind = state.ca.defaultKind;
-    renderCostArtifact();
-  } else if (m === 'total_spend') renderTotalSpend();
-  else if (m === 'sessions') renderSessionsMetric();
-  else if (m === 'ops') renderOps();
+  renderOpenMetric();
 }
 
 export function syncKpiActive() {

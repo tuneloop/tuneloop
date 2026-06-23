@@ -2,8 +2,8 @@
 // Session success rate detail, then kicks off the async loads. Bundled by tsup
 // into dist/client/app.js and loaded by index.html.
 import { state, $, esc, get, dayOf } from './core'
-import { loadFacets, renderDists } from './facets'
-import { loadKpis } from './kpis'
+import { loadFacets } from './facets'
+import { loadKpis, renderWindow } from './kpis'
 import { renderSuccessRate, renderSrControls } from './metrics/successRate'
 import { buildFilters, loadSessions, closeDrawer, setView } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
@@ -27,9 +27,9 @@ function init() {
     loadFacets().then(function () {
       buildFilters();
       if (state.metric === 'success_rate') renderSrControls();
-      if (state.metric === 'sessions') renderDists(state.overview || {});
     });
   });
+  renderWindow();
   loadKpis();
   loadSessions();
   loadArtifacts();

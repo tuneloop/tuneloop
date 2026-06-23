@@ -1,15 +1,21 @@
 // Session success rate detail (headline metric #1): outcome-set picker, bucket
 // selector, optional breakdown into per-cohort rate lines, and the overall
 // stacked-volume bar when not broken down.
-import { state, $, esc, SR_PALETTE, get } from '../core'
+import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs } from '../core'
+import { loadKpis } from '../kpis'
 import { lineChart, barChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
+
+// Fixed display order for the "Count as success" outcomes: concrete shipped
+// artifacts first, softening down to the LLM-judged catch-all. Types not listed
+// sort to the end (preserving their relative order).
+var SR_OUTCOME_ORDER = ['pr_merged', 'pr_created', 'commit_pushed', 'file_written', 'session_success'];
+function srOutcomeRank(type) { var i = SR_OUTCOME_ORDER.indexOf(type); return i < 0 ? SR_OUTCOME_ORDER.length : i; }
 
 export function renderSuccessRate() {
   $('#metric-detail').innerHTML =
     '<div class="metric-head">' +
       '<h2>Session success rate</h2>' +
-      '<div class="metric-big" id="sr-big">—</div>' +
     '</div>' +
     '<div class="panel">' +
       '<div class="sr-controls" id="sr-controls"></div>' +
@@ -22,14 +28,16 @@ export function renderSuccessRate() {
 }
 
 export function renderSrControls() {
-  var oc = state.outcomeTypes || [];
+  var oc = (state.outcomeTypes || []).slice().sort(function (a, b) { return srOutcomeRank(a.type) - srOutcomeRank(b.type); });
   var checks = oc.map(function (o) {
     var on = state.sr.outcomes.indexOf(o.type) >= 0;
+    var label = esc(o.type) + (o.type === 'session_success' ? ' (LLM-judged)' : '');
     return '<label class="sr-check"><input type="checkbox" class="sr-oc" value="' + esc(o.type) + '"' +
-      (on ? ' checked' : '') + '/> ' + esc(o.type) + ' <span class="sr-cnt">' + o.sessions + '</span></label>';
+      (on ? ' checked' : '') + '/> ' + label + ' <span class="sr-cnt">' + o.sessions + '</span></label>';
   }).join('');
+  var activeBucket = autoBucket(state.sr.bucket);
   var bucketBtns = ['day', 'week', 'month'].map(function (b) {
-    return '<button class="' + (b === state.sr.bucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
+    return '<button class="' + (b === activeBucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
   var byOpts = '<option value="">none</option>';
   srBreakdownFacets().forEach(function (f) {
@@ -47,20 +55,22 @@ export function renderSrControls() {
       var set = [];
       Array.prototype.forEach.call(document.querySelectorAll('.sr-oc'), function (x) { if (x.checked) set.push(x.value); });
       state.sr.outcomes = set;
+      saveSrPrefs();
       loadSuccessRate();
+      loadKpis(); // the windowed KPI tile counts success the same way — keep it in sync
     };
   });
   Array.prototype.forEach.call($('#sr-bucket').children, function (btn) {
     btn.onclick = function () { state.sr.bucket = btn.getAttribute('data-b'); renderSrControls(); loadSuccessRate(); };
   });
-  $('#sr-by').onchange = function () { state.sr.by = this.value; loadSuccessRate(); };
+  $('#sr-by').onchange = function () { state.sr.by = this.value; saveSrPrefs(); loadSuccessRate(); };
 }
 
 export function loadSuccessRate() {
   var sr = state.sr;
-  var qs = ['outcomes=' + encodeURIComponent((sr.outcomes || []).join(',')), 'bucket=' + encodeURIComponent(sr.bucket)];
+  var qs = ['outcomes=' + encodeURIComponent((sr.outcomes || []).join(',')), 'bucket=' + encodeURIComponent(autoBucket(sr.bucket))];
   if (sr.by) qs.push('by=' + encodeURIComponent(sr.by));
-  get('/api/success-rate?' + qs.join('&')).then(function (d) {
+  get('/api/success-rate?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sr-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderRateChart(d);
   });
@@ -68,11 +78,6 @@ export function loadSuccessRate() {
 
 export function renderRateChart(d) {
   var ov = d.overall || { rate: null, num: 0, denom: 0 };
-  var big = $('#sr-big');
-  if (big) {
-    big.innerHTML = (ov.rate != null ? Math.round(ov.rate * 100) + '%' : '—') +
-      ' <span class="metric-sub">overall &middot; ' + ov.num + '/' + ov.denom + ' sessions</span>';
-  }
   // Mark depends on mode: overall → a stacked count bar (volume + success in one
   // mark, honest about sample size); breakdown → rate lines (bars don't compose
   // across many series), with faint volume bars behind for that sample-size cue.
