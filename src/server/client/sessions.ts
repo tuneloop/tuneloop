@@ -4,6 +4,21 @@
 // shared so the artifacts tab and drawer can jump into a filtered session list.
 import { state, $, esc, usd, num, dayOf, badge, get } from './core'
 
+// Close the transcript outline dropdown on an outside click — it's a custom
+// dropdown with no native blur. One module-level listener (added once) that
+// queries the live elements, so it works across drawer re-opens without leaking
+// per-open handlers. mousedown (not click) so opening the dropdown via its own
+// button doesn't immediately re-close it on the same interaction.
+document.addEventListener('mousedown', function (e) {
+  var panel = document.getElementById('tx-outline');
+  if (!panel || !panel.classList.contains('on')) return;
+  var btn = document.querySelector('#drawerBody .tx-ol-btn');
+  var target = e.target as Node;
+  if (panel.contains(target) || (btn && btn.contains(target))) return;
+  panel.classList.remove('on');
+  if (btn) btn.classList.remove('on');
+});
+
 export function buildFilters() {
   var html = '';
   state.facets.forEach(function (f) {
