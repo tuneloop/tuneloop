@@ -321,6 +321,17 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-grp.none { color: var(--muted); font-style: italic; }
 .tx-grp-lbl { color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-size: 11px; }
 .tx-grp .btn { padding: 2px 9px; }
+/* Block filter (focus the transcript on one PR / feature / use-case). */
+.tx-filter-wrap { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tx-filter-wrap:empty { display: none; }
+.tx-fdim { font: inherit; font-size: 12px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); }
+.tx-fdim-lbl { font-weight: 600; font-size: 12px; }
+.tx-fchips { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.tx-fchip { border: 1px solid var(--line); background: var(--paper); color: var(--muted); border-radius: 999px; padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.tx-fchip:hover { color: var(--ink); border-color: var(--gray); }
+.tx-fchip.on { color: var(--ink); border-color: var(--emerald); background: #eaf3ec; }
+.turn.tx-hidden, .tx-spawn.tx-hidden { display: none; }
+.tx-gap { text-align: center; color: var(--muted); font-size: 12px; padding: 7px 0; letter-spacing: .04em; }
 .tx-pos { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
 .tx-pos b { color: var(--ink); font-weight: 600; }
 .tx-errs .tx-pos b { color: var(--red); }

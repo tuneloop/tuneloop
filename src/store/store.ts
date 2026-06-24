@@ -3,6 +3,7 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import type { Session } from '../core/model'
 import type { ProcessorResult } from '../core/processor'
 import type { DB } from './db'
+import { deterministicBlocks } from '../core/blocks'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
@@ -1337,6 +1338,36 @@ export class Store {
   }
 
   /** Full detail for one session, including a viewer-ready transcript from the blob. */
+  /** Per-block labels (use_case / PR / feature) for the transcript filter bar. */
+  private blockLabels(
+    id: string,
+  ): Map<number, { useCase?: string | null; pr?: { ident: string; title?: string } | null; feature?: { id: string; title?: string } | null }> {
+    type Lbl = { useCase?: string | null; pr?: { ident: string; title?: string } | null; feature?: { id: string; title?: string } | null }
+    const m = new Map<number, Lbl>()
+    const ensure = (idx: number): Lbl => {
+      let e = m.get(idx)
+      if (!e) { e = {}; m.set(idx, e) }
+      return e
+    }
+    const ucRows = this.db
+      .prepare("SELECT block_idx AS idx, json_extract(value,'$') AS v FROM block_annotations WHERE session_id = ? AND key = 'use_case'")
+      .all(id) as Array<{ idx: number; v: string }>
+    for (const r of ucRows) ensure(r.idx).useCase = r.v
+    const artRows = this.db
+      .prepare(
+        `SELECT ba.block_idx AS idx, a.id AS aid, a.ident, a.title, a.kind
+         FROM block_artifacts ba JOIN artifacts a ON a.id = ba.artifact_id
+         WHERE ba.session_id = ? AND a.kind IN ('pr','feature')`,
+      )
+      .all(id) as Array<{ idx: number; aid: string; ident: string | null; title: string | null; kind: string }>
+    for (const r of artRows) {
+      const e = ensure(r.idx)
+      if (r.kind === 'pr') e.pr = { ident: r.ident ?? '?', title: r.title ?? undefined }
+      else e.feature = { id: r.aid, title: r.title ?? undefined }
+    }
+    return m
+  }
+
   sessionDetail(id: string): SessionDetail | null {
     const s = this.db
       .prepare(
@@ -1366,7 +1397,7 @@ export class Store {
       )
       .all(id) as Array<Record<string, any>>
 
-    let transcript: Transcript = { turns: [], subagents: [] }
+    let transcript: Transcript = { turns: [], subagents: [], blocks: [] }
     const blob = this.db.prepare('SELECT gz FROM session_blobs WHERE id = ?').get(id) as { gz: Buffer } | undefined
     if (blob?.gz) {
       try {
@@ -1374,6 +1405,11 @@ export class Store {
       } catch {
         /* leave empty */
       }
+    }
+    // Attach per-block labels (use_case / PR / feature) the filter bar groups by.
+    if (transcript.blocks.length) {
+      const labels = this.blockLabels(id)
+      transcript.blocks = transcript.blocks.map((b) => ({ idx: b.idx, ...(labels.get(b.idx) ?? {}) }))
     }
 
     return {
@@ -1979,6 +2015,10 @@ export interface TranscriptTurn {
   sidechain: boolean
   /** Which subagent emitted this turn; undefined for main-thread turns. */
   agentId?: string
+  /** Main-thread sequence index (undefined for sidechain turns). */
+  seq?: number
+  /** Block this turn belongs to (handling_long_sessions); undefined if unmapped. */
+  blockIdx?: number
   text: string
   tools: TranscriptTool[]
 }
@@ -1997,9 +2037,19 @@ export interface SubagentInfo {
  * (each tagged with its `agentId`, so the client can split the main thread from
  * each subagent into its own tab) plus the subagent roster.
  */
+/** One block's identity + labels, for the transcript's filter bar. */
+export interface TranscriptBlock {
+  idx: number
+  useCase?: string | null
+  pr?: { ident: string; title?: string } | null
+  feature?: { id: string; title?: string } | null
+}
+
 export interface Transcript {
   turns: TranscriptTurn[]
   subagents: SubagentInfo[]
+  /** Block partition + per-block labels, for filtering the transcript by PR / feature / use-case. */
+  blocks: TranscriptBlock[]
 }
 
 /** A facet's resolved value for one session — the registry-driven detail row. */
@@ -2133,14 +2183,29 @@ function facetGroupExpr(f: FacetSpec, anchorGrain: Grain): { join: string; expr:
 }
 
 function buildTranscript(session: Session): Transcript {
+  const turns = buildTranscriptCore(session).turns
+  // Map each main-thread turn to its block via seq (labels are attached in
+  // sessionDetail, which has DB access). Deterministic, so idx matches storage.
+  const blocks = deterministicBlocks(session)
+  if (blocks.length) {
+    const maxSeq = blocks[blocks.length - 1]!.endSeq
+    const seqToBlock = new Array<number>(maxSeq + 1).fill(-1)
+    for (const b of blocks) for (let s = b.startSeq; s <= b.endSeq; s++) seqToBlock[s] = b.idx
+    for (const t of turns) {
+      if (t.seq == null || t.seq < 0 || t.seq > maxSeq) continue
+      const bi = seqToBlock[t.seq]
+      if (bi != null && bi >= 0) t.blockIdx = bi
+    }
+  }
   return {
-    turns: buildTranscriptCore(session).turns,
+    turns,
     subagents: (session.subagents ?? []).map((s) => ({
       agentId: s.agentId,
       agentType: s.agentType,
       description: s.description,
       toolUseId: s.toolUseId,
     })),
+    blocks: blocks.map((b) => ({ idx: b.idx })),
   }
 }
 
@@ -2187,14 +2252,14 @@ function buildTranscriptCore(session: Session): {
       if (!text && tools.length === 0) continue
       const idx = turns.length
       for (const id of ids) toolTurn.set(id, { turn: idx, userTurn: lastUserIdx })
-      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, text: clip(text, 20000), tools })
+      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, seq: ev.seq, text: clip(text, 20000), tools })
     } else if (ev.kind === 'user') {
       const text = ev.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ').trim()
       if (!text) continue
       // Only real prompts become the "intent" an edit links back to (the turn is
       // still shown in the transcript, just not used as a jump/grouping target).
       if (!isSyntheticUser(text)) lastUserIdx = turns.length
-      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, text: clip(text, 20000), tools: [] })
+      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, seq: ev.seq, text: clip(text, 20000), tools: [] })
     }
   }
   return { turns, toolTurn }

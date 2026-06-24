@@ -422,10 +422,45 @@ export function openDetail(id) {
     // assistant message, so "a long series of tool calls" is a RUN of consecutive
     // such turns — we keep text turns separate but coalesce each tool-only run
     // into one collapsible block (first few chips + "+N more").
-    var TX = d.transcript || { turns: [], subagents: [] };
+    var TX = d.transcript || { turns: [], subagents: [], blocks: [] };
     var allTurns = TX.turns || [];
     var subMeta = {};      // agentId -> {agentType, description, toolUseId}
     (TX.subagents || []).forEach(function (sa) { subMeta[sa.agentId] = sa; });
+
+    // ---- Block filter: focus the transcript on one PR / feature / use-case. ----
+    // Each main-thread turn carries its block (server) and blocks carry labels.
+    // A "View by" dimension is offered only when it has ≥2 distinct values;
+    // picking a value hides the rest behind a named "··· N turns ···" gap.
+    var TXB = TX.blocks || [];
+    function blkVal(bi, dim) {
+      var b = TXB[bi]; if (!b) return null;
+      return dim === 'pr' ? (b.pr ? b.pr.ident : null) : dim === 'feature' ? (b.feature ? b.feature.id : null) : (b.useCase || null);
+    }
+    function blkLabel(bi, dim) {
+      var b = TXB[bi]; if (!b) return null;
+      return dim === 'pr' ? (b.pr ? '#' + b.pr.ident : null) : dim === 'feature' ? (b.feature ? (b.feature.title || 'feature') : null) : (b.useCase || null);
+    }
+    var DIM_DEFS = [{ dim: 'pr', label: 'PRs' }, { dim: 'feature', label: 'Features' }, { dim: 'use_case', label: 'Use-case' }];
+    var dimsAvail = DIM_DEFS.map(function (def) {
+      var seen = {}, vals = [];
+      TXB.forEach(function (b) {
+        var k = blkVal(b.idx, def.dim);
+        if (k != null && !seen[k]) { seen[k] = 1; vals.push({ key: k, label: blkLabel(b.idx, def.dim) }); }
+      });
+      return { dim: def.dim, label: def.label, values: vals };
+    }).filter(function (d) { return d.values.length >= 2; });
+    var fDim = dimsAvail.length ? dimsAvail[0].dim : null;
+    var fVal = null; // null = All
+    function filterBarHtml() {
+      if (!dimsAvail.length) return '';
+      var dd = dimsAvail.filter(function (d) { return d.dim === fDim; })[0] || dimsAvail[0];
+      var sw = dimsAvail.length > 1
+        ? '<select class="tx-fdim">' + dimsAvail.map(function (d) { return '<option value="' + d.dim + '"' + (d.dim === fDim ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select>'
+        : '<span class="tx-fdim-lbl">' + esc(dd.label) + '</span>';
+      var chips = '<button class="tx-fchip' + (fVal == null ? ' on' : '') + '" type="button" data-v="">All</button>' +
+        dd.values.map(function (v) { return '<button class="tx-fchip' + (fVal === v.key ? ' on' : '') + '" type="button" data-v="' + esc(v.key) + '">' + esc(v.label) + '</button>'; }).join('');
+      return '<span class="tx-grp-lbl">View by</span>' + sw + '<span class="tx-fchips">' + chips + '</span>';
+    }
 
     var TOOLCAP = 4;
     var errSeq = 0;        // running id per failed tool call → error-panel anchor (unique across scopes)
@@ -476,10 +511,11 @@ export function openDetail(id) {
     // A prominent, clickable banner standing in for a subagent-spawning call, so
     // the link into the subagent's scope is easy to find (and a stable anchor for
     // the subagent's "back" link).
-    function spawnBlockHtml(sp) {
+    function spawnBlockHtml(sp, blk) {
       var m = subMeta[sp.agentId] || {};
       var lbl = (m.agentType || 'subagent') + (m.description ? ' · ' + m.description : '');
-      return '<button class="tx-spawn" type="button" id="txspawn-' + esc(sp.agentId) + '" data-agent="' + esc(sp.agentId) + '">' +
+      var ba = blk != null ? ' data-blk="' + blk + '"' : '';
+      return '<button class="tx-spawn" type="button" id="txspawn-' + esc(sp.agentId) + '" data-agent="' + esc(sp.agentId) + '"' + ba + '>' +
         '<span class="tx-spawn-ico">🤖</span><span class="tx-spawn-lbl">Spawned subagent · ' + esc(lbl) + '</span>' +
         '<span class="tx-spawn-go">view transcript →</span></button>';
     }
@@ -513,36 +549,42 @@ export function openDetail(id) {
     // and pushing its error-panel ids into the scope's errIds via errSink.
     function renderScopeBlocks(items, isSub) {
       var blocks = [];
-      var run = null;      // tools from consecutive tool-only turns
+      var run = null;      // tools from consecutive tool-only turns (within one block)
+      var runBlk = null;   // block idx of the current run (runs don't cross blocks, so a filter hides cleanly)
       var userTurns = [];  // {i (global), text} powering the outline + scroll-spy
       function flushRun() {
         if (run && run.length) {
-          blocks.push('<div class="turn asst toolrun"><div class="role">Tool calls · ' + run.length + '</div>' +
+          var a = runBlk != null ? ' data-blk="' + runBlk + '"' : '';
+          blocks.push('<div class="turn asst toolrun"' + a + '><div class="role">Tool calls · ' + run.length + '</div>' +
             toolsHtml(run) + '</div>');
         }
-        run = null;
+        run = null; runBlk = null;
       }
       items.forEach(function (it) {
         var i = it.gi, t = it.t, tools = t.tools || [];
+        var blk = t.blockIdx;
+        var ba = blk != null ? ' data-blk="' + blk + '"' : '';
         if (t.role === 'user') {
           flushRun();
           userTurns.push({ i: i, text: t.text });
-          blocks.push('<div class="turn user" id="txt-' + i + '"><div class="role">' + (isSub ? 'Prompt' : 'You') +
+          blocks.push('<div class="turn user" id="txt-' + i + '"' + ba + '><div class="role">' + (isSub ? 'Prompt' : 'You') +
             '<span class="tnum">#' + userTurns.length + '</span></div>' + textBlock(t.text) + '</div>');
         } else if (t.text) {
           flushRun();
-          blocks.push('<div class="turn asst" id="txt-' + i + '"><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
+          blocks.push('<div class="turn asst" id="txt-' + i + '"' + ba + '><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
             '</div>' + textBlock(t.text) + (tools.length ? toolsHtml(tools) : '') + '</div>');
         } else if (tools.length) {
           // Surface spawning calls as their own banner; fold the rest into the run.
+          // Flush when the block changes so a run stays within one block.
           var spawns = tools.filter(function (x) { return x.agentId && subMeta[x.agentId]; });
           if (spawns.length) {
             flushRun();
-            spawns.forEach(function (sp) { blocks.push(spawnBlockHtml(sp)); });
+            spawns.forEach(function (sp) { blocks.push(spawnBlockHtml(sp, blk)); });
             var keep = tools.filter(function (x) { return !(x.agentId && subMeta[x.agentId]); });
-            if (keep.length) run = (run || []).concat(keep);
+            if (keep.length) { if (run && blk !== runBlk) flushRun(); runBlk = blk; run = (run || []).concat(keep); }
           } else {
-            run = (run || []).concat(tools);
+            if (run && blk !== runBlk) flushRun();
+            runBlk = blk; run = (run || []).concat(tools);
           }
         }
       });
@@ -612,6 +654,7 @@ export function openDetail(id) {
             '<button class="btn tx-err-next" type="button">›</button></div>'
           : '<span class="tx-grp none">no tool errors</span>') +
       '</div>' +
+      '<div class="tx-filter-wrap"></div>' +
       '<div class="tx-now" id="tx-now"></div>' +
       '</div>';
 
@@ -843,6 +886,61 @@ export function openDetail(id) {
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
     if (en) en.onclick = function () { gotoErr(errIdx + 1); };
 
+    // ----- Block filter: focus the main thread on one PR / feature / use-case --
+    function mainPaneEl() { return document.querySelector('#drawerBody .tx-scope-pane[data-scope="main"]'); }
+    function renderFilterBar() {
+      var c = $('#drawerBody .tx-filter-wrap'); if (!c) return;
+      c.innerHTML = filterBarHtml();
+      var sel = c.querySelector('.tx-fdim');
+      if (sel) sel.onchange = function () { fDim = this.value; fVal = null; renderFilterBar(); applyTxFilter(); };
+      Array.prototype.forEach.call(c.querySelectorAll('.tx-fchip'), function (b) {
+        b.onclick = function () { var v = b.getAttribute('data-v'); fVal = v === '' ? null : v; renderFilterBar(); applyTxFilter(); };
+      });
+    }
+    function applyTxFilter() {
+      var pane = mainPaneEl(); if (!pane) return;
+      Array.prototype.forEach.call(pane.querySelectorAll('.tx-gap'), function (g) { if (g.parentNode) g.parentNode.removeChild(g); });
+      var els = Array.prototype.filter.call(pane.children, function (el) { return el.hasAttribute('data-blk'); });
+      if (fVal == null || fDim == null) {
+        els.forEach(function (el) { el.classList.remove('tx-hidden'); });
+      } else {
+        var run = [];
+        var flush = function () {
+          if (!run.length) return;
+          var labels = {};
+          run.forEach(function (el) { var l = blkLabel(parseInt(el.getAttribute('data-blk'), 10), fDim); if (l) labels[l] = 1; });
+          var ks = Object.keys(labels);
+          var n = run.filter(function (el) { return el.classList.contains('turn'); }).length || run.length;
+          var g = document.createElement('div'); g.className = 'tx-gap';
+          g.textContent = '··· ' + n + ' turn' + (n > 1 ? 's' : '') + (ks.length === 1 ? ' on ' + ks[0] : ' elsewhere') + ' ···';
+          pane.insertBefore(g, run[0]); run = [];
+        };
+        els.forEach(function (el) {
+          if (blkVal(parseInt(el.getAttribute('data-blk'), 10), fDim) === fVal) { flush(); el.classList.remove('tx-hidden'); }
+          else { el.classList.add('tx-hidden'); run.push(el); }
+        });
+        flush();
+      }
+      recountTurns();
+    }
+    // Re-point the turn stepper + outline at the currently-VISIBLE main-thread
+    // turns, so the counter and ‹/› navigate what you can actually see.
+    function recountTurns() {
+      if (activeScope !== 'main') return;
+      var full = scopeByKey.main.userTurns;
+      var vis = full.filter(function (u) { var el = document.getElementById('txt-' + u.i); return el && !el.classList.contains('tx-hidden'); });
+      userTurns = vis;
+      var tt = $('#drawerBody .tx-turn-total'); if (tt) tt.textContent = String(vis.length);
+      var ol = $('#tx-outline'); if (ol) ol.innerHTML = outlineHtml(vis);
+      wireOutline();
+      curTurn = 0;
+      if (vis.length) updateIndicator(0);
+      else { var pos = $('#drawerBody .tx-turn-pos'); if (pos) pos.textContent = '0'; var now = $('#tx-now'); if (now) now.textContent = ''; }
+      syncHeadH();
+    }
+    renderFilterBar();
+    if (dimsAvail.length) applyTxFilter();
+
     // ----- Subagent scopes: switch tab, link from spawn calls, link back -------
     // Point the nav (turn stepper, outline, error stepper, scroll-spy) at a scope
     // and show its pane. Indices are global, so the steppers/anchors carry over.
@@ -870,6 +968,9 @@ export function openDetail(id) {
         var pos = $('#drawerBody .tx-turn-pos'); if (pos) pos.textContent = '0';
         var now = $('#tx-now'); if (now) now.textContent = '';
       }
+      // The block filter applies to the main thread only; re-apply it on return.
+      var fw = $('#drawerBody .tx-filter-wrap'); if (fw) fw.style.display = key === 'main' ? '' : 'none';
+      if (key === 'main' && dimsAvail.length) applyTxFilter();
       syncHeadH();
     }
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
