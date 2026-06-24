@@ -450,6 +450,7 @@ export function openDetail(id, focus?: any) {
     // A "View by" dimension is offered only when it has ≥2 distinct values;
     // picking a value hides the rest behind a named "··· N turns ···" gap.
     var TXB = TX.blocks || [];
+    var intent = (d.annotations && d.annotations.intent_summary) || '';
     function blkVal(bi, dim) {
       var b = TXB[bi]; if (!b) return null;
       return dim === 'pr' ? (b.pr ? b.pr.ident : null) : dim === 'feature' ? (b.feature ? b.feature.id : null) : (b.useCase || null);
@@ -699,8 +700,9 @@ export function openDetail(id, focus?: any) {
         (sc.description ? ' <span class="tx-sub-desc">' + esc(sc.description) + '</span>' : '') + back + '</div>';
     }
     var panesHtml = scopes.map(function (sc) {
+      var ctx = sc.key === 'main' ? '<div class="tx-ctx" id="tx-ctx"></div>' : '';
       return '<div class="tx-scope-pane' + (sc.key === 'main' ? ' on' : '') + '" data-scope="' + esc(sc.key) + '">' +
-        subPaneHeader(sc) + (sc.blocksHtml || '<div class="empty">No turns.</div>') + '</div>';
+        subPaneHeader(sc) + ctx + (sc.blocksHtml || '<div class="empty">No turns.</div>') + '</div>';
     }).join('');
 
     var hasTx = allTurns.length > 0;
@@ -956,8 +958,14 @@ export function openDetail(id, focus?: any) {
       }
       recountTurns();
       if (scroll) {
+        muteSpy();
+        // Scroll to the context strip (just above the first visible block) so you
+        // land with the grounding header in view; flash where the content starts.
+        var strip = $('#tx-ctx');
         var first = pane.querySelector('[data-blk]:not(.tx-hidden)');
-        if (first) { muteSpy(); first.scrollIntoView({ block: 'start' }); flashEl(first); }
+        if (strip) strip.scrollIntoView({ block: 'start' });
+        else if (first) first.scrollIntoView({ block: 'start' });
+        if (first) flashEl(first);
       }
     }
     // Re-point the turn AND error steppers + the outline at the currently-VISIBLE
@@ -982,10 +990,46 @@ export function openDetail(id, focus?: any) {
       errIdx = -1;
       var et = $('#drawerBody .tx-err-total'); if (et) et.textContent = String(errIds.length);
       var epos = $('#drawerBody .tx-err-pos'); if (epos) epos.textContent = '—';
+      renderCtxStrip();
       syncHeadH();
+    }
+    // A calm context strip at the top of the transcript: the session's goal when
+    // unfocused, the feature / PR / work-type context when focused — grounds the
+    // user on landing without adding to the (already busy) sticky header.
+    function renderCtxStrip() {
+      var el = $('#tx-ctx'); if (!el) return;
+      var fullN = scopeByKey.main.userTurns.length;
+      if (fDim == null || fVal == null) {
+        var wts = {}; TXB.forEach(function (b) { if (b.useCase) wts[b.useCase] = 1; });
+        var wk = Object.keys(wts);
+        var meta = fullN + ' turn' + (fullN === 1 ? '' : 's') + (wk.length ? ' · ' + wk.join(' · ') : '');
+        el.className = 'tx-ctx';
+        el.innerHTML = '<div class="tx-ctx-lbl">This session</div>' +
+          (intent ? '<div class="tx-ctx-main">' + esc(intent) + '</div>' : '') +
+          '<div class="tx-ctx-meta">' + esc(meta) + '</div>';
+        return;
+      }
+      var dd = dimsAvail.filter(function (d) { return d.dim === fDim; })[0];
+      var lbl = dd ? ((dd.values.filter(function (v) { return v.key === fVal; })[0] || {}).label || fVal) : fVal;
+      var spans = 0, prev = true, pane = mainPaneEl();
+      if (pane) Array.prototype.forEach.call(pane.children, function (c) {
+        if (!c.hasAttribute('data-blk')) return;
+        var h = c.classList.contains('tx-hidden');
+        if (!h && prev) spans++;
+        prev = h;
+      });
+      var dimName = fDim === 'pr' ? 'PR' : fDim === 'feature' ? 'Feature' : 'Work type';
+      var cover = fDim === 'use_case'
+        ? (userTurns.length + ' of ' + fullN + ' turns')
+        : (spans + ' stretch' + (spans === 1 ? '' : 'es') + ' · ' + userTurns.length + ' of ' + fullN + ' turns');
+      el.className = 'tx-ctx focused';
+      el.innerHTML = '<div class="tx-ctx-lbl">▸ ' + esc(dimName) + '</div>' +
+        '<div class="tx-ctx-main">' + esc(lbl) + '</div>' +
+        '<div class="tx-ctx-meta">' + esc(cover) + '</div>';
     }
     renderFilterBar();
     if (dimsAvail.length) applyTxFilter();
+    else renderCtxStrip();
 
     // ----- Subagent scopes: switch tab, link from spawn calls, link back -------
     // Point the nav (turn stepper, outline, error stepper, scroll-spy) at a scope
