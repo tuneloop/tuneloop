@@ -1527,10 +1527,20 @@ export class Store {
                 a.parent_artifact_id AS parentId,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
-                  SELECT SUM(c) FROM (
-                    SELECT DISTINCT s.id, s.cost_usd AS c
-                    FROM session_artifacts sa2 JOIN sessions s ON s.id = sa2.session_id
+                  SELECT SUM(cost_usd) FROM (
+                    -- block-attributed cost (block→artifact): blocks partition the
+                    -- session, so a multi-purpose session isn't charged whole (P1).
+                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
+                    FROM block_artifacts ba
+                    JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+                    JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+                    WHERE ba.artifact_id = a.id
+                    UNION
+                    -- whole-session fallback when this artifact has no block links
+                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
+                    FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
                     WHERE sa2.artifact_id = a.id
+                      AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
                   )
                 ), 0) AS costUsd
          FROM artifacts a
