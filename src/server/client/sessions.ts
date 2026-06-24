@@ -147,7 +147,12 @@ export function renderSessions(rows) {
   }).join('');
   $('#sessions').innerHTML = '<table>' + head + body + '</table>';
   Array.prototype.forEach.call(document.querySelectorAll('.srow'), function (tr) {
-    tr.onclick = function () { openDetail(tr.getAttribute('data-id')); };
+    tr.onclick = function () {
+      var f = state.filters || {};
+      // Carry the active artifact filter (from "See sessions") into the drawer so
+      // the transcript opens focused on that feature / PR.
+      openDetail(tr.getAttribute('data-id'), f.artifact ? { kind: f.artifactKind, val: f.artifact } : null);
+    };
   });
 }
 
@@ -354,7 +359,7 @@ function filesHtml(edits, transcript) {
     .map(function (g) { return fileCardHtml(g.key, g.items, promptSegmentsHtml(g.items, transcript)); }).join('');
 }
 
-export function openDetail(id) {
+export function openDetail(id, focus?: any) {
   get('/api/session?id=' + encodeURIComponent(id)).then(function (d) {
     if (!d || d.error) return;
     var s = d.session, a = d.annotations || {};
@@ -365,9 +370,9 @@ export function openDetail(id) {
       '<button class="x" type="button" id="drawerCloseBtn">close</button></div>';
     var fileCount = (d.artifacts || []).filter(function (x) { return x.kind === 'file'; }).length;
     var tabs = '<div class="drawer-tabs">' +
-      '<button class="dtab on" type="button" data-dtab="summary">Summary</button>' +
+      '<button class="dtab on" type="button" data-dtab="transcript">Transcript</button>' +
       (fileCount ? '<button class="dtab" type="button" data-dtab="files">Files (' + fileCount + ')</button>' : '') +
-      '<button class="dtab" type="button" data-dtab="transcript">Transcript</button>' +
+      '<button class="dtab" type="button" data-dtab="summary">Summary</button>' +
       '</div>';
 
     // ---- Summary pane: vitals, registry-driven dimensions, intent, artifacts --
@@ -424,9 +429,7 @@ export function openDetail(id) {
       sum += '<div class="sect-h">Outcomes</div>';
       sum += chipList(outs, 10, function (o) { return '<span class="tag">' + esc(o.type) + '</span>'; });
     }
-    sum += '<div class="see-tx-wrap">' +
-      (fileCount ? '<button class="see-tx" type="button" data-tab="files">See files changed →</button>' : '') +
-      '<button class="see-tx" type="button" data-tab="transcript">See transcript →</button></div>';
+    if (fileCount) sum += '<div class="see-tx-wrap"><button class="see-tx" type="button" data-tab="files">See files changed →</button></div>';
 
     // ---- Transcript pane: the main thread + one tab per subagent. ----------
     // Claude Code writes each subagent (Task/Agent spawn) to its own sidechain
@@ -466,6 +469,19 @@ export function openDetail(id) {
     }).filter(function (d) { return d.values.length >= 2; });
     var fDim = dimsAvail.length ? dimsAvail[0].dim : null;
     var fVal = null; // null = All
+    // Arrived via an artifact drill ("See sessions") → pre-select that dimension+value
+    // (feature matched by title, PR by number). Single-artifact sessions just open the
+    // transcript; a no-match falls through to All.
+    if (focus && focus.val && (focus.kind === 'feature' || focus.kind === 'pr')) {
+      var fd = dimsAvail.filter(function (d) { return d.dim === focus.kind; })[0];
+      if (fd) {
+        var fv0 = String(focus.val), digs = (fv0.match(/(\d+)\s*$/) || [])[1];
+        var hit = fd.values.filter(function (v) {
+          return v.key === fv0 || v.label === fv0 || '#' + v.key === fv0 || (focus.kind === 'pr' && digs && v.key === digs);
+        })[0];
+        if (hit) { fDim = focus.kind; fVal = hit.key; }
+      }
+    }
     function filterBarHtml() {
       if (!dimsAvail.length) return '';
       var dd = dimsAvail.filter(function (d) { return d.dim === fDim; })[0] || dimsAvail[0];
@@ -692,9 +708,9 @@ export function openDetail(id) {
     // One sticky header (title + tabs + scope bar + transcript nav) over the panes.
     $('#drawerBody').innerHTML =
       '<div class="drawer-head">' + headTop + tabs + (hasTx ? scopeBar : '') + (hasTx ? nav : '') + '</div>' +
-      '<div class="dpane on" id="dpane-summary">' + sum + '</div>' +
+      '<div class="dpane" id="dpane-summary">' + sum + '</div>' +
       (fileCount ? '<div class="dpane" id="dpane-files"><div class="empty">Loading file changes…</div></div>' : '') +
-      '<div class="dpane" id="dpane-transcript">' + txBody + '</div>';
+      '<div class="dpane on" id="dpane-transcript">' + txBody + '</div>';
 
     // Keep --head-h (used for sticky-aware scroll-margin) in step with the header,
     // whose height changes when the transcript nav shows/hides between tabs.
@@ -1021,7 +1037,8 @@ export function openDetail(id) {
       };
     });
 
-    syncHeadH();
+    // Land on Transcript by default (global default); empty sessions fall to Summary.
+    showTab(hasTx ? 'transcript' : 'summary');
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
   });
