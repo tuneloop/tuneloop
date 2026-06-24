@@ -52,6 +52,12 @@ interface BaseEvent {
   ts?: string
   isSidechain: boolean
   /**
+   * Dense ordinal over MAIN-THREAD events (sidechain events have none), assigned
+   * post-merge by assignSeq() (core/blocks.ts). The coordinate the block partition
+   * is defined in; persisted in the session blob.
+   */
+  seq?: number
+  /**
    * For sidechain (subagent) events, the stable id of the subagent that emitted
    * them — Claude Code's per-subagent transcript id. Lets the viewer group a
    * subagent's turns into their own thread instead of interleaving them with the

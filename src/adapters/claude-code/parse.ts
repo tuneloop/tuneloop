@@ -18,7 +18,8 @@ import { mapAction } from './actions'
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (see analyze.ts). 4: capture subagent identity (agentId on events +
 // session.subagents from the sidechain `.meta.json`) for the tabbed transcript.
-export const PARSE_VERSION = 4
+// 5: assign main-thread `seq` (assignSeq) so the block partition + blob carry it.
+export const PARSE_VERSION = 5
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 

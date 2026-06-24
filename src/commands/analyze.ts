@@ -2,6 +2,7 @@ import { basename } from 'node:path'
 import { loadConfig } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
+import { assignSeq } from '../core/blocks'
 import { mergeSessions } from '../core/merge'
 import type { Session } from '../core/model'
 import { getAdapters, getProcessors } from '../core/registry'
@@ -102,6 +103,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   for (const group of groups.values()) {
     if (opts.limit != null && processed >= opts.limit) break
     const session = mergeSessions(group)
+    assignSeq(session) // main-thread seq, post-merge — the block partition's coordinate
     const repo = await resolveRepo(session.project.cwd)
     if (repo) session.project.repo = repo
     const prior = store.storedMeta(session.id)

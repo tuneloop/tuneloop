@@ -1,6 +1,7 @@
 import { registerProcessor } from '../core/registry'
+import { attributeBlocksToPrs, blockMembership, deterministicBlocks } from '../core/blocks'
 import type { Processor } from '../core/processor'
-import type { ArtifactInput, OutcomeInput, SessionArtifactInput } from '../store/types'
+import type { ArtifactInput, BlockArtifactInput, OutcomeInput, SessionArtifactInput } from '../store/types'
 
 const PR_URL = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
 
@@ -15,6 +16,7 @@ export const outcomesGit: Processor = {
   version: 2,
   kind: 'static',
   needs: { network: true },
+  requires: ['segment-blocks'],
   async run(ctx) {
     const { session, sh } = ctx
     const cwd = session.project.cwd
@@ -23,8 +25,9 @@ export const outcomesGit: Processor = {
     const outcomes: OutcomeInput[] = []
 
     let committed = false
-    const prUrls = new Set<string>()
-    for (const t of session.toolCalls) {
+    // Track each PR's create/merge tool-call index so it maps to its block below.
+    const prHits: Array<{ url: string; toolIndex: number }> = []
+    session.toolCalls.forEach((t, i) => {
       if (t.action === 'shell' && typeof t.target.command === 'string') {
         const cmd = t.target.command
         if (/\bgit\b[^\n]*\bcommit\b/.test(cmd)) committed = true
@@ -33,15 +36,17 @@ export const outcomesGit: Processor = {
         // researching a public repo). That blanket scan caused false positives.
         if (/\bgh\s+pr\s+(?:create|merge)\b/.test(cmd)) {
           const url = matchPrUrl(t.result.raw) ?? matchPrUrl(cmd)
-          if (url) prUrls.add(url)
+          if (url) prHits.push({ url, toolIndex: i })
         }
       } else if (t.action === 'mcp_call' && /pull_request/i.test(t.name) && /(?:create|merge|update)/i.test(t.name)) {
         const url = matchPrUrl(t.result.raw) ?? matchPrUrl(t.input)
-        if (url) prUrls.add(url)
+        if (url) prHits.push({ url, toolIndex: i })
       }
-    }
+    })
 
     if (committed) outcomes.push({ type: 'commit_pushed', artifactId: null, ts: session.endedAt })
+
+    const prUrls = new Set(prHits.map((h) => h.url))
 
     for (const url of prUrls) {
       const m = PR_URL.exec(url)
@@ -95,7 +100,26 @@ export const outcomesGit: Processor = {
       }
     }
 
-    return { artifacts, sessionArtifacts, outcomes }
+    // Block→PR: map each PR's create/merge call to its (closing) block, then
+    // attribute every block to the next PR it fed into — the full cost of
+    // producing the PR, including the commit-bounded blocks leading up to it.
+    const blocks = deterministicBlocks(session)
+    const blockArtifacts: BlockArtifactInput[] = []
+    if (blocks.length && prHits.length) {
+      const tool = blockMembership(session, blocks).tool
+      const closingBlockToArtifact = new Map<number, string>()
+      for (const hit of prHits) {
+        const m = PR_URL.exec(hit.url)
+        if (!m) continue
+        const blockIdx = tool[hit.toolIndex]
+        if (blockIdx != null) closingBlockToArtifact.set(blockIdx, `pr:${m[1]}/${m[2]}:${m[3]}`)
+      }
+      for (const { blockIdx, artifactId } of attributeBlocksToPrs(blocks, closingBlockToArtifact)) {
+        blockArtifacts.push({ blockIdx, artifactId, role: 'contributed', source: 'explicit' })
+      }
+    }
+
+    return { artifacts, sessionArtifacts, outcomes, blockArtifacts }
   },
 }
 

@@ -1,7 +1,7 @@
 import { registerProcessor } from '../core/registry'
 import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
-import { isSyntheticUser } from '../core/turns'
+import { isSyntheticUser, stripReminders } from '../core/turns'
 import { costOfUsage } from '../pricing/pricing'
 import type {
   AnnotationInput,
@@ -310,13 +310,6 @@ function userTurns(s: Session): string[] {
     if (t && !isSyntheticUser(t)) out.push(t)
   }
   return out
-}
-
-function stripReminders(text: string): string {
-  return text
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ')
-    .replace(/[ \t]+\n/g, '\n')
-    .trim()
 }
 
 /**

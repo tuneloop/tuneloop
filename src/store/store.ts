@@ -209,6 +209,11 @@ export class Store {
       this.db.prepare('DELETE FROM outcomes WHERE session_id = ? AND producer = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM session_artifacts WHERE session_id = ? AND producer = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM files_index WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM blocks WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_usage WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_tool WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_annotations WHERE session_id = ? AND processor = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_artifacts WHERE session_id = ? AND producer = ?').run(sessionId, processor)
 
       for (const a of result.annotations ?? []) {
         this.db
@@ -275,6 +280,35 @@ export class Store {
         this.db
           .prepare('INSERT OR REPLACE INTO files_index (repo, path, session_id, producer) VALUES (?,?,?,?)')
           .run(f.repo ?? null, f.path, sessionId, processor)
+      }
+      for (const b of result.blocks ?? []) {
+        this.db
+          .prepare(
+            'INSERT OR REPLACE INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, ts_start, ts_end, producer) VALUES (?,?,?,?,?,?,?,?)',
+          )
+          .run(sessionId, b.idx, b.startSeq, b.endSeq, b.boundaryKind, b.tsStart ?? null, b.tsEnd ?? null, processor)
+      }
+      for (const u of result.blockUsage ?? []) {
+        this.db
+          .prepare('INSERT OR REPLACE INTO block_usage (session_id, usage_idx, block_idx, producer) VALUES (?,?,?,?)')
+          .run(sessionId, u.usageIdx, u.blockIdx, processor)
+      }
+      for (const t of result.blockTool ?? []) {
+        this.db
+          .prepare('INSERT OR REPLACE INTO block_tool (session_id, tool_idx, block_idx, producer) VALUES (?,?,?,?)')
+          .run(sessionId, t.toolIdx, t.blockIdx, processor)
+      }
+      for (const ba of result.blockAnnotations ?? []) {
+        this.db
+          .prepare('INSERT OR REPLACE INTO block_annotations (session_id, block_idx, processor, key, value) VALUES (?,?,?,?,?)')
+          .run(sessionId, ba.blockIdx, processor, ba.key, JSON.stringify(ba.value))
+      }
+      for (const x of result.blockArtifacts ?? []) {
+        this.db
+          .prepare(
+            'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
+          )
+          .run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
       }
 
       this.db

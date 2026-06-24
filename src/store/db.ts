@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 4
+const SCHEMA_VERSION = 5
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -213,6 +213,72 @@ CREATE TABLE IF NOT EXISTS measures (
   format   TEXT,
   producer TEXT
 );
+
+-- Block-level attribution (handling_long_sessions). A block is a contiguous,
+-- deterministic slice of a session's MAIN thread; the membership join tables map
+-- each usage_facts / tool_calls row to its block so cost attributes at block grain.
+-- Owned by the segment-blocks processor; block_annotations/block_artifacts are
+-- layered on by enrich-session (use_case, feature) and outcomes-git (PR/commit).
+CREATE TABLE IF NOT EXISTS blocks (
+  session_id    TEXT,
+  idx           INTEGER,        -- 0-based main-thread block ordinal
+  start_seq     INTEGER,        -- inclusive main-thread seq
+  end_seq       INTEGER,        -- inclusive
+  boundary_kind TEXT,           -- 'user_turn' | 'commit' | 'pr_create' | 'pr_merge' | 'session_end'
+  ts_start      TEXT,
+  ts_end        TEXT,
+  producer      TEXT,
+  PRIMARY KEY (session_id, idx),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_blocks_session ON blocks(session_id);
+
+-- usage_facts row -> its block. PK (session_id, usage_idx) enforces that a usage
+-- row belongs to exactly one block (non-overlap); exhaustiveness is asserted.
+CREATE TABLE IF NOT EXISTS block_usage (
+  session_id TEXT,
+  usage_idx  INTEGER,           -- usage_facts.idx
+  block_idx  INTEGER,
+  producer   TEXT,
+  PRIMARY KEY (session_id, usage_idx),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_block_usage_block ON block_usage(session_id, block_idx);
+
+CREATE TABLE IF NOT EXISTS block_tool (
+  session_id TEXT,
+  tool_idx   INTEGER,           -- tool_calls.idx
+  block_idx  INTEGER,
+  producer   TEXT,
+  PRIMARY KEY (session_id, tool_idx),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_block_tool_block ON block_tool(session_id, block_idx);
+
+-- Per-block labels (parallels annotations). use_case lands here.
+CREATE TABLE IF NOT EXISTS block_annotations (
+  session_id TEXT,
+  block_idx  INTEGER,
+  processor  TEXT,
+  key        TEXT,
+  value      TEXT,              -- json
+  PRIMARY KEY (session_id, block_idx, processor, key),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+-- block -> artifact (PR/commit deterministic from outcomes-git; feature from enrich-session).
+CREATE TABLE IF NOT EXISTS block_artifacts (
+  session_id  TEXT,
+  block_idx   INTEGER,
+  artifact_id TEXT,
+  role        TEXT,
+  source      TEXT,
+  confidence  REAL,
+  producer    TEXT,
+  PRIMARY KEY (session_id, block_idx, artifact_id, role),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_block_artifacts_artifact ON block_artifacts(artifact_id);
 `
 
 export function openDb(path: string): DB {
