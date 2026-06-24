@@ -671,7 +671,6 @@ export function openDetail(id, focus?: any) {
     }
     var nav = '<div class="tx-nav">' +
       '<div class="tx-filter-wrap"></div>' +
-      '<div class="tx-now" id="tx-now"></div>' +
       '<div class="tx-nav-row">' +
         '<div class="tx-grp">' +
           '<span class="tx-grp-lbl">Turn</span>' +
@@ -688,6 +687,7 @@ export function openDetail(id, focus?: any) {
             '<button class="btn tx-err-next" type="button">›</button></div>'
           : '<span class="tx-grp none">no tool errors</span>') +
       '</div>' +
+      '<div class="tx-now" id="tx-now"></div>' +
       '</div>';
 
     // Subagent scopes get a header (type/description + a link back to the call).
