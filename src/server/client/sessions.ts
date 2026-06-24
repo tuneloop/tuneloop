@@ -491,18 +491,31 @@ export function openDetail(id, focus?: any) {
     }).filter(function (d) { return d.values.length >= 2; });
     var fDim = dimsAvail.length ? dimsAvail[0].dim : null;
     var fVal = null; // null = All
-    // Arrived via an artifact drill ("See sessions") → pre-select that dimension+value
-    // (feature matched by title, PR by number). Single-artifact sessions just open the
-    // transcript; a no-match falls through to All.
-    if (focus && focus.val && (focus.kind === 'feature' || focus.kind === 'pr')) {
-      var fd = dimsAvail.filter(function (d) { return d.dim === focus.kind; })[0];
-      if (fd) {
-        var fv0 = String(focus.val), digs = (fv0.match(/(\d+)\s*$/) || [])[1];
-        var hit = fd.values.filter(function (v) {
-          return v.key === fv0 || v.label === fv0 || '#' + v.key === fv0 || (focus.kind === 'pr' && digs && v.key === digs);
-        })[0];
-        if (hit) { fDim = focus.kind; fVal = hit.key; }
-      }
+    // Match a summary artifact chip (or an arrival focus) to a View-by dimension
+    // VALUE — feature by title, PR by number. Null when that dimension isn't
+    // filterable (≤1 value) or there's no match.
+    function resolveDimValue(kind, val) {
+      if ((kind !== 'feature' && kind !== 'pr') || val == null) return null;
+      var fd = dimsAvail.filter(function (d) { return d.dim === kind; })[0];
+      if (!fd) return null;
+      var fv0 = String(val), digs = (fv0.match(/(\d+)\s*$/) || [])[1];
+      var hit = fd.values.filter(function (v) {
+        return v.key === fv0 || v.label === fv0 || '#' + v.key === fv0 || (kind === 'pr' && digs && v.key === digs);
+      })[0];
+      return hit ? hit.key : null;
+    }
+    // Focus the transcript on a dimension value (a summary chip → the transcript).
+    function focusDim(dim, key) {
+      if (activeScope !== 'main') switchScope('main');
+      fDim = dim; fVal = key;
+      renderFilterBar();
+      showTab('transcript');
+      applyTxFilter(true);
+    }
+    // Arrived via an artifact drill ("See sessions") → pre-select that value.
+    if (focus && focus.val) {
+      var fk = resolveDimValue(focus.kind, focus.val);
+      if (fk != null) { fDim = focus.kind; fVal = fk; }
     }
     function filterBarHtml() {
       if (!dimsAvail.length) return '';
@@ -852,7 +865,17 @@ export function openDetail(id, focus?: any) {
 
     // Artifact chips pivot to a filtered session list.
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tag.click'), function (el) {
-      el.onclick = function () { filterByArtifact(el.getAttribute('data-art'), el.getAttribute('data-kind')); };
+      var kind = el.getAttribute('data-kind'), art = el.getAttribute('data-art');
+      if (kind === 'feature') {
+        // In-session: focus the transcript on this feature when it's filterable
+        // (>1 feature), rather than leaving for the session list. The only feature
+        // → filtering is pointless, so disable the chip.
+        var key = resolveDimValue(kind, art);
+        if (key != null) el.onclick = function () { focusDim(kind, key); };
+        else el.classList.remove('click');
+      } else {
+        el.onclick = function () { filterByArtifact(art, kind); };
+      }
     });
 
     // ----- Transcript navigation: turn stepper + scroll-spy + error stepper ----
