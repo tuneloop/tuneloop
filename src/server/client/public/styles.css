@@ -316,7 +316,7 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-scope-pane.on { display: block; }
 .tx-nav { display: none; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .tx-nav.on { display: block; }
-.tx-nav-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.tx-nav-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 9px; }
 .tx-grp { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
 .tx-grp.none { color: var(--muted); font-style: italic; }
 .tx-grp-lbl { color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-size: 11px; }
@@ -332,13 +332,14 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-fchip.on { color: var(--ink); border-color: var(--emerald); background: #eaf3ec; }
 .turn.tx-hidden, .tx-spawn.tx-hidden { display: none; }
 .tx-gap { text-align: center; color: var(--muted); font-size: 12px; padding: 7px 0; letter-spacing: .04em; }
-/* Context strip: grounds the user at the top of the transcript (goal / focus). */
-.tx-ctx { border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 9px 13px; margin: 2px 0 12px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
+/* Context strip: a serif section-intro (NOT a turn card) that grounds the user at
+   the top of the transcript — the session goal, or the focused PR/feature/work-type. */
+.tx-ctx { padding: 2px 0 12px; margin: 0 0 12px; border-bottom: 1px solid var(--line); scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 .tx-ctx:empty { display: none; }
-.tx-ctx.focused { border-left: 3px solid var(--emerald); }
-.tx-ctx-lbl { font-size: 12px; color: var(--muted); font-weight: 600; }
-.tx-ctx-main { margin-top: 2px; color: var(--ink); font-size: 14px; line-height: 1.35; }
-.tx-ctx-meta { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.tx-ctx-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.tx-ctx.focused .tx-ctx-lbl { color: var(--emerald); }
+.tx-ctx-main { margin-top: 3px; font-family: Georgia, "Times New Roman", serif; font-size: 17px; color: var(--ink); line-height: 1.3; }
+.tx-ctx-meta { margin-top: 5px; font-size: 12px; color: var(--muted); }
 .tx-pos { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
 .tx-pos b { color: var(--ink); font-weight: 600; }
 .tx-errs .tx-pos b { color: var(--red); }
