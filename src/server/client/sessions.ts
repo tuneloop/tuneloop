@@ -320,7 +320,7 @@ function editHtml(e, showNarr) {
 // by-file view).
 function fileCardHtml(path, edits, bodyHtml) {
   var c = sumAddDel(edits);
-  return '<div class="fc-file collapsed"><button class="fc-head" type="button">' +
+  return '<div class="fc-file collapsed" data-path="' + esc(path) + '"><button class="fc-head" type="button">' +
     '<span class="fc-caret">▾</span><span class="fc-path" title="' + esc(path) + '">' + shortPathHtml(path) + '</span>' +
     '<span class="fc-stat"><span class="fc-add">+' + c.add + '</span> <span class="fc-del">−' + c.del + '</span> · ' +
     edits.length + ' edit' + (edits.length > 1 ? 's' : '') + '</span></button>' +
@@ -505,9 +505,12 @@ export function openDetail(id, focus?: any) {
       return hit ? hit.key : null;
     }
     // Focus the transcript on a dimension value (a summary chip → the transcript).
+    // When the value isn't filterable (only one of its kind), just open the
+    // transcript unfiltered — a single feature/PR ≈ the whole session.
     function focusDim(dim, key) {
       if (activeScope !== 'main') switchScope('main');
-      fDim = dim; fVal = key;
+      if (key != null && dimsAvail.filter(function (d) { return d.dim === dim; })[0]) { fDim = dim; fVal = key; }
+      else fVal = null;
       renderFilterBar();
       showTab('transcript');
       applyTxFilter(true);
@@ -767,7 +770,19 @@ export function openDetail(id, focus?: any) {
     // Tab switching — shared by the top tabs and the summary "See transcript".
     // The transcript nav lives in the shared header but only shows on that tab;
     // the Files diffs are fetched lazily the first time that tab is opened.
-    var filesLoaded = false;
+    var filesLoaded = false, filesRendered = false, pendingFile = null;
+    function expandFile(path) {
+      var pane = $('#dpane-files'); if (!pane) return;
+      var card = null;
+      Array.prototype.forEach.call(pane.querySelectorAll('.fc-file'), function (c) { if (c.getAttribute('data-path') === path) card = c; });
+      if (card) { card.classList.remove('collapsed'); card.scrollIntoView({ block: 'start' }); flashEl(card); }
+    }
+    // A summary file chip → the Files tab with that file expanded (after lazy load).
+    function openFile(path) {
+      pendingFile = path;
+      showTab('files');
+      if (filesRendered) { expandFile(path); pendingFile = null; }
+    }
     function showTab(name) {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (x) {
         x.classList.toggle('on', x.getAttribute('data-dtab') === name);
@@ -806,6 +821,8 @@ export function openDetail(id, focus?: any) {
         Array.prototype.forEach.call(pane.querySelectorAll('.msg-more'), function (b) {
           b.onclick = function () { var on = b.previousElementSibling.classList.toggle('on'); b.textContent = on ? 'Show less ↑' : 'Show more ↓'; };
         });
+        filesRendered = true;
+        if (pendingFile) { expandFile(pendingFile); pendingFile = null; }
       });
     }
     // From a file edit, jump to the user message that prompted it (the intent),
@@ -864,15 +881,20 @@ export function openDetail(id, focus?: any) {
     });
 
     // Artifact chips pivot to a filtered session list.
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tag.click'), function (el) {
+    var sumChips = document.querySelectorAll('#drawerBody .tag.click');
+    // A feature/PR chip is clickable only when there are ≥2 of THAT kind in the
+    // summary (focus the transcript on it); a lone one has nothing to filter, so
+    // disable it. Gate on what's actually shown — the transcript's block-level
+    // feature dim can be sparser than the session's linked features.
+    var kindCount = {};
+    Array.prototype.forEach.call(sumChips, function (el) { var k = el.getAttribute('data-kind'); kindCount[k] = (kindCount[k] || 0) + 1; });
+    Array.prototype.forEach.call(sumChips, function (el) {
       var kind = el.getAttribute('data-kind'), art = el.getAttribute('data-art');
-      if (kind === 'feature') {
-        // In-session: focus the transcript on this feature when it's filterable
-        // (>1 feature), rather than leaving for the session list. The only feature
-        // → filtering is pointless, so disable the chip.
-        var key = resolveDimValue(kind, art);
-        if (key != null) el.onclick = function () { focusDim(kind, key); };
+      if (kind === 'feature' || kind === 'pr') {
+        if ((kindCount[kind] || 0) >= 2) el.onclick = function () { focusDim(kind, resolveDimValue(kind, art)); };
         else el.classList.remove('click');
+      } else if (kind === 'file') {
+        el.onclick = function () { openFile(art); };
       } else {
         el.onclick = function () { filterByArtifact(art, kind); };
       }

@@ -252,11 +252,12 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .fc-narr { color: var(--muted); font-size: 12px; font-style: italic; line-height: 1.45; margin: 2px 0 6px; }
 /* A file's edits, headed by the prompt that drove them */
 .fc-pseg { margin: 2px 0; }
-.fc-pseg + .fc-pseg { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 8px; }
-.fc-pseg-h { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 6px; }
-.fc-pseg-msg { flex: 1; min-width: 0; font-size: 12.5px; color: var(--emerald); }
+.fc-pseg + .fc-pseg { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 18px; }
+.fc-pseg-h { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+/* The prompt that drove these edits, as a tinted band with an emerald rail. */
+.fc-pseg-msg { flex: 1; min-width: 0; font-size: 12.5px; color: var(--ink); background: var(--track); border-left: 3px solid var(--emerald); border-radius: 0 6px 6px 0; padding: 6px 10px; }
 .fc-pseg-empty { color: var(--muted); font-style: italic; }
-.fc-file { border: 1px solid var(--line); border-radius: 8px; margin: 10px 0; background: var(--paper); overflow: hidden; }
+.fc-file { border: 1px solid var(--line); border-radius: 8px; margin: 10px 0; background: var(--paper); overflow: hidden; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 .fc-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: var(--track); padding: 8px 12px; cursor: pointer; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
 .fc-caret { color: var(--muted); }
 .fc-file.collapsed .fc-caret { display: inline-block; transform: rotate(-90deg); }
