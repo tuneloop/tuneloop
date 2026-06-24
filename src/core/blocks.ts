@@ -14,7 +14,7 @@
  * cross-processor store reads.
  */
 import type { Event, Session, ToolCall } from './model'
-import { isRealUserText } from './turns'
+import { isRealUserText, stripReminders } from './turns'
 
 /** A tool action that closes a block (cost-attribution boundary). */
 export type BoundaryKind = 'commit' | 'pr_create' | 'pr_merge'
@@ -223,4 +223,55 @@ export function blockMembership(session: Session, blocks: Block[]): BlockMembers
   }
 
   return { usage, tool }
+}
+
+/**
+ * A complete numbered digest of the blocks for the segmentation prompt — every
+ * block on one line: its opening user turn (truncated) + a compact action
+ * summary. NOT truncated by block count: the idx labels must map 1:1 to the
+ * model's runs, so this is the one place the digest can't elide the middle.
+ */
+export function blockSpine(session: Session, blocks: Block[]): string {
+  if (blocks.length === 0) return '(no blocks)'
+  const { tool } = blockMembership(session, blocks)
+  const toolsByBlock = new Map<number, ToolCall[]>()
+  session.toolCalls.forEach((tc, i) => {
+    const b = tool[i]
+    if (b == null) return
+    const arr = toolsByBlock.get(b) ?? []
+    arr.push(tc)
+    toolsByBlock.set(b, arr)
+  })
+  const bySeq = new Map<number, Event>()
+  for (const ev of session.events) if (!ev.isSidechain && ev.seq != null) bySeq.set(ev.seq, ev)
+
+  const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
+  const lines: string[] = []
+  for (const b of blocks) {
+    let opener = ''
+    for (let s = b.startSeq; s <= b.endSeq; s++) {
+      const ev = bySeq.get(s)
+      if (ev && ev.kind === 'user' && isRealUserText(ev.text)) {
+        opener = stripReminders(ev.text).replace(/\s+/g, ' ')
+        break
+      }
+    }
+    const tcs = toolsByBlock.get(b.idx) ?? []
+    const writes = tcs.filter((t) => t.action === 'file_write').length
+    const shells = tcs.filter((t) => t.action === 'shell').length
+    const acts = [writes ? `${writes} file write${writes > 1 ? 's' : ''}` : '', shells ? `${shells} shell` : '']
+      .filter(Boolean)
+      .join(', ')
+    const tag =
+      b.boundaryKind === 'pr_create'
+        ? ' · opened a PR'
+        : b.boundaryKind === 'pr_merge'
+          ? ' · merged a PR'
+          : b.boundaryKind === 'commit'
+            ? ' · git commit'
+            : ''
+    const head = opener ? `user: "${clip(opener, 200)}"` : '(continued work — no new prompt)'
+    lines.push(`[${b.idx}] ${head}${acts ? ` · ${acts}` : ''}${tag}`)
+  }
+  return lines.join('\n')
 }

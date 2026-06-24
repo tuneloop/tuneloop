@@ -517,7 +517,7 @@ export class Store {
       topTools,
       costPerMergedPr: this.costPerArtifact('pr'),
       analysisCostUsd,
-      useCases: this.arrayDist('use_case'),
+      useCases: this.facetDistribution('use_case'),
       complexity: this.scalarDist('complexity'),
       autonomy: this.scalarDist('autonomy'),
       success: this.scalarDist('success'),
@@ -530,17 +530,6 @@ export class Store {
     return this.db
       .prepare(
         "SELECT json_extract(value,'$') AS value, COUNT(*) AS count FROM annotations WHERE key = ? GROUP BY value ORDER BY count DESC",
-      )
-      .all(key) as Dist[]
-  }
-
-  /** Distribution of a multi-value (JSON array) annotation across sessions. */
-  private arrayDist(key: string): Dist[] {
-    return this.db
-      .prepare(
-        `SELECT je.value AS value, COUNT(*) AS count
-         FROM annotations a, json_each(a.value) je
-         WHERE a.key = ? GROUP BY je.value ORDER BY count DESC`,
       )
       .all(key) as Dist[]
   }
@@ -1106,6 +1095,11 @@ export class Store {
         : `SELECT json_extract(a.value,'$') AS value, COUNT(*) AS count
            FROM annotations a WHERE a.key = ? GROUP BY value ORDER BY count DESC`
       params.push(f.key)
+    } else if (f.source === 'block') {
+      // sessions that have a block labeled value (single label per block)
+      sql = `SELECT json_extract(value,'$') AS value, COUNT(DISTINCT session_id) AS count
+             FROM block_annotations WHERE key = ? GROUP BY value ORDER BY count DESC`
+      params.push(f.key)
     } else {
       const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
       const where = f.base ? `WHERE ${f.base}` : ''
@@ -1418,6 +1412,15 @@ export class Store {
       const parsed = row ? safeJson<unknown>(row.value, null) : null
       if (f.multi) return Array.isArray(parsed) ? parsed.map(String) : []
       return parsed == null || parsed === '' ? null : String(parsed)
+    }
+    if (f.source === 'block') {
+      // the distinct block labels this session exhibits (union rollup, e.g. use_case)
+      const rows = this.db
+        .prepare(
+          `SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id = ? AND key = ? ORDER BY v`,
+        )
+        .all(id, f.key) as Array<{ v: unknown }>
+      return rows.map((r) => String(r.v))
     }
     // usage / tool-call child grain: the distinct values this session exhibits.
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'

@@ -1,4 +1,6 @@
 import { registerProcessor } from '../core/registry'
+import { blockSpine, deterministicBlocks } from '../core/blocks'
+import type { Block } from '../core/blocks'
 import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
 import { isSyntheticUser, stripReminders } from '../core/turns'
@@ -6,6 +8,8 @@ import { costOfUsage } from '../pricing/pricing'
 import type {
   AnnotationInput,
   ArtifactInput,
+  BlockAnnotationInput,
+  BlockArtifactInput,
   FeatureRevisionInput,
   OutcomeInput,
   SessionArtifactInput,
@@ -55,11 +59,14 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 9,
+  version: 10,
   kind: 'enrichment',
   needs: { llm: true },
+  requires: ['segment-blocks'],
   facets: [
-    { key: 'use_case', label: 'Use Case', type: 'enum', source: 'annotation', multi: true, roles: ['chart', 'filter', 'detail'] },
+    // use_case is BLOCK-grain: a session's spend time-slices across its blocks'
+    // use-cases (P3). Session-level filter/detail roll up via block_annotations.
+    { key: 'use_case', label: 'Use Case', type: 'enum', source: 'block', roles: ['chart', 'filter', 'detail'] },
     { key: 'complexity', label: 'Complexity', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'autonomy', label: 'Autonomy', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'success', label: 'Success', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
@@ -68,8 +75,9 @@ export const enrichSession: Processor = {
     const { llm, session } = ctx
     if (!llm) return {}
 
-    const { system, user } = buildPrompt(session, ctx.existingFeatures)
-    const completion = await llm.complete({ system, user, maxTokens: 1500 })
+    const blocks = deterministicBlocks(session)
+    const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks)
+    const completion = await llm.complete({ system, user, maxTokens: 2200 })
     const selfCost = { tokens: completion.usage, usd: costOfUsage(llm.provider, llm.model, completion.usage) }
 
     const parsed = parseJson(completion.text)
@@ -78,8 +86,9 @@ export const enrichSession: Processor = {
       return { selfCost } // record the spend; don't re-charge on every run
     }
 
+    // Session-level classification (P4: success/autonomy/complexity stay per-session).
+    // use_case is NOT here — it's block-grain (see block labels below).
     const annotations: AnnotationInput[] = [
-      { key: 'use_case', value: sanitizeList(parsed.use_cases, USE_CASES) },
       { key: 'complexity', value: oneOf(parsed.complexity, COMPLEXITY) },
       { key: 'autonomy', value: oneOf(parsed.autonomy, AUTONOMY) },
       { key: 'success', value: oneOf(parsed.success, SUCCESS) },
@@ -116,25 +125,34 @@ export const enrichSession: Processor = {
       linked.add(id)
       sessionArtifacts.push({ artifactId: id, role: 'contributed', source: 'derived', confidence })
     }
+    // The feature palette: the model declares the features this session touched.
+    // feature_runs reference these by index, so record the resolved id per slot
+    // (or '' when dropped) — index-aligned with parsed.features.
     const features = Array.isArray(parsed.features) ? parsed.features : []
+    const paletteIds: string[] = []
     for (const f of features) {
       const matched = str(f?.matched_feature_id)
       const mf = matched ? existing.get(matched) : undefined
       if (mf && inRepo(mf)) {
         link(mf.id, 0.6) // same-repo or global feature → link directly
+        paletteIds.push(mf.id)
         continue
       }
       // No usable match. Take the model's new title, or — if it tried to match a
       // feature owned by another repo — clone that concept into THIS repo (a
       // repo-scoped twin), never a cross-repo link.
       const title = featureTitle(f?.new_title ?? f?.title) ?? (mf ? featureTitle(mf.title) : null)
-      if (!title) continue
+      if (!title) {
+        paletteIds.push('')
+        continue
+      }
       // Repo-qualify the id so identical titles in different repos stay distinct artifacts.
       const id = derivedFeatureId(repo, title)
       const parent = str(f?.parent_id)
       const parentArtifactId = parent && parent !== id && canParent(parent) ? parent : undefined
       artifacts.push({ id, kind: 'feature', title, source: 'derived', repo: repo ?? undefined, parentArtifactId })
       link(id, 0.5)
+      paletteIds.push(id)
     }
 
     // Taxonomy upkeep: REPARENT only, and only for a feature this session is
@@ -155,7 +173,36 @@ export const enrichSession: Processor = {
       featureRevisions.push({ id, parentId })
     }
 
-    return { annotations, outcomes, artifacts, sessionArtifacts, featureRevisions, selfCost }
+    // Block labels: expand use_case_runs → one use_case per block; feature_runs →
+    // block→feature links (sparse, non-overlapping, resolved via the palette).
+    const blockAnnotations: BlockAnnotationInput[] = []
+    const blockArtifacts: BlockArtifactInput[] = []
+    if (blocks.length > 0) {
+      expandUseCaseRuns(parsed.use_case_runs, blocks.length).forEach((uc, idx) =>
+        blockAnnotations.push({ blockIdx: idx, key: 'use_case', value: uc }),
+      )
+      const assigned = new Set<number>()
+      for (const run of featureRuns(parsed.feature_runs)) {
+        const id = paletteIds[run.feature]
+        if (!id) continue
+        for (let i = Math.max(0, run.from); i <= Math.min(blocks.length - 1, run.to); i++) {
+          if (assigned.has(i)) continue
+          assigned.add(i)
+          blockArtifacts.push({ blockIdx: i, artifactId: id, role: 'contributed', source: 'derived', confidence: 0.5 })
+        }
+      }
+    }
+
+    return {
+      annotations,
+      outcomes,
+      artifacts,
+      sessionArtifacts,
+      featureRevisions,
+      blockAnnotations,
+      blockArtifacts,
+      selfCost,
+    }
   },
 }
 
@@ -163,7 +210,7 @@ registerProcessor(enrichSession)
 
 // ---- prompt -----------------------------------------------------------------
 
-function buildPrompt(session: Session, features: FeatureRef[]): { system: string; user: string } {
+function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]): { system: string; user: string } {
   const system =
     'You analyze a single AI coding session, classify it, and maintain a hierarchical product-feature map. ' +
     'Respond with ONLY a single JSON object — no markdown fences, no commentary.'
@@ -178,20 +225,24 @@ function buildPrompt(session: Session, features: FeatureRef[]): { system: string
     '',
     digest(session),
     '',
+    `Blocks — the session split into ${blocks.length} contiguous slice(s); boundaries are FIXED (label every one):`,
+    blockSpine(session, blocks),
+    '',
     'The full feature map across all repos (indentation = parent → child; "(locked)" = user-owned;',
     '{...} = the repos that feature spans, "{any repo}" = unscoped/global):',
     featureTree,
     '',
     'Return a JSON object with EXACTLY these fields:',
     '{',
-    `  "use_cases": string[] chosen from [${USE_CASES.join(', ')}],`,
     `  "complexity": one of [${COMPLEXITY.join(', ')}],`,
     `  "autonomy": one of [${AUTONOMY.join(', ')}],`,
     '  "intent_summary": one sentence stating what the user set out to accomplish (the goal, not the decisions),',
     '  "decisions": string[] — the KEY decisions made during the session, newest insight last; [] if none,',
     `  "success": one of [${SUCCESS.join(', ')}],`,
     '  "features": [ { "matched_feature_id": "<id of the most specific existing feature this session advanced, or empty>", "new_title": "<title for a NEW feature when none fit, else empty>", "parent_id": "<existing feature id to nest the new feature under, or empty for top-level>" } ],',
-    '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ]',
+    '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ],',
+    `  "use_case_runs": [ { "from": <block idx>, "to": <block idx>, "use_case": one of [${USE_CASES.join(', ')}] } ],`,
+    '  "feature_runs": [ { "from": <block idx>, "to": <block idx>, "feature": <0-based index into the "features" array above> } ]',
     '}',
     'How to classify autonomy — it measures how much the AGENT ran on its own. Look at the user turns AFTER the',
     'opening request and judge how much they STEERED the work. Steering = a correction, a redirection, a design',
@@ -230,6 +281,12 @@ function buildPrompt(session: Session, features: FeatureRef[]): { system: string
     '- feature_revisions is ONLY for moving a feature you advanced (one you matched or created above) under a better parent. You CANNOT rename features. Never touch features you did not advance, other repos\' features, or "(locked)" features.',
     '- parent_id / new_parent_id must reference an id that already exists in the map above.',
     '- If the work is not feature-level (e.g. a chore, refactor, or pure research), use empty "features" and "feature_revisions" arrays.',
+    'Rules for use_case_runs (the use-case of each block, in time order):',
+    `- Cover EVERY block index 0..${Math.max(0, blocks.length - 1)} with contiguous, non-overlapping runs (a partition). Merge adjacent blocks of the same use-case into one run; expect FEW runs (work changes use-case only a few times).`,
+    '- Pick the single dominant use_case per run.',
+    'Rules for feature_runs (which blocks advanced which feature):',
+    '- SPARSE: emit a run ONLY for blocks that substantially advanced a feature; chores/research/fixups belong to no feature — leave them out.',
+    '- "feature" is the 0-based index into the "features" array above. Runs must not overlap. Most sessions need 0–2 feature_runs.',
     'Output ONLY the JSON object.',
   ].join('\n')
 
@@ -408,10 +465,54 @@ function oneOf(v: unknown, allowed: string[]): string {
   return allowed.includes(s) ? s : 'unknown'
 }
 
-function sanitizeList(v: unknown, allowed: string[]): string[] {
-  const set = new Set(allowed)
-  const out = strArray(v).map((s) => s.toLowerCase()).filter((s) => set.has(s))
-  return out.length ? [...new Set(out)] : ['other']
+function intOf(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) ? v : null
+}
+
+/**
+ * Expand the model's use_case_runs into one use_case per block, tiling [0,n).
+ * Out-of-range / invalid runs are clamped or dropped. Unlabeled blocks fall to
+ * 'unclassified'; a gap bracketed by the SAME label on both sides inherits it
+ * (use-case is sticky). A miss degrades quality, never cost (see plan).
+ */
+function expandUseCaseRuns(v: unknown, n: number): string[] {
+  const out = new Array<string>(n).fill('unclassified')
+  const filled = new Array<boolean>(n).fill(false)
+  if (Array.isArray(v)) {
+    for (const r of v) {
+      const uc = oneOf(r?.use_case, USE_CASES)
+      const from = intOf(r?.from)
+      const to = intOf(r?.to)
+      if (uc === 'unknown' || from == null || to == null) continue
+      for (let i = Math.max(0, Math.min(from, to)); i <= Math.min(n - 1, Math.max(from, to)); i++) {
+        out[i] = uc
+        filled[i] = true
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    if (filled[i]) continue
+    let p = i - 1
+    while (p >= 0 && !filled[p]) p--
+    let q = i + 1
+    while (q < n && !filled[q]) q++
+    if (p >= 0 && q < n && out[p] === out[q]) out[i] = out[p]!
+  }
+  return out
+}
+
+/** Normalize feature_runs into clamped {from,to,feature} entries (caller resolves the palette index). */
+function featureRuns(v: unknown): Array<{ from: number; to: number; feature: number }> {
+  if (!Array.isArray(v)) return []
+  const out: Array<{ from: number; to: number; feature: number }> = []
+  for (const r of v) {
+    const from = intOf(r?.from)
+    const to = intOf(r?.to)
+    const feature = intOf(r?.feature)
+    if (from == null || to == null || feature == null) continue
+    out.push({ from: Math.min(from, to), to: Math.max(from, to), feature })
+  }
+  return out
 }
 
 function unique<T>(arr: T[]): T[] {
