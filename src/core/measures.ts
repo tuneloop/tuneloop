@@ -31,7 +31,7 @@ export interface MeasureSpec {
 
 /** Anchor alias for a grain, used to qualify measure/facet expressions. */
 export function aliasFor(grain: Grain): string {
-  return grain === 'usage' ? 'u' : grain === 'tool_call' ? 't' : 's'
+  return grain === 'usage' ? 'u' : grain === 'tool_call' ? 't' : grain === 'block' ? 'b' : 's'
 }
 
 export const INTRINSIC_MEASURES: MeasureSpec[] = [

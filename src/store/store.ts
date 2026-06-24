@@ -3,8 +3,8 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import type { Session } from '../core/model'
 import type { ProcessorResult } from '../core/processor'
 import type { DB } from './db'
-import { grainOf } from '../core/facets'
-import type { FacetSpec, FacetType } from '../core/facets'
+import { facetGroupCompatible, grainOf } from '../core/facets'
+import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
@@ -772,8 +772,8 @@ export class Store {
       const f = this.facet(q.by)
       if (!f) return { error: 'unknown facet' }
       const gf = grainOf(f.source)
-      if (gf !== 'usage' && gf !== 'session') return { error: 'incompatible grain' }
-      const fg = facetGroupExpr(f)
+      if (!facetGroupCompatible(gf, 'usage')) return { error: 'incompatible grain' }
+      const fg = facetGroupExpr(f, 'usage')
       const sql = `SELECT ${time} AS tb, ${fg.expr} AS val, SUM(u.cost_usd) AS spend
                    ${fromSql} ${fg.join} ${whereSql}${fg.where ? ' AND ' + fg.where : ''}
                    GROUP BY tb, val`
@@ -1141,6 +1141,14 @@ export class Store {
             params: [f.key, value],
           }
     }
+    if (f.source === 'block') {
+      // "sessions with a block labeled value" — session-scoped EXISTS, like model/skill.
+      return {
+        sql: `EXISTS (SELECT 1 FROM block_annotations ba
+              WHERE ba.session_id = s.id AND ba.key = ? AND json_extract(ba.value,'$') = ?)`,
+        params: [f.key, value],
+      }
+    }
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
     const base = f.base ? `${f.base} AND ` : ''
     return {
@@ -1215,8 +1223,8 @@ export class Store {
       const f = this.facet(byFacetKey)
       if (!f) return { error: 'unknown facet' }
       const gf = grainOf(f.source)
-      if (gf !== gm && gf !== 'session') return { error: 'incompatible grain' }
-      const fg = facetGroupExpr(f)
+      if (!facetGroupCompatible(gf, gm)) return { error: 'incompatible grain' }
+      const fg = facetGroupExpr(f, gm)
       groupExpr = fg.expr
       facetJoin = fg.join
       if (fg.where) where.push(fg.where)
@@ -2043,8 +2051,12 @@ function aggExpr(m: MeasureSpec): string {
   }
 }
 
-/** Group expression + any join/where a facet contributes to a breakdown (alias `s`/`u`/`t`). */
-function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: string } {
+/**
+ * Group expression + any join/where a facet contributes to a breakdown. `anchorGrain`
+ * is the MEASURE's grain (alias s/u/t) — needed to bridge a block facet up from the
+ * measure's own anchor (usage_facts / tool_calls) through the block membership tables.
+ */
+function facetGroupExpr(f: FacetSpec, anchorGrain: Grain): { join: string; expr: string; where?: string } {
   const col = f.column ?? f.key
   if (f.source === 'session') {
     return f.multi
@@ -2061,6 +2073,20 @@ function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: str
           join: `JOIN annotations fa ON fa.session_id = s.id AND fa.key = '${f.key}'`,
           expr: `json_extract(fa.value,'$')`,
         }
+  }
+  if (f.source === 'block') {
+    // Bridge the measure's anchor (usage_facts / tool_calls) up to its block, then to
+    // the per-block label. Only reached for usage/tool_call measures (block is their
+    // ancestor); session measures can't group by a finer block facet (guard rejects).
+    const anchor = aliasFor(anchorGrain)
+    const member = anchorGrain === 'tool_call' ? 'block_tool' : 'block_usage'
+    const memberCol = anchorGrain === 'tool_call' ? 'tool_idx' : 'usage_idx'
+    return {
+      join:
+        `JOIN ${member} bm ON bm.session_id = ${anchor}.session_id AND bm.${memberCol} = ${anchor}.idx ` +
+        `JOIN block_annotations ba ON ba.session_id = bm.session_id AND ba.block_idx = bm.block_idx AND ba.key = '${f.key}'`,
+      expr: `json_extract(ba.value,'$')`,
+    }
   }
   // same-grain child facet (usage / tool-call): a column on the measure's own anchor
   return { join: '', expr: `${aliasFor(grainOf(f.source))}.${col}`, where: f.base }
