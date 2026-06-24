@@ -177,7 +177,7 @@ function printSummary(s: Summary): void {
   }
 
   // Enrichment (only present when LLM enrichment has run)
-  dist('Use case', s.useCases)
+  dist('Work type', s.useCases)
   dist('Complexity', s.complexity)
   dist('Autonomy', s.autonomy)
   dist('Session success', s.success)

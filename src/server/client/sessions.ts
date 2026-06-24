@@ -132,7 +132,7 @@ export function applyFilters() {
 
 export function renderSessions(rows) {
   if (!rows || !rows.length) { $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>'; return; }
-  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Success</th><th>Complexity</th><th>Use case</th><th></th></tr>';
+  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Success</th><th>Complexity</th><th>Work type</th><th></th></tr>';
   var body = rows.map(function (r) {
     var tags = (r.useCase || []).slice(0, 3).map(function (u) { return '<span class="tag">' + esc(u) + '</span>'; }).join('');
     var merged = r.prMerged ? '<span class="badge b-success">PR merged</span>' : '';
@@ -455,7 +455,7 @@ export function openDetail(id) {
       var b = TXB[bi]; if (!b) return null;
       return dim === 'pr' ? (b.pr ? '#' + b.pr.ident : null) : dim === 'feature' ? (b.feature ? (b.feature.title || 'feature') : null) : (b.useCase || null);
     }
-    var DIM_DEFS = [{ dim: 'pr', label: 'PRs' }, { dim: 'feature', label: 'Features' }, { dim: 'use_case', label: 'Use-case' }];
+    var DIM_DEFS = [{ dim: 'pr', label: 'PRs' }, { dim: 'feature', label: 'Features' }, { dim: 'use_case', label: 'Work type' }];
     var dimsAvail = DIM_DEFS.map(function (def) {
       var seen = {}, vals = [];
       TXB.forEach(function (b) {

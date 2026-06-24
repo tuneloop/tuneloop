@@ -66,7 +66,7 @@ export const enrichSession: Processor = {
   facets: [
     // use_case is BLOCK-grain: a session's spend time-slices across its blocks'
     // use-cases (P3). Session-level filter/detail roll up via block_annotations.
-    { key: 'use_case', label: 'Use Case', type: 'enum', source: 'block', roles: ['chart', 'filter', 'detail'] },
+    { key: 'use_case', label: 'Work type', type: 'enum', source: 'block', roles: ['chart', 'filter', 'detail'] },
     { key: 'complexity', label: 'Complexity', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'autonomy', label: 'Autonomy', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'success', label: 'Success', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
