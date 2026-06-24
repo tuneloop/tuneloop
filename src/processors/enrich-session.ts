@@ -59,7 +59,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 10,
+  version: 11,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],
@@ -115,51 +115,65 @@ export const enrichSession: Processor = {
       return !!p && (p.source === 'user' || inRepo(p))
     }
 
-    // Session → feature links: attach to the most specific feature this repo may
-    // use, else create a repo-scoped derived feature. We never link across repos.
-    const artifacts: ArtifactInput[] = []
-    const sessionArtifacts: SessionArtifactInput[] = []
-    const linked = new Set<string>()
-    const link = (id: string, confidence: number) => {
-      if (linked.has(id)) return
-      linked.add(id)
-      sessionArtifacts.push({ artifactId: id, role: 'contributed', source: 'derived', confidence })
-    }
-    // The feature palette: the model declares the features this session touched.
-    // feature_runs reference these by index, so record the resolved id per slot
-    // (or '' when dropped) — index-aligned with parsed.features.
+    // Feature linkage is BLOCK-FIRST: the model attaches features to block ranges
+    // (feature_runs); the session's feature set is the UNION of its blocks'
+    // features (exactly like the use_case rollup). The `features` palette only
+    // NAMES the candidates that feature_runs reference by index — a palette entry
+    // never tied to a block is dropped, so session-level and block-level features
+    // can never diverge. We never link across repos.
     const features = Array.isArray(parsed.features) ? parsed.features : []
-    const paletteIds: string[] = []
+    const palette: Array<{ id: string; create?: ArtifactInput }> = []
     for (const f of features) {
       const matched = str(f?.matched_feature_id)
       const mf = matched ? existing.get(matched) : undefined
-      if (mf && inRepo(mf)) {
-        link(mf.id, 0.6) // same-repo or global feature → link directly
-        paletteIds.push(mf.id)
-        continue
-      }
-      // No usable match. Take the model's new title, or — if it tried to match a
-      // feature owned by another repo — clone that concept into THIS repo (a
-      // repo-scoped twin), never a cross-repo link.
+      if (mf && inRepo(mf)) { palette.push({ id: mf.id }); continue } // existing same-repo/global feature
+      // No usable match → propose a repo-scoped derived feature (created only if used).
       const title = featureTitle(f?.new_title ?? f?.title) ?? (mf ? featureTitle(mf.title) : null)
-      if (!title) {
-        paletteIds.push('')
-        continue
-      }
-      // Repo-qualify the id so identical titles in different repos stay distinct artifacts.
+      if (!title) { palette.push({ id: '' }); continue }
       const id = derivedFeatureId(repo, title)
       const parent = str(f?.parent_id)
       const parentArtifactId = parent && parent !== id && canParent(parent) ? parent : undefined
-      artifacts.push({ id, kind: 'feature', title, source: 'derived', repo: repo ?? undefined, parentArtifactId })
-      link(id, 0.5)
-      paletteIds.push(id)
+      palette.push({ id, create: { id, kind: 'feature', title, source: 'derived', repo: repo ?? undefined, parentArtifactId } })
     }
 
-    // Taxonomy upkeep: REPARENT only, and only for a feature this session is
-    // itself advancing (in `linked`). Auto-rename is intentionally disabled — a
-    // bad rename retroactively mislabels every session under that feature, far
-    // worse than a slightly-stale title. Locked/user features are never touched;
-    // the store also drops cycles.
+    // Block labels: use_case per block (use_case_runs) + block→feature links
+    // (feature_runs: sparse, non-overlapping, palette-resolved). `linked`
+    // accumulates the UNION of features any block advanced.
+    const blockAnnotations: BlockAnnotationInput[] = []
+    const blockArtifacts: BlockArtifactInput[] = []
+    const linked = new Set<string>()
+    if (blocks.length > 0) {
+      expandUseCaseRuns(parsed.use_case_runs, blocks.length).forEach((uc, idx) =>
+        blockAnnotations.push({ blockIdx: idx, key: 'use_case', value: uc }),
+      )
+      const assigned = new Set<number>()
+      for (const run of featureRuns(parsed.feature_runs)) {
+        const id = palette[run.feature]?.id || ''
+        if (!id) continue
+        linked.add(id)
+        for (let i = Math.max(0, run.from); i <= Math.min(blocks.length - 1, run.to); i++) {
+          if (assigned.has(i)) continue
+          assigned.add(i)
+          blockArtifacts.push({ blockIdx: i, artifactId: id, role: 'contributed', source: 'derived', confidence: 0.5 })
+        }
+      }
+    }
+
+    // Session → feature links + new-feature creation, DERIVED from the block union:
+    // only features with block coverage are linked/created, so the Summary and the
+    // transcript's View-by features always agree.
+    const artifacts: ArtifactInput[] = []
+    const sessionArtifacts: SessionArtifactInput[] = []
+    const emitted = new Set<string>()
+    for (const slot of palette) {
+      if (!slot.id || !linked.has(slot.id) || emitted.has(slot.id)) continue
+      emitted.add(slot.id)
+      if (slot.create) artifacts.push(slot.create)
+      sessionArtifacts.push({ artifactId: slot.id, role: 'contributed', source: 'derived', confidence: 0.6 })
+    }
+
+    // Taxonomy upkeep: REPARENT only, and only for a feature this session advanced
+    // (in `linked`). Auto-rename stays disabled; locked/user features untouched.
     const featureRevisions: FeatureRevisionInput[] = []
     const revs = Array.isArray(parsed.feature_revisions) ? parsed.feature_revisions : []
     for (const r of revs) {
@@ -171,26 +185,6 @@ export const enrichSession: Processor = {
       else if (rawParent && rawParent !== id && canParent(rawParent)) parentId = rawParent
       if (parentId === undefined) continue
       featureRevisions.push({ id, parentId })
-    }
-
-    // Block labels: expand use_case_runs → one use_case per block; feature_runs →
-    // block→feature links (sparse, non-overlapping, resolved via the palette).
-    const blockAnnotations: BlockAnnotationInput[] = []
-    const blockArtifacts: BlockArtifactInput[] = []
-    if (blocks.length > 0) {
-      expandUseCaseRuns(parsed.use_case_runs, blocks.length).forEach((uc, idx) =>
-        blockAnnotations.push({ blockIdx: idx, key: 'use_case', value: uc }),
-      )
-      const assigned = new Set<number>()
-      for (const run of featureRuns(parsed.feature_runs)) {
-        const id = paletteIds[run.feature]
-        if (!id) continue
-        for (let i = Math.max(0, run.from); i <= Math.min(blocks.length - 1, run.to); i++) {
-          if (assigned.has(i)) continue
-          assigned.add(i)
-          blockArtifacts.push({ blockIdx: i, artifactId: id, role: 'contributed', source: 'derived', confidence: 0.5 })
-        }
-      }
     }
 
     return {
@@ -287,6 +281,7 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     'Rules for feature_runs (which blocks advanced which feature):',
     '- SPARSE: emit a run ONLY for blocks that substantially advanced a feature; chores/research/fixups belong to no feature — leave them out.',
     '- "feature" is the 0-based index into the "features" array above. Runs must not overlap. Most sessions need 0–2 feature_runs.',
+    '- The session is credited a feature ONLY through feature_runs, so give every feature you list in "features" at least one feature_run; a feature with no run is dropped.',
     'Output ONLY the JSON object.',
   ].join('\n')
 

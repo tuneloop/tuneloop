@@ -1316,7 +1316,7 @@ export class Store {
         `SELECT s.id AS id, COALESCE(s.title,'(untitled)') AS title, s.started_at AS startedAt,
                 s.cost_usd AS costUsd, s.models AS modelsJson,
                 ${scalar('success')} AS success, ${scalar('complexity')} AS complexity,
-                (SELECT value FROM annotations WHERE session_id=s.id AND key='use_case') AS useCaseJson,
+                (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
                 ${scalar('intent_summary')} AS intent,
                 (SELECT COUNT(*) FROM outcomes WHERE session_id=s.id AND type='pr_merged') AS prMerged
          FROM sessions s ${where} ORDER BY s.started_at DESC LIMIT ${limit}`,
