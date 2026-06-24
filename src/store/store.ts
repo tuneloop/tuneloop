@@ -534,7 +534,16 @@ export class Store {
       .all(key) as Dist[]
   }
 
-  /** Windowed cost-per-shipped-artifact KPI (no window = all time). Unique sessions per artifact. */
+  /**
+   * Windowed cost-per-shipped-artifact KPI (no window = all time). The numerator is
+   * the cost of the BLOCKS that produced each in-window completed artifact (block→PR
+   * is deterministic; block→feature is the LLM feature_runs). Blocks partition the
+   * session, so a session that also did unshipped/other work is NOT charged whole —
+   * the old unique-session approximation dissolves (handling_long_sessions P1/P2).
+   * Falls back to whole-session cost for any artifact with NO block links (a feature
+   * the model never block-linked, or pre-block data). Both paths are at usage grain
+   * and UNION-deduped, so a usage row shared across in-window artifacts counts once.
+   */
   costPerArtifact(kind: string, from?: string, to?: string): { count: number; costPerUnit: number | null } {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
     const params = from && to ? [kind, from, to] : [kind]
@@ -548,13 +557,24 @@ export class Store {
       this.db
         .prepare(
           `SELECT COALESCE(SUM(cost_usd),0) AS s FROM (
-             SELECT DISTINCT s.id, s.cost_usd
+             -- block-attributed: usage rows in blocks linked to an in-window completed artifact
+             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             FROM artifacts a
+             JOIN block_artifacts ba ON ba.artifact_id = a.id
+             JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+             JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
+             UNION
+             -- fallback: whole sessions of in-window artifacts that have NO block links
+             SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
              JOIN session_artifacts sa ON sa.artifact_id = a.id
-             JOIN sessions s ON s.id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range})`,
+             JOIN usage_facts u ON u.session_id = sa.session_id
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
+               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
+           )`,
         )
-        .get(...params) as { s: number }
+        .get(...params, ...params) as { s: number }
     ).s
     return { count, costPerUnit: num / count }
   }
@@ -622,18 +642,25 @@ export class Store {
     throughput: Array<{ bucket: string; count: number }>
     buckets: string[]
   } {
-    // kind binds first (it sits in the SELECT subquery), then the window params.
-    const burnRange = from && to ? 'AND s.started_at >= ? AND s.started_at < ?' : ''
+    // Anchored on usage_facts and dated at message time (COALESCE u.ts → session
+    // start), so spend buckets at block-level time granularity (P5), and the
+    // converted sub-band greens only the BLOCKS that produced a shipped artifact —
+    // not the whole session. kind binds first (in the CASE subquery), then window.
+    const burnRange = from && to ? 'AND COALESCE(u.ts, s.started_at) >= ? AND COALESCE(u.ts, s.started_at) < ?' : ''
     const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
       .prepare(
-        `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
-                COALESCE(SUM(s.cost_usd),0) AS spend,
+        `SELECT ${bucketExpr('COALESCE(u.ts, s.started_at)', bucket)} AS bucket,
+                COALESCE(SUM(u.cost_usd),0) AS spend,
                 COALESCE(SUM(CASE WHEN EXISTS (
-                    SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
-                    WHERE sa.session_id = s.id AND a.kind = ? AND a.completed_at IS NOT NULL
-                  ) THEN s.cost_usd ELSE 0 END),0) AS shippedSpend
-         FROM sessions s WHERE s.started_at IS NOT NULL ${burnRange}
+                    SELECT 1 FROM block_usage bu
+                    JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
+                    JOIN artifacts a ON a.id = ba.artifact_id
+                    WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
+                      AND a.kind = ? AND a.completed_at IS NOT NULL
+                  ) THEN u.cost_usd ELSE 0 END),0) AS shippedSpend
+         FROM usage_facts u JOIN sessions s ON s.id = u.session_id
+         WHERE COALESCE(u.ts, s.started_at) IS NOT NULL ${burnRange}
          GROUP BY bucket ORDER BY bucket`,
       )
       .all(...burnParams) as Array<{ bucket: string; spend: number; shippedSpend: number }>
