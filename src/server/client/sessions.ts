@@ -944,8 +944,8 @@ export function openDetail(id) {
         if (first) { muteSpy(); first.scrollIntoView({ block: 'start' }); flashEl(first); }
       }
     }
-    // Re-point the turn stepper + outline at the currently-VISIBLE main-thread
-    // turns, so the counter and ‹/› navigate what you can actually see.
+    // Re-point the turn AND error steppers + the outline at the currently-VISIBLE
+    // main-thread content, so every nav control walks only what you can see.
     function recountTurns() {
       if (activeScope !== 'main') return;
       var full = scopeByKey.main.userTurns;
@@ -957,6 +957,15 @@ export function openDetail(id) {
       curTurn = 0;
       if (vis.length) updateIndicator(0);
       else { var pos = $('#drawerBody .tx-turn-pos'); if (pos) pos.textContent = '0'; var now = $('#tx-now'); if (now) now.textContent = ''; }
+      // Error stepper: cycle only errors whose block is still visible (a panel
+      // lives inside a turn/toolrun, so check that ancestor's tx-hidden).
+      errIds = scopeByKey.main.errIds.filter(function (eid) {
+        var el = document.getElementById('txerr-' + eid);
+        return el && !el.closest('.tx-hidden');
+      });
+      errIdx = -1;
+      var et = $('#drawerBody .tx-err-total'); if (et) et.textContent = String(errIds.length);
+      var epos = $('#drawerBody .tx-err-pos'); if (epos) epos.textContent = '—';
       syncHeadH();
     }
     renderFilterBar();
