@@ -892,12 +892,14 @@ export function openDetail(id) {
       var c = $('#drawerBody .tx-filter-wrap'); if (!c) return;
       c.innerHTML = filterBarHtml();
       var sel = c.querySelector('.tx-fdim');
-      if (sel) sel.onchange = function () { fDim = this.value; fVal = null; renderFilterBar(); applyTxFilter(); };
+      if (sel) sel.onchange = function () { fDim = this.value; fVal = null; renderFilterBar(); applyTxFilter(true); };
       Array.prototype.forEach.call(c.querySelectorAll('.tx-fchip'), function (b) {
-        b.onclick = function () { var v = b.getAttribute('data-v'); fVal = v === '' ? null : v; renderFilterBar(); applyTxFilter(); };
+        b.onclick = function () { var v = b.getAttribute('data-v'); fVal = v === '' ? null : v; renderFilterBar(); applyTxFilter(true); };
       });
     }
-    function applyTxFilter() {
+    // `scroll` (a user chip/switcher click) lands at the top of the newly-focused
+    // view — otherwise switching focus after scrolling leaves you mid-transcript.
+    function applyTxFilter(scroll?: boolean) {
       var pane = mainPaneEl(); if (!pane) return;
       Array.prototype.forEach.call(pane.querySelectorAll('.tx-gap'), function (g) { if (g.parentNode) g.parentNode.removeChild(g); });
       var els = Array.prototype.filter.call(pane.children, function (el) { return el.hasAttribute('data-blk'); });
@@ -922,6 +924,10 @@ export function openDetail(id) {
         flush();
       }
       recountTurns();
+      if (scroll) {
+        var first = pane.querySelector('[data-blk]:not(.tx-hidden)');
+        if (first) { muteSpy(); first.scrollIntoView({ block: 'start' }); flashEl(first); }
+      }
     }
     // Re-point the turn stepper + outline at the currently-VISIBLE main-thread
     // turns, so the counter and ‹/› navigate what you can actually see.
