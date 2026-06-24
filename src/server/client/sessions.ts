@@ -458,20 +458,34 @@ export function openDetail(id, focus?: any) {
       var b = TXB[bi]; if (!b) return null;
       return dim === 'pr' ? (b.pr ? '#' + b.pr.ident : null) : dim === 'feature' ? (b.feature ? (b.feature.title || 'feature') : null) : (b.useCase || null);
     }
-    // User-turn count per block, so each filter value advertises its share of the
-    // session ("research 3/30") right in its pill.
-    var turnsPerBlock = {}, totalTurns = 0;
+    // Per-block size (any main turn, incl. each tool call) → the proportional
+    // segment bar showing where in the session each value's stretches fall.
+    var sizePerBlock = {}, totalSize = 0;
     allTurns.forEach(function (t) {
-      if (t.role === 'user' && !t.sidechain && t.blockIdx != null) { turnsPerBlock[t.blockIdx] = (turnsPerBlock[t.blockIdx] || 0) + 1; totalTurns++; }
+      if (t.sidechain || t.blockIdx == null) return;
+      sizePerBlock[t.blockIdx] = (sizePerBlock[t.blockIdx] || 0) + 1; totalSize++;
     });
+    // A mini sparkline of the whole session with this value's blocks lit — position
+    // + fragmentation at a glance (the count already gives magnitude).
+    function segBar(dim, key) {
+      if (!TXB.length || !totalSize) return '';
+      var W = 46, H = 8, x = 0, rects = '';
+      TXB.forEach(function (b) {
+        var w = (sizePerBlock[b.idx] || 0) / totalSize * W;
+        if (w <= 0) return;
+        var lit = blkVal(b.idx, dim) === key;
+        rects += '<rect class="' + (lit ? 'lit' : 'trk') + '" x="' + x.toFixed(1) + '" y="0" width="' + Math.max(0.7, w).toFixed(1) + '" height="' + H + '" rx="1"></rect>';
+        x += w;
+      });
+      return '<svg class="tx-fbar" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" preserveAspectRatio="none">' + rects + '</svg>';
+    }
     var DIM_DEFS = [{ dim: 'pr', label: 'PRs' }, { dim: 'feature', label: 'Features' }, { dim: 'use_case', label: 'Work type' }];
     var dimsAvail = DIM_DEFS.map(function (def) {
       var byKey = {}, vals = [];
       TXB.forEach(function (b) {
         var k = blkVal(b.idx, def.dim);
-        if (k == null) return;
-        if (!byKey[k]) { byKey[k] = { key: k, label: blkLabel(b.idx, def.dim), turns: 0 }; vals.push(byKey[k]); }
-        byKey[k].turns += (turnsPerBlock[b.idx] || 0);
+        if (k == null || byKey[k]) return;
+        byKey[k] = 1; vals.push({ key: k, label: blkLabel(b.idx, def.dim) });
       });
       return { dim: def.dim, label: def.label, values: vals };
     }).filter(function (d) { return d.values.length >= 2; });
@@ -496,10 +510,10 @@ export function openDetail(id, focus?: any) {
       var sw = dimsAvail.length > 1
         ? '<select class="tx-fdim">' + dimsAvail.map(function (d) { return '<option value="' + d.dim + '"' + (d.dim === fDim ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select>'
         : '<span class="tx-fdim-lbl">' + esc(dd.label) + '</span>';
-      var chips = '<button class="tx-fchip' + (fVal == null ? ' on' : '') + '" type="button" data-v="">All <span class="tx-fchip-n">(' + totalTurns + ')</span></button>' +
+      var chips = '<button class="tx-fchip' + (fVal == null ? ' on' : '') + '" type="button" data-v="">All</button>' +
         dd.values.map(function (v) {
           return '<button class="tx-fchip' + (fVal === v.key ? ' on' : '') + '" type="button" data-v="' + esc(v.key) + '">' +
-            esc(v.label) + ' <span class="tx-fchip-n">(' + v.turns + '/' + totalTurns + ')</span></button>';
+            esc(v.label) + segBar(dd.dim, v.key) + '</button>';
         }).join('');
       return '<span class="tx-grp-lbl">View by</span>' + sw + '<span class="tx-fchips">' + chips + '</span>';
     }
