@@ -3,8 +3,9 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import type { Session } from '../core/model'
 import type { ProcessorResult } from '../core/processor'
 import type { DB } from './db'
-import { grainOf } from '../core/facets'
-import type { FacetSpec, FacetType } from '../core/facets'
+import { deterministicBlocks } from '../core/blocks'
+import { facetGroupCompatible, grainOf } from '../core/facets'
+import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
@@ -209,6 +210,11 @@ export class Store {
       this.db.prepare('DELETE FROM outcomes WHERE session_id = ? AND producer = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM session_artifacts WHERE session_id = ? AND producer = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM files_index WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM blocks WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_usage WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_tool WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_annotations WHERE session_id = ? AND processor = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM block_artifacts WHERE session_id = ? AND producer = ?').run(sessionId, processor)
 
       for (const a of result.annotations ?? []) {
         this.db
@@ -275,6 +281,35 @@ export class Store {
         this.db
           .prepare('INSERT OR REPLACE INTO files_index (repo, path, session_id, producer) VALUES (?,?,?,?)')
           .run(f.repo ?? null, f.path, sessionId, processor)
+      }
+      for (const b of result.blocks ?? []) {
+        this.db
+          .prepare(
+            'INSERT OR REPLACE INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, ts_start, ts_end, producer) VALUES (?,?,?,?,?,?,?,?)',
+          )
+          .run(sessionId, b.idx, b.startSeq, b.endSeq, b.boundaryKind, b.tsStart ?? null, b.tsEnd ?? null, processor)
+      }
+      for (const u of result.blockUsage ?? []) {
+        this.db
+          .prepare('INSERT OR REPLACE INTO block_usage (session_id, usage_idx, block_idx, producer) VALUES (?,?,?,?)')
+          .run(sessionId, u.usageIdx, u.blockIdx, processor)
+      }
+      for (const t of result.blockTool ?? []) {
+        this.db
+          .prepare('INSERT OR REPLACE INTO block_tool (session_id, tool_idx, block_idx, producer) VALUES (?,?,?,?)')
+          .run(sessionId, t.toolIdx, t.blockIdx, processor)
+      }
+      for (const ba of result.blockAnnotations ?? []) {
+        this.db
+          .prepare('INSERT OR REPLACE INTO block_annotations (session_id, block_idx, processor, key, value) VALUES (?,?,?,?,?)')
+          .run(sessionId, ba.blockIdx, processor, ba.key, JSON.stringify(ba.value))
+      }
+      for (const x of result.blockArtifacts ?? []) {
+        this.db
+          .prepare(
+            'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
+          )
+          .run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
       }
 
       this.db
@@ -483,7 +518,7 @@ export class Store {
       topTools,
       costPerMergedPr: this.costPerArtifact('pr'),
       analysisCostUsd,
-      useCases: this.arrayDist('use_case'),
+      useCases: this.facetDistribution('use_case'),
       complexity: this.scalarDist('complexity'),
       autonomy: this.scalarDist('autonomy'),
       success: this.scalarDist('success'),
@@ -500,18 +535,16 @@ export class Store {
       .all(key) as Dist[]
   }
 
-  /** Distribution of a multi-value (JSON array) annotation across sessions. */
-  private arrayDist(key: string): Dist[] {
-    return this.db
-      .prepare(
-        `SELECT je.value AS value, COUNT(*) AS count
-         FROM annotations a, json_each(a.value) je
-         WHERE a.key = ? GROUP BY je.value ORDER BY count DESC`,
-      )
-      .all(key) as Dist[]
-  }
-
-  /** Windowed cost-per-shipped-artifact KPI (no window = all time). Unique sessions per artifact. */
+  /**
+   * Windowed cost-per-shipped-artifact KPI (no window = all time). The numerator is
+   * the cost of the BLOCKS that produced each in-window completed artifact (block→PR
+   * is deterministic; block→feature is the LLM feature_runs). Blocks partition the
+   * session, so a session that also did unshipped/other work is NOT charged whole —
+   * the old unique-session approximation dissolves (handling_long_sessions P1/P2).
+   * Falls back to whole-session cost for any artifact with NO block links (a feature
+   * the model never block-linked, or pre-block data). Both paths are at usage grain
+   * and UNION-deduped, so a usage row shared across in-window artifacts counts once.
+   */
   costPerArtifact(kind: string, from?: string, to?: string): { count: number; costPerUnit: number | null } {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
     const params = from && to ? [kind, from, to] : [kind]
@@ -525,13 +558,24 @@ export class Store {
       this.db
         .prepare(
           `SELECT COALESCE(SUM(cost_usd),0) AS s FROM (
-             SELECT DISTINCT s.id, s.cost_usd
+             -- block-attributed: usage rows in blocks linked to an in-window completed artifact
+             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             FROM artifacts a
+             JOIN block_artifacts ba ON ba.artifact_id = a.id
+             JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+             JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
+             UNION
+             -- fallback: whole sessions of in-window artifacts that have NO block links
+             SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
              JOIN session_artifacts sa ON sa.artifact_id = a.id
-             JOIN sessions s ON s.id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range})`,
+             JOIN usage_facts u ON u.session_id = sa.session_id
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
+               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
+           )`,
         )
-        .get(...params) as { s: number }
+        .get(...params, ...params) as { s: number }
     ).s
     return { count, costPerUnit: num / count }
   }
@@ -599,18 +643,25 @@ export class Store {
     throughput: Array<{ bucket: string; count: number }>
     buckets: string[]
   } {
-    // kind binds first (it sits in the SELECT subquery), then the window params.
-    const burnRange = from && to ? 'AND s.started_at >= ? AND s.started_at < ?' : ''
+    // Anchored on usage_facts and dated at message time (COALESCE u.ts → session
+    // start), so spend buckets at block-level time granularity (P5), and the
+    // converted sub-band greens only the BLOCKS that produced a shipped artifact —
+    // not the whole session. kind binds first (in the CASE subquery), then window.
+    const burnRange = from && to ? 'AND COALESCE(u.ts, s.started_at) >= ? AND COALESCE(u.ts, s.started_at) < ?' : ''
     const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
       .prepare(
-        `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
-                COALESCE(SUM(s.cost_usd),0) AS spend,
+        `SELECT ${bucketExpr('COALESCE(u.ts, s.started_at)', bucket)} AS bucket,
+                COALESCE(SUM(u.cost_usd),0) AS spend,
                 COALESCE(SUM(CASE WHEN EXISTS (
-                    SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
-                    WHERE sa.session_id = s.id AND a.kind = ? AND a.completed_at IS NOT NULL
-                  ) THEN s.cost_usd ELSE 0 END),0) AS shippedSpend
-         FROM sessions s WHERE s.started_at IS NOT NULL ${burnRange}
+                    SELECT 1 FROM block_usage bu
+                    JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
+                    JOIN artifacts a ON a.id = ba.artifact_id
+                    WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
+                      AND a.kind = ? AND a.completed_at IS NOT NULL
+                  ) THEN u.cost_usd ELSE 0 END),0) AS shippedSpend
+         FROM usage_facts u JOIN sessions s ON s.id = u.session_id
+         WHERE COALESCE(u.ts, s.started_at) IS NOT NULL ${burnRange}
          GROUP BY bucket ORDER BY bucket`,
       )
       .all(...burnParams) as Array<{ bucket: string; spend: number; shippedSpend: number }>
@@ -738,8 +789,8 @@ export class Store {
       const f = this.facet(q.by)
       if (!f) return { error: 'unknown facet' }
       const gf = grainOf(f.source)
-      if (gf !== 'usage' && gf !== 'session') return { error: 'incompatible grain' }
-      const fg = facetGroupExpr(f)
+      if (!facetGroupCompatible(gf, 'usage')) return { error: 'incompatible grain' }
+      const fg = facetGroupExpr(f, 'usage')
       const sql = `SELECT ${time} AS tb, ${fg.expr} AS val, SUM(u.cost_usd) AS spend
                    ${fromSql} ${fg.join} ${whereSql}${fg.where ? ' AND ' + fg.where : ''}
                    GROUP BY tb, val`
@@ -1072,6 +1123,11 @@ export class Store {
         : `SELECT json_extract(a.value,'$') AS value, COUNT(*) AS count
            FROM annotations a WHERE a.key = ? GROUP BY value ORDER BY count DESC`
       params.push(f.key)
+    } else if (f.source === 'block') {
+      // sessions that have a block labeled value (single label per block)
+      sql = `SELECT json_extract(value,'$') AS value, COUNT(DISTINCT session_id) AS count
+             FROM block_annotations WHERE key = ? GROUP BY value ORDER BY count DESC`
+      params.push(f.key)
     } else {
       const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
       const where = f.base ? `WHERE ${f.base}` : ''
@@ -1106,6 +1162,14 @@ export class Store {
                   WHERE a.session_id = s.id AND a.key = ? AND json_extract(a.value,'$') = ?)`,
             params: [f.key, value],
           }
+    }
+    if (f.source === 'block') {
+      // "sessions with a block labeled value" — session-scoped EXISTS, like model/skill.
+      return {
+        sql: `EXISTS (SELECT 1 FROM block_annotations ba
+              WHERE ba.session_id = s.id AND ba.key = ? AND json_extract(ba.value,'$') = ?)`,
+        params: [f.key, value],
+      }
     }
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
     const base = f.base ? `${f.base} AND ` : ''
@@ -1181,8 +1245,8 @@ export class Store {
       const f = this.facet(byFacetKey)
       if (!f) return { error: 'unknown facet' }
       const gf = grainOf(f.source)
-      if (gf !== gm && gf !== 'session') return { error: 'incompatible grain' }
-      const fg = facetGroupExpr(f)
+      if (!facetGroupCompatible(gf, gm)) return { error: 'incompatible grain' }
+      const fg = facetGroupExpr(f, gm)
       groupExpr = fg.expr
       facetJoin = fg.join
       if (fg.where) where.push(fg.where)
@@ -1252,7 +1316,7 @@ export class Store {
         `SELECT s.id AS id, COALESCE(s.title,'(untitled)') AS title, s.started_at AS startedAt,
                 s.cost_usd AS costUsd, s.models AS modelsJson,
                 ${scalar('success')} AS success, ${scalar('complexity')} AS complexity,
-                (SELECT value FROM annotations WHERE session_id=s.id AND key='use_case') AS useCaseJson,
+                (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
                 ${scalar('intent_summary')} AS intent,
                 (SELECT COUNT(*) FROM outcomes WHERE session_id=s.id AND type='pr_merged') AS prMerged
          FROM sessions s ${where} ORDER BY s.started_at DESC LIMIT ${limit}`,
@@ -1274,6 +1338,36 @@ export class Store {
   }
 
   /** Full detail for one session, including a viewer-ready transcript from the blob. */
+  /** Per-block labels (use_case / PR / feature) for the transcript filter bar. */
+  private blockLabels(
+    id: string,
+  ): Map<number, { useCase?: string | null; pr?: { ident: string; title?: string } | null; feature?: { id: string; title?: string } | null }> {
+    type Lbl = { useCase?: string | null; pr?: { ident: string; title?: string } | null; feature?: { id: string; title?: string } | null }
+    const m = new Map<number, Lbl>()
+    const ensure = (idx: number): Lbl => {
+      let e = m.get(idx)
+      if (!e) { e = {}; m.set(idx, e) }
+      return e
+    }
+    const ucRows = this.db
+      .prepare("SELECT block_idx AS idx, json_extract(value,'$') AS v FROM block_annotations WHERE session_id = ? AND key = 'use_case'")
+      .all(id) as Array<{ idx: number; v: string }>
+    for (const r of ucRows) ensure(r.idx).useCase = r.v
+    const artRows = this.db
+      .prepare(
+        `SELECT ba.block_idx AS idx, a.id AS aid, a.ident, a.title, a.kind
+         FROM block_artifacts ba JOIN artifacts a ON a.id = ba.artifact_id
+         WHERE ba.session_id = ? AND a.kind IN ('pr','feature')`,
+      )
+      .all(id) as Array<{ idx: number; aid: string; ident: string | null; title: string | null; kind: string }>
+    for (const r of artRows) {
+      const e = ensure(r.idx)
+      if (r.kind === 'pr') e.pr = { ident: r.ident ?? '?', title: r.title ?? undefined }
+      else e.feature = { id: r.aid, title: r.title ?? undefined }
+    }
+    return m
+  }
+
   sessionDetail(id: string): SessionDetail | null {
     const s = this.db
       .prepare(
@@ -1303,7 +1397,7 @@ export class Store {
       )
       .all(id) as Array<Record<string, any>>
 
-    let transcript: Transcript = { turns: [], subagents: [] }
+    let transcript: Transcript = { turns: [], subagents: [], blocks: [] }
     const blob = this.db.prepare('SELECT gz FROM session_blobs WHERE id = ?').get(id) as { gz: Buffer } | undefined
     if (blob?.gz) {
       try {
@@ -1311,6 +1405,11 @@ export class Store {
       } catch {
         /* leave empty */
       }
+    }
+    // Attach per-block labels (use_case / PR / feature) the filter bar groups by.
+    if (transcript.blocks.length) {
+      const labels = this.blockLabels(id)
+      transcript.blocks = transcript.blocks.map((b) => ({ idx: b.idx, ...(labels.get(b.idx) ?? {}) }))
     }
 
     return {
@@ -1376,6 +1475,15 @@ export class Store {
       const parsed = row ? safeJson<unknown>(row.value, null) : null
       if (f.multi) return Array.isArray(parsed) ? parsed.map(String) : []
       return parsed == null || parsed === '' ? null : String(parsed)
+    }
+    if (f.source === 'block') {
+      // the distinct block labels this session exhibits (union rollup, e.g. use_case)
+      const rows = this.db
+        .prepare(
+          `SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id = ? AND key = ? ORDER BY v`,
+        )
+        .all(id, f.key) as Array<{ v: unknown }>
+      return rows.map((r) => String(r.v))
     }
     // usage / tool-call child grain: the distinct values this session exhibits.
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
@@ -1455,10 +1563,20 @@ export class Store {
                 a.parent_artifact_id AS parentId,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
-                  SELECT SUM(c) FROM (
-                    SELECT DISTINCT s.id, s.cost_usd AS c
-                    FROM session_artifacts sa2 JOIN sessions s ON s.id = sa2.session_id
+                  SELECT SUM(cost_usd) FROM (
+                    -- block-attributed cost (block→artifact): blocks partition the
+                    -- session, so a multi-purpose session isn't charged whole (P1).
+                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
+                    FROM block_artifacts ba
+                    JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+                    JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+                    WHERE ba.artifact_id = a.id
+                    UNION
+                    -- whole-session fallback when this artifact has no block links
+                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
+                    FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
                     WHERE sa2.artifact_id = a.id
+                      AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
                   )
                 ), 0) AS costUsd
          FROM artifacts a
@@ -1897,6 +2015,10 @@ export interface TranscriptTurn {
   sidechain: boolean
   /** Which subagent emitted this turn; undefined for main-thread turns. */
   agentId?: string
+  /** Main-thread sequence index (undefined for sidechain turns). */
+  seq?: number
+  /** Block this turn belongs to (handling_long_sessions); undefined if unmapped. */
+  blockIdx?: number
   text: string
   tools: TranscriptTool[]
 }
@@ -1915,9 +2037,19 @@ export interface SubagentInfo {
  * (each tagged with its `agentId`, so the client can split the main thread from
  * each subagent into its own tab) plus the subagent roster.
  */
+/** One block's identity + labels, for the transcript's filter bar. */
+export interface TranscriptBlock {
+  idx: number
+  useCase?: string | null
+  pr?: { ident: string; title?: string } | null
+  feature?: { id: string; title?: string } | null
+}
+
 export interface Transcript {
   turns: TranscriptTurn[]
   subagents: SubagentInfo[]
+  /** Block partition + per-block labels, for filtering the transcript by PR / feature / use-case. */
+  blocks: TranscriptBlock[]
 }
 
 /** A facet's resolved value for one session — the registry-driven detail row. */
@@ -2009,8 +2141,12 @@ function aggExpr(m: MeasureSpec): string {
   }
 }
 
-/** Group expression + any join/where a facet contributes to a breakdown (alias `s`/`u`/`t`). */
-function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: string } {
+/**
+ * Group expression + any join/where a facet contributes to a breakdown. `anchorGrain`
+ * is the MEASURE's grain (alias s/u/t) — needed to bridge a block facet up from the
+ * measure's own anchor (usage_facts / tool_calls) through the block membership tables.
+ */
+function facetGroupExpr(f: FacetSpec, anchorGrain: Grain): { join: string; expr: string; where?: string } {
   const col = f.column ?? f.key
   if (f.source === 'session') {
     return f.multi
@@ -2028,19 +2164,48 @@ function facetGroupExpr(f: FacetSpec): { join: string; expr: string; where?: str
           expr: `json_extract(fa.value,'$')`,
         }
   }
+  if (f.source === 'block') {
+    // Bridge the measure's anchor (usage_facts / tool_calls) up to its block, then to
+    // the per-block label. Only reached for usage/tool_call measures (block is their
+    // ancestor); session measures can't group by a finer block facet (guard rejects).
+    const anchor = aliasFor(anchorGrain)
+    const member = anchorGrain === 'tool_call' ? 'block_tool' : 'block_usage'
+    const memberCol = anchorGrain === 'tool_call' ? 'tool_idx' : 'usage_idx'
+    return {
+      join:
+        `JOIN ${member} bm ON bm.session_id = ${anchor}.session_id AND bm.${memberCol} = ${anchor}.idx ` +
+        `JOIN block_annotations ba ON ba.session_id = bm.session_id AND ba.block_idx = bm.block_idx AND ba.key = '${f.key}'`,
+      expr: `json_extract(ba.value,'$')`,
+    }
+  }
   // same-grain child facet (usage / tool-call): a column on the measure's own anchor
   return { join: '', expr: `${aliasFor(grainOf(f.source))}.${col}`, where: f.base }
 }
 
 function buildTranscript(session: Session): Transcript {
+  const turns = buildTranscriptCore(session).turns
+  // Map each main-thread turn to its block via seq (labels are attached in
+  // sessionDetail, which has DB access). Deterministic, so idx matches storage.
+  const blocks = deterministicBlocks(session)
+  if (blocks.length) {
+    const maxSeq = blocks[blocks.length - 1]!.endSeq
+    const seqToBlock = new Array<number>(maxSeq + 1).fill(-1)
+    for (const b of blocks) for (let s = b.startSeq; s <= b.endSeq; s++) seqToBlock[s] = b.idx
+    for (const t of turns) {
+      if (t.seq == null || t.seq < 0 || t.seq > maxSeq) continue
+      const bi = seqToBlock[t.seq]
+      if (bi != null && bi >= 0) t.blockIdx = bi
+    }
+  }
   return {
-    turns: buildTranscriptCore(session).turns,
+    turns,
     subagents: (session.subagents ?? []).map((s) => ({
       agentId: s.agentId,
       agentType: s.agentType,
       description: s.description,
       toolUseId: s.toolUseId,
     })),
+    blocks: blocks.map((b) => ({ idx: b.idx })),
   }
 }
 
@@ -2087,14 +2252,14 @@ function buildTranscriptCore(session: Session): {
       if (!text && tools.length === 0) continue
       const idx = turns.length
       for (const id of ids) toolTurn.set(id, { turn: idx, userTurn: lastUserIdx })
-      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, text: clip(text, 20000), tools })
+      turns.push({ role: 'assistant', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, seq: ev.seq, text: clip(text, 20000), tools })
     } else if (ev.kind === 'user') {
       const text = ev.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ').trim()
       if (!text) continue
       // Only real prompts become the "intent" an edit links back to (the turn is
       // still shown in the transcript, just not used as a jump/grouping target).
       if (!isSyntheticUser(text)) lastUserIdx = turns.length
-      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, text: clip(text, 20000), tools: [] })
+      turns.push({ role: 'user', ts: ev.ts, sidechain: ev.isSidechain, agentId: ev.agentId, seq: ev.seq, text: clip(text, 20000), tools: [] })
     }
   }
   return { turns, toolTurn }

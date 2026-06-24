@@ -193,6 +193,54 @@ export function stackChart(buckets, points, format) {
   return svg;
 }
 
+// Stacked component bars: per bucket, one segment per series, stacked to the
+// bucket's total. series=[{label,color,points:[{bucket,y}]}]; format ('usd'|'int').
+// For breakdowns whose components PARTITION the total (so segments sum honestly to
+// the bar height) — e.g. spend by model/repo/use_case. Each segment carries its own
+// hover tooltip. Series should be pre-sorted (biggest first → stacked at the bottom).
+export function stackedBarChart(buckets, series, format) {
+  if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
+  var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
+  var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
+  var idx = series.map(function (s) {
+    var m = {};
+    (s.points || []).forEach(function (p) { m[p.bucket] = p.y || 0; });
+    return m;
+  });
+  var maxV = 0;
+  buckets.forEach(function (b) {
+    var t = 0;
+    idx.forEach(function (m) { t += m[b] || 0; });
+    if (t > maxV) maxV = t;
+  });
+  maxV = maxV || 1;
+  var yOf = function (v) { return padT + (1 - v / maxV) * plotH; };
+  var base = yOf(0), bw = plotW / n;
+  var fmt = function (v) { return format === 'usd' ? usd(v) : num(Math.round(v)); };
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  [0, 0.5, 1].forEach(function (g) {
+    var v = maxV * g, y = yOf(v);
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
+  });
+  var step = Math.ceil(n / 9);
+  buckets.forEach(function (b, i) {
+    var x = padL + i * bw + 2, w = Math.max(2, bw - 4), acc = 0;
+    series.forEach(function (s, si) {
+      var v = idx[si][b] || 0;
+      if (v > 0) {
+        var yTop = yOf(acc + v), yBot = yOf(acc);
+        svg += '<rect x="' + x + '" y="' + yTop.toFixed(1) + '" width="' + w + '" height="' + (yBot - yTop).toFixed(1) +
+          '" fill="' + s.color + '"><title>' + esc(b + ' · ' + s.label + ': ' + fmt(v)) + '</title></rect>';
+        acc += v;
+      }
+    });
+    if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
+  });
+  svg += '</svg>';
+  return svg;
+}
+
 // Value-axis multi-line chart. lines[i].points = [{bucket, y}]; format ('usd'|'int')
 // drives the y-axis labels + hover. Missing buckets are 0-filled (a real zero, not
 // a gap), so lines connect through quiet periods. Used by spend and sessions.

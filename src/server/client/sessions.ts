@@ -4,6 +4,21 @@
 // shared so the artifacts tab and drawer can jump into a filtered session list.
 import { state, $, esc, usd, num, dayOf, badge, get } from './core'
 
+// Close the transcript outline dropdown on an outside click — it's a custom
+// dropdown with no native blur. One module-level listener (added once) that
+// queries the live elements, so it works across drawer re-opens without leaking
+// per-open handlers. mousedown (not click) so opening the dropdown via its own
+// button doesn't immediately re-close it on the same interaction.
+document.addEventListener('mousedown', function (e) {
+  var panel = document.getElementById('tx-outline');
+  if (!panel || !panel.classList.contains('on')) return;
+  var btn = document.querySelector('#drawerBody .tx-ol-btn');
+  var target = e.target as Node;
+  if (panel.contains(target) || (btn && btn.contains(target))) return;
+  panel.classList.remove('on');
+  if (btn) btn.classList.remove('on');
+});
+
 export function buildFilters() {
   var html = '';
   state.facets.forEach(function (f) {
@@ -117,7 +132,7 @@ export function applyFilters() {
 
 export function renderSessions(rows) {
   if (!rows || !rows.length) { $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>'; return; }
-  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Success</th><th>Complexity</th><th>Use case</th><th></th></tr>';
+  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Success</th><th>Complexity</th><th>Work type</th><th></th></tr>';
   var body = rows.map(function (r) {
     var tags = (r.useCase || []).slice(0, 3).map(function (u) { return '<span class="tag">' + esc(u) + '</span>'; }).join('');
     var merged = r.prMerged ? '<span class="badge b-success">PR merged</span>' : '';
@@ -132,7 +147,12 @@ export function renderSessions(rows) {
   }).join('');
   $('#sessions').innerHTML = '<table>' + head + body + '</table>';
   Array.prototype.forEach.call(document.querySelectorAll('.srow'), function (tr) {
-    tr.onclick = function () { openDetail(tr.getAttribute('data-id')); };
+    tr.onclick = function () {
+      var f = state.filters || {};
+      // Carry the active artifact filter (from "See sessions") into the drawer so
+      // the transcript opens focused on that feature / PR.
+      openDetail(tr.getAttribute('data-id'), f.artifact ? { kind: f.artifactKind, val: f.artifact } : null);
+    };
   });
 }
 
@@ -300,7 +320,7 @@ function editHtml(e, showNarr) {
 // by-file view).
 function fileCardHtml(path, edits, bodyHtml) {
   var c = sumAddDel(edits);
-  return '<div class="fc-file collapsed"><button class="fc-head" type="button">' +
+  return '<div class="fc-file collapsed" data-path="' + esc(path) + '"><button class="fc-head" type="button">' +
     '<span class="fc-caret">▾</span><span class="fc-path" title="' + esc(path) + '">' + shortPathHtml(path) + '</span>' +
     '<span class="fc-stat"><span class="fc-add">+' + c.add + '</span> <span class="fc-del">−' + c.del + '</span> · ' +
     edits.length + ' edit' + (edits.length > 1 ? 's' : '') + '</span></button>' +
@@ -339,7 +359,7 @@ function filesHtml(edits, transcript) {
     .map(function (g) { return fileCardHtml(g.key, g.items, promptSegmentsHtml(g.items, transcript)); }).join('');
 }
 
-export function openDetail(id) {
+export function openDetail(id, focus?: any) {
   get('/api/session?id=' + encodeURIComponent(id)).then(function (d) {
     if (!d || d.error) return;
     var s = d.session, a = d.annotations || {};
@@ -350,9 +370,9 @@ export function openDetail(id) {
       '<button class="x" type="button" id="drawerCloseBtn">close</button></div>';
     var fileCount = (d.artifacts || []).filter(function (x) { return x.kind === 'file'; }).length;
     var tabs = '<div class="drawer-tabs">' +
-      '<button class="dtab on" type="button" data-dtab="summary">Summary</button>' +
+      '<button class="dtab on" type="button" data-dtab="transcript">Transcript</button>' +
       (fileCount ? '<button class="dtab" type="button" data-dtab="files">Files (' + fileCount + ')</button>' : '') +
-      '<button class="dtab" type="button" data-dtab="transcript">Transcript</button>' +
+      '<button class="dtab" type="button" data-dtab="summary">Summary</button>' +
       '</div>';
 
     // ---- Summary pane: vitals, registry-driven dimensions, intent, artifacts --
@@ -409,9 +429,7 @@ export function openDetail(id) {
       sum += '<div class="sect-h">Outcomes</div>';
       sum += chipList(outs, 10, function (o) { return '<span class="tag">' + esc(o.type) + '</span>'; });
     }
-    sum += '<div class="see-tx-wrap">' +
-      (fileCount ? '<button class="see-tx" type="button" data-tab="files">See files changed →</button>' : '') +
-      '<button class="see-tx" type="button" data-tab="transcript">See transcript →</button></div>';
+    if (fileCount) sum += '<div class="see-tx-wrap"><button class="see-tx" type="button" data-tab="files">See files changed →</button></div>';
 
     // ---- Transcript pane: the main thread + one tab per subagent. ----------
     // Claude Code writes each subagent (Task/Agent spawn) to its own sidechain
@@ -422,10 +440,99 @@ export function openDetail(id) {
     // assistant message, so "a long series of tool calls" is a RUN of consecutive
     // such turns — we keep text turns separate but coalesce each tool-only run
     // into one collapsible block (first few chips + "+N more").
-    var TX = d.transcript || { turns: [], subagents: [] };
+    var TX = d.transcript || { turns: [], subagents: [], blocks: [] };
     var allTurns = TX.turns || [];
     var subMeta = {};      // agentId -> {agentType, description, toolUseId}
     (TX.subagents || []).forEach(function (sa) { subMeta[sa.agentId] = sa; });
+
+    // ---- Block filter: focus the transcript on one PR / feature / use-case. ----
+    // Each main-thread turn carries its block (server) and blocks carry labels.
+    // A "View by" dimension is offered only when it has ≥2 distinct values;
+    // picking a value hides the rest behind a named "··· N turns ···" gap.
+    var TXB = TX.blocks || [];
+    function blkVal(bi, dim) {
+      var b = TXB[bi]; if (!b) return null;
+      return dim === 'pr' ? (b.pr ? b.pr.ident : null) : dim === 'feature' ? (b.feature ? b.feature.id : null) : (b.useCase || null);
+    }
+    function blkLabel(bi, dim) {
+      var b = TXB[bi]; if (!b) return null;
+      return dim === 'pr' ? (b.pr ? '#' + b.pr.ident : null) : dim === 'feature' ? (b.feature ? (b.feature.title || 'feature') : null) : (b.useCase || null);
+    }
+    // Per-block size (any main turn, incl. each tool call) → the proportional
+    // segment bar showing where in the session each value's stretches fall.
+    var sizePerBlock = {}, totalSize = 0;
+    allTurns.forEach(function (t) {
+      if (t.sidechain || t.blockIdx == null) return;
+      sizePerBlock[t.blockIdx] = (sizePerBlock[t.blockIdx] || 0) + 1; totalSize++;
+    });
+    // A mini sparkline of the whole session with this value's blocks lit — position
+    // + fragmentation at a glance (the count already gives magnitude).
+    function segBar(dim, key) {
+      if (!TXB.length || !totalSize) return '';
+      var W = 46, H = 8, x = 0, rects = '';
+      TXB.forEach(function (b) {
+        var w = (sizePerBlock[b.idx] || 0) / totalSize * W;
+        if (w <= 0) return;
+        var lit = blkVal(b.idx, dim) === key;
+        rects += '<rect class="' + (lit ? 'lit' : 'trk') + '" x="' + x.toFixed(1) + '" y="0" width="' + Math.max(0.7, w).toFixed(1) + '" height="' + H + '" rx="1"></rect>';
+        x += w;
+      });
+      return '<svg class="tx-fbar" viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" preserveAspectRatio="none">' + rects + '</svg>';
+    }
+    var DIM_DEFS = [{ dim: 'pr', label: 'PRs' }, { dim: 'feature', label: 'Features' }, { dim: 'use_case', label: 'Work type' }];
+    var dimsAvail = DIM_DEFS.map(function (def) {
+      var byKey = {}, vals = [];
+      TXB.forEach(function (b) {
+        var k = blkVal(b.idx, def.dim);
+        if (k == null || byKey[k]) return;
+        byKey[k] = 1; vals.push({ key: k, label: blkLabel(b.idx, def.dim) });
+      });
+      return { dim: def.dim, label: def.label, values: vals };
+    }).filter(function (d) { return d.values.length >= 2; });
+    var fDim = dimsAvail.length ? dimsAvail[0].dim : null;
+    var fVal = null; // null = All
+    // Match a summary artifact chip (or an arrival focus) to a View-by dimension
+    // VALUE — feature by title, PR by number. Null when that dimension isn't
+    // filterable (≤1 value) or there's no match.
+    function resolveDimValue(kind, val) {
+      if ((kind !== 'feature' && kind !== 'pr') || val == null) return null;
+      var fd = dimsAvail.filter(function (d) { return d.dim === kind; })[0];
+      if (!fd) return null;
+      var fv0 = String(val), digs = (fv0.match(/(\d+)\s*$/) || [])[1];
+      var hit = fd.values.filter(function (v) {
+        return v.key === fv0 || v.label === fv0 || '#' + v.key === fv0 || (kind === 'pr' && digs && v.key === digs);
+      })[0];
+      return hit ? hit.key : null;
+    }
+    // Focus the transcript on a dimension value (a summary chip → the transcript).
+    // When the value isn't filterable (only one of its kind), just open the
+    // transcript unfiltered — a single feature/PR ≈ the whole session.
+    function focusDim(dim, key) {
+      if (activeScope !== 'main') switchScope('main');
+      if (key != null && dimsAvail.filter(function (d) { return d.dim === dim; })[0]) { fDim = dim; fVal = key; }
+      else fVal = null;
+      renderFilterBar();
+      showTab('transcript');
+      applyTxFilter(true);
+    }
+    // Arrived via an artifact drill ("See sessions") → pre-select that value.
+    if (focus && focus.val) {
+      var fk = resolveDimValue(focus.kind, focus.val);
+      if (fk != null) { fDim = focus.kind; fVal = fk; }
+    }
+    function filterBarHtml() {
+      if (!dimsAvail.length) return '';
+      var dd = dimsAvail.filter(function (d) { return d.dim === fDim; })[0] || dimsAvail[0];
+      var sw = dimsAvail.length > 1
+        ? '<select class="tx-fdim">' + dimsAvail.map(function (d) { return '<option value="' + d.dim + '"' + (d.dim === fDim ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select>'
+        : '<span class="tx-fdim-lbl">' + esc(dd.label) + '</span>';
+      var chips = '<button class="tx-fchip' + (fVal == null ? ' on' : '') + '" type="button" data-v="">All</button>' +
+        dd.values.map(function (v) {
+          return '<button class="tx-fchip' + (fVal === v.key ? ' on' : '') + '" type="button" data-v="' + esc(v.key) + '">' +
+            esc(v.label) + segBar(dd.dim, v.key) + '</button>';
+        }).join('');
+      return '<span class="tx-grp-lbl">View by</span>' + sw + '<span class="tx-fchips">' + chips + '</span>';
+    }
 
     var TOOLCAP = 4;
     var errSeq = 0;        // running id per failed tool call → error-panel anchor (unique across scopes)
@@ -476,10 +583,11 @@ export function openDetail(id) {
     // A prominent, clickable banner standing in for a subagent-spawning call, so
     // the link into the subagent's scope is easy to find (and a stable anchor for
     // the subagent's "back" link).
-    function spawnBlockHtml(sp) {
+    function spawnBlockHtml(sp, blk) {
       var m = subMeta[sp.agentId] || {};
       var lbl = (m.agentType || 'subagent') + (m.description ? ' · ' + m.description : '');
-      return '<button class="tx-spawn" type="button" id="txspawn-' + esc(sp.agentId) + '" data-agent="' + esc(sp.agentId) + '">' +
+      var ba = blk != null ? ' data-blk="' + blk + '"' : '';
+      return '<button class="tx-spawn" type="button" id="txspawn-' + esc(sp.agentId) + '" data-agent="' + esc(sp.agentId) + '"' + ba + '>' +
         '<span class="tx-spawn-ico">🤖</span><span class="tx-spawn-lbl">Spawned subagent · ' + esc(lbl) + '</span>' +
         '<span class="tx-spawn-go">view transcript →</span></button>';
     }
@@ -513,36 +621,42 @@ export function openDetail(id) {
     // and pushing its error-panel ids into the scope's errIds via errSink.
     function renderScopeBlocks(items, isSub) {
       var blocks = [];
-      var run = null;      // tools from consecutive tool-only turns
+      var run = null;      // tools from consecutive tool-only turns (within one block)
+      var runBlk = null;   // block idx of the current run (runs don't cross blocks, so a filter hides cleanly)
       var userTurns = [];  // {i (global), text} powering the outline + scroll-spy
       function flushRun() {
         if (run && run.length) {
-          blocks.push('<div class="turn asst toolrun"><div class="role">Tool calls · ' + run.length + '</div>' +
+          var a = runBlk != null ? ' data-blk="' + runBlk + '"' : '';
+          blocks.push('<div class="turn asst toolrun"' + a + '><div class="role">Tool calls · ' + run.length + '</div>' +
             toolsHtml(run) + '</div>');
         }
-        run = null;
+        run = null; runBlk = null;
       }
       items.forEach(function (it) {
         var i = it.gi, t = it.t, tools = t.tools || [];
+        var blk = t.blockIdx;
+        var ba = blk != null ? ' data-blk="' + blk + '"' : '';
         if (t.role === 'user') {
           flushRun();
           userTurns.push({ i: i, text: t.text });
-          blocks.push('<div class="turn user" id="txt-' + i + '"><div class="role">' + (isSub ? 'Prompt' : 'You') +
+          blocks.push('<div class="turn user" id="txt-' + i + '"' + ba + '><div class="role">' + (isSub ? 'Prompt' : 'You') +
             '<span class="tnum">#' + userTurns.length + '</span></div>' + textBlock(t.text) + '</div>');
         } else if (t.text) {
           flushRun();
-          blocks.push('<div class="turn asst" id="txt-' + i + '"><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
+          blocks.push('<div class="turn asst" id="txt-' + i + '"' + ba + '><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
             '</div>' + textBlock(t.text) + (tools.length ? toolsHtml(tools) : '') + '</div>');
         } else if (tools.length) {
           // Surface spawning calls as their own banner; fold the rest into the run.
+          // Flush when the block changes so a run stays within one block.
           var spawns = tools.filter(function (x) { return x.agentId && subMeta[x.agentId]; });
           if (spawns.length) {
             flushRun();
-            spawns.forEach(function (sp) { blocks.push(spawnBlockHtml(sp)); });
+            spawns.forEach(function (sp) { blocks.push(spawnBlockHtml(sp, blk)); });
             var keep = tools.filter(function (x) { return !(x.agentId && subMeta[x.agentId]); });
-            if (keep.length) run = (run || []).concat(keep);
+            if (keep.length) { if (run && blk !== runBlk) flushRun(); runBlk = blk; run = (run || []).concat(keep); }
           } else {
-            run = (run || []).concat(tools);
+            if (run && blk !== runBlk) flushRun();
+            runBlk = blk; run = (run || []).concat(tools);
           }
         }
       });
@@ -596,6 +710,7 @@ export function openDetail(id) {
         : '<div class="empty">No turns.</div>';
     }
     var nav = '<div class="tx-nav">' +
+      '<div class="tx-filter-wrap"></div>' +
       '<div class="tx-nav-row">' +
         '<div class="tx-grp">' +
           '<span class="tx-grp-lbl">Turn</span>' +
@@ -634,9 +749,9 @@ export function openDetail(id) {
     // One sticky header (title + tabs + scope bar + transcript nav) over the panes.
     $('#drawerBody').innerHTML =
       '<div class="drawer-head">' + headTop + tabs + (hasTx ? scopeBar : '') + (hasTx ? nav : '') + '</div>' +
-      '<div class="dpane on" id="dpane-summary">' + sum + '</div>' +
+      '<div class="dpane" id="dpane-summary">' + sum + '</div>' +
       (fileCount ? '<div class="dpane" id="dpane-files"><div class="empty">Loading file changes…</div></div>' : '') +
-      '<div class="dpane" id="dpane-transcript">' + txBody + '</div>';
+      '<div class="dpane on" id="dpane-transcript">' + txBody + '</div>';
 
     // Keep --head-h (used for sticky-aware scroll-margin) in step with the header,
     // whose height changes when the transcript nav shows/hides between tabs.
@@ -655,7 +770,19 @@ export function openDetail(id) {
     // Tab switching — shared by the top tabs and the summary "See transcript".
     // The transcript nav lives in the shared header but only shows on that tab;
     // the Files diffs are fetched lazily the first time that tab is opened.
-    var filesLoaded = false;
+    var filesLoaded = false, filesRendered = false, pendingFile = null;
+    function expandFile(path) {
+      var pane = $('#dpane-files'); if (!pane) return;
+      var card = null;
+      Array.prototype.forEach.call(pane.querySelectorAll('.fc-file'), function (c) { if (c.getAttribute('data-path') === path) card = c; });
+      if (card) { card.classList.remove('collapsed'); card.scrollIntoView({ block: 'start' }); flashEl(card); }
+    }
+    // A summary file chip → the Files tab with that file expanded (after lazy load).
+    function openFile(path) {
+      pendingFile = path;
+      showTab('files');
+      if (filesRendered) { expandFile(path); pendingFile = null; }
+    }
     function showTab(name) {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (x) {
         x.classList.toggle('on', x.getAttribute('data-dtab') === name);
@@ -694,6 +821,8 @@ export function openDetail(id) {
         Array.prototype.forEach.call(pane.querySelectorAll('.msg-more'), function (b) {
           b.onclick = function () { var on = b.previousElementSibling.classList.toggle('on'); b.textContent = on ? 'Show less ↑' : 'Show more ↓'; };
         });
+        filesRendered = true;
+        if (pendingFile) { expandFile(pendingFile); pendingFile = null; }
       });
     }
     // From a file edit, jump to the user message that prompted it (the intent),
@@ -752,8 +881,23 @@ export function openDetail(id) {
     });
 
     // Artifact chips pivot to a filtered session list.
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tag.click'), function (el) {
-      el.onclick = function () { filterByArtifact(el.getAttribute('data-art'), el.getAttribute('data-kind')); };
+    var sumChips = document.querySelectorAll('#drawerBody .tag.click');
+    // A feature/PR chip is clickable only when there are ≥2 of THAT kind in the
+    // summary (focus the transcript on it); a lone one has nothing to filter, so
+    // disable it. Gate on what's actually shown — the transcript's block-level
+    // feature dim can be sparser than the session's linked features.
+    var kindCount = {};
+    Array.prototype.forEach.call(sumChips, function (el) { var k = el.getAttribute('data-kind'); kindCount[k] = (kindCount[k] || 0) + 1; });
+    Array.prototype.forEach.call(sumChips, function (el) {
+      var kind = el.getAttribute('data-kind'), art = el.getAttribute('data-art');
+      if (kind === 'feature' || kind === 'pr') {
+        if ((kindCount[kind] || 0) >= 2) el.onclick = function () { focusDim(kind, resolveDimValue(kind, art)); };
+        else el.classList.remove('click');
+      } else if (kind === 'file') {
+        el.onclick = function () { openFile(art); };
+      } else {
+        el.onclick = function () { filterByArtifact(art, kind); };
+      }
     });
 
     // ----- Transcript navigation: turn stepper + scroll-spy + error stepper ----
@@ -843,6 +987,76 @@ export function openDetail(id) {
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
     if (en) en.onclick = function () { gotoErr(errIdx + 1); };
 
+    // ----- Block filter: focus the main thread on one PR / feature / use-case --
+    function mainPaneEl() { return document.querySelector('#drawerBody .tx-scope-pane[data-scope="main"]'); }
+    function renderFilterBar() {
+      var c = $('#drawerBody .tx-filter-wrap'); if (!c) return;
+      c.innerHTML = filterBarHtml();
+      var sel = c.querySelector('.tx-fdim');
+      if (sel) sel.onchange = function () { fDim = this.value; fVal = null; renderFilterBar(); applyTxFilter(true); };
+      Array.prototype.forEach.call(c.querySelectorAll('.tx-fchip'), function (b) {
+        b.onclick = function () { var v = b.getAttribute('data-v'); fVal = v === '' ? null : v; renderFilterBar(); applyTxFilter(true); };
+      });
+    }
+    // `scroll` (a user chip/switcher click) lands at the top of the newly-focused
+    // view — otherwise switching focus after scrolling leaves you mid-transcript.
+    function applyTxFilter(scroll?: boolean) {
+      var pane = mainPaneEl(); if (!pane) return;
+      Array.prototype.forEach.call(pane.querySelectorAll('.tx-gap'), function (g) { if (g.parentNode) g.parentNode.removeChild(g); });
+      var els = Array.prototype.filter.call(pane.children, function (el) { return el.hasAttribute('data-blk'); });
+      if (fVal == null || fDim == null) {
+        els.forEach(function (el) { el.classList.remove('tx-hidden'); });
+      } else {
+        var run = [];
+        var flush = function () {
+          if (!run.length) return;
+          var labels = {};
+          run.forEach(function (el) { var l = blkLabel(parseInt(el.getAttribute('data-blk'), 10), fDim); if (l) labels[l] = 1; });
+          var ks = Object.keys(labels);
+          var n = run.filter(function (el) { return el.classList.contains('turn'); }).length || run.length;
+          var g = document.createElement('div'); g.className = 'tx-gap';
+          g.textContent = '··· ' + n + ' turn' + (n > 1 ? 's' : '') + (ks.length === 1 ? ' on ' + ks[0] : ' elsewhere') + ' ···';
+          pane.insertBefore(g, run[0]); run = [];
+        };
+        els.forEach(function (el) {
+          if (blkVal(parseInt(el.getAttribute('data-blk'), 10), fDim) === fVal) { flush(); el.classList.remove('tx-hidden'); }
+          else { el.classList.add('tx-hidden'); run.push(el); }
+        });
+        flush();
+      }
+      recountTurns();
+      if (scroll) {
+        var first = pane.querySelector('[data-blk]:not(.tx-hidden)');
+        if (first) { muteSpy(); first.scrollIntoView({ block: 'start' }); flashEl(first); }
+      }
+    }
+    // Re-point the turn AND error steppers + the outline at the currently-VISIBLE
+    // main-thread content, so every nav control walks only what you can see.
+    function recountTurns() {
+      if (activeScope !== 'main') return;
+      var full = scopeByKey.main.userTurns;
+      var vis = full.filter(function (u) { var el = document.getElementById('txt-' + u.i); return el && !el.classList.contains('tx-hidden'); });
+      userTurns = vis;
+      var tt = $('#drawerBody .tx-turn-total'); if (tt) tt.textContent = String(vis.length);
+      var ol = $('#tx-outline'); if (ol) ol.innerHTML = outlineHtml(vis);
+      wireOutline();
+      curTurn = 0;
+      if (vis.length) updateIndicator(0);
+      else { var pos = $('#drawerBody .tx-turn-pos'); if (pos) pos.textContent = '0'; var now = $('#tx-now'); if (now) now.textContent = ''; }
+      // Error stepper: cycle only errors whose block is still visible (a panel
+      // lives inside a turn/toolrun, so check that ancestor's tx-hidden).
+      errIds = scopeByKey.main.errIds.filter(function (eid) {
+        var el = document.getElementById('txerr-' + eid);
+        return el && !el.closest('.tx-hidden');
+      });
+      errIdx = -1;
+      var et = $('#drawerBody .tx-err-total'); if (et) et.textContent = String(errIds.length);
+      var epos = $('#drawerBody .tx-err-pos'); if (epos) epos.textContent = '—';
+      syncHeadH();
+    }
+    renderFilterBar();
+    if (dimsAvail.length) applyTxFilter();
+
     // ----- Subagent scopes: switch tab, link from spawn calls, link back -------
     // Point the nav (turn stepper, outline, error stepper, scroll-spy) at a scope
     // and show its pane. Indices are global, so the steppers/anchors carry over.
@@ -870,6 +1084,9 @@ export function openDetail(id) {
         var pos = $('#drawerBody .tx-turn-pos'); if (pos) pos.textContent = '0';
         var now = $('#tx-now'); if (now) now.textContent = '';
       }
+      // The block filter applies to the main thread only; re-apply it on return.
+      var fw = $('#drawerBody .tx-filter-wrap'); if (fw) fw.style.display = key === 'main' ? '' : 'none';
+      if (key === 'main' && dimsAvail.length) applyTxFilter();
       syncHeadH();
     }
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
@@ -890,7 +1107,8 @@ export function openDetail(id) {
       };
     });
 
-    syncHeadH();
+    // Land on Transcript by default (global default); empty sessions fall to Summary.
+    showTab(hasTx ? 'transcript' : 'summary');
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
   });

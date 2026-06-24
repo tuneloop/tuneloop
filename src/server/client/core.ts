@@ -91,7 +91,7 @@ export function badge(v) {
   return '<span class="badge ' + c + '">' + esc(v || '—') + '</span>';
 }
 
-export function grainOfSrc(src) { return src === 'usage' ? 'usage' : src === 'tool-call' ? 'tool_call' : 'session'; }
+export function grainOfSrc(src) { return src === 'usage' ? 'usage' : src === 'tool-call' ? 'tool_call' : src === 'block' ? 'block' : 'session'; }
 
 export function fmtVal(v, format) {
   if (v == null) return '—';

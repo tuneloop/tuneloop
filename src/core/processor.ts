@@ -13,6 +13,11 @@ import type {
   AnnotationInput,
   ArtifactInput,
   ArtifactLinkInput,
+  BlockAnnotationInput,
+  BlockArtifactInput,
+  BlockInput,
+  BlockToolInput,
+  BlockUsageInput,
   FeatureRevisionInput,
   FileIndexInput,
   OutcomeInput,
@@ -72,6 +77,13 @@ export interface ProcessorResult {
   featureRevisions?: FeatureRevisionInput[]
   outcomes?: OutcomeInput[]
   files?: FileIndexInput[]
+  /** Block partition + membership (owned by segment-blocks). */
+  blocks?: BlockInput[]
+  blockUsage?: BlockUsageInput[]
+  blockTool?: BlockToolInput[]
+  /** Per-block labels / links (use_case from enrich-session, PR/commit from outcomes-git, feature from enrich-session). */
+  blockAnnotations?: BlockAnnotationInput[]
+  blockArtifacts?: BlockArtifactInput[]
   /** For enrichment processors: the LLM spend this processor incurred. */
   selfCost?: { tokens: TokenUsage; usd: number }
 }

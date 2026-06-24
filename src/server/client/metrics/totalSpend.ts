@@ -1,7 +1,7 @@
 // Total spend detail (the burn / spend-breakdown view): spend over time, with
 // an optional split into one usage/session-grain cohort line per facet value.
 import { state, $, esc, usd, SR_PALETTE, get, autoBucket, windowQs } from '../core'
-import { valueLineChart, stackChart } from '../charts'
+import { valueLineChart, stackChart, stackedBarChart } from '../charts'
 import { spendBreakdownFacets } from '../facets'
 
 export function renderTotalSpend() {
@@ -52,25 +52,48 @@ export function loadTotalSpend() {
 export function renderSpend(d) {
   var ov = d.overall || { total: 0, points: [] };
   if (d.series && d.series.length) {
-    var lines = d.series.map(function (s, i) {
+    var series = d.series.map(function (s, i) {
       return {
         label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
         points: s.points.map(function (p) { return { bucket: p.bucket, y: p.spend }; })
       };
     });
-    $('#sp-chart').innerHTML = valueLineChart(d.buckets || [], lines, 'usd');
-    $('#sp-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        ' <span class="sr-cnt">' + usd(l.total) + '</span></span>';
-    }).join('');
-    var note = d.truncated ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by spend. ' : '';
-    note += 'Each line is one cohort. Hover a point for that bucket spend.';
-    if (d.presenceInflated) note += ' Sessions can carry several values here, so the lines sum to more than total spend.';
-    $('#sp-note').innerHTML = esc(note);
+    if (d.presenceInflated) {
+      // Multi-valued facet: a session's spend counts under several values, so the
+      // components over-sum the total — stacking would lie. Keep cohort lines.
+      $('#sp-chart').innerHTML = valueLineChart(d.buckets || [], series, 'usd');
+      $('#sp-legend').innerHTML = spendLegend(series);
+      var noteL = (d.truncated ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by spend. ' : '') +
+        'Each line is one cohort. Sessions can carry several values here, so the lines sum to more than total spend.';
+      $('#sp-note').innerHTML = esc(noteL);
+    } else {
+      // Components partition the bucket's spend → stack them. Add a muted "other"
+      // segment for any top-K tail so the bars still reach the true total.
+      var ovByB = {};
+      (ov.points || []).forEach(function (p) { ovByB[p.bucket] = p.spend; });
+      var shownByB = {};
+      series.forEach(function (s) { s.points.forEach(function (p) { shownByB[p.bucket] = (shownByB[p.bucket] || 0) + p.y; }); });
+      var otherPts = (d.buckets || []).map(function (b) { return { bucket: b, y: Math.max(0, (ovByB[b] || 0) - (shownByB[b] || 0)) }; });
+      var otherTotal = otherPts.reduce(function (a, p) { return a + p.y; }, 0);
+      var chart = series.slice();
+      if (otherTotal > 0.005) chart.push({ label: 'other', color: '#cfc8b8', total: otherTotal, points: otherPts });
+      $('#sp-chart').innerHTML = stackedBarChart(d.buckets || [], chart, 'usd');
+      $('#sp-legend').innerHTML = spendLegend(chart);
+      var noteB = (d.truncated ? 'Top ' + d.truncated.shown + ' of ' + d.truncated.total + '; the rest are grouped as “other”. ' : '') +
+        'Each bar splits the bucket’s spend into components — hover a segment for its value.';
+      $('#sp-note').innerHTML = esc(noteB);
+    }
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.spend, filled: p.spend }; });
     $('#sp-chart').innerHTML = stackChart(d.buckets || [], barPts, 'usd');
     $('#sp-legend').innerHTML = '';
     $('#sp-note').innerHTML = esc('Spend per ' + autoBucket(state.spend.bucket) + ', dated at session start. Break down by a dimension to split it.');
   }
+}
+
+function spendLegend(series) {
+  return series.map(function (l) {
+    return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
+      ' <span class="sr-cnt">' + usd(l.total) + '</span></span>';
+  }).join('');
 }

@@ -15,15 +15,39 @@
  */
 
 /** Where a facet's value lives — implies its grain. */
-export type FacetSource = 'session' | 'annotation' | 'tool-call' | 'usage'
+export type FacetSource = 'session' | 'annotation' | 'tool-call' | 'usage' | 'block'
 export type FacetType = 'string' | 'number' | 'boolean' | 'enum'
 
-/** The entity a row lives at. session is the coarsest; usage/tool_call are its children. */
-export type Grain = 'session' | 'usage' | 'tool_call'
+/**
+ * The entity a row lives at. Ancestry: session ⊃ block ⊃ {usage, tool_call};
+ * usage and tool_call are siblings (both children of block).
+ */
+export type Grain = 'session' | 'block' | 'usage' | 'tool_call'
 
 /** A source's grain. session-column and annotation are both per-session. */
 export function grainOf(source: FacetSource): Grain {
-  return source === 'usage' ? 'usage' : source === 'tool-call' ? 'tool_call' : 'session'
+  return source === 'usage'
+    ? 'usage'
+    : source === 'tool-call'
+      ? 'tool_call'
+      : source === 'block'
+        ? 'block'
+        : 'session'
+}
+
+/** Depth in the grain tree (coarsest = 0). usage and tool_call share depth 2. */
+export const GRAIN_DEPTH: Record<Grain, number> = { session: 0, block: 1, usage: 2, tool_call: 2 }
+
+/**
+ * Whether a facet at grain `gf` is a valid GROUP BY for a measure at grain `gm`:
+ * `gf` must equal `gm` or be a strict ANCESTOR (session/block). Finer or sibling
+ * facets (e.g. cost × skill = usage × tool_call) are rejected to avoid silent
+ * double-counting — they need the (unbuilt) pre-reduction path.
+ */
+export function facetGroupCompatible(gf: Grain, gm: Grain): boolean {
+  if (gf === gm) return true
+  if (GRAIN_DEPTH[gf] >= GRAIN_DEPTH[gm]) return false
+  return gf === 'session' || gf === 'block'
 }
 /** Where a facet may surface in the UI. */
 export type FacetRole = 'chart' | 'filter' | 'detail'

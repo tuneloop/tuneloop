@@ -17,3 +17,17 @@ export const SYNTHETIC_USER_RE =
 export function isSyntheticUser(text: string): boolean {
   return SYNTHETIC_USER_RE.test(text)
 }
+
+/** Strip injected <system-reminder> blocks (and the trailing space they leave). */
+export function stripReminders(text: string): string {
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+}
+
+/** True when a "user" event is a genuine human prompt (not injected machinery). */
+export function isRealUserText(text: string): boolean {
+  const t = stripReminders(text)
+  return !!t && !isSyntheticUser(t)
+}

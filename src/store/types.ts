@@ -77,6 +77,46 @@ export interface AnnotationInput {
   value: unknown
 }
 
+// ---- block-level attribution (handling_long_sessions) ----------------------
+
+/** A contiguous deterministic slice of a session's main thread. */
+export interface BlockInput {
+  idx: number
+  startSeq: number
+  endSeq: number
+  boundaryKind: string
+  tsStart?: string
+  tsEnd?: string
+}
+
+/** usage_facts.idx -> block idx (a total partition; non-overlap is PK-enforced). */
+export interface BlockUsageInput {
+  usageIdx: number
+  blockIdx: number
+}
+
+/** tool_calls.idx -> block idx. */
+export interface BlockToolInput {
+  toolIdx: number
+  blockIdx: number
+}
+
+/** A label on one block (e.g. use_case), parallel to AnnotationInput. */
+export interface BlockAnnotationInput {
+  blockIdx: number
+  key: string
+  value: unknown
+}
+
+/** A block -> artifact link (block→PR/commit deterministic; block→feature derived). */
+export interface BlockArtifactInput {
+  blockIdx: number
+  artifactId: string
+  role: SessionArtifactRole
+  source?: LinkSource
+  confidence?: number
+}
+
 /** One assistant message's usage + cost — a row in the `usage_facts` table. */
 export interface UsageFactInput {
   idx: number
