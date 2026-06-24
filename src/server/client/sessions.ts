@@ -496,10 +496,10 @@ export function openDetail(id, focus?: any) {
       var sw = dimsAvail.length > 1
         ? '<select class="tx-fdim">' + dimsAvail.map(function (d) { return '<option value="' + d.dim + '"' + (d.dim === fDim ? ' selected' : '') + '>' + esc(d.label) + '</option>'; }).join('') + '</select>'
         : '<span class="tx-fdim-lbl">' + esc(dd.label) + '</span>';
-      var chips = '<button class="tx-fchip' + (fVal == null ? ' on' : '') + '" type="button" data-v="">All <span class="tx-fchip-n">' + totalTurns + '</span></button>' +
+      var chips = '<button class="tx-fchip' + (fVal == null ? ' on' : '') + '" type="button" data-v="">All <span class="tx-fchip-n">(' + totalTurns + ')</span></button>' +
         dd.values.map(function (v) {
           return '<button class="tx-fchip' + (fVal === v.key ? ' on' : '') + '" type="button" data-v="' + esc(v.key) + '">' +
-            esc(v.label) + ' <span class="tx-fchip-n">' + v.turns + '/' + totalTurns + '</span></button>';
+            esc(v.label) + ' <span class="tx-fchip-n">(' + v.turns + '/' + totalTurns + ')</span></button>';
         }).join('');
       return '<span class="tx-grp-lbl">View by</span>' + sw + '<span class="tx-fchips">' + chips + '</span>';
     }
