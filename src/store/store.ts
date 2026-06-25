@@ -2367,7 +2367,7 @@ function buildTranscriptCore(session: Session): {
         else if (b.type === 'tool_use') {
           ids.push(b.id)
           const input = b.input as Record<string, unknown> | undefined
-          const target = (input?.file_path ?? input?.path ?? input?.command) as string | undefined
+          const target = (input?.file_path ?? input?.filePath ?? input?.path ?? input?.command) as string | undefined
           const res = resById.get(b.id)
           const ok = res ? res.ok : true
           const command = toolCommandText(b.name, input)
@@ -2375,11 +2375,14 @@ function buildTranscriptCore(session: Session): {
           const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
           if (command) tool.command = command
           if (output) tool.output = output
-          if (b.name === 'Edit' && input) {
-            const old_s = clip(String(input.old_string ?? ''), 2000)
-            const new_s = clip(String(input.new_string ?? ''), 2000)
+          // Edit/Write → inline diff. Field names differ across harnesses
+          // (Claude Code: old_string/new_string; OpenCode: oldString/newString).
+          const toolLc = b.name.toLowerCase()
+          if (toolLc === 'edit' && input) {
+            const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
+            const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
             if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
-          } else if (b.name === 'Write' && input) {
+          } else if (toolLc === 'write' && input) {
             const content = clip(String(input.content ?? ''), 2000)
             if (content) tool.hunks = [{ del: '', ins: content }]
           }
@@ -2417,29 +2420,57 @@ function readableOutput(toolName: string, raw: unknown): string {
   return resultText(raw)
 }
 
-/** Maps tool name → the input key that best describes the operation. */
-const TOOL_KEY_MAP: Record<string, string> = {
-  Read: 'file_path',
-  Edit: 'file_path',
-  Write: 'file_path',
-  Bash: 'command',
-  Agent: 'prompt',
-  Skill: 'skill',
-  WebFetch: 'url',
-  WebSearch: 'query',
-  ToolSearch: 'query',
-  Grep: 'pattern',
-  Glob: 'pattern',
+/**
+ * Maps a tool → the input field(s) that best describe its operation, tried in
+ * order. Keyed by LOWERCASED tool name so it covers both Claude Code's
+ * capitalized names (`Bash`, `Read`, …) and OpenCode's lowercase ones (`bash`,
+ * `read`, …), and each entry lists both vendors' field spellings (`file_path`
+ * vs `filePath`).
+ */
+const TOOL_KEY_MAP: Record<string, string[]> = {
+  read: ['file_path', 'filePath', 'path'],
+  edit: ['file_path', 'filePath', 'path'],
+  write: ['file_path', 'filePath', 'path'],
+  multiedit: ['file_path', 'filePath', 'path'],
+  notebookedit: ['notebook_path', 'file_path', 'path'],
+  bash: ['command'],
+  agent: ['prompt'],
+  task: ['prompt'],
+  skill: ['skill', 'name'],
+  webfetch: ['url'],
+  websearch: ['query'],
+  toolsearch: ['query'],
+  grep: ['pattern'],
+  glob: ['pattern'],
+  list: ['path'],
 }
 
 function toolCommandText(name: string, input: Record<string, unknown> | undefined): string {
   if (!input) return ''
-  const key = TOOL_KEY_MAP[name]
-  if (key) {
-    const val = input[key]
-    return clip(typeof val === 'string' ? val : '', 2000)
+  const tool = name.toLowerCase()
+  const keys = TOOL_KEY_MAP[tool]
+  if (keys) {
+    for (const k of keys) {
+      const val = input[k]
+      if (typeof val === 'string' && val) return clip(val, 2000)
+    }
+    return ''
   }
-  if (name === 'AskUserQuestion') {
+  if (tool === 'todowrite' || tool === 'todoread') {
+    const todos = input.todos
+    if (Array.isArray(todos) && todos.length) {
+      const lines = todos.map((t) => {
+        const o = (t && typeof t === 'object' ? t : {}) as Record<string, unknown>
+        const status = typeof o.status === 'string' ? o.status : ''
+        const mark = status === 'completed' ? '✓' : status === 'in_progress' ? '▶' : '○'
+        return `${mark} ${typeof o.content === 'string' ? o.content : ''}`
+      })
+      return clip(lines.join('\n'), 2000)
+    }
+    return ''
+  }
+  // Claude Code: AskUserQuestion; OpenCode: question — same `questions` shape.
+  if (tool === 'askuserquestion' || tool === 'question') {
     const qs = input.questions
     if (Array.isArray(qs) && qs.length && typeof qs[0] === 'object' && qs[0]) {
       return String((qs[0] as Record<string, unknown>).question ?? '')
