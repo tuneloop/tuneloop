@@ -39,10 +39,11 @@ export function renderSmControls() {
   $('#sm-by').onchange = function () { state.sm.by = this.value; loadSessionsOverTime(); };
 }
 
-export function loadSessionsOverTime() {
+export function loadSessionsOverTime(topK?) {
   var sm = state.sm;
   var qs = ['bucket=' + encodeURIComponent(autoBucket(sm.bucket))];
   if (sm.by) qs.push('by=' + encodeURIComponent(sm.by));
+  if (topK) qs.push('topK=' + topK);
   get('/api/sessions-over-time?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sm-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderSm(d);
@@ -66,6 +67,11 @@ export function renderSm(d) {
     var note = d.truncated ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by session count. ' : '';
     note += 'Each line is one cohort. Hover a point for that bucket count.';
     if (d.presenceInflated) note += ' A session can fall under several values here, so the lines sum to more than total sessions.';
+    if (d.truncated) {
+      $('#sm-legend').innerHTML += ' <a class="show-all-link" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + '</a>';
+      var smLink = $('#sm-legend .show-all-link');
+      if (smLink) smLink.onclick = function () { loadSessionsOverTime(this.getAttribute('data-total')); };
+    }
     $('#sm-note').innerHTML = esc(note);
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.count, filled: p.count }; });

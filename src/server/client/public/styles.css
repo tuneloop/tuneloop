@@ -55,8 +55,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-by { border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
 .sr-by-ctrl { display: inline-flex; align-items: center; gap: 8px; }
 .sr-legend { margin-top: 10px; }
-.sr-legend .leg { display: inline-flex; align-items: center; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
+.sr-legend .leg { display: inline-flex; align-items: center; vertical-align: middle; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
 .sr-legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
+.sr-legend .show-all-link { display: inline-flex; align-items: center; vertical-align: middle; font-size: 12px; color: var(--emerald); cursor: pointer; text-decoration: underline; margin-left: 8px; }
 .chart-title { font-size: 13px; font-weight: 600; color: var(--ink); margin: 2px 0 10px; }
 .ca-controls { margin: 12px 0 4px; }
 .panel-head h2 .metric-sub { margin-left: 8px; }

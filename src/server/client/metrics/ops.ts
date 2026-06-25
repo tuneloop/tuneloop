@@ -57,9 +57,10 @@ export function renderOpsControls() {
   });
 }
 
-export function loadOps(view) {
+export function loadOps(view, topK?) {
   var by = state.ops.by[view];
   var qs = 'view=' + encodeURIComponent(view) + '&bucket=' + encodeURIComponent(autoBucket(state.ops.bucket)) + (by ? '&by=name' : '') + windowQs();
+  if (topK) qs += '&topK=' + topK;
   get('/api/ops-over-time?' + qs).then(function (d) {
     if (!d || d.error) { $('#ops-chart-' + view).innerHTML = '<div class="empty">No data.</div>'; return; }
     renderOpsChart(view, d);
@@ -105,7 +106,12 @@ export function renderOpsChart(view, d) {
     }
     note = (d.view === 'skill_usage' ? 'Skill invocations' : 'Tool calls') + ' per bucket, dated at session start.';
   }
-  if (d.truncated) note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
+  if (d.truncated) {
+    note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
+    legend += ' <a class="show-all-link" data-view="' + view + '" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + '</a>';
+  }
   $('#ops-legend-' + view).innerHTML = legend;
   $('#ops-note-' + view).innerHTML = esc(note);
+  var showAll = $('#ops-legend-' + view + ' .show-all-link');
+  if (showAll) showAll.onclick = function () { loadOps(this.getAttribute('data-view'), this.getAttribute('data-total')); };
 }

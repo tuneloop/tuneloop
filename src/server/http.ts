@@ -127,11 +127,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       rawView === 'tool_calls' || rawView === 'skill_usage' ? rawView : 'error_rate'
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to'])
+    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to', 'topK'])
     const filters: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) filters[k] = v
     }
+    const opsTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
       res,
       200,
@@ -142,6 +143,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         from: q.get('from') ?? undefined,
         to: q.get('to') ?? undefined,
         filters,
+        topK: Number.isFinite(opsTopK) && opsTopK > 0 ? opsTopK : undefined,
       }),
     )
     return
@@ -151,11 +153,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const q = url.searchParams
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const reserved = new Set(['bucket', 'by', 'from', 'to'])
+    const reserved = new Set(['bucket', 'by', 'from', 'to', 'topK'])
     const filters: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) filters[k] = v
     }
+    const sessTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
       res,
       200,
@@ -165,6 +168,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         from: q.get('from') ?? undefined,
         to: q.get('to') ?? undefined,
         filters,
+        topK: Number.isFinite(sessTopK) && sessTopK > 0 ? sessTopK : undefined,
       }),
     )
     return
@@ -176,11 +180,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const q = url.searchParams
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const reserved = new Set(['bucket', 'by', 'from', 'to'])
+    const reserved = new Set(['bucket', 'by', 'from', 'to', 'topK'])
     const filters: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) filters[k] = v
     }
+    const spendTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
       res,
       200,
@@ -190,6 +195,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         from: q.get('from') ?? undefined,
         to: q.get('to') ?? undefined,
         filters,
+        topK: Number.isFinite(spendTopK) && spendTopK > 0 ? spendTopK : undefined,
       }),
     )
     return
@@ -255,11 +261,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       .filter(Boolean)
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const reserved = new Set(['outcomes', 'bucket', 'by', 'from', 'to'])
+    const reserved = new Set(['outcomes', 'bucket', 'by', 'from', 'to', 'topK'])
     const filters: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) filters[k] = v
     }
+    const srTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
       res,
       200,
@@ -270,6 +277,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         from: q.get('from') ?? undefined,
         to: q.get('to') ?? undefined,
         filters,
+        topK: Number.isFinite(srTopK) && srTopK > 0 ? srTopK : undefined,
       }),
     )
     return

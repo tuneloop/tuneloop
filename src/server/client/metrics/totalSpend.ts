@@ -39,10 +39,11 @@ export function renderSpendControls() {
   $('#sp-by').onchange = function () { state.spend.by = this.value; loadTotalSpend(); };
 }
 
-export function loadTotalSpend() {
+export function loadTotalSpend(topK?) {
   var sp = state.spend;
   var qs = ['bucket=' + encodeURIComponent(autoBucket(sp.bucket))];
   if (sp.by) qs.push('by=' + encodeURIComponent(sp.by));
+  if (topK) qs.push('topK=' + topK);
   get('/api/spend-over-time?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sp-chart').innerHTML = '<div class="empty">' + esc(d && d.error ? d.error : 'No data.') + '</div>'; return; }
     renderSpend(d);
@@ -82,6 +83,11 @@ export function renderSpend(d) {
       var noteB = (d.truncated ? 'Top ' + d.truncated.shown + ' of ' + d.truncated.total + '; the rest are grouped as “other”. ' : '') +
         'Each bar splits the bucket’s spend into components — hover a segment for its value.';
       $('#sp-note').innerHTML = esc(noteB);
+    }
+    if (d.truncated) {
+      $('#sp-legend').innerHTML += ' <a class="show-all-link" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + '</a>';
+      var spLink = $('#sp-legend .show-all-link');
+      if (spLink) spLink.onclick = function () { loadTotalSpend(this.getAttribute('data-total')); };
     }
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.spend, filled: p.spend }; });

@@ -63,10 +63,11 @@ export function renderSrControls() {
   $('#sr-by').onchange = function () { state.sr.by = this.value; saveSrPrefs(); loadSuccessRate(); };
 }
 
-export function loadSuccessRate() {
+export function loadSuccessRate(topK?) {
   var sr = state.sr;
   var qs = ['outcomes=' + encodeURIComponent((sr.outcomes || []).join(',')), 'bucket=' + encodeURIComponent(autoBucket(sr.bucket))];
   if (sr.by) qs.push('by=' + encodeURIComponent(sr.by));
+  if (topK) qs.push('topK=' + topK);
   get('/api/success-rate?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sr-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderRateChart(d);
@@ -88,12 +89,17 @@ export function renderRateChart(d) {
       // Two-tone swatch mirrors the bar: solid (with outcome) over faded (none).
       var sw = 'linear-gradient(to top,' + l.color + ' 0 50%,' + l.color + '47 50% 100%)';
       return '<span class="leg"><span class="swatch" style="background:' + sw + '"></span>' + esc(l.label) +
-        (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
+        ' <span class="sr-cnt">' + (l.rate != null ? Math.round(l.rate * 100) + '%' : 'n/a') + '</span></span>';
     }).join('');
     note = d.truncated
       ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' values by session volume. '
       : '';
     note += 'Each bucket shows one bar per value (its own color); the solid lower portion produced a selected outcome, the faded upper portion did not. Hover a bar for its count.';
+    if (d.truncated) {
+      $('#sr-legend').innerHTML += ' <a class="show-all-link" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + '</a>';
+      var srLink = $('#sr-legend .show-all-link');
+      if (srLink) srLink.onclick = function () { loadSuccessRate(this.getAttribute('data-total')); };
+    }
   } else {
     $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || [], 'Sessions');
     $('#sr-legend').innerHTML =
