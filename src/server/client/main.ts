@@ -5,7 +5,7 @@ import { state, $, esc, get, dayOf } from './core'
 import { loadFacets } from './facets'
 import { loadKpis, renderWindow } from './kpis'
 import { renderSuccessRate, renderSrControls } from './metrics/successRate'
-import { buildFilters, loadSessions, closeDrawer, setView } from './sessions'
+import { buildFilters, closeDrawer, setView } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
 
 function init() {
@@ -31,7 +31,8 @@ function init() {
   });
   renderWindow();
   loadKpis();
-  loadSessions();
+  // Sessions load via buildFilters() → applyFilters() once facets resolve, so the
+  // list arrives already windowed to the default (30d) with its active chips.
   loadArtifacts();
   get('/api/outcome-types').then(function (t) {
     state.outcomeTypes = t || [];

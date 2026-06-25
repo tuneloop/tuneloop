@@ -2,7 +2,7 @@
 // free-text), the session table, the detail drawer, and view switching. The
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
-import { state, $, esc, usd, num, dayOf, badge, get } from './core'
+import { state, $, esc, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
@@ -19,35 +19,232 @@ document.addEventListener('mousedown', function (e) {
   if (btn) btn.classList.remove('on');
 });
 
+// Close the outcome multi-select popover on an outside click (same pattern as
+// the transcript outline above): one module-level listener over live elements.
+document.addEventListener('mousedown', function (e) {
+  var menu = document.getElementById('f-outcome-menu');
+  if (!menu || !menu.classList.contains('on')) return;
+  var wrap = document.getElementById('f-outcome-wrap');
+  if (wrap && wrap.contains(e.target as Node)) return;
+  menu.classList.remove('on');
+});
+
+var TIME_PRESETS = [
+  { d: 7, l: '7d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
+];
+
+// Filter facets shown inline (in this order); every other filter-role facet —
+// plus the artifact search — collapses behind "More filters" to keep the bar
+// compact. Adding a facet to a processor still surfaces it (under "More").
+var PRIMARY_FACETS = ['use_case', 'repo'];
+
 export function buildFilters() {
-  var html = '';
-  state.facets.forEach(function (f) {
-    if ((f.roles || []).indexOf('filter') < 0) return;
+  // Compact toolbar. The generic facet loop still drives everything (so a new
+  // processor facet surfaces automatically) — PRIMARY_FACETS render inline,
+  // the rest collapse behind "More filters" with the artifact search.
+  function sel(f) {
     var d = state.dist[f.key] || [];
-    if (!d.length) return;
     var opts = '<option value="">' + esc(f.label || f.key) + ': all</option>';
-    d.forEach(function (r) {
-      if (r.value == null) return;
-      opts += '<option value="' + esc(r.value) + '">' + esc(r.value) + '</option>';
-    });
-    html += '<select class="facet-filter" data-key="' + esc(f.key) + '">' + opts + '</select>';
+    d.forEach(function (r) { if (r.value == null) return; opts += '<option value="' + esc(r.value) + '">' + esc(r.value) + '</option>'; });
+    return '<select class="facet-filter" data-key="' + esc(f.key) + '">' + opts + '</select>';
+  }
+  function usable(f) { return (f.roles || []).indexOf('filter') >= 0 && (state.dist[f.key] || []).length > 0; }
+
+  var primary = '';
+  PRIMARY_FACETS.forEach(function (k) {
+    var f = state.facets.filter(function (x) { return x.key === k; })[0];
+    if (f && usable(f)) primary += sel(f);
   });
-  html += '<select id="f-artKind"><option value="">artifact: any</option><option value="file">file</option><option value="pr">PR</option><option value="feature">feature</option></select>' +
-    '<span class="ac" id="f-artifact-ac">' +
-      '<input id="f-artifact" placeholder="file path / PR # / feature" autocomplete="off" />' +
-      '<div class="ac-menu" id="f-artifact-menu"></div>' +
-    '</span>' +
-    '<input id="f-q" placeholder="search title / intent" />';
-  $('#filters').innerHTML = html;
+  var more = '';
+  state.facets.forEach(function (f) {
+    if (!usable(f) || PRIMARY_FACETS.indexOf(f.key) >= 0) return;
+    more += sel(f);
+  });
+
+  var segBtns = TIME_PRESETS.map(function (p) {
+    return '<button type="button" data-d="' + p.d + '"' +
+      (String(p.d) === String(state.sessTime.preset) ? ' class="on"' : '') + '>' + p.l + '</button>';
+  }).join('');
+
+  $('#filters').innerHTML =
+    '<div class="flt-row">' +
+      '<span class="flt-grp"><span class="flt-lbl">Time</span>' +
+        '<div class="seg flt-seg" id="f-time">' + segBtns + '</div>' +
+        '<span class="flt-dates" id="f-dates"' + (state.sessTime.preset === 'custom' ? '' : ' hidden') + '>' +
+          '<input type="date" id="f-from" value="' + esc(state.sessTime.from) + '" />' +
+          '<span class="flt-dash">→</span>' +
+          '<input type="date" id="f-to" value="' + esc(state.sessTime.to) + '" />' +
+        '</span>' +
+      '</span>' +
+      '<input id="f-q" class="flt-search" placeholder="search title / intent" />' +
+    '</div>' +
+    '<div class="flt-row flt-row-facets">' + primary +
+      '<span class="flt-pop" id="f-outcome-wrap">' +
+        '<button type="button" class="flt-pop-btn" id="f-outcome-btn">Outcomes' +
+          '<span class="flt-pop-cnt" id="f-outcome-cnt"></span><span class="flt-pop-car">▾</span></button>' +
+        '<div class="flt-menu" id="f-outcome-menu"></div>' +
+      '</span>' +
+      '<span class="ac" id="f-artifact-ac">' +
+        '<input id="f-artifact" placeholder="file path / PR # / feature" autocomplete="off" />' +
+        '<div class="ac-menu" id="f-artifact-menu"></div>' +
+      '</span>' +
+      (more ? '<button type="button" class="flt-pop-btn flt-more-btn" id="f-more-btn">More filters<span class="flt-pop-cnt" id="f-more-cnt"></span><span class="flt-pop-car">▾</span></button>' : '') +
+    '</div>' +
+    (more ? '<div class="flt-row flt-more" id="f-more" hidden>' + more + '</div>' : '') +
+    '<div class="flt-active" id="filter-active"></div>';
+
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) { s.onchange = applyFilters; });
-  $('#f-artKind').onchange = applyFilters;
+
+  // Time segmented control (presets + custom range).
+  Array.prototype.forEach.call(document.querySelectorAll('#f-time button'), function (b) {
+    b.onclick = function () {
+      var d = b.getAttribute('data-d');
+      setTimePreset(d === 'all' || d === 'custom' ? d : parseInt(d, 10));
+    };
+  });
+  $('#f-from').onchange = function () { state.sessTime.from = this.value; applyFilters(); };
+  $('#f-to').onchange = function () { state.sessTime.to = this.value; applyFilters(); };
+
+  // Outcome multi-select popover (built lazily; outcome types load async).
+  $('#f-outcome-btn').onclick = function () { buildOutcomeMenu(); $('#f-outcome-menu').classList.toggle('on'); };
+
+  // More-filters disclosure.
+  var moreBtn = $('#f-more-btn');
+  if (moreBtn) moreBtn.onclick = function () { var m = $('#f-more'); var open = m.hidden; m.hidden = !open; this.classList.toggle('on', open); };
+
   var t;
   $('#f-q').oninput = function () { clearTimeout(t); t = setTimeout(applyFilters, 250); };
   // Artifact search: typeahead suggestions + (debounced) live substring filter.
+  // Typing manually clears the picked kind, so the search spans all kinds.
   var t2;
-  $('#f-artifact').oninput = function () { clearTimeout(t2); t2 = setTimeout(function () { acFetch(); applyFilters(); }, 200); };
+  $('#f-artifact').oninput = function () { this.dataset.kind = ''; clearTimeout(t2); t2 = setTimeout(function () { acFetch(); applyFilters(); }, 200); };
   $('#f-artifact').onkeydown = acKeydown;
   $('#f-artifact').onblur = function () { setTimeout(acClose, 150); }; // delay so a click registers
+
+  // Apply current defaults (30d window) and render the active-chip row.
+  applyFilters();
+}
+
+// Badge on the "More filters" button = how many collapsed filters are active.
+function updateMoreCount() {
+  var el = $('#f-more-cnt');
+  if (!el) return;
+  var f = state.filters || {};
+  var n = 0;
+  Object.keys(f.facets || {}).forEach(function (k) { if (PRIMARY_FACETS.indexOf(k) < 0) n++; });
+  el.textContent = n ? String(n) : '';
+}
+
+// Clear every sessions filter, including the time window (→ all-time), and reload.
+// buildFilters() rebuilds the bar empty, then applyFilters() reloads + empties the
+// chip row (so the "Clear all" button itself disappears — nothing left to clear).
+export function clearAllFilters() {
+  state.sessTime = { preset: 'all', from: '', to: '' };
+  buildFilters();
+}
+
+// Resolve the sessions-list window to ISO {from,to} for the request. Empty
+// bounds mean "open" (the 'all' preset, or a half-filled custom range).
+function sessWindow() {
+  var st = state.sessTime;
+  if (st.preset === 'all') return { from: '', to: '' };
+  if (st.preset === 'custom') {
+    return {
+      from: st.from ? new Date(st.from + 'T00:00:00').toISOString() : '',
+      to: st.to ? new Date(st.to + 'T23:59:59.999').toISOString() : '',
+    };
+  }
+  var span = st.preset * 86400000, now = Date.now();
+  return { from: new Date(now - span).toISOString(), to: new Date(now).toISOString() };
+}
+
+// Apply a time preset: update state + the segmented control + date visibility,
+// then refresh. Shared by the seg buttons and the active-chip "clear".
+function setTimePreset(preset) {
+  state.sessTime.preset = preset;
+  Array.prototype.forEach.call(document.querySelectorAll('#f-time button'), function (b) {
+    b.classList.toggle('on', b.getAttribute('data-d') === String(preset));
+  });
+  var dates = $('#f-dates');
+  if (dates) dates.hidden = preset !== 'custom';
+  applyFilters();
+}
+
+function selectedOutcomes() {
+  var out = [];
+  Array.prototype.forEach.call(document.querySelectorAll('#f-outcome-menu input:checked'), function (cb) { out.push(cb.value); });
+  return out;
+}
+
+// Populate the outcome checklist on first open (state.outcomeTypes loads async,
+// so build lazily and only mark built once it actually has items).
+function buildOutcomeMenu() {
+  var menu = $('#f-outcome-menu');
+  if (!menu || menu.getAttribute('data-built')) return;
+  var types = state.outcomeTypes || [];
+  if (!types.length) { menu.innerHTML = '<div class="flt-menu-empty">No outcomes recorded yet.</div>'; return; }
+  menu.innerHTML = types.map(function (t) {
+    return '<label class="flt-menu-item"><input type="checkbox" value="' + esc(t.type) + '" />' +
+      '<span class="flt-menu-tx">' + esc(outcomeLabel(t.type)) + '</span>' +
+      '<span class="flt-menu-n">' + num(t.sessions || 0) + '</span></label>';
+  }).join('');
+  menu.setAttribute('data-built', '1');
+  Array.prototype.forEach.call(menu.querySelectorAll('input'), function (cb) { cb.onchange = applyFilters; });
+}
+
+function updateOutcomeCount(n) {
+  var el = $('#f-outcome-cnt');
+  if (el) el.textContent = n ? String(n) : '';
+  var btn = $('#f-outcome-btn');
+  if (btn) btn.classList.toggle('on', n > 0);
+}
+
+// One active-filter chip with a per-filter clear (×).
+function chipHtml(cat, key, label, val) {
+  return '<span class="flt-chip"><span class="flt-chip-k">' + esc(label) + '</span>' +
+    '<span class="flt-chip-v">' + esc(val) + '</span>' +
+    '<button class="flt-chip-x" type="button" data-c="' + esc(cat) + '" data-k="' + esc(key) + '" aria-label="Remove filter">×</button></span>';
+}
+
+// Clear one filter (from its chip ×) and re-apply.
+function clearChip(cat, key) {
+  if (cat === 'time') { setTimePreset('all'); return; }
+  if (cat === 'facet') {
+    var sel = document.querySelector('.facet-filter[data-key="' + key + '"]') as any;
+    if (sel) sel.value = '';
+  } else if (cat === 'outcome') {
+    Array.prototype.forEach.call(document.querySelectorAll('#f-outcome-menu input'), function (cb) { if (cb.value === key) cb.checked = false; });
+  } else if (cat === 'artifact') {
+    var af = $('#f-artifact') as any; if (af) { af.value = ''; af.dataset.kind = ''; }
+  } else if (cat === 'q') {
+    var q = $('#f-q') as any; if (q) q.value = '';
+  }
+  applyFilters();
+}
+
+// The "Active" row: one chip per applied filter; chips double as per-filter clears.
+function renderActiveChips() {
+  var host = $('#filter-active');
+  if (!host) return;
+  var f = state.filters || {};
+  var labels = {};
+  (state.facets || []).forEach(function (x) { labels[x.key] = x.label || x.key; });
+  // Note: the time window is conveyed by the segmented control, so it isn't
+  // repeated as a chip — only narrowing filters appear here.
+  var chips = [];
+  Object.keys(f.facets || {}).forEach(function (k) { chips.push(chipHtml('facet', k, labels[k] || k, f.facets[k])); });
+  (f.outcomes || []).forEach(function (o) { chips.push(chipHtml('outcome', o, 'Outcome', outcomeLabel(o))); });
+  if (f.artifact) chips.push(chipHtml('artifact', '', 'Artifact', f.artifact));
+  if (f.q) chips.push(chipHtml('q', '', 'Search', f.q));
+
+  if (!chips.length) { host.innerHTML = ''; return; }
+  host.innerHTML = '<span class="flt-active-lbl">Active</span>' + chips.join('') +
+    '<button class="flt-clear-all" type="button">Clear all</button>';
+  Array.prototype.forEach.call(host.querySelectorAll('.flt-chip-x'), function (b) {
+    b.onclick = function () { clearChip(b.getAttribute('data-c'), b.getAttribute('data-k')); };
+  });
+  var ca = host.querySelector('.flt-clear-all') as any;
+  if (ca) ca.onclick = clearAllFilters;
 }
 
 // ---- artifact-search typeahead (session-list filter) -----------------------
@@ -56,7 +253,7 @@ function acFetch() {
   var inp = $('#f-artifact');
   if (!inp) return;
   var q = inp.value.trim();
-  var kind = $('#f-artKind') ? $('#f-artKind').value : '';
+  var kind = inp.dataset.kind || '';
   if (q.length < 1) { acClose(); return; }
   get('/api/artifact-suggest?q=' + encodeURIComponent(q) + (kind ? '&kind=' + encodeURIComponent(kind) : '')).then(function (items) {
     state.ac = { items: items || [], sel: -1 };
@@ -94,8 +291,9 @@ function acRender() {
 function acPick(i) {
   var it = (state.ac.items || [])[i];
   if (!it) return;
-  $('#f-artifact').value = it.value;
-  if ($('#f-artKind')) $('#f-artKind').value = it.kind; // narrow the filter to the picked kind
+  var af = $('#f-artifact');
+  af.value = it.value;
+  af.dataset.kind = it.kind || ''; // narrow the filter to the picked kind
   acClose();
   applyFilters();
 }
@@ -121,29 +319,37 @@ export function applyFilters() {
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) {
     if (s.value) facets[s.getAttribute('data-key')] = s.value;
   });
+  var af = $('#f-artifact');
+  var win = sessWindow();
+  var outcomes = selectedOutcomes();
+  updateOutcomeCount(outcomes.length);
   state.filters = {
     facets: facets,
     q: $('#f-q') ? $('#f-q').value : '',
-    artifact: $('#f-artifact') ? $('#f-artifact').value : '',
-    artifactKind: $('#f-artKind') ? $('#f-artKind').value : ''
+    artifact: af ? af.value : '',
+    artifactKind: af && af.dataset.kind ? af.dataset.kind : '',
+    outcomes: outcomes,
+    from: win.from,
+    to: win.to
   };
+  updateMoreCount();
+  renderActiveChips();
   loadSessions();
 }
 
 export function renderSessions(rows) {
   if (!rows || !rows.length) { $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>'; return; }
-  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Success</th><th>Complexity</th><th>Work type</th><th></th></tr>';
+  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Outcomes</th><th>Complexity</th><th>Work type</th></tr>';
   var body = rows.map(function (r) {
-    var tags = (r.useCase || []).slice(0, 3).map(function (u) { return '<span class="tag">' + esc(u) + '</span>'; }).join('');
-    var merged = r.prMerged ? '<span class="badge b-success">PR merged</span>' : '';
+    // Outcomes in the canonical order (pr_merged first … session_success last).
+    var outs = (r.outcomes || []).slice().sort(function (a, b) { return outcomeRank(a) - outcomeRank(b); });
     return '<tr class="srow" data-id="' + esc(r.id) + '">' +
-      '<td>' + esc(r.title) + '</td>' +
-      '<td class="num">' + esc(dayOf(r.startedAt)) + '</td>' +
-      '<td class="num">' + usd(r.costUsd) + '</td>' +
-      '<td>' + badge(r.success) + '</td>' +
+      '<td><span class="s-title" title="' + esc(r.title) + '">' + esc(r.title) + '</span></td>' +
+      '<td class="num nowrap">' + esc(dayOf(r.startedAt)) + '</td>' +
+      '<td class="num nowrap">' + usd(r.costUsd) + '</td>' +
+      '<td class="cell-tags">' + tagCell(outs) + '</td>' +
       '<td>' + esc(r.complexity || '—') + '</td>' +
-      '<td>' + tags + '</td>' +
-      '<td>' + merged + '</td></tr>';
+      '<td class="cell-tags">' + tagCell(r.useCase) + '</td></tr>';
   }).join('');
   $('#sessions').innerHTML = '<table>' + head + body + '</table>';
   Array.prototype.forEach.call(document.querySelectorAll('.srow'), function (tr) {
@@ -154,6 +360,27 @@ export function renderSessions(rows) {
       openDetail(tr.getAttribute('data-id'), f.artifact ? { kind: f.artifactKind, val: f.artifact } : null);
     };
   });
+  // "+N" reveals the rest of a capped tag cell in place (without opening the row).
+  Array.prototype.forEach.call(document.querySelectorAll('#sessions .tag-more'), function (b) {
+    b.onclick = function (e) {
+      e.stopPropagation();
+      var rest = b.previousElementSibling;
+      if (rest) rest.classList.add('on');
+      b.style.display = 'none';
+    };
+  });
+}
+
+// A table cell of tags, capped at 2 with a "+N" that reveals the rest in place,
+// keeping rows to a single line by default.
+function tagCell(items) {
+  items = items || [];
+  if (!items.length) return '—';
+  function t(x) { return '<span class="tag">' + esc(x) + '</span>'; }
+  var head = items.slice(0, 2).map(t).join('');
+  if (items.length <= 2) return head;
+  return head + '<span class="tag-rest">' + items.slice(2).map(t).join('') + '</span>' +
+    '<button class="tag-more" type="button">+' + (items.length - 2) + '</button>';
 }
 
 // Render a list of chips with a default cap; the overflow is rendered up front
@@ -1117,10 +1344,11 @@ export function openDetail(id, focus?: any) {
 export function filterByArtifact(text, kind) {
   closeDrawer();
   setView('sessions');
-  var ak = $('#f-artKind'), af = $('#f-artifact');
-  if (ak) ak.value = kind || '';
-  if (af) af.value = text || '';
-  applyFilters();
+  var af = $('#f-artifact');
+  if (af) { af.value = text || ''; af.dataset.kind = kind || ''; } // kind rides along on the input (no visible kind dropdown)
+  // Drilling into one artifact should show its FULL history, not just the default
+  // window — widen to all-time. setTimePreset() re-applies the filters.
+  setTimePreset('all');
 }
 
 export function closeDrawer() { $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on'); }
@@ -1143,5 +1371,8 @@ export function loadSessions() {
   if (f.q) qs.push('q=' + encodeURIComponent(f.q));
   if (f.artifact) qs.push('artifact=' + encodeURIComponent(f.artifact));
   if (f.artifactKind) qs.push('artifact_kind=' + encodeURIComponent(f.artifactKind));
+  if (f.from) qs.push('from=' + encodeURIComponent(f.from));
+  if (f.to) qs.push('to=' + encodeURIComponent(f.to));
+  if (f.outcomes && f.outcomes.length) qs.push('outcome_types=' + encodeURIComponent(f.outcomes.join(',')));
   get('/api/sessions' + (qs.length ? '?' + qs.join('&') : '')).then(renderSessions);
 }

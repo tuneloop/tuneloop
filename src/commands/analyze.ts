@@ -180,7 +180,8 @@ function printSummary(s: Summary): void {
   dist('Work type', s.useCases)
   dist('Complexity', s.complexity)
   dist('Autonomy', s.autonomy)
-  dist('Session success', s.success)
+  // 'Session success' is no longer a facet/distribution — it surfaces as the
+  // `session_success` outcome in the Outcomes section above.
   if (s.features.total > 0) {
     out.push('')
     out.push(`  Features        ${s.features.linked} linked (${s.features.derived} LLM-proposed)`)
