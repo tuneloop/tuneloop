@@ -3,16 +3,10 @@
 // a single stacked bar per bucket, or grouped bars (one per value) when broken
 // down. The headline % lives on the KPI tile; the expanded view shows the counts
 // behind it.
-import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs } from '../core'
+import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel } from '../core'
 import { loadKpis } from '../kpis'
 import { barChart, groupedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
-
-// Fixed display order for the "Count as success" outcomes: concrete shipped
-// artifacts first, softening down to the LLM-judged catch-all. Types not listed
-// sort to the end (preserving their relative order).
-var SR_OUTCOME_ORDER = ['pr_merged', 'pr_created', 'commit_pushed', 'file_written', 'session_success'];
-function srOutcomeRank(type) { var i = SR_OUTCOME_ORDER.indexOf(type); return i < 0 ? SR_OUTCOME_ORDER.length : i; }
 
 export function renderSuccessRate() {
   $('#metric-detail').innerHTML =
@@ -31,10 +25,10 @@ export function renderSuccessRate() {
 }
 
 export function renderSrControls() {
-  var oc = (state.outcomeTypes || []).slice().sort(function (a, b) { return srOutcomeRank(a.type) - srOutcomeRank(b.type); });
+  var oc = (state.outcomeTypes || []).slice().sort(function (a, b) { return outcomeRank(a.type) - outcomeRank(b.type); });
   var checks = oc.map(function (o) {
     var on = state.sr.outcomes.indexOf(o.type) >= 0;
-    var label = esc(o.type) + (o.type === 'session_success' ? ' (LLM-judged)' : '');
+    var label = esc(outcomeLabel(o.type));
     return '<label class="sr-check"><input type="checkbox" class="sr-oc" value="' + esc(o.type) + '"' +
       (on ? ' checked' : '') + '/> ' + label + ' <span class="sr-cnt">' + o.sessions + '</span></label>';
   }).join('');

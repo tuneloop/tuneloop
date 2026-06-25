@@ -32,7 +32,6 @@ export interface Summary {
   useCases: Dist[]
   complexity: Dist[]
   autonomy: Dist[]
-  success: Dist[]
   features: { total: number; derived: number; linked: number }
 }
 
@@ -521,7 +520,6 @@ export class Store {
       useCases: this.facetDistribution('use_case'),
       complexity: this.scalarDist('complexity'),
       autonomy: this.scalarDist('autonomy'),
-      success: this.scalarDist('success'),
       features,
     }
   }
@@ -1308,6 +1306,25 @@ export class Store {
                  WHERE sa3.session_id = s.id AND ${conds.join(' AND ')})`,
       )
     }
+    // Window on session start (inclusive lower, exclusive upper).
+    if (f.from) {
+      clauses.push('s.started_at >= ?')
+      params.push(f.from)
+    }
+    if (f.to) {
+      clauses.push('s.started_at < ?')
+      params.push(f.to)
+    }
+    // Outcome-type filter (OR): session produced ANY of the given outcome types.
+    const outcomeTypes = (f.outcomeTypes ?? []).filter(Boolean)
+    if (outcomeTypes.length) {
+      clauses.push(
+        `EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type IN (${outcomeTypes
+          .map(() => '?')
+          .join(',')}))`,
+      )
+      params.push(...outcomeTypes)
+    }
     const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''
     const limit = Math.min(Math.max(1, f.limit ?? 200), 1000)
 
@@ -1315,10 +1332,10 @@ export class Store {
       .prepare(
         `SELECT s.id AS id, COALESCE(s.title,'(untitled)') AS title, s.started_at AS startedAt,
                 s.cost_usd AS costUsd, s.models AS modelsJson,
-                ${scalar('success')} AS success, ${scalar('complexity')} AS complexity,
+                ${scalar('complexity')} AS complexity,
                 (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
                 ${scalar('intent_summary')} AS intent,
-                (SELECT COUNT(*) FROM outcomes WHERE session_id=s.id AND type='pr_merged') AS prMerged
+                (SELECT json_group_array(t) FROM (SELECT DISTINCT type AS t FROM outcomes WHERE session_id=s.id ORDER BY t)) AS outcomesJson
          FROM sessions s ${where} ORDER BY s.started_at DESC LIMIT ${limit}`,
       )
       .all(...params) as Array<Record<string, any>>
@@ -1329,11 +1346,10 @@ export class Store {
       startedAt: r.startedAt,
       costUsd: r.costUsd ?? 0,
       models: safeJson(r.modelsJson, []),
-      success: r.success ?? null,
       complexity: r.complexity ?? null,
       useCase: safeJson(r.useCaseJson, []),
       intent: r.intent ?? null,
-      prMerged: r.prMerged ?? 0,
+      outcomes: safeJson(r.outcomesJson, []),
     }))
   }
 
@@ -1983,6 +1999,11 @@ export interface SessionFilter {
   artifact?: string
   /** Restrict the artifact match to a kind: file | pr | feature | ticket | commit. */
   artifactKind?: string
+  /** Window on session start (ISO); inclusive lower / exclusive upper bound. */
+  from?: string
+  to?: string
+  /** Match sessions that produced ANY of these outcome types (OR). */
+  outcomeTypes?: string[]
   limit?: number
 }
 
@@ -1992,11 +2013,11 @@ export interface SessionListItem {
   startedAt: string | null
   costUsd: number
   models: string[]
-  success: string | null
   complexity: string | null
   useCase: string[]
   intent: string | null
-  prMerged: number
+  /** Distinct outcome types this session produced (e.g. pr_merged, session_success). */
+  outcomes: string[]
 }
 
 export interface TranscriptTool {

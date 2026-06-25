@@ -12,6 +12,18 @@ export interface SessionFilters {
   q: string
   artifact: string
   artifactKind: string
+  outcomes: string[]
+  // Resolved window for the request (ISO); '' when the window is 'all'.
+  from: string
+  to: string
+}
+
+// Sessions-list time window. `preset` drives from/to; 'custom' reads the date
+// inputs; 'all' means no bound. Independent of the dashboard KPI window.
+export interface SessTime {
+  preset: 7 | 30 | 90 | 'all' | 'custom'
+  from: string // ISO date (yyyy-mm-dd) for custom range
+  to: string
 }
 
 export interface ClientState {
@@ -36,6 +48,7 @@ export interface ClientState {
   // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
   ops: { bucket: string; by: Record<string, boolean> }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
+  sessTime: SessTime // sessions-list time window (default 30d)
 }
 
 export var state: ClientState = {
@@ -50,7 +63,8 @@ export var state: ClientState = {
   spend: { bucket: '', by: '' },
   sm: { bucket: '', by: '' },
   ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
-  ac: { items: [], sel: -1 }
+  ac: { items: [], sel: -1 },
+  sessTime: { preset: 30, from: '', to: '' }
 };
 
 // The success-rate detail controls persist across reloads: the user's "what
@@ -101,6 +115,21 @@ export function fmtVal(v, format) {
 }
 
 export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', '#1b8a8a', '#a65c2e', '#6b8e23'];
+
+// Canonical outcome display order: concrete shipped artifacts first, softening
+// down to the LLM-judged catch-all. Shared by the success-rate "Count as success"
+// picker and the sessions Outcomes column so they read consistently. Types not
+// listed sort to the end (preserving their relative order).
+export var OUTCOME_ORDER = ['pr_merged', 'pr_created', 'commit_pushed', 'file_written', 'session_success'];
+export function outcomeRank(type) { var i = OUTCOME_ORDER.indexOf(type); return i < 0 ? OUTCOME_ORDER.length : i; }
+
+// Friendly display for an outcome type in selection UIs (success-rate picker,
+// the sessions Outcome filter, active chips). The LLM-judged signal keeps its
+// snake_case token (consistent with git-derived outcomes like pr_merged) and
+// adds a "(LLM Judged)" cue; every other type shows its raw token unchanged.
+export function outcomeLabel(type) {
+  return type === 'session_success' ? 'session_success (LLM Judged)' : type;
+}
 
 // A delta badge comparing this window's value to the prior window's. mode:
 // 'points' for rates (absolute percentage-point change), 'rel' for everything
