@@ -3,8 +3,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { computeSessionCost } from '../../pricing/pricing'
+import { computeSessionCost, PRICE_TABLE_VERSION } from '../../pricing/pricing'
 import type { Session } from '../../core/model'
+import { openDb } from '../../store/db'
+import { Store } from '../../store/store'
 import { openOpencodeDb } from './db'
 import { buildSessions } from './parse'
 
@@ -69,6 +71,15 @@ function writeFixture(path: string): void {
   insPart.run('Pa3', 'Pa', 'P', 1782000001200, JSON.stringify({
     type: 'tool', tool: 'task', callID: 'call_task',
     state: { status: 'completed', input: { description: 'Explore stuff', subagent_type: 'explore', prompt: '...' } },
+  }))
+  // write + edit with OpenCode's camelCase field spellings (filePath/oldString/newString).
+  insPart.run('Pa4', 'Pa', 'P', 1782000001300, JSON.stringify({
+    type: 'tool', tool: 'write', callID: 'call_write',
+    state: { status: 'completed', input: { filePath: '/repo/new.ts', content: 'hello\nworld' }, output: 'ok' },
+  }))
+  insPart.run('Pa5', 'Pa', 'P', 1782000001400, JSON.stringify({
+    type: 'tool', tool: 'edit', callID: 'call_edit',
+    state: { status: 'completed', input: { filePath: '/repo/x.ts', oldString: 'foo', newString: 'bar' }, output: 'ok' },
   }))
 
   // Child (subagent): one assistant turn with a read tool and an errored grep.
@@ -157,5 +168,50 @@ describe('opencode adapter', () => {
     // togetherai isn't in models.json → falls back to summed native costs (0.01 + 0.02).
     expect(cost.usd).toBeCloseTo(0.03, 6)
     expect(cost.unpriced).toHaveLength(0)
+  })
+})
+
+/**
+ * Ingest a parsed OpenCode session into the store and read it back through the
+ * Files-changed view. Guards that store.ts keys file-edit rendering off the
+ * canonical action / input shape, not the raw vendor tool name — OpenCode tools
+ * are lowercase (`write`/`edit`) with camelCase fields (oldString/newString), so
+ * the old `tc.name === 'Write'` + `old_string`-only reads produced empty diffs.
+ */
+describe('opencode → store Files-changed view', () => {
+  let dir: string
+  let edits: ReturnType<Store['fileChanges']>
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'oc-store-'))
+    const ocPath = join(dir, 'opencode.db')
+    writeFixture(ocPath)
+    const ocDb = openOpencodeDb(ocPath)
+    let session: Session
+    try {
+      session = buildSessions(ocDb, ocPath)[0]!
+    } finally {
+      ocDb.close()
+    }
+    const store = new Store(openDb(join(dir, 'aivue.db')))
+    const cost = computeSessionCost(session)
+    store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, 1)
+    edits = store.fileChanges(session.id)
+  })
+
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('renders the write as a write op with its content', () => {
+    const write = edits.find((e) => e.path === '/repo/new.ts')
+    expect(write).toBeDefined()
+    expect(write!.op).toBe('write')
+    expect(write!.hunks).toEqual([{ del: '', ins: 'hello\nworld' }])
+  })
+
+  it('renders the edit with non-empty before/after from camelCase fields', () => {
+    const edit = edits.find((e) => e.path === '/repo/x.ts')
+    expect(edit).toBeDefined()
+    expect(edit!.op).toBe('edit')
+    expect(edit!.hunks).toEqual([{ del: 'foo', ins: 'bar' }])
   })
 })

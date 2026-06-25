@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
-import type { Session } from '../core/model'
+import type { CanonicalAction, Session, ToolCall } from '../core/model'
 import type { ProcessorResult } from '../core/processor'
 import type { DB } from './db'
 import { deterministicBlocks } from '../core/blocks'
@@ -1646,20 +1646,20 @@ export class Store {
       const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
       let op: FileEdit['op']
       let hunks: Array<{ del: string; ins: string }>
-      // Field names differ across harnesses (Claude Code: Write/old_string/new_string;
-      // OpenCode: write/oldString/newString) — both content fields are `content`.
-      const toolLc = tc.name.toLowerCase()
-      if (toolLc === 'write') {
-        op = 'write'
-        // Cap is generous because consecutive writes are diffed against each
-        // other client-side; too small a window hides changes near the file end.
-        hunks = [{ del: '', ins: clip(String(input.content ?? ''), 16000) }]
-      } else if (Array.isArray(input.edits)) {
+      // Distinguish write/multiedit/edit by input shape, not the raw tool name —
+      // names are case- and vendor-specific (`Write` vs `write`). Field spellings
+      // also differ (Claude Code: old_string/new_string; OpenCode: oldString/newString).
+      if (Array.isArray(input.edits)) {
         op = 'multiedit'
         hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
           del: clip(String(e.old_string ?? e.oldString ?? ''), 4000),
           ins: clip(String(e.new_string ?? e.newString ?? ''), 4000),
         }))
+      } else if (input.content != null) {
+        op = 'write'
+        // Cap is generous because consecutive writes are diffed against each
+        // other client-side; too small a window hides changes near the file end.
+        hunks = [{ del: '', ins: clip(String(input.content ?? ''), 16000) }]
       } else {
         op = 'edit'
         hunks = [
@@ -2357,7 +2357,7 @@ function buildTranscriptCore(session: Session): {
   turns: TranscriptTurn[]
   toolTurn: Map<string, { turn: number; userTurn: number }>
 } {
-  const resById = new Map(session.toolCalls.map((t) => [t.id, t.result]))
+  const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -2374,25 +2374,30 @@ function buildTranscriptCore(session: Session): {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
         else if (b.type === 'tool_use') {
           ids.push(b.id)
+          const tc = tcById.get(b.id)
           const input = b.input as Record<string, unknown> | undefined
-          const target = (input?.file_path ?? input?.filePath ?? input?.path ?? input?.command) as string | undefined
-          const res = resById.get(b.id)
+          // Prefer the adapter-normalized target (paths/command) over re-parsing the
+          // raw input blob, so per-vendor field spellings live in the adapter.
+          const target = tc?.target.paths?.[0] ?? tc?.target.command
+          const res = tc?.result
           const ok = res ? res.ok : true
-          const command = toolCommandText(b.name, input)
-          const output = res?.raw != null ? clipOutput(readableOutput(b.name, res.raw)) : undefined
+          const command = toolCommandText(tc, input)
+          const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
           const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
           if (command) tool.command = command
           if (output) tool.output = output
-          // Edit/Write → inline diff. Field names differ across harnesses
-          // (Claude Code: old_string/new_string; OpenCode: oldString/newString).
-          const toolLc = b.name.toLowerCase()
-          if (toolLc === 'edit' && input) {
+          // file_write → inline diff. The before/after strings aren't in the
+          // normalized target, so read them from the raw input here; field names
+          // differ across harnesses (Claude Code: old_string/new_string;
+          // OpenCode: oldString/newString).
+          if (tc?.action === 'file_write' && input) {
             const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
             const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
             if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
-          } else if (toolLc === 'write' && input) {
-            const content = clip(String(input.content ?? ''), 2000)
-            if (content) tool.hunks = [{ del: '', ins: content }]
+            else {
+              const content = clip(String(input.content ?? ''), 2000)
+              if (content) tool.hunks = [{ del: '', ins: content }]
+            }
           }
           if (!ok) tool.error = clipError(resultText(res?.raw))
           const spawned = spawnToAgent.get(b.id)
@@ -2416,12 +2421,13 @@ function buildTranscriptCore(session: Session): {
   return { turns, toolTurn }
 }
 
-/** Extract the meaningful output text for a tool, handling tool-specific payloads. */
-function readableOutput(toolName: string, raw: unknown): string {
+/** Extract the meaningful output text for a tool, handling action-specific payloads. */
+function readableOutput(action: CanonicalAction | undefined, raw: unknown): string {
   if (raw == null) return ''
-  if (toolName === 'Read' && typeof raw === 'object' && !Array.isArray(raw)) {
+  if (action === 'file_read' && typeof raw === 'object' && !Array.isArray(raw)) {
     const o = raw as Record<string, unknown>
-    // toolUseResult for Read is {"type":"text","file":{"filePath":"...","content":"..."}}
+    // Claude Code's Read result is {"type":"text","file":{"filePath":"...","content":"..."}};
+    // OpenCode stores a plain string, which falls through to resultText below.
     const file = o.file as Record<string, unknown> | undefined
     if (file && typeof file.content === 'string') return file.content
   }
@@ -2429,67 +2435,68 @@ function readableOutput(toolName: string, raw: unknown): string {
 }
 
 /**
- * Maps a tool → the input field(s) that best describe its operation, tried in
- * order. Keyed by LOWERCASED tool name so it covers both Claude Code's
- * capitalized names (`Bash`, `Read`, …) and OpenCode's lowercase ones (`bash`,
- * `read`, …), and each entry lists both vendors' field spellings (`file_path`
- * vs `filePath`).
+ * One-line description of a tool call for the transcript. Dispatches on the
+ * adapter-assigned canonical `action` (not the raw vendor tool name), so the
+ * vocabulary differences across harnesses (`Bash` vs `bash`, `Agent` vs `task`,
+ * `AskUserQuestion` vs `question`) stay inside the adapters. Paths and shell
+ * commands come from the already-normalized `target`; everything else reads the
+ * genuinely vendor-neutral input fields (`prompt`, `pattern`, `url`, `todos`,
+ * `questions`), whose spellings match across harnesses.
  */
-const TOOL_KEY_MAP: Record<string, string[]> = {
-  read: ['file_path', 'filePath', 'path'],
-  edit: ['file_path', 'filePath', 'path'],
-  write: ['file_path', 'filePath', 'path'],
-  multiedit: ['file_path', 'filePath', 'path'],
-  notebookedit: ['notebook_path', 'file_path', 'path'],
-  bash: ['command'],
-  agent: ['prompt'],
-  task: ['prompt'],
-  skill: ['skill', 'name'],
-  webfetch: ['url'],
-  websearch: ['query'],
-  toolsearch: ['query'],
-  grep: ['pattern'],
-  glob: ['pattern'],
-  list: ['path'],
-}
-
-function toolCommandText(name: string, input: Record<string, unknown> | undefined): string {
+function toolCommandText(tc: ToolCall | undefined, input: Record<string, unknown> | undefined): string {
   if (!input) return ''
-  const tool = name.toLowerCase()
-  const keys = TOOL_KEY_MAP[tool]
-  if (keys) {
-    for (const k of keys) {
-      const val = input[k]
-      if (typeof val === 'string' && val) return clip(val, 2000)
-    }
-    return ''
+  switch (tc?.action) {
+    case 'file_read':
+    case 'file_write':
+      return clip(tc.target.paths?.[0] ?? '', 2000)
+    case 'shell':
+      return clip(tc.target.command ?? '', 2000)
+    case 'task_spawn':
+      return firstStringField(input, ['prompt'])
+    case 'skill':
+      return firstStringField(input, ['skill', 'name'])
+    case 'web':
+      return firstStringField(input, ['url', 'query'])
+    case 'search':
+      return firstStringField(input, ['pattern', 'query', 'path'])
+    case 'todo':
+      return renderTodos(input)
   }
-  if (tool === 'todowrite' || tool === 'todoread') {
-    const todos = input.todos
-    if (Array.isArray(todos) && todos.length) {
-      const lines = todos.map((t) => {
-        const o = (t && typeof t === 'object' ? t : {}) as Record<string, unknown>
-        const status = typeof o.status === 'string' ? o.status : ''
-        const mark = status === 'completed' ? '✓' : status === 'in_progress' ? '▶' : '○'
-        return `${mark} ${typeof o.content === 'string' ? o.content : ''}`
-      })
-      return clip(lines.join('\n'), 2000)
-    }
-    return ''
+  // 'other' / 'mcp_call' / unmapped: a question prompt (AskUserQuestion /
+  // OpenCode `question`) or generic query if present, else the raw input as JSON.
+  const qs = input.questions
+  if (Array.isArray(qs) && qs.length && typeof qs[0] === 'object' && qs[0]) {
+    return String((qs[0] as Record<string, unknown>).question ?? '')
   }
-  // Claude Code: AskUserQuestion; OpenCode: question — same `questions` shape.
-  if (tool === 'askuserquestion' || tool === 'question') {
-    const qs = input.questions
-    if (Array.isArray(qs) && qs.length && typeof qs[0] === 'object' && qs[0]) {
-      return String((qs[0] as Record<string, unknown>).question ?? '')
-    }
-    return ''
-  }
+  const query = firstStringField(input, ['query'])
+  if (query) return query
   try {
     return clip(JSON.stringify(input, null, 2), 2000)
   } catch {
     return ''
   }
+}
+
+/** First non-empty string among the given input keys, clipped for display. */
+function firstStringField(input: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const val = input[k]
+    if (typeof val === 'string' && val) return clip(val, 2000)
+  }
+  return ''
+}
+
+/** Render a todo-list tool's items as a checkbox summary. */
+function renderTodos(input: Record<string, unknown>): string {
+  const todos = input.todos
+  if (!Array.isArray(todos) || !todos.length) return ''
+  const lines = todos.map((t) => {
+    const o = (t && typeof t === 'object' ? t : {}) as Record<string, unknown>
+    const status = typeof o.status === 'string' ? o.status : ''
+    const mark = status === 'completed' ? '✓' : status === 'in_progress' ? '▶' : '○'
+    return `${mark} ${typeof o.content === 'string' ? o.content : ''}`
+  })
+  return clip(lines.join('\n'), 2000)
 }
 
 function clip(s: string | undefined, n: number): string {
