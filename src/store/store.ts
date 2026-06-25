@@ -2426,6 +2426,8 @@ const TOOL_KEY_MAP: Record<string, string> = {
   Agent: 'prompt',
   Skill: 'skill',
   WebFetch: 'url',
+  WebSearch: 'query',
+  ToolSearch: 'query',
   Grep: 'pattern',
   Glob: 'pattern',
 }
