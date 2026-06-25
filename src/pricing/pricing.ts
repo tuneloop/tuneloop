@@ -86,6 +86,10 @@ export function computeSessionCost(session: Session): CostResult {
           u.cacheCreate * price.cache_write_5m +
           u.cacheRead * price.cache_read) /
         1_000_000
+    } else if (ev.costUsd != null) {
+      // No rate-table entry, but the source computed its own per-message cost
+      // (e.g. OpenCode across providers aivue doesn't price). Trust it.
+      cost = ev.costUsd
     } else {
       unpriced.add(model)
     }

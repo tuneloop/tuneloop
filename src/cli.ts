@@ -14,7 +14,7 @@ program
 program
   .command('analyze')
   .description('Analyze session transcripts, build the local store, then serve the dashboard.')
-  .argument('[dirs]', 'comma-separated session directories (default: ~/.claude/projects)')
+  .argument('[dirs]', 'comma-separated session directories (default: ~/.claude/projects, ~/.local/share/opencode)')
   .option('--db <path>', 'path to the aivue SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))

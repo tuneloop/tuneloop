@@ -7,7 +7,6 @@ import { mergeSessions } from '../core/merge'
 import type { Session } from '../core/model'
 import { getAdapters, getProcessors } from '../core/registry'
 import { runProcessors } from '../core/runner'
-import { PARSE_VERSION } from '../adapters/claude-code/parse'
 import { createLlmClient } from '../llm'
 import { computeSessionCost, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { openDb } from '../store/db'
@@ -65,18 +64,29 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Parse every file, then group files that share a session id and merge them
   // so each logical session is ingested and processed exactly once.
   const groups = new Map<string, Session[]>()
+  // Per-source parse version, used by the re-ingest cache gate below. Each adapter
+  // owns its own so a parser change in one source doesn't rebuild the others.
+  const parseVersionBySource = new Map<string, number>()
   for (const adapter of getAdapters()) {
+    parseVersionBySource.set(adapter.id, adapter.parseVersion)
     const roots = opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots()
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
-    const files = await adapter.discover(roots)
-    discovered += files.length
-    for (const file of files) {
-      const session = await adapter.parse(file)
-      if (!session) continue
+    const collect = (session: Session | null): void => {
+      if (!session) return
       parsed++
       const g = groups.get(session.id)
       if (g) g.push(session)
       else groups.set(session.id, [session])
+    }
+    if (adapter.discoverSessions) {
+      // Store-backed adapter (e.g. OpenCode): one DB yields many sessions.
+      const sessions = await adapter.discoverSessions(roots)
+      discovered += sessions.length
+      for (const session of sessions) collect(session)
+    } else {
+      const files = await adapter.discover(roots)
+      discovered += files.length
+      for (const file of files) collect(await adapter.parse(file))
     }
   }
 
@@ -107,11 +117,12 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     const repo = await resolveRepo(session.project.cwd)
     if (repo) session.project.repo = repo
     const prior = store.storedMeta(session.id)
+    const parseVersion = parseVersionBySource.get(session.source) ?? 1
     // Re-ingest when the transcript changed OR a newer parser can extract more
     // from the same bytes (e.g. skill names — PARSE_VERSION bumped to 2).
-    if (prior?.hash !== session.raw.contentHash || prior.parseVersion < PARSE_VERSION) {
+    if (prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion) {
       const cost = computeSessionCost(session)
-      store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, PARSE_VERSION)
+      store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, parseVersion)
       if (cost.unpriced.length > 0) {
         log.debug(`unpriced model(s) in ${session.id}: ${cost.unpriced.join(', ')}`)
       }
