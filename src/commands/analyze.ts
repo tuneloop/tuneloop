@@ -2,12 +2,11 @@ import { basename } from 'node:path'
 import { loadConfig } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
-import { assignSeq } from '../core/blocks'
+import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
 import { mergeSessions } from '../core/merge'
 import type { Session } from '../core/model'
 import { getAdapters, getProcessors } from '../core/registry'
 import { runProcessors } from '../core/runner'
-import { PARSE_VERSION } from '../adapters/claude-code/parse'
 import { createLlmClient } from '../llm'
 import { computeSessionCost, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { openDb } from '../store/db'
@@ -65,6 +64,12 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Parse every file, then group files that share a session id and merge them
   // so each logical session is ingested and processed exactly once.
   const groups = new Map<string, Session[]>()
+  // The stored parse_version is per-adapter (`parseVersion`) composed with the
+  // shared NORMALIZE_VERSION, so a per-vendor parser bump re-ingests only that
+  // vendor and a normalization bump re-ingests everyone. See ADR-0002.
+  const parseVersionBySource = new Map<string, number>()
+  for (const a of getAdapters()) parseVersionBySource.set(a.id, a.parseVersion * 1000 + NORMALIZE_VERSION)
+  const parsedSessions: Session[] = []
   for (const adapter of getAdapters()) {
     const roots = opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots()
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
@@ -74,10 +79,33 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       const session = await adapter.parse(file)
       if (!session) continue
       parsed++
-      const g = groups.get(session.id)
-      if (g) g.push(session)
-      else groups.set(session.id, [session])
+      parsedSessions.push(session)
     }
+  }
+
+  // Group files into logical sessions. Same-id files merge (Claude resume/sidechain).
+  // A sub-agent transcript that lives in its own file (Codex) carries `forkedFromId`
+  // pointing at its parent; fold it under its ROOT ancestor so the parent merge pulls
+  // it in as a sidechain (ADR-0003). Resolve to root in a second pass since a child can
+  // be parsed before its parent and nest more than one level deep.
+  const byId = new Map<string, Session>()
+  for (const s of parsedSessions) byId.set(s.id, s)
+  const rootKey = (s: Session): string => {
+    const seen = new Set<string>()
+    let cur = s
+    while (cur.forkedFromId && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      const parent = byId.get(`${cur.source}:${cur.forkedFromId}`)
+      if (!parent) return `${cur.source}:${cur.forkedFromId}` // parent file absent — group under it anyway
+      cur = parent
+    }
+    return cur.id
+  }
+  for (const s of parsedSessions) {
+    const key = rootKey(s)
+    const g = groups.get(key)
+    if (g) g.push(s)
+    else groups.set(key, [s])
   }
 
   // Resolve a session's repo from its cwd via git (the parser only sees cwd, and
@@ -107,11 +135,12 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     const repo = await resolveRepo(session.project.cwd)
     if (repo) session.project.repo = repo
     const prior = store.storedMeta(session.id)
+    const parseVersion = parseVersionBySource.get(session.source) ?? NORMALIZE_VERSION
     // Re-ingest when the transcript changed OR a newer parser can extract more
-    // from the same bytes (e.g. skill names — PARSE_VERSION bumped to 2).
-    if (prior?.hash !== session.raw.contentHash || prior.parseVersion < PARSE_VERSION) {
+    // from the same bytes (e.g. skill names — the adapter's parseVersion bumped).
+    if (prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion) {
       const cost = computeSessionCost(session)
-      store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, PARSE_VERSION)
+      store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, parseVersion)
       if (cost.unpriced.length > 0) {
         log.debug(`unpriced model(s) in ${session.id}: ${cost.unpriced.join(', ')}`)
       }

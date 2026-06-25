@@ -3,16 +3,29 @@ import { addUsage, emptyUsage } from './model'
 import type { Event, Session, SubagentMeta, ToolCall } from './model'
 
 /**
- * Merge files that share a session id into one session. Claude Code can split a
- * single logical session across files (resume, sidechain/subagent transcripts
- * tagged with the parent id); processing them separately would re-run processors
- * on the same id and clobber per-session rows. Merging rolls everything —
- * including sidechain tokens and tool calls — into one session, processed once.
+ * Merge files that make up one logical session into a single session. A session
+ * splits across files when Claude Code resumes or writes sidechain/subagent
+ * transcripts tagged with the parent id, or when Codex writes each sub-agent to
+ * its own rollout file (`forkedFromId` → parent). Processing them separately would
+ * re-run processors on the same id and clobber per-session rows. Merging rolls
+ * everything — including sidechain tokens and tool calls — into one session,
+ * processed once. The base is the top-level member (no `forkedFromId`); sub-agent
+ * members contribute their already-sidechain events, token rollup, and SubagentMeta.
  */
 export function mergeSessions(group: Session[]): Session {
-  if (group.length === 1) return group[0]!
+  // A merged session is always the ROOT of its group, so it never carries a
+  // forkedFromId. Clearing it on a lone member matters for an orphan sub-agent
+  // (parent file missing): it becomes a clean standalone session rather than a
+  // child of an absent parent. (It keeps 0 blocks — its events stay sidechain —
+  // but cost still counts at session grain.)
+  if (group.length === 1) {
+    const s = group[0]!
+    return s.forkedFromId ? { ...s, forkedFromId: undefined } : s
+  }
   const sorted = [...group].sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''))
-  const first = sorted[0]!
+  // The parent (top-level, no forkedFromId) supplies identity/project; fall back to
+  // earliest if the group is all sidechains (parent file missing).
+  const first = sorted.find((s) => !s.forkedFromId) ?? sorted[0]!
 
   const models = new Set<string>()
   let tokens = emptyUsage()
@@ -42,8 +55,21 @@ export function mergeSessions(group: Session[]): Session {
     if (s.endedAt && (!endedAt || s.endedAt > endedAt)) endedAt = s.endedAt
   }
 
+  // Link each sub-agent to the tool call that spawned it: the task_spawn call whose
+  // result references the sub-agent's id (Codex's spawn_agent returns `{agent_id}`).
+  // This is what the block-attribution rollup keys on. Claude sets toolUseId at parse,
+  // so the guard skips already-linked sub-agents (ADR-0003).
+  for (const sa of subagents.values()) {
+    if (sa.toolUseId) continue
+    const spawn = toolCalls.find(
+      (t) => t.action === 'task_spawn' && typeof t.result.raw === 'string' && t.result.raw.includes(sa.agentId),
+    )
+    if (spawn) sa.toolUseId = spawn.id
+  }
+
   return {
     ...first,
+    forkedFromId: undefined, // the merged session is the root of its group
     title,
     project: { cwd, branch, repo },
     startedAt,

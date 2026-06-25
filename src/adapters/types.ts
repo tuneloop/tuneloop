@@ -6,6 +6,13 @@ export interface SourceAdapter {
   id: string
   /** LLM vendor family, e.g. `anthropic`. */
   provider: string
+  /**
+   * Version of THIS adapter's parse output. Bumped when the adapter extracts more
+   * (or different) data from the same transcript bytes. Combined with the shared
+   * `NORMALIZE_VERSION` into the stored `parse_version` (see analyze.ts), so a
+   * per-vendor bump re-ingests only that vendor's sessions.
+   */
+  parseVersion: number
   /** Locations to scan when the user passes no directories. */
   defaultRoots(): string[]
   /** Find candidate session files under the given roots. */

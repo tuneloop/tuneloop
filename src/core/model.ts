@@ -126,6 +126,12 @@ export interface Session {
   /** LLM vendor family for slicing, e.g. `anthropic`. */
   provider: string
   title?: string
+  /**
+   * For a sub-agent transcript that lives in its own file (Codex), the parent
+   * session's raw id — the grouping key that folds it into the parent as a
+   * sidechain (see analyze.ts / merge.ts). Undefined for top-level sessions.
+   */
+  forkedFromId?: string
   project: { cwd?: string; repo?: string; branch?: string }
   startedAt?: string
   endedAt?: string

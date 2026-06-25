@@ -40,6 +40,14 @@ export interface BlockMembership {
 }
 
 /**
+ * Version of the shared, vendor-neutral normalization applied post-parse
+ * (`assignSeq` + `mergeSessions`) whose output rides the session blob. Bumped when
+ * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
+ * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
+ */
+export const NORMALIZE_VERSION = 1
+
+/**
  * Assign a dense ordinal `seq` to every MAIN-THREAD event, in order. Sidechain
  * events get none (they're clumped per-file by merge and roll up to the block
  * that spawned them). Run once, post-merge, before ingest — `seq` then rides the
