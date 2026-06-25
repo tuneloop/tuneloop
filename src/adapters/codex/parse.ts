@@ -17,7 +17,7 @@ import { mapAction } from './actions'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (composed with NORMALIZE_VERSION in analyze.ts). 1: initial Codex adapter.
-export const PARSE_VERSION = 1
+export const PARSE_VERSION = 2
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -30,8 +30,8 @@ type Raw = any
  * `turn_context` (the model), `response_item` (the API conversation), `event_msg`
  * (UI events incl. `token_count`). Usage lives only on `token_count` events, so one
  * assistant message is emitted per token_count, folding the response items since the
- * previous one (ADR-0001). Sub-agent files (`thread_source: subagent`) are tagged as
- * sidechains for the parent merge (Phase 2 / ADR-0003).
+ * previous one. Sub-agent files (`thread_source: subagent`) are tagged as
+ * sidechains for the parent merge
  */
 export async function parseCodex(path: string): Promise<Session | null> {
   const content = await readFile(path, 'utf8')
@@ -173,10 +173,11 @@ export async function parseCodex(path: string): Promise<Session | null> {
       // the phrase) and flag any non-zero exit. No status line → assume ok.
       const exit = out != null ? /^Process exited with code (\d+)/m.exec(out) : null
       const isError = exit != null && exit[1] !== '0'
-      pending.push({ type: 'tool_use', id: callId, name, input })
+      pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name
       toolCalls.push({
         id: callId,
-        name,
+        // Analytics identity: refined for skills (the specific skill name), raw tool name otherwise.
+        name: mapped.name ?? name,
         action: mapped.action,
         input,
         target: mapped.target,

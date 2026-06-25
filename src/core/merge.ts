@@ -58,7 +58,7 @@ export function mergeSessions(group: Session[]): Session {
   // Link each sub-agent to the tool call that spawned it: the task_spawn call whose
   // result references the sub-agent's id (Codex's spawn_agent returns `{agent_id}`).
   // This is what the block-attribution rollup keys on. Claude sets toolUseId at parse,
-  // so the guard skips already-linked sub-agents (ADR-0003).
+  // so the guard skips already-linked sub-agents
   for (const sa of subagents.values()) {
     if (sa.toolUseId) continue
     const spawn = toolCalls.find(
