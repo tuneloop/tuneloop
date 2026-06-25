@@ -2025,6 +2025,12 @@ export interface TranscriptTool {
   action: string
   ok: boolean
   target?: string
+  /** Full tool input rendered as displayable text (key field or JSON). */
+  command?: string
+  /** Tool output/result text (clipped to OUTPUT_MAX, with an explicit tail notice if cut). */
+  output?: string
+  /** For Edit/Write: old→new hunks for inline diff rendering. */
+  hunks?: { del: string; ins: string }[]
   error?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
@@ -2257,13 +2263,23 @@ function buildTranscriptCore(session: Session): {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
         else if (b.type === 'tool_use') {
           ids.push(b.id)
-          const input = b.input as { file_path?: string; command?: string; path?: string } | undefined
-          const target = input?.file_path ?? input?.path ?? input?.command
+          const input = b.input as Record<string, unknown> | undefined
+          const target = (input?.file_path ?? input?.path ?? input?.command) as string | undefined
           const res = resById.get(b.id)
           const ok = res ? res.ok : true
-          // Keep the full command/path (capped for payload) so the UI can show a
-          // short preview on the chip and expand to the whole thing on demand.
+          const command = toolCommandText(b.name, input)
+          const output = res?.raw != null ? clipOutput(readableOutput(b.name, res.raw)) : undefined
           const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          if (command) tool.command = command
+          if (output) tool.output = output
+          if (b.name === 'Edit' && input) {
+            const old_s = clip(String(input.old_string ?? ''), 2000)
+            const new_s = clip(String(input.new_string ?? ''), 2000)
+            if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
+          } else if (b.name === 'Write' && input) {
+            const content = clip(String(input.content ?? ''), 2000)
+            if (content) tool.hunks = [{ del: '', ins: content }]
+          }
           if (!ok) tool.error = clipError(resultText(res?.raw))
           const spawned = spawnToAgent.get(b.id)
           if (spawned) tool.agentId = spawned
@@ -2286,9 +2302,67 @@ function buildTranscriptCore(session: Session): {
   return { turns, toolTurn }
 }
 
+/** Extract the meaningful output text for a tool, handling tool-specific payloads. */
+function readableOutput(toolName: string, raw: unknown): string {
+  if (raw == null) return ''
+  if (toolName === 'Read' && typeof raw === 'object' && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>
+    // toolUseResult for Read is {"type":"text","file":{"filePath":"...","content":"..."}}
+    const file = o.file as Record<string, unknown> | undefined
+    if (file && typeof file.content === 'string') return file.content
+  }
+  return resultText(raw)
+}
+
+/** Maps tool name → the input key that best describes the operation. */
+const TOOL_KEY_MAP: Record<string, string> = {
+  Read: 'file_path',
+  Edit: 'file_path',
+  Write: 'file_path',
+  Bash: 'command',
+  Agent: 'prompt',
+  Skill: 'skill',
+  WebFetch: 'url',
+  Grep: 'pattern',
+  Glob: 'pattern',
+}
+
+function toolCommandText(name: string, input: Record<string, unknown> | undefined): string {
+  if (!input) return ''
+  const key = TOOL_KEY_MAP[name]
+  if (key) {
+    const val = input[key]
+    return clip(typeof val === 'string' ? val : '', 2000)
+  }
+  if (name === 'AskUserQuestion') {
+    const qs = input.questions
+    if (Array.isArray(qs) && qs.length && typeof qs[0] === 'object' && qs[0]) {
+      return String((qs[0] as Record<string, unknown>).question ?? '')
+    }
+    return ''
+  }
+  try {
+    return clip(JSON.stringify(input, null, 2), 2000)
+  } catch {
+    return ''
+  }
+}
+
 function clip(s: string | undefined, n: number): string {
   if (!s) return ''
   return s.length > n ? s.slice(0, n) + ' …' : s
+}
+
+/**
+ * Clip tool output for the transcript viewer. Generous cap (the detail payload is
+ * built per-session on demand, so this only ships for the one session being viewed),
+ * and the tail notice makes the cut explicit rather than a silent " …".
+ */
+const OUTPUT_MAX = 20000
+function clipOutput(s: string): string {
+  if (!s) return ''
+  if (s.length <= OUTPUT_MAX) return s
+  return s.slice(0, OUTPUT_MAX) + `\n\n… ${s.length - OUTPUT_MAX} more characters truncated …`
 }
 
 /**
@@ -2316,7 +2390,7 @@ function resultText(raw: unknown): string {
   }
   if (typeof raw === 'object') {
     const o = raw as Record<string, unknown>
-    for (const k of ['stderr', 'error', 'message', 'content']) {
+    for (const k of ['stdout', 'stderr', 'error', 'message', 'content']) {
       const v = o[k]
       if (typeof v === 'string' && v) return v
       if (Array.isArray(v)) return resultText(v)
