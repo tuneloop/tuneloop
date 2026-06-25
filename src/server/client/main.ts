@@ -4,7 +4,7 @@
 import { state, $, esc, get, dayOf } from './core'
 import { loadFacets } from './facets'
 import { loadKpis, renderWindow } from './kpis'
-import { renderSuccessRate, renderSrControls } from './metrics/successRate'
+import { renderSuccessRate, renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { buildFilters, closeDrawer, setView } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
 
@@ -26,7 +26,10 @@ function init() {
     $('#meta').innerHTML = (range ? esc(range) + '<br>' : '') + esc(o.dbPath || '');
     loadFacets().then(function () {
       buildFilters();
-      if (state.metric === 'success_rate') renderSrControls();
+      // Facets drive the breakdown dropdown AND the per-value table's facet-named
+      // title/labels, so refresh both controls and chart now that they're loaded
+      // (the initial render fired before facets arrived).
+      if (state.metric === 'success_rate') { renderSrControls(); loadSuccessRate(); }
     });
   });
   renderWindow();
