@@ -92,6 +92,86 @@ export function esc(s) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
   });
 }
+// Minimal, safe Markdown → HTML for assistant message text. Escape-first by
+// construction: fenced/inline code is pulled out to placeholders, everything
+// else is HTML-escaped (so no raw HTML from the transcript is ever rendered),
+// then a small set of block/inline rules are applied. Covers the common cases
+// (headings, lists, blockquotes, bold/italic, inline + fenced code, links);
+// imperfect on exotic nesting, which is fine for a transcript viewer.
+export function renderMd(src) {
+  var text = String(src == null ? '' : src);
+  var codes = [], inls = [];
+  // Private-use sentinel delimiting code placeholders. Never appears in real
+  // text, survives esc(), and is stripped by restore(). (A literal char, not a
+  // NUL byte, so the file stays text and diffs render.)
+  var Z = String.fromCharCode(0xe000);
+  // Fenced code blocks first, so their contents are never treated as markdown.
+  text = text.replace(/```[ \t]*[\w+-]*\n?([\s\S]*?)```/g, function (_m, code) {
+    codes.push('<pre class="md-code"><code>' + esc(code.replace(/\n+$/, '')) + '</code></pre>');
+    return Z + 'C' + (codes.length - 1) + Z;
+  });
+  // Inline code next (single line), so emphasis rules don't touch it.
+  text = text.replace(/`([^`\n]+)`/g, function (_m, code) {
+    inls.push('<code>' + esc(code) + '</code>');
+    return Z + 'I' + (inls.length - 1) + Z;
+  });
+
+  var inline = function (s) {
+    s = esc(s);
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[^_\w])_([^_\s][^_]*?)_/g, '$1<em>$2</em>');
+    s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    // [text](url) — only http/https/relative/anchor hrefs (esc turned & into &amp;).
+    s = s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/|#)[^\s)]+)\)/g, function (_m, label, href) {
+      return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+    });
+    return s;
+  };
+  var restore = function (s) {
+    return s
+      .replace(new RegExp(Z + 'C(\\d+)' + Z, 'g'), function (_m, i) { return codes[Number(i)]; })
+      .replace(new RegExp(Z + 'I(\\d+)' + Z, 'g'), function (_m, i) { return inls[Number(i)]; });
+  };
+
+  var lines = text.split('\n');
+  var out = [], i = 0;
+  var flushPara = function (buf) { if (buf.length) out.push('<p>' + buf.map(inline).join('<br>') + '</p>'); };
+  while (i < lines.length) {
+    var line = lines[i];
+    var cb = line.trim().match(new RegExp('^' + Z + 'C(\\d+)' + Z + '$'));
+    if (cb) { out.push(codes[Number(cb[1])]); i++; continue; }
+    if (!line.trim()) { i++; continue; }
+    var h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { var lvl = h[1].length; out.push('<div class="md-h md-h' + lvl + '">' + inline(h[2]) + '</div>'); i++; continue; }
+    if (/^\s*>\s?/.test(line)) {
+      var q = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { q.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+      out.push('<blockquote>' + q.map(inline).join('<br>') + '</blockquote>');
+      continue;
+    }
+    if (/^\s*[-*+]\s+/.test(line)) {
+      var ul = [];
+      while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { ul.push('<li>' + inline(lines[i].replace(/^\s*[-*+]\s+/, '')) + '</li>'); i++; }
+      out.push('<ul>' + ul.join('') + '</ul>');
+      continue;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      var ol = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { ol.push('<li>' + inline(lines[i].replace(/^\s*\d+\.\s+/, '')) + '</li>'); i++; }
+      out.push('<ol>' + ol.join('') + '</ol>');
+      continue;
+    }
+    var para = [];
+    while (i < lines.length && lines[i].trim() && !new RegExp('^' + Z + 'C\\d+' + Z + '$').test(lines[i].trim()) &&
+      !/^(#{1,6})\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i]) &&
+      !/^\s*[-*+]\s+/.test(lines[i]) && !/^\s*\d+\.\s+/.test(lines[i])) { para.push(lines[i]); i++; }
+    flushPara(para);
+  }
+  return restore(out.join(''));
+}
+
 export function usd(n) { return '$' + (Number(n) || 0).toFixed(2); }
 export function num(n) { return (Number(n) || 0).toLocaleString('en-US'); }
 export function get(url) { return fetch(url).then(function (r) { return r.json(); }); }

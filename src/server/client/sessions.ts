@@ -2,7 +2,7 @@
 // free-text), the session table, the detail drawer, and view switching. The
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
-import { state, $, esc, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
+import { state, $, esc, renderMd, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
@@ -852,12 +852,16 @@ export function openDetail(id, focus?: any) {
     // (assistant/user text is capped at 20k server-side; this keeps walls of text
     // from dominating the scroll while still letting you read the whole thing).
     var MSG_PREVIEW = 1200;
-    function textBlock(text) {
+    // `md` renders the text as Markdown (assistant/subagent responses); user
+    // prompts stay plain-escaped so their literal formatting is preserved.
+    function textBlock(text, md?) {
       var t = String(text || '');
       if (!t) return '';
-      if (t.length <= 2000) return '<div class="text">' + esc(t) + '</div>';
-      return '<div class="text msg"><span class="msg-prev">' + esc(t.slice(0, MSG_PREVIEW)) + ' …</span>' +
-        '<span class="msg-full">' + esc(t) + '</span></div>' +
+      var render = md ? renderMd : esc;
+      var cls = 'text' + (md ? ' md' : '');
+      if (t.length <= 2000) return '<div class="' + cls + '">' + render(t) + '</div>';
+      return '<div class="' + cls + ' msg"><span class="msg-prev">' + render(t.slice(0, MSG_PREVIEW)) + ' …</span>' +
+        '<span class="msg-full">' + render(t) + '</span></div>' +
         '<button class="msg-more" type="button">Show more ↓</button>';
     }
 
@@ -901,7 +905,7 @@ export function openDetail(id, focus?: any) {
         } else if (t.text) {
           flushRun();
           blocks.push('<div class="turn asst" id="txt-' + i + '"' + ba + '><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
-            '</div>' + textBlock(t.text) + (tools.length ? toolsHtml(tools) : '') + '</div>');
+            '</div>' + textBlock(t.text, true) + (tools.length ? toolsHtml(tools) : '') + '</div>');
         } else if (tools.length) {
           // Surface spawning calls as their own banner; fold the rest into the run.
           // Flush when the block changes so a run stays within one block.
