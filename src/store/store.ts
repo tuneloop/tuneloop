@@ -1646,7 +1646,10 @@ export class Store {
       const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
       let op: FileEdit['op']
       let hunks: Array<{ del: string; ins: string }>
-      if (tc.name === 'Write') {
+      // Field names differ across harnesses (Claude Code: Write/old_string/new_string;
+      // OpenCode: write/oldString/newString) — both content fields are `content`.
+      const toolLc = tc.name.toLowerCase()
+      if (toolLc === 'write') {
         op = 'write'
         // Cap is generous because consecutive writes are diffed against each
         // other client-side; too small a window hides changes near the file end.
@@ -1654,12 +1657,17 @@ export class Store {
       } else if (Array.isArray(input.edits)) {
         op = 'multiedit'
         hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
-          del: clip(String(e.old_string ?? ''), 4000),
-          ins: clip(String(e.new_string ?? ''), 4000),
+          del: clip(String(e.old_string ?? e.oldString ?? ''), 4000),
+          ins: clip(String(e.new_string ?? e.newString ?? ''), 4000),
         }))
       } else {
         op = 'edit'
-        hunks = [{ del: clip(String(input.old_string ?? ''), 4000), ins: clip(String(input.new_string ?? ''), 4000) }]
+        hunks = [
+          {
+            del: clip(String(input.old_string ?? input.oldString ?? ''), 4000),
+            ins: clip(String(input.new_string ?? input.newString ?? ''), 4000),
+          },
+        ]
       }
       out.push({ path, op, hunks, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
     }
