@@ -1053,17 +1053,19 @@ export class Store {
       }
       const sql = `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
                           COUNT(*) AS denom,
-                          SUM(CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS num
+                          SUM(CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS num,
+                          COALESCE(SUM(s.cost_usd),0) AS spend
                    FROM sessions s WHERE ${where.join(' AND ')}
                    GROUP BY bucket ORDER BY bucket`
-      const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; denom: number; num: number }>
-      return rows.map((r) => ({ bucket: r.bucket, num: r.num, denom: r.denom, rate: r.denom ? r.num / r.denom : null }))
+      const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; denom: number; num: number; spend: number }>
+      return rows.map((r) => ({ bucket: r.bucket, num: r.num, denom: r.denom, spend: r.spend, rate: r.denom ? r.num / r.denom : null }))
     }
 
     const totals = (points: RatePoint[]) => {
       const num = points.reduce((a, p) => a + p.num, 0)
       const denom = points.reduce((a, p) => a + p.denom, 0)
-      return { num, denom, rate: denom ? num / denom : null }
+      const spend = points.reduce((a, p) => a + p.spend, 0)
+      return { num, denom, spend, rate: denom ? num / denom : null }
     }
 
     const overallPoints = runBuckets('', [])
@@ -1082,13 +1084,14 @@ export class Store {
         const where = ['s.started_at IS NOT NULL', ...filterClauses]
         // SELECT-text param order: combo params, then numPred outcomes, then WHERE filters.
         const params: unknown[] = [...combo.params, ...outcomes, ...filterParams]
-        const sql = `SELECT bucket, combo, COUNT(*) AS denom, SUM(has_outcome) AS num FROM (
+        const sql = `SELECT bucket, combo, COUNT(*) AS denom, SUM(has_outcome) AS num, COALESCE(SUM(cost),0) AS spend FROM (
                        SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
                               ${combo.sql} AS combo,
-                              (CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS has_outcome
+                              (CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS has_outcome,
+                              s.cost_usd AS cost
                        FROM sessions s WHERE ${where.join(' AND ')}
                      ) t GROUP BY bucket, combo ORDER BY bucket`
-        const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; combo: string | null; denom: number; num: number }>
+        const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; combo: string | null; denom: number; num: number; spend: number }>
 
         // Order values WITHIN a combo by global volume so labels read primary-first
         // (opus before haiku), independent of the SQL key's alpha order. Re-sorting
@@ -1103,7 +1106,7 @@ export class Store {
         for (const r of rows) {
           const label = !r.combo ? '(none)' : orderCombo(r.combo)
           const pts = byCombo.get(label) ?? []
-          pts.push({ bucket: r.bucket, num: r.num, denom: r.denom, rate: r.denom ? r.num / r.denom : null })
+          pts.push({ bucket: r.bucket, num: r.num, denom: r.denom, spend: r.spend, rate: r.denom ? r.num / r.denom : null })
           byCombo.set(label, pts)
         }
         let all: RateSeries[] = [...byCombo.entries()]
@@ -1117,9 +1120,10 @@ export class Store {
           const otherByBucket = new Map<string, RatePoint>()
           for (const s of all.slice(topK)) {
             for (const p of s.points) {
-              const acc = otherByBucket.get(p.bucket) ?? { bucket: p.bucket, num: 0, denom: 0, rate: null }
+              const acc = otherByBucket.get(p.bucket) ?? { bucket: p.bucket, num: 0, denom: 0, spend: 0, rate: null }
               acc.num += p.num
               acc.denom += p.denom
+              acc.spend += p.spend
               otherByBucket.set(p.bucket, acc)
             }
           }
@@ -1945,6 +1949,11 @@ export interface RatePoint {
   bucket: string
   num: number
   denom: number
+  /** Total session cost (USD) in the bucket — feeds the per-value cost table
+   *  (total spend, and $/session = spend/denom). Summed over the SAME population
+   *  as `denom` (all sessions, not just successful ones), so spend/denom is an
+   *  honest avg cost per session. */
+  spend: number
   /** num/denom, or null when the bucket has no sessions (drawn as a gap). */
   rate: number | null
 }
@@ -1955,6 +1964,8 @@ export interface RateSeries {
   points: RatePoint[]
   num: number
   denom: number
+  /** Window-total session cost (USD); spend/denom = avg cost per session. */
+  spend: number
   rate: number | null
 }
 

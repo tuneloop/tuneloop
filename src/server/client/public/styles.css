@@ -203,6 +203,11 @@ tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .tag.click { cursor: pointer; }
 .tag.click:hover { background: #dfe9e0; color: var(--emerald); }
 .num { font-family: ui-monospace, Menlo, monospace; }
+/* Outcome rate vs. cost table (Session Outcome Rate detail, option B). */
+.sr-tbl th.num, .sr-tbl td.num { text-align: right; }
+.sr-tbl td { vertical-align: middle; }
+.sr-tbl .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; margin-right: 7px; vertical-align: middle; }
+.sr-tbl tr.off td { opacity: .42; }
 /* Sessions table: keep every row to a single line. */
 tr.srow td { vertical-align: middle; }
 .nowrap { white-space: nowrap; }

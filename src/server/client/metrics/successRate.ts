@@ -3,7 +3,7 @@
 // a single stacked bar per bucket, or grouped bars (one per value) when broken
 // down. The headline % lives on the KPI tile; the expanded view shows the counts
 // behind it.
-import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel, comboLabel } from '../core'
+import { state, $, esc, usd, num, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel, comboLabel } from '../core'
 import { loadKpis } from '../kpis'
 import { barChart, groupedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
@@ -24,6 +24,13 @@ export function renderSuccessRate() {
       '<div id="sr-chart"></div>' +
       '<div class="sr-legend" id="sr-legend"></div>' +
       '<div class="card-note" id="sr-note"></div>' +
+    '</div>' +
+    // Cost-vs-outcome table. Only meaningful as a cross-value comparison, so it's
+    // shown only when a breakdown is active (renderRateChart toggles the panel).
+    '<div class="panel" id="sr-tbl-panel" style="display:none">' +
+      '<div class="chart-title" id="sr-tbl-title">Outcome and Spend</div>' +
+      '<div id="sr-tbl"></div>' +
+      '<div class="card-note" id="sr-tbl-note"></div>' +
     '</div>';
   renderSrControls();
   loadSuccessRate();
@@ -80,13 +87,39 @@ export function loadSuccessRate(topK?) {
   });
 }
 
-// Draw (or re-draw) the breakdown chart + legend from srHidden. Hidden series
-// drop out of the chart (the y-axis rescales to what's left) and grey out in the
-// legend. Called on load and on every legend interaction. `series` carries the
-// full set (key/label/full/color/points/rate); the note is set separately once.
+// Per-value outcome-and-cost table (cost-at-equal-rate comparison). One row per
+// series, greyed when hidden in the legend above. The four columns are honest
+// primitives — two counts (sessions, with-outcome) and total spend, plus the one
+// normalized cost cue ($/session = spend ÷ sessions). Cost-per-outcome is left
+// to the eye (total spend vs the adjacent with-outcome count), deliberately not
+// printed, so nothing competes with the cost-per-shipped-artifact KPI.
+// `rows` are series-shaped: {key,text,color,num,denom,spend}.
+function tableRow(s) {
+  var perSess = s.denom ? esc(usd(s.spend / s.denom)) : '—';
+  return '<tr' + (srHidden[s.key] ? ' class="off"' : '') + '>' +
+    '<td><span class="swatch" style="background:' + s.color + '"></span>' + esc(s.text) + '</td>' +
+    '<td class="num">' + num(s.denom) + '</td>' +
+    '<td class="num">' + num(s.num) + '</td>' +
+    '<td class="num">' + esc(usd(s.spend)) + '</td>' +
+    '<td class="num">' + perSess + '</td>' +
+  '</tr>';
+}
+function paintTable(rows) {
+  $('#sr-tbl').innerHTML =
+    '<table class="sr-tbl"><thead><tr>' +
+      '<th>Value</th><th class="num">Sessions</th><th class="num">Sessions with outcome</th>' +
+      '<th class="num">Total spend</th><th class="num">$ / session</th>' +
+    '</tr></thead><tbody>' + rows.map(tableRow).join('') + '</tbody></table>';
+}
+
+// Draw (or re-draw) the breakdown chart + legend + table from srHidden. Hidden
+// series drop out of the chart (the y-axis rescales to what's left) and grey out
+// in the legend and table. Called on load and on every legend interaction.
+// `series` carries the full set (key/label/full/color/points/rate/num/denom/spend).
 function paintRate(d, series) {
   var visible = series.filter(function (s) { return !srHidden[s.key]; });
   $('#sr-chart').innerHTML = groupedBarChart(d.buckets || [], visible, 'Sessions');
+  paintTable(series); // table keeps every row but greys the hidden ones
   var anyHidden = series.some(function (s) { return srHidden[s.key]; });
   var legend = series.map(function (l) {
     // Two-tone swatch mirrors the bar: solid (with outcome) over faded (none).
@@ -134,10 +167,13 @@ export function renderRateChart(d) {
     var series = d.series.map(function (s, i) {
       var lab = comboLabel(s.key);
       // groupedBarChart reads `label` (its bar tooltip) — give it the full set.
+      // num/denom/spend ride along for the cost table ($/session = spend/denom).
       return { key: s.key, label: lab.full, text: lab.text, full: lab.full,
-               color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };
+               color: SR_PALETTE[i % SR_PALETTE.length], points: s.points,
+               rate: s.rate, num: s.num, denom: s.denom, spend: s.spend };
     });
     paintRate(d, series);
+    $('#sr-tbl-panel').style.display = '';
     note = d.truncated
       ? 'Showing the top ' + d.truncated.shown + ' of ' + d.truncated.total +
         ' value combinations by session volume; the rest are grouped as “Other”. '
@@ -151,9 +187,21 @@ export function renderRateChart(d) {
       '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>with a selected outcome</span>' +
       '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no outcome</span>';
     note = 'Bar height is sessions started in the bucket; the filled portion produced a selected outcome.';
+    // No breakdown → nothing to compare; hide the per-value cost table.
+    $('#sr-tbl-panel').style.display = 'none';
   }
   if ((d.outcomes || []).indexOf('pr_merged') >= 0) {
     note += ' Recent buckets may rise as PRs merge — those outcomes backfill after the session.';
   }
   $('#sr-note').innerHTML = esc(note);
+  if (d.series && d.series.length) {
+    // Default to the raw facet key (state.sr.by), upgraded to the friendly label
+    // once facets are loaded — so an early render (facets still in flight) shows
+    // "…by model", never "…by value".
+    var byLabel = state.sr.by || 'value';
+    srBreakdownFacets().forEach(function (f) { if (f.key === state.sr.by) byLabel = f.label || f.key; });
+    $('#sr-tbl-title').textContent = 'Outcome and Spend by ' + byLabel;
+    $('#sr-tbl-note').innerHTML = esc('One row per ' + byLabel + ', sorted by session volume. ' +
+      '$ / session = total spend ÷ sessions. Rows hidden in the legend above are greyed.');
+  }
 }
