@@ -1,5 +1,5 @@
 // Dashboard entry point. Wires the static chrome (tabs, drawer), lands on the
-// Session success rate detail, then kicks off the async loads. Bundled by tsup
+// Session Outcome Rate detail, then kicks off the async loads. Bundled by tsup
 // into dist/client/app.js and loaded by index.html.
 import { state, $, esc, get, dayOf } from './core'
 import { loadFacets } from './facets'
@@ -17,7 +17,7 @@ function init() {
   });
   renderArtKindSeg();
   // The KPI tiles are the nav; one section is always expanded. Land on the
-  // Session success rate detail (its controls refresh once facets load below).
+  // Session Outcome Rate detail (its controls refresh once facets load below).
   state.metric = 'success_rate';
   renderSuccessRate();
   get('/api/overview').then(function (o) {

@@ -58,12 +58,20 @@ export function measureBars(rows, format) {
   }).join('');
 }
 
+// A rotated y-axis caption in the left margin. Shared by the count charts.
+function yAxisLabel(text, padT, plotH) {
+  if (!text) return '';
+  var yc = padT + plotH / 2;
+  return '<text x="11" y="' + yc.toFixed(1) + '" text-anchor="middle" transform="rotate(-90 11 ' +
+    yc.toFixed(1) + ')">' + esc(text) + '</text>';
+}
+
 // Overall mode: one stacked bar per bucket — full height = sessions started
-// (denominator), filled portion = sessions with a success outcome (numerator).
+// (denominator), filled portion = sessions with a selected outcome (numerator).
 // The rate reads off as the green fraction; the bar's height shows volume.
-export function barChart(buckets, points) {
+export function barChart(buckets, points, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
-  var W = 920, H = 240, padL = 36, padR = 12, padT = 16, padB = 28;
+  var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   var byBucket = {};
   points.forEach(function (p) { byBucket[p.bucket] = p; });
@@ -78,6 +86,7 @@ export function barChart(buckets, points) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + v + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     var x = padL + i * bw + 2, w = Math.max(2, bw - 4), p = byBucket[b];
@@ -85,9 +94,58 @@ export function barChart(buckets, points) {
       var totalTop = yOf(p.denom), succTop = yOf(p.num);
       svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" rx="2" fill="#ece7dc"/>';
       svg += '<rect x="' + x + '" y="' + succTop + '" width="' + w + '" height="' + (base - succTop) + '" rx="2" fill="#0f7a55"/>';
-      var tip = b + ': ' + p.num + '/' + p.denom + ' succeeded (' + (p.rate != null ? Math.round(p.rate * 100) : 0) + '%)';
+      var tip = b + ': ' + p.num + '/' + p.denom + ' with outcome (' + (p.rate != null ? Math.round(p.rate * 100) : 0) + '%)';
       svg += '<rect x="' + x + '" y="' + totalTop + '" width="' + w + '" height="' + (base - totalTop) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
     }
+    if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
+  });
+  svg += '</svg>';
+  return svg;
+}
+
+// Breakdown mode: grouped count bars — per bucket, one bar PER series (facet
+// value). Each bar is a single hue (the value's color) so color always means
+// "which value"; outcome status is a separate channel — the SOLID lower portion
+// produced a selected outcome, the FADED upper portion did not. The rate reads
+// off as the solid fraction; bar heights show per-value volume.
+// series = [{label,color,points:[{bucket,num,denom,rate}]}].
+export function groupedBarChart(buckets, series, yLabel?) {
+  if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
+  var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
+  var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
+  var idx = series.map(function (s) {
+    var m = {};
+    (s.points || []).forEach(function (p) { m[p.bucket] = p; });
+    return m;
+  });
+  var maxD = 0;
+  series.forEach(function (s) { (s.points || []).forEach(function (p) { if (p.denom > maxD) maxD = p.denom; }); });
+  maxD = maxD || 1;
+  var yOf = function (v) { return padT + (1 - v / maxD) * plotH; };
+  var base = yOf(0), bw = plotW / n, k = series.length || 1;
+  var gpad = Math.min(8, bw * 0.18), inner = bw - gpad, sw = Math.max(1.5, inner / k);
+  var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+  [0, 0.5, 1].forEach(function (g) {
+    var v = Math.round(maxD * g), y = yOf(v);
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + v + '</text>';
+  });
+  svg += yAxisLabel(yLabel, padT, plotH);
+  var step = Math.ceil(n / 9);
+  buckets.forEach(function (b, i) {
+    var gx = padL + i * bw + gpad / 2;
+    series.forEach(function (s, si) {
+      var p = idx[si][b];
+      if (!p || p.denom <= 0) return;
+      var x = gx + si * sw, w = Math.max(1, sw - 0.6);
+      var totalTop = yOf(p.denom), fillTop = yOf(p.num);
+      // Faded full bar (total) + solid lower portion (with a selected outcome) —
+      // both in the value's own hue, so color = value and shade = outcome status.
+      svg += '<rect x="' + x.toFixed(1) + '" y="' + totalTop.toFixed(1) + '" width="' + w.toFixed(1) + '" height="' + (base - totalTop).toFixed(1) + '" rx="1" fill="' + s.color + '" fill-opacity="0.28"/>';
+      if (p.num > 0) svg += '<rect x="' + x.toFixed(1) + '" y="' + fillTop.toFixed(1) + '" width="' + w.toFixed(1) + '" height="' + (base - fillTop).toFixed(1) + '" rx="1" fill="' + s.color + '"/>';
+      var tip = b + ' · ' + s.label + ': ' + p.num + '/' + p.denom + (p.rate != null ? ' (' + Math.round(p.rate * 100) + '%)' : '');
+      svg += '<rect x="' + x.toFixed(1) + '" y="' + totalTop.toFixed(1) + '" width="' + w.toFixed(1) + '" height="' + (base - totalTop).toFixed(1) + '" fill="transparent"><title>' + esc(tip) + '</title></rect>';
+    });
     if (i % step === 0) svg += xTick(padL + i * bw + bw / 2, H - padB + 14, b, padL, W - padR);
   });
   svg += '</svg>';
@@ -104,7 +162,7 @@ export function lineChart(buckets, lines, opts?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
   var W = 920, H = 240, padL = 36, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
-  // Y-axis top: full 100% by default (an honest absolute scale for success rate);
+  // Y-axis top: full 100% by default (an honest absolute scale for the outcome rate);
   // opts.adaptive scales to the data so small rates (e.g. error rates of a few %)
   // fill the chart instead of hugging the bottom. The nice-rounded top keeps the
   // quartile gridlines on clean percentages.
