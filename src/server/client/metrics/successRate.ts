@@ -1,18 +1,21 @@
-// Session success rate detail (headline metric #1): outcome-set picker, bucket
-// selector, optional breakdown into per-cohort rate lines, and the overall
-// stacked-volume bar when not broken down.
+// Session Outcome Rate detail (headline metric #1): outcome-set picker, bucket
+// selector, and a session-count chart whose filled portion is the outcome rate —
+// a single stacked bar per bucket, or grouped bars (one per value) when broken
+// down. The headline % lives on the KPI tile; the expanded view shows the counts
+// behind it.
 import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel } from '../core'
 import { loadKpis } from '../kpis'
-import { lineChart, barChart } from '../charts'
+import { barChart, groupedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
 
 export function renderSuccessRate() {
   $('#metric-detail').innerHTML =
     '<div class="metric-head">' +
-      '<h2>Session success rate</h2>' +
+      '<h2>Session Outcome Rate</h2>' +
     '</div>' +
     '<div class="panel">' +
       '<div class="sr-controls" id="sr-controls"></div>' +
+      '<div class="chart-title">Count of Sessions with Outcomes</div>' +
       '<div id="sr-chart"></div>' +
       '<div class="sr-legend" id="sr-legend"></div>' +
       '<div class="card-note" id="sr-note"></div>' +
@@ -72,29 +75,31 @@ export function loadSuccessRate() {
 
 export function renderRateChart(d) {
   var ov = d.overall || { rate: null, num: 0, denom: 0 };
-  // Mark depends on mode: overall → a stacked count bar (volume + success in one
-  // mark, honest about sample size); breakdown → rate lines (bars don't compose
-  // across many series), with faint volume bars behind for that sample-size cue.
+  // Both modes are count charts (Y-axis = sessions), with the outcome rate read
+  // off as the colored fill — overall is one stacked bar per bucket; breakdown is
+  // one bar per value per bucket (grouped). Keeps the volume/sample-size cue.
   var note = '';
   if (d.series && d.series.length) {
-    var lines = d.series.map(function (s, i) {
+    var seriesG = d.series.map(function (s, i) {
       return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };
     });
-    $('#sr-chart').innerHTML = lineChart(d.buckets || [], lines);
-    $('#sr-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
+    $('#sr-chart').innerHTML = groupedBarChart(d.buckets || [], seriesG, 'Sessions');
+    $('#sr-legend').innerHTML = seriesG.map(function (l) {
+      // Two-tone swatch mirrors the bar: solid (with outcome) over faded (none).
+      var sw = 'linear-gradient(to top,' + l.color + ' 0 50%,' + l.color + '47 50% 100%)';
+      return '<span class="leg"><span class="swatch" style="background:' + sw + '"></span>' + esc(l.label) +
         (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
     }).join('');
     note = d.truncated
       ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' values by session volume. '
       : '';
-    note += 'Each line is one cohort. Hover a point to see its sessions (successes / total).';
+    note += 'Each bucket shows one bar per value (its own color); the solid lower portion produced a selected outcome, the faded upper portion did not. Hover a bar for its count.';
   } else {
-    $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || []);
+    $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || [], 'Sessions');
     $('#sr-legend').innerHTML =
-      '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>successful</span>' +
-      '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no success outcome</span>';
-    note = 'Bar height is sessions started in the bucket; the filled portion produced a success outcome.';
+      '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>with a selected outcome</span>' +
+      '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no outcome</span>';
+    note = 'Bar height is sessions started in the bucket; the filled portion produced a selected outcome.';
   }
   if ((d.outcomes || []).indexOf('pr_merged') >= 0) {
     note += ' Recent buckets may rise as PRs merge — those outcomes backfill after the session.';

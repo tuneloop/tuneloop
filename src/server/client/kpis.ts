@@ -70,7 +70,7 @@ export function loadKpis() {
     var cnt = caData.cur.count || 0;
     var caSub = caData.label + ' · ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' ' + caData.verb;
     var tiles = [
-      { label: 'Session success rate', value: fmtVal(cur.successRate, 'pct'),
+      { label: 'Session Outcome Rate', value: fmtVal(cur.successRate, 'pct'),
         delta: kpiDelta(cur.successRate, prev.successRate, 'points', 'up'), sub: 'of sessions in window',
         metric: 'success_rate' },
       { label: 'Cost per shipped artifact', value: caData.cur.costPerUnit != null ? usd(caData.cur.costPerUnit) : '—',

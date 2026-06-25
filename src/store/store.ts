@@ -580,7 +580,7 @@ export class Store {
 
   /**
    * The headline KPI row for one time window. Session-grain metrics (count,
-   * spend, success rate) window by session start; cost-per-artifact windows by
+   * spend, outcome rate) window by session start; cost-per-artifact windows by
    * completion (see costPerArtifact). The API calls this twice — current and the
    * same-length prior period — to derive deltas. No window = all time.
    */

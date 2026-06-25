@@ -49,7 +49,7 @@ export const INTRINSIC_MEASURES: MeasureSpec[] = [
   {
     // Headline: fraction of all sessions with a session_success outcome (full denominator).
     key: 'success_rate',
-    label: 'Success rate',
+    label: 'Session Outcome Rate',
     source: 'session',
     expr: "EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'session_success')",
     agg: 'rate',
