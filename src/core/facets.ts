@@ -75,6 +75,16 @@ export interface FacetSpec {
 
 /** Structural facets that exist without any processor having run. */
 export const INTRINSIC_FACETS: FacetSpec[] = [
+  {
+    // The harness a session came from (sessions.source: claude-code | codex | …).
+    // Session-grain, so it splits both session counts/rates and usage measures (cost).
+    key: 'harness',
+    label: 'Harness',
+    type: 'enum',
+    source: 'session',
+    column: 'source',
+    roles: ['chart', 'filter', 'detail'],
+  },
   { key: 'repo', label: 'Repo', type: 'string', source: 'session', column: 'repo', roles: ['chart', 'filter', 'detail'] },
   {
     // Usage-grain (usage_facts.model), NOT the sessions.models array — so a usage

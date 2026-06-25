@@ -5,6 +5,7 @@ import { INTRINSIC_MEASURES } from '../core/measures'
 import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
 import { mergeSessions } from '../core/merge'
 import type { Session } from '../core/model'
+import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
 import { runProcessors } from '../core/runner'
 import { createLlmClient } from '../llm'
@@ -17,6 +18,8 @@ import { makeSh } from '../util/sh'
 
 export interface AnalyzeOptions {
   dirs?: string[]
+  /** `--source` entries: a harness name, optionally `name=dir` to override its roots. */
+  sources?: string[]
   db?: string
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
@@ -64,14 +67,30 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Parse every file, then group files that share a session id and merge them
   // so each logical session is ingested and processed exactly once.
   const groups = new Map<string, Session[]>()
+  const adapters = getAdapters()
   // The stored parse_version is per-adapter (`parseVersion`) composed with the
   // shared NORMALIZE_VERSION, so a per-vendor parser bump re-ingests only that
   // vendor and a normalization bump re-ingests everyone. See ADR-0002.
   const parseVersionBySource = new Map<string, number>()
-  for (const a of getAdapters()) parseVersionBySource.set(a.id, a.parseVersion * 1000 + NORMALIZE_VERSION)
+  for (const a of adapters) parseVersionBySource.set(a.id, a.parseVersion * 1000 + NORMALIZE_VERSION)
+
+  // --source name[=dir] (repeatable): pick a subset of harnesses, each optionally
+  // with its own roots. No --source → every adapter with its own default. Roots
+  // precedence per source: explicit `=dir` ▸ positional [dirs] ▸ defaultRoots().
+  const sourceRoots = new Map<string, string[]>()
+  const selected = new Set<string>()
+  for (const entry of opts.sources ?? []) {
+    const eq = entry.indexOf('=')
+    const id = resolveSource((eq >= 0 ? entry.slice(0, eq) : entry).trim(), adapters)
+    selected.add(id)
+    const dir = eq >= 0 ? entry.slice(eq + 1).trim() : ''
+    if (dir) sourceRoots.set(id, [...(sourceRoots.get(id) ?? []), dir])
+  }
+  const activeAdapters = selected.size ? adapters.filter((a) => selected.has(a.id)) : adapters
+
   const parsedSessions: Session[] = []
-  for (const adapter of getAdapters()) {
-    const roots = opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots()
+  for (const adapter of activeAdapters) {
+    const roots = sourceRoots.get(adapter.id) ?? (opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots())
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
     const files = await adapter.discover(roots)
     discovered += files.length
@@ -161,6 +180,19 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   )
   printSummary(store.summary())
   store.close()
+}
+
+/** Resolve a --source name to a registered adapter id, tolerant of a short alias (`claude` → `claude-code`). */
+function resolveSource(name: string, adapters: SourceAdapter[]): string {
+  const exact = adapters.find((a) => a.id === name)
+  if (exact) return exact.id
+  const prefix = adapters.filter((a) => a.id.startsWith(name))
+  if (prefix.length === 1) return prefix[0]!.id
+  const available = adapters.map((a) => a.id).join(', ')
+  if (prefix.length > 1) {
+    throw new Error(`ambiguous --source "${name}" (matches ${prefix.map((a) => a.id).join(', ')})`)
+  }
+  throw new Error(`unknown --source "${name}" (available: ${available})`)
 }
 
 function printSummary(s: Summary): void {
