@@ -240,32 +240,33 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .msg-more { display: inline-block; margin-top: 4px; border: 0; background: transparent; color: var(--emerald); font-size: 12px; font-weight: 600; cursor: pointer; padding: 2px 0; }
 .msg-more:hover { text-decoration: underline; }
 .turn .tools { margin-top: 8px; }
-/* Tool block: agentlens-style bordered card per tool call */
-.tool-block { border: 1px solid var(--line); border-radius: 8px; margin: 6px 0; }
+/* Tool block: one compact row per tool call (name · command · output toggle) */
+.tool-block { border: 1px solid var(--line); border-radius: 8px; margin: 4px 0; }
 .tool-block.err { border-color: #e6c3b8; }
-.tool-block.agent .tool-block-head { cursor: pointer; }
-.tool-block.agent .tool-block-head:hover { background: #e7eef6; }
-.tool-block-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
-.tool-block-label { font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.tool-block-name { font-family: ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 500; }
-.tool-badge.err { font-size: 10px; font-weight: 500; color: var(--red); background: #f4ddd6; border-radius: 4px; padding: 1px 5px; }
-.tool-chip-go { opacity: .8; font-size: 11px; margin-left: auto; color: var(--emerald); }
-/* Command/input section */
-.tool-block-cmd { border-top: 1px solid var(--line); padding: 6px 10px; }
-.tool-cmd-pre { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--track); border-radius: 5px; padding: 6px 8px; max-height: 300px; overflow-y: auto; }
-.tool-cmd-full { display: none; margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--track); border-radius: 5px; padding: 6px 8px; max-height: 300px; overflow-y: auto; }
+.tool-block.agent .tool-block-row { cursor: pointer; }
+.tool-block.agent .tool-block-row:hover { background: #e7eef6; }
+.tool-block-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 10px; }
+.tool-block-name { flex: none; min-width: 40px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 600; color: var(--ink); padding-top: 1px; }
+.tool-badge.err { flex: none; font-size: 10px; font-weight: 500; color: var(--red); background: #f4ddd6; border-radius: 4px; padding: 1px 5px; }
+.tool-chip-go { flex: none; opacity: .8; font-size: 11px; color: var(--emerald); white-space: nowrap; }
+/* Command/input — inline, grows to fill the row */
+.tool-block-cmd { flex: 1 1 auto; min-width: 0; }
+.tool-cmd-pre { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
+.tool-cmd-full { display: none; margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
 .tool-block-cmd.on .tool-cmd-pre { display: none; }
 .tool-block-cmd.on .tool-cmd-full { display: block; }
-.tool-cmd-toggle { border: 0; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; padding: 0 0 4px; display: block; }
+.tool-cmd-toggle { border: 0; background: transparent; color: var(--muted); font-size: 10px; cursor: pointer; padding: 2px 0 0; display: block; }
 .tool-cmd-toggle:hover { color: var(--emerald); }
 .tool-cmd-arrow { display: inline-block; font-size: 9px; transition: transform .15s; }
-/* Output section — collapsed by default via <details> */
-.tool-block-output { border-top: 1px solid var(--line); }
-.tool-output-summary { padding: 5px 10px; font-size: 11px; color: var(--muted); cursor: pointer; user-select: none; }
-.tool-output-summary:hover { color: var(--emerald); }
-.tool-output-pre { margin: 0 10px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--track); border-radius: 5px; padding: 6px 8px; max-height: 300px; overflow-y: auto; }
-.tool-output-pre.err { background: #fbeae4; }
-.tool-block-output .fc-diff { margin: 0 10px 8px; }
+/* Output toggle — right-aligned on the row; body collapsed by default */
+.tool-out-toggle { flex: none; border: 0; background: transparent; color: var(--muted); font-size: 11px; cursor: pointer; padding: 0; white-space: nowrap; }
+.tool-out-toggle:hover { color: var(--emerald); }
+.tool-out-toggle::before { content: "\25B8"; font-size: 9px; margin-right: 4px; display: inline-block; transition: transform .15s; }
+.tool-out-toggle.on::before { transform: rotate(90deg); }
+.tool-block-body { display: none; border-top: 1px solid var(--line); padding: 6px 10px; }
+.tool-block-body.on { display: block; }
+.tool-output-pre { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--track); border-radius: 5px; padding: 6px 8px; max-height: 300px; overflow-y: auto; }
+.tool-block-body .fc-diff { margin: 0; }
 /* Tool overflow (>TOOLCAP) */
 .tool-rest { display: none; }
 .tool-rest.on { display: block; }

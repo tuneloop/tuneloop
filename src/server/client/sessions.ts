@@ -768,31 +768,27 @@ export function openDetail(id, focus?: any) {
 
     function toolBlockHtml(tl) {
       var agent = tl.agentId && subMeta[tl.agentId];
-      var go = agent ? ' <span class="tool-chip-go">view →</span>' : '';
+      var go = agent ? '<span class="tool-chip-go">view →</span>' : '';
       var attr = agent ? ' data-agent="' + esc(tl.agentId) + '"' : '';
-      var errBadge = tl.ok ? '' : ' <span class="tool-badge err">error</span>';
-      // Header
-      var header = '<div class="tool-block-head"' + attr + '>' +
-        '<span class="tool-block-label">Tool</span>' +
-        '<span class="tool-block-name">' + esc(tl.name) + '</span>' +
-        errBadge + go + '</div>';
-      // Command/input section — collapsible if >2 lines
+      var errBadge = tl.ok ? '' : '<span class="tool-badge err">error</span>';
+      // Command/input — sits inline next to the tool name; collapsible if >2 lines
       var cmd = '';
       if (tl.command) {
         var lines = tl.command.split('\n');
         if (lines.length > CMD_COLLAPSE_LINES) {
           var preview = lines.slice(0, CMD_COLLAPSE_LINES).join('\n');
           cmd = '<div class="tool-block-cmd collapsible">' +
-            '<button class="tool-cmd-toggle" type="button">' +
-            '<span class="tool-cmd-arrow">&#9654;</span> expand</button>' +
             '<pre class="tool-cmd-pre">' + esc(preview) + '</pre>' +
-            '<pre class="tool-cmd-full">' + esc(tl.command) + '</pre></div>';
+            '<pre class="tool-cmd-full">' + esc(tl.command) + '</pre>' +
+            '<button class="tool-cmd-toggle" type="button">' +
+            '<span class="tool-cmd-arrow" style="transform:rotate(90deg)">&#9654;</span> expand</button></div>';
         } else {
           cmd = '<div class="tool-block-cmd"><pre class="tool-cmd-pre">' + esc(tl.command) + '</pre></div>';
         }
       }
-      // Body: tool-specific rendering
+      // Body: tool-specific output, collapsed by default behind an inline toggle
       var body = '';
+      var toggle = '';
       if (tl.hunks && tl.hunks.length) {
         // Edit/Write: render as inline diff (same style as Files tab)
         var diffRows = [];
@@ -805,15 +801,19 @@ export function openDetail(id, focus?: any) {
           ? '<div class="dl-rest">' + diffRows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
             '<button class="fc-rows-more" type="button">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</button>'
           : '';
-        body = '<details class="tool-block-output">' +
-          '<summary class="tool-output-summary">diff</summary>' +
-          '<div class="fc-diff">' + diffHead + diffRest + '</div></details>';
-      } else if (tl.output) {
-        // Generic tool output
-        body = '<details class="tool-block-output">' +
-          '<summary class="tool-output-summary">output</summary>' +
-          '<pre class="tool-output-pre' + (tl.ok ? '' : ' err') + '">' + esc(tl.output) + '</pre></details>';
+        body = '<div class="tool-block-body"><div class="fc-diff">' + diffHead + diffRest + '</div></div>';
+        toggle = '<button class="tool-out-toggle" type="button">diff</button>';
+      } else if (tl.output && tl.ok) {
+        // Generic tool output. Failed calls already surface their result in the error
+        // panel below, so an output toggle here would just duplicate it — skip it.
+        body = '<div class="tool-block-body"><pre class="tool-output-pre">' + esc(tl.output) + '</pre></div>';
+        toggle = '<button class="tool-out-toggle" type="button">output</button>';
       }
+      // Single inline row: name · command · (output toggle / agent link) — replaces
+      // the old dedicated header row to keep each tool call compact.
+      var row = '<div class="tool-block-row"' + attr + '>' +
+        '<span class="tool-block-name">' + esc(tl.name) + '</span>' +
+        errBadge + cmd + go + toggle + '</div>';
       // Error panel for failed calls (stepper jump target)
       var errPanel = '';
       if (!tl.ok && tl.error) {
@@ -824,7 +824,7 @@ export function openDetail(id, focus?: any) {
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
       return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '">' +
-        header + cmd + body + errPanel + '</div>';
+        row + body + errPanel + '</div>';
     }
 
     function toolsHtml(tools) {
@@ -1125,13 +1125,21 @@ export function openDetail(id, focus?: any) {
         var wrap = b.closest('.tool-block-cmd');
         var on = wrap.classList.toggle('on');
         b.innerHTML = on
-          ? '<span class="tool-cmd-arrow" style="transform:rotate(90deg)">&#9654;</span> collapse'
-          : '<span class="tool-cmd-arrow">&#9654;</span> expand';
+          ? '<span class="tool-cmd-arrow" style="transform:rotate(-90deg)">&#9654;</span> collapse'
+          : '<span class="tool-cmd-arrow" style="transform:rotate(90deg)">&#9654;</span> expand';
       };
     });
     // Expand overflow diff rows in tool blocks.
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tool-block-output .fc-rows-more'), function (b) {
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tool-block-body .fc-rows-more'), function (b) {
       b.onclick = function () { b.previousElementSibling.classList.add('on'); b.style.display = 'none'; };
+    });
+    // Toggle a tool call's output/diff body (collapsed by default).
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tool-out-toggle'), function (b) {
+      b.onclick = function (e) {
+        e.stopPropagation();
+        var body = b.closest('.tool-block').querySelector('.tool-block-body');
+        if (body) b.classList.toggle('on', body.classList.toggle('on'));
+      };
     });
     // Expand a long message's preview to its full text.
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .msg-more'), function (b) {
@@ -1354,7 +1362,7 @@ export function openDetail(id, focus?: any) {
       b.onclick = function () { switchScope(b.getAttribute('data-scope')); };
     });
     // A spawning call (banner or chip) opens its subagent's scope.
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-block.agent .tool-block-head'), function (b) {
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-block.agent .tool-block-row'), function (b) {
       b.onclick = function (e) { e.stopPropagation(); switchScope(b.getAttribute('data-agent')); };
     });
     // A subagent's "back" link returns to the main thread and flashes the call.

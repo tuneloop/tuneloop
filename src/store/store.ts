@@ -2027,7 +2027,7 @@ export interface TranscriptTool {
   target?: string
   /** Full tool input rendered as displayable text (key field or JSON). */
   command?: string
-  /** Tool output/result text (truncated). */
+  /** Tool output/result text (clipped to OUTPUT_MAX, with an explicit tail notice if cut). */
   output?: string
   /** For Edit/Write: old→new hunks for inline diff rendering. */
   hunks?: { del: string; ins: string }[]
@@ -2268,7 +2268,7 @@ function buildTranscriptCore(session: Session): {
           const res = resById.get(b.id)
           const ok = res ? res.ok : true
           const command = toolCommandText(b.name, input)
-          const output = res?.raw != null ? clip(readableOutput(b.name, res.raw), 2000) : undefined
+          const output = res?.raw != null ? clipOutput(readableOutput(b.name, res.raw)) : undefined
           const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
           if (command) tool.command = command
           if (output) tool.output = output
@@ -2351,6 +2351,18 @@ function toolCommandText(name: string, input: Record<string, unknown> | undefine
 function clip(s: string | undefined, n: number): string {
   if (!s) return ''
   return s.length > n ? s.slice(0, n) + ' …' : s
+}
+
+/**
+ * Clip tool output for the transcript viewer. Generous cap (the detail payload is
+ * built per-session on demand, so this only ships for the one session being viewed),
+ * and the tail notice makes the cut explicit rather than a silent " …".
+ */
+const OUTPUT_MAX = 20000
+function clipOutput(s: string): string {
+  if (!s) return ''
+  if (s.length <= OUTPUT_MAX) return s
+  return s.slice(0, OUTPUT_MAX) + `\n\n… ${s.length - OUTPUT_MAX} more characters truncated …`
 }
 
 /**
