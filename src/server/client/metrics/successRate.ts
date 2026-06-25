@@ -8,6 +8,11 @@ import { loadKpis } from '../kpis'
 import { barChart, groupedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
 
+// In-memory legend show/hide for the breakdown chart, keyed by series label.
+// Reset on every new query (loadSuccessRate); preserved across legend clicks,
+// which only re-paint. Not persisted — composite labels are data-dependent.
+var srHidden = {};
+
 export function renderSuccessRate() {
   $('#metric-detail').innerHTML =
     '<div class="metric-head">' +
@@ -65,6 +70,7 @@ export function renderSrControls() {
 
 export function loadSuccessRate(topK?) {
   var sr = state.sr;
+  srHidden = {}; // a new query may have a different set of labels — start all-visible
   var qs = ['outcomes=' + encodeURIComponent((sr.outcomes || []).join(',')), 'bucket=' + encodeURIComponent(autoBucket(sr.bucket))];
   if (sr.by) qs.push('by=' + encodeURIComponent(sr.by));
   if (topK) qs.push('topK=' + topK);
@@ -74,32 +80,84 @@ export function loadSuccessRate(topK?) {
   });
 }
 
+// Format a composite series key for display. A multi-value set (e.g.
+// "opus, haiku") is truncated to the first few members + "+N"; the full set is
+// kept for the title/tooltip. Single values and the synthetic "(none)"/"Other"
+// labels pass through unchanged.
+function srLabel(key) {
+  if (key === '(none)' || key === 'Other') return { text: key, full: key };
+  var parts = key.split(', ');
+  if (parts.length <= 1) return { text: key, full: key };
+  var MAX = 3, shown = parts.slice(0, MAX).join(', ');
+  if (parts.length > MAX) shown += ' +' + (parts.length - MAX);
+  return { text: shown, full: parts.join(', ') };
+}
+
+// Draw (or re-draw) the breakdown chart + legend from srHidden. Hidden series
+// drop out of the chart (the y-axis rescales to what's left) and grey out in the
+// legend. Called on load and on every legend interaction. `series` carries the
+// full set (key/label/full/color/points/rate); the note is set separately once.
+function paintRate(d, series) {
+  var visible = series.filter(function (s) { return !srHidden[s.key]; });
+  $('#sr-chart').innerHTML = groupedBarChart(d.buckets || [], visible, 'Sessions');
+  var anyHidden = series.some(function (s) { return srHidden[s.key]; });
+  var legend = series.map(function (l) {
+    // Two-tone swatch mirrors the bar: solid (with outcome) over faded (none).
+    var sw = 'linear-gradient(to top,' + l.color + ' 0 50%,' + l.color + '47 50% 100%)';
+    var rate = l.rate != null ? Math.round(l.rate * 100) + '%' : 'n/a';
+    return '<span class="leg' + (srHidden[l.key] ? ' off' : '') + '" data-key="' + esc(l.key) +
+      '" title="' + esc(l.full + (l.rate != null ? ' · ' + rate : '')) + '">' +
+      '<span class="swatch" style="background:' + sw + '"></span>' + esc(l.text) +
+      ' <span class="sr-cnt">' + rate + '</span></span>';
+  }).join('');
+  // Master toggle (de-select all / restore) — only worth showing with many series.
+  if (series.length > 5) {
+    legend += ' <a class="leg-toggle-all" data-act="' + (anyHidden ? 'show' : 'hide') + '">' +
+      (anyHidden ? 'Show all' : 'Hide all') + '</a>';
+  }
+  if (d.truncated) {
+    legend += ' <a class="show-all-link" data-total="' + d.truncated.total + '">Show all ' +
+      d.truncated.total + ' combinations</a>';
+  }
+  $('#sr-legend').innerHTML = legend;
+  Array.prototype.forEach.call(document.querySelectorAll('#sr-legend .leg'), function (el) {
+    el.onclick = function () {
+      var k = this.getAttribute('data-key');
+      if (srHidden[k]) delete srHidden[k]; else srHidden[k] = 1;
+      paintRate(d, series);
+    };
+  });
+  var allBtn = $('#sr-legend .leg-toggle-all');
+  if (allBtn) allBtn.onclick = function () {
+    if (this.getAttribute('data-act') === 'hide') series.forEach(function (s) { srHidden[s.key] = 1; });
+    else srHidden = {};
+    paintRate(d, series);
+  };
+  var srLink = $('#sr-legend .show-all-link');
+  if (srLink) srLink.onclick = function () { loadSuccessRate(this.getAttribute('data-total')); };
+}
+
 export function renderRateChart(d) {
   var ov = d.overall || { rate: null, num: 0, denom: 0 };
   // Both modes are count charts (Y-axis = sessions), with the outcome rate read
   // off as the colored fill — overall is one stacked bar per bucket; breakdown is
-  // one bar per value per bucket (grouped). Keeps the volume/sample-size cue.
+  // one bar per composite label per bucket (grouped). Keeps the volume cue.
   var note = '';
   if (d.series && d.series.length) {
-    var seriesG = d.series.map(function (s, i) {
-      return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };
+    var series = d.series.map(function (s, i) {
+      var lab = srLabel(s.key);
+      // groupedBarChart reads `label` (its bar tooltip) — give it the full set.
+      return { key: s.key, label: lab.full, text: lab.text, full: lab.full,
+               color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };
     });
-    $('#sr-chart').innerHTML = groupedBarChart(d.buckets || [], seriesG, 'Sessions');
-    $('#sr-legend').innerHTML = seriesG.map(function (l) {
-      // Two-tone swatch mirrors the bar: solid (with outcome) over faded (none).
-      var sw = 'linear-gradient(to top,' + l.color + ' 0 50%,' + l.color + '47 50% 100%)';
-      return '<span class="leg"><span class="swatch" style="background:' + sw + '"></span>' + esc(l.label) +
-        ' <span class="sr-cnt">' + (l.rate != null ? Math.round(l.rate * 100) + '%' : 'n/a') + '</span></span>';
-    }).join('');
+    paintRate(d, series);
     note = d.truncated
-      ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' values by session volume. '
+      ? 'Showing the top ' + d.truncated.shown + ' of ' + d.truncated.total +
+        ' value combinations by session volume; the rest are grouped as “Other”. '
       : '';
-    note += 'Each bucket shows one bar per value (its own color); the solid lower portion produced a selected outcome, the faded upper portion did not. Hover a bar for its count.';
-    if (d.truncated) {
-      $('#sr-legend').innerHTML += ' <a class="show-all-link" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + '</a>';
-      var srLink = $('#sr-legend .show-all-link');
-      if (srLink) srLink.onclick = function () { loadSuccessRate(this.getAttribute('data-total')); };
-    }
+    note += 'Each session is grouped by the set of values it used, so the bars partition sessions (no double-counting). ' +
+      'The solid lower portion of each bar produced a selected outcome, the faded upper portion did not. ' +
+      'Click a legend item to show or hide it.';
   } else {
     $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || [], 'Sessions');
     $('#sr-legend').innerHTML =

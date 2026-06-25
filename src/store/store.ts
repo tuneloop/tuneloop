@@ -983,10 +983,11 @@ export class Store {
    * sessions — cohorted by START date — that produced any outcome in the
    * selected set. Numerator = sessions with an outcome in `outcomes`; denominator
    * = all sessions in the bucket. Session-level filters apply to BOTH (so the
-   * rate is honest). With `by`, returns one series per facet value (top-K by
-   * volume): each value adds a session-scoped predicate to numerator AND
-   * denominator via the facet compiler, so multi-valued facets overlap
-   * (any_match) and nothing fans out past session grain.
+   * rate is honest). With `by`, returns one series per COMPOSITE label (top-K by
+   * volume, the tail collapsed into "Other"): each session is labeled by the
+   * sorted set of its distinct values for the dimension (e.g. <opus, haiku>), so
+   * every session falls in exactly one series and the bars partition the
+   * population — multi-valued sessions are counted once, not fanned out.
    */
   successRate(q: SuccessRateQuery): SuccessRateResult {
     const outcomes = q.outcomes.length ? q.outcomes : ['session_success']
@@ -1045,16 +1046,59 @@ export class Store {
     if (q.by) {
       const f = this.facet(q.by)
       if (f) {
-        const values = this.facetDistribution(q.by)
-          .map((d) => d.value)
-          .filter((v) => v != null)
-        const shown = values.slice(0, topK)
-        if (values.length > shown.length) truncated = { shown: shown.length, total: values.length }
-        series = shown.map((v) => {
-          const p = this.facetPredicate(f, String(v))
-          const pts = runBuckets(p.sql, p.params)
-          return { key: String(v), points: pts, ...totals(pts) }
-        })
+        // Composite breakdown: label each session by the sorted SET of its distinct
+        // values (comboExpr is a correlated subquery yielding a ", "-joined string,
+        // NULL when empty), then GROUP BY (bucket, combo). Every session lands in
+        // exactly one combo, so the bars partition the population — no double-count.
+        const combo = this.comboExpr(f)
+        const where = ['s.started_at IS NOT NULL', ...filterClauses]
+        // SELECT-text param order: combo params, then numPred outcomes, then WHERE filters.
+        const params: unknown[] = [...combo.params, ...outcomes, ...filterParams]
+        const sql = `SELECT bucket, combo, COUNT(*) AS denom, SUM(has_outcome) AS num FROM (
+                       SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
+                              ${combo.sql} AS combo,
+                              (CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS has_outcome
+                       FROM sessions s WHERE ${where.join(' AND ')}
+                     ) t GROUP BY bucket, combo ORDER BY bucket`
+        const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; combo: string | null; denom: number; num: number }>
+
+        // Order values WITHIN a combo by global volume so labels read primary-first
+        // (opus before haiku), independent of the SQL key's alpha order. Re-sorting
+        // in JS also canonicalizes the key, merging any combos SQLite emitted in a
+        // different member order.
+        const rank = new Map<string, number>()
+        this.facetDistribution(q.by).forEach((d, i) => { if (d.value != null) rank.set(String(d.value), i) })
+        const orderCombo = (c: string): string =>
+          c.split(', ').sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9) || (a < b ? -1 : 1)).join(', ')
+
+        const byCombo = new Map<string, RatePoint[]>()
+        for (const r of rows) {
+          const label = !r.combo ? '(none)' : orderCombo(r.combo)
+          const pts = byCombo.get(label) ?? []
+          pts.push({ bucket: r.bucket, num: r.num, denom: r.denom, rate: r.denom ? r.num / r.denom : null })
+          byCombo.set(label, pts)
+        }
+        let all: RateSeries[] = [...byCombo.entries()]
+          .map(([key, points]) => ({ key, points, ...totals(points) }))
+          .sort((a, b) => b.denom - a.denom)
+
+        if (all.length > topK) {
+          // Collapse the long tail into a single "Other" series so bars still sum
+          // to the bucket total; the client offers "Show all" to expand it.
+          truncated = { shown: topK, total: all.length }
+          const otherByBucket = new Map<string, RatePoint>()
+          for (const s of all.slice(topK)) {
+            for (const p of s.points) {
+              const acc = otherByBucket.get(p.bucket) ?? { bucket: p.bucket, num: 0, denom: 0, rate: null }
+              acc.num += p.num
+              acc.denom += p.denom
+              otherByBucket.set(p.bucket, acc)
+            }
+          }
+          const otherPts = [...otherByBucket.values()].map((p) => ({ ...p, rate: p.denom ? p.num / p.denom : null }))
+          all = [...all.slice(0, topK), { key: 'Other', points: otherPts, ...totals(otherPts) }]
+        }
+        series = all
       }
     }
 
@@ -1175,6 +1219,38 @@ export class Store {
       sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}c.${col} = ?)`,
       params: [value],
     }
+  }
+
+  /**
+   * Correlated subquery (alias `s`) yielding a session's DISTINCT values for a
+   * facet as one alpha-sorted, ", "-joined string — the composite label for the
+   * success-rate breakdown; empty set → NULL. Mirrors facetPredicate's source
+   * switch (identifiers/base are registry-defined and trusted, values are data).
+   */
+  private comboExpr(f: FacetSpec): { sql: string; params: unknown[] } {
+    const col = f.column ?? f.key
+    const cat = (valExpr: string, from: string, where: string, params: unknown[]) => ({
+      sql: `(SELECT group_concat(v, ', ') FROM
+             (SELECT DISTINCT ${valExpr} AS v FROM ${from}
+              WHERE ${where} AND ${valExpr} IS NOT NULL ORDER BY v))`,
+      params,
+    })
+    if (f.source === 'session') {
+      return f.multi
+        ? cat('je.value', `json_each(s.${col}) je`, '1=1', [])
+        : { sql: `s.${col}`, params: [] }
+    }
+    if (f.source === 'annotation') {
+      return f.multi
+        ? cat('je.value', 'annotations a, json_each(a.value) je', 'a.session_id = s.id AND a.key = ?', [f.key])
+        : { sql: `(SELECT json_extract(a.value,'$') FROM annotations a WHERE a.session_id = s.id AND a.key = ? LIMIT 1)`, params: [f.key] }
+    }
+    if (f.source === 'block') {
+      return cat(`json_extract(ba.value,'$')`, 'block_annotations ba', 'ba.session_id = s.id AND ba.key = ?', [f.key])
+    }
+    const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
+    const base = f.base ? `${f.base} AND ` : ''
+    return cat(`c.${col}`, `${table} c`, `${base}c.session_id = s.id`, [])
   }
 
   // ---- measures ------------------------------------------------------------
