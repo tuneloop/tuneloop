@@ -69,7 +69,9 @@ export const enrichSession: Processor = {
     { key: 'use_case', label: 'Work type', type: 'enum', source: 'block', roles: ['chart', 'filter', 'detail'] },
     { key: 'complexity', label: 'Complexity', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
     { key: 'autonomy', label: 'Autonomy', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
-    { key: 'success', label: 'Success', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
+    // NOTE: `success` is deliberately NOT a facet. The LLM judgment is surfaced to
+    // users only as the `session_success` outcome; the raw 4-way grade stays as
+    // a plain annotation (below) for traceability, not exposed in any UI.
   ],
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
     const { llm, session } = ctx
@@ -91,11 +93,15 @@ export const enrichSession: Processor = {
     const annotations: AnnotationInput[] = [
       { key: 'complexity', value: oneOf(parsed.complexity, COMPLEXITY) },
       { key: 'autonomy', value: oneOf(parsed.autonomy, AUTONOMY) },
+      // Trace-only: the raw 4-way grade is kept for inspection but is not a facet
+      // (see facets[] above). The user-facing signal is the outcome below.
       { key: 'success', value: oneOf(parsed.success, SUCCESS) },
       { key: 'intent_summary', value: str(parsed.intent_summary) },
       { key: 'decisions', value: decisionList(parsed.decisions) },
     ]
 
+    // The LLM-judged "did this session accomplish its task(s)" signal lives in the
+    // outcomes list (alongside git-derived pr_merged etc.), not as a facet.
     const outcomes: OutcomeInput[] = []
     if (oneOf(parsed.success, SUCCESS) === 'success') {
       outcomes.push({ type: 'session_success', artifactId: null, ts: session.endedAt })
