@@ -215,7 +215,7 @@ export function lineChart(buckets, lines, opts?) {
 // Stacked bar per bucket: track = total, emerald = filled (filled ≤ total).
 // format controls the y-axis + hover (usd or int). For throughput, filled=total
 // so the bar is fully emerald.
-export function stackChart(buckets, points, format) {
+export function stackChart(buckets, points, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 200, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
@@ -233,6 +233,7 @@ export function stackChart(buckets, points, format) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     var x = padL + i * bw + 2, w = Math.max(2, bw - 4), p = byB[b];
@@ -256,7 +257,7 @@ export function stackChart(buckets, points, format) {
 // For breakdowns whose components PARTITION the total (so segments sum honestly to
 // the bar height) — e.g. spend by model/repo/use_case. Each segment carries its own
 // hover tooltip. Series should be pre-sorted (biggest first → stacked at the bottom).
-export function stackedBarChart(buckets, series, format) {
+export function stackedBarChart(buckets, series, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
@@ -281,6 +282,7 @@ export function stackedBarChart(buckets, series, format) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     var x = padL + i * bw + 2, w = Math.max(2, bw - 4), acc = 0;

@@ -818,12 +818,12 @@ export class Store {
   }
 
   /**
-   * Session COUNT over time, optionally split into one series per facet value —
-   * the time-series form of the distribution cards. Counts explode safely, so
-   * (unlike spendOverTime) ANY facet works: each value adds a session-scoped
-   * predicate (via the facet compiler) to a COUNT over sessions, so "sessions
-   * that used model X / skill Y" is well-defined and multi-per-session facets
-   * (model, skill, use_case) overlap across series (`presenceInflated`).
+   * Session COUNT over time, optionally split into one series per COMPOSITE label
+   * — the time-series form of the distribution cards. Each session is labeled by
+   * the sorted set of its distinct values for the dimension (e.g. <opus, haiku>)
+   * and grouped by it, so every session lands in exactly one series and the
+   * counts partition the total (honest to STACK) — no presence-inflation. The
+   * tail past top-K collapses into "Other".
    */
   sessionsOverTime(q: SessionsOverTimeQuery): SessionsOverTimeResult {
     const bucket = q.bucket
@@ -864,27 +864,55 @@ export class Store {
 
     let series: CountSeries[] | undefined
     let truncated: { shown: number; total: number } | undefined
-    let presenceInflated: boolean | undefined
     if (q.by) {
       const f = this.facet(q.by)
       if (f) {
-        const values = this.facetDistribution(q.by)
-          .map((d) => d.value)
-          .filter((v) => v != null)
-        const shown = values.slice(0, topK)
-        if (values.length > shown.length) truncated = { shown: shown.length, total: values.length }
-        series = shown.map((v) => {
-          const p = this.facetPredicate(f, String(v))
-          const pts = runBuckets(p.sql, p.params)
-          return { key: String(v), points: pts, total: totals(pts) }
-        })
-        // A session can fall under several values when the facet is multi-valued
-        // or lives at a child grain (model/skill) → series sum past overall.
-        presenceInflated = !!f.multi || grainOf(f.source) !== 'session'
+        // Composite breakdown (mirrors successRate): GROUP BY (bucket, value-set),
+        // so each session is counted in exactly one series → the stack is honest.
+        const combo = this.comboExpr(f)
+        const params: unknown[] = [...combo.params, ...baseParams]
+        const rows = this.db
+          .prepare(
+            `SELECT tb, combo, COUNT(*) AS cnt FROM (
+               SELECT ${time} AS tb, ${combo.sql} AS combo
+               FROM sessions s WHERE ${baseWhere.join(' AND ')}
+             ) t GROUP BY tb, combo ORDER BY tb`,
+          )
+          .all(...params) as Array<{ tb: string; combo: string | null; cnt: number }>
+
+        // Order members within a combo by global volume (primary-first), which
+        // also canonicalizes the key for grouping.
+        const rank = new Map<string, number>()
+        this.facetDistribution(q.by).forEach((d, i) => { if (d.value != null) rank.set(String(d.value), i) })
+        const orderCombo = (c: string): string =>
+          c.split(', ').sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9) || (a < b ? -1 : 1)).join(', ')
+
+        const byCombo = new Map<string, CountPoint[]>()
+        for (const r of rows) {
+          const label = !r.combo ? '(none)' : orderCombo(r.combo)
+          const pts = byCombo.get(label) ?? []
+          pts.push({ bucket: r.tb, count: r.cnt })
+          byCombo.set(label, pts)
+        }
+        let all: CountSeries[] = [...byCombo.entries()]
+          .map(([key, points]) => ({ key, points, total: totals(points) }))
+          .sort((a, b) => b.total - a.total)
+
+        if (all.length > topK) {
+          // Collapse the tail into "Other" so the stack still sums to the total.
+          truncated = { shown: topK, total: all.length }
+          const otherByBucket = new Map<string, number>()
+          for (const s of all.slice(topK)) {
+            for (const p of s.points) otherByBucket.set(p.bucket, (otherByBucket.get(p.bucket) ?? 0) + p.count)
+          }
+          const otherPts = [...otherByBucket.entries()].map(([bucket, count]) => ({ bucket, count }))
+          all = [...all.slice(0, topK), { key: 'Other', points: otherPts, total: totals(otherPts) }]
+        }
+        series = all
       }
     }
 
-    return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, presenceInflated }
+    return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated }
   }
 
   /**
@@ -2022,7 +2050,6 @@ export interface SessionsOverTimeResult {
   overall: { points: CountPoint[]; total: number }
   series?: CountSeries[]
   truncated?: { shown: number; total: number }
-  presenceInflated?: boolean
 }
 
 /** One bucket of a spend series. */

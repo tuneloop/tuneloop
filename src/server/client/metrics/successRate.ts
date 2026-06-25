@@ -3,7 +3,7 @@
 // a single stacked bar per bucket, or grouped bars (one per value) when broken
 // down. The headline % lives on the KPI tile; the expanded view shows the counts
 // behind it.
-import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel } from '../core'
+import { state, $, esc, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel, comboLabel } from '../core'
 import { loadKpis } from '../kpis'
 import { barChart, groupedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
@@ -80,19 +80,6 @@ export function loadSuccessRate(topK?) {
   });
 }
 
-// Format a composite series key for display. A multi-value set (e.g.
-// "opus, haiku") is truncated to the first few members + "+N"; the full set is
-// kept for the title/tooltip. Single values and the synthetic "(none)"/"Other"
-// labels pass through unchanged.
-function srLabel(key) {
-  if (key === '(none)' || key === 'Other') return { text: key, full: key };
-  var parts = key.split(', ');
-  if (parts.length <= 1) return { text: key, full: key };
-  var MAX = 3, shown = parts.slice(0, MAX).join(', ');
-  if (parts.length > MAX) shown += ' +' + (parts.length - MAX);
-  return { text: shown, full: parts.join(', ') };
-}
-
 // Draw (or re-draw) the breakdown chart + legend from srHidden. Hidden series
 // drop out of the chart (the y-axis rescales to what's left) and grey out in the
 // legend. Called on load and on every legend interaction. `series` carries the
@@ -145,7 +132,7 @@ export function renderRateChart(d) {
   var note = '';
   if (d.series && d.series.length) {
     var series = d.series.map(function (s, i) {
-      var lab = srLabel(s.key);
+      var lab = comboLabel(s.key);
       // groupedBarChart reads `label` (its bar tooltip) — give it the full set.
       return { key: s.key, label: lab.full, text: lab.text, full: lab.full,
                color: SR_PALETTE[i % SR_PALETTE.length], points: s.points, rate: s.rate };

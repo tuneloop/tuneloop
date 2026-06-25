@@ -114,6 +114,20 @@ export function fmtVal(v, format) {
   return num(Math.round(v));
 }
 
+// Format a composite breakdown key (a ", "-joined value set) for display: a
+// multi-value set is truncated to the first few members + "+N", with the full
+// set kept for the title/tooltip. Single values and the synthetic
+// "(none)"/"Other" labels pass through unchanged. Shared by the outcome and
+// session-count breakdown charts.
+export function comboLabel(key) {
+  if (key === '(none)' || key === 'Other') return { text: key, full: key };
+  var parts = String(key).split(', ');
+  if (parts.length <= 1) return { text: key, full: key };
+  var MAX = 3, shown = parts.slice(0, MAX).join(', ');
+  if (parts.length > MAX) shown += ' +' + (parts.length - MAX);
+  return { text: shown, full: parts.join(', ') };
+}
+
 export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', '#1b8a8a', '#a65c2e', '#6b8e23'];
 
 // Canonical outcome display order: concrete shipped artifacts first, softening
