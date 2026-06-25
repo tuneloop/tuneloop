@@ -109,10 +109,18 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     return repo
   }
 
+  // Merge each group, then process oldest-first. Chronological order matters:
+  // enrich-session builds the feature taxonomy incrementally — each session links
+  // to features proposed by sessions processed before it — so the earliest session
+  // to touch a feature should be the one that creates it. Map iteration order is
+  // discovery order (filesystem walk / per-adapter), not time, so sort by
+  // startedAt. Sessions with no startedAt sort first; ties keep a stable order.
+  const merged = [...groups.values()].map((group) => mergeSessions(group))
+  merged.sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''))
+
   let processed = 0
-  for (const group of groups.values()) {
+  for (const session of merged) {
     if (opts.limit != null && processed >= opts.limit) break
-    const session = mergeSessions(group)
     assignSeq(session) // main-thread seq, post-merge — the block partition's coordinate
     const repo = await resolveRepo(session.project.cwd)
     if (repo) session.project.repo = repo
