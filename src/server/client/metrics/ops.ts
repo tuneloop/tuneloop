@@ -4,7 +4,12 @@
 // dropdown the other metric graphs use). Error rate reuses the percent line
 // chart; counts use int bars (overall) or int lines (breakdown).
 import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
-import { lineChart, valueLineChart, stackChart } from '../charts'
+import { lineChart, valueLineChart } from '../charts'
+
+// Per-view, in-memory line show/hide (keyed by tool/skill name), like the
+// outcome chart's legend. Reset on every load (new query); preserved across
+// legend clicks, which only re-paint. Each of the three graphs hides its own.
+var opsHidden = { tool_calls: {}, error_rate: {}, skill_usage: {} };
 
 var OPS_VIEWS = [
   { key: 'tool_calls', title: 'Tool Call Counts' },
@@ -13,6 +18,12 @@ var OPS_VIEWS = [
 ];
 
 function opsByLabel(view) { return view === 'skill_usage' ? 'skill name' : 'tool name'; }
+
+// Y-axis caption per graph: a percent error axis, or a count axis named for what
+// it counts.
+function opsYLabel(view, fmt) {
+  return fmt === 'pct' ? 'Error rate' : view === 'skill_usage' ? 'Skill invocations' : 'Tool calls';
+}
 
 export function renderOps() {
   var panels = OPS_VIEWS.map(function (v) {
@@ -59,6 +70,7 @@ export function renderOpsControls() {
 
 export function loadOps(view, topK?) {
   var by = state.ops.by[view];
+  opsHidden[view] = {}; // a new query may have a different set of lines — start all-visible
   var qs = 'view=' + encodeURIComponent(view) + '&bucket=' + encodeURIComponent(autoBucket(state.ops.bucket)) + (by ? '&by=name' : '') + windowQs();
   if (topK) qs += '&topK=' + topK;
   get('/api/ops-over-time?' + qs).then(function (d) {
@@ -67,51 +79,92 @@ export function loadOps(view, topK?) {
   });
 }
 
+// Draw (or re-draw) a breakdown graph + legend from opsHidden[view]. Hidden
+// lines drop out of the chart (the y-axis rescales to what's left) and grey out
+// in the legend. fmt selects the line renderer + legend value (pct rate vs int
+// count). Each `line` carries {key,label,color,points,total/rate}.
+function paintOps(view, d, lines, fmt) {
+  var hidden = opsHidden[view];
+  var visible = lines.filter(function (l) { return !hidden[l.key]; });
+  var yLabel = opsYLabel(view, fmt);
+  $('#ops-chart-' + view).innerHTML = fmt === 'pct'
+    ? lineChart(d.buckets || [], visible, { adaptive: true }, yLabel)
+    : valueLineChart(d.buckets || [], visible, 'int', yLabel);
+  var anyHidden = lines.some(function (l) { return hidden[l.key]; });
+  var legend = lines.map(function (l) {
+    var val = fmt === 'pct'
+      ? (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '')
+      : ' <span class="sr-cnt">' + num(l.total) + '</span>';
+    return '<span class="leg' + (hidden[l.key] ? ' off' : '') + '" data-key="' + esc(l.key) + '" title="' + esc(l.label) + '">' +
+      '<span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) + val + '</span>';
+  }).join('');
+  // Master toggle (de-select all / restore) — only worth showing with many lines.
+  if (lines.length > 5) {
+    legend += ' <a class="leg-toggle-all" data-act="' + (anyHidden ? 'show' : 'hide') + '">' +
+      (anyHidden ? 'Show all' : 'Hide all') + '</a>';
+  }
+  if (d.truncated) {
+    legend += ' <a class="show-all-link" data-view="' + view + '" data-total="' + d.truncated.total + '">Show all ' +
+      d.truncated.total + '</a>';
+  }
+  $('#ops-legend-' + view).innerHTML = legend;
+  Array.prototype.forEach.call(document.querySelectorAll('#ops-legend-' + view + ' .leg'), function (el) {
+    el.onclick = function () {
+      var k = this.getAttribute('data-key');
+      if (hidden[k]) delete hidden[k]; else hidden[k] = 1;
+      paintOps(view, d, lines, fmt);
+    };
+  });
+  var allBtn = $('#ops-legend-' + view + ' .leg-toggle-all');
+  if (allBtn) allBtn.onclick = function () {
+    if (this.getAttribute('data-act') === 'hide') lines.forEach(function (l) { hidden[l.key] = 1; });
+    else opsHidden[view] = {};
+    paintOps(view, d, lines, fmt);
+  };
+  var showAll = $('#ops-legend-' + view + ' .show-all-link');
+  if (showAll) showAll.onclick = function () { loadOps(this.getAttribute('data-view'), this.getAttribute('data-total')); };
+}
+
 export function renderOpsChart(view, d) {
   var ov = d.overall || { total: null, points: [] };
-  var legend = '', note = '';
+  var note = '';
+  var hasBreakdown = d.series && d.series.length;
   if (d.format === 'pct') {
     // Error rate → percent line chart (reusing the success-rate renderer).
-    var rlines;
-    if (d.series && d.series.length) {
-      rlines = d.series.map(function (s, i) {
-        return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
+    if (hasBreakdown) {
+      var rlines = d.series.map(function (s, i) {
+        return { key: s.key, label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
           points: s.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }) };
       });
+      paintOps(view, d, rlines, 'pct'); // interactive legend (hide/show lines)
     } else {
-      rlines = [{ label: 'error rate', color: SR_PALETTE[2],
+      var oline = [{ label: 'error rate', color: SR_PALETTE[2],
         points: ov.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }), rate: ov.total }];
+      $('#ops-chart-' + view).innerHTML = lineChart(d.buckets || [], oline, { adaptive: true }, opsYLabel(view, 'pct'));
+      $('#ops-legend-' + view).innerHTML = '<span class="leg"><span class="swatch" style="background:' + oline[0].color + '"></span>error rate' +
+        (oline[0].rate != null ? ' <span class="sr-cnt">' + Math.round(oline[0].rate * 100) + '%</span>' : '') + '</span>';
     }
-    $('#ops-chart-' + view).innerHTML = lineChart(d.buckets || [], rlines, { adaptive: true });
-    legend = rlines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        (l.rate != null ? ' <span class="sr-cnt">' + Math.round(l.rate * 100) + '%</span>' : '') + '</span>';
-    }).join('');
     note = 'Error rate = errored tool calls / all tool calls, dated at session start.';
   } else {
     // Counts → int bars (overall) / int lines (breakdown).
-    if (d.series && d.series.length) {
+    if (hasBreakdown) {
       var clines = d.series.map(function (s, i) {
-        return { label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
+        return { key: s.key, label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
           points: s.points.map(function (p) { return { bucket: p.bucket, y: p.value }; }) };
       });
-      $('#ops-chart-' + view).innerHTML = valueLineChart(d.buckets || [], clines, 'int');
-      legend = clines.map(function (l) {
-        return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-          ' <span class="sr-cnt">' + num(l.total) + '</span></span>';
-      }).join('');
+      paintOps(view, d, clines, 'int'); // interactive legend (hide/show lines)
     } else {
-      var barPts = ov.points.map(function (p) { return { bucket: p.bucket, total: p.value, filled: p.value }; });
-      $('#ops-chart-' + view).innerHTML = stackChart(d.buckets || [], barPts, 'int');
+      // A single line (not bars), to match the error-rate overall and the
+      // breakdown lines — count graphs stay lines throughout.
+      var lbl = d.view === 'skill_usage' ? 'skill invocations' : 'tool calls';
+      var cline = [{ label: lbl, color: SR_PALETTE[0],
+        points: ov.points.map(function (p) { return { bucket: p.bucket, y: p.value }; }) }];
+      $('#ops-chart-' + view).innerHTML = valueLineChart(d.buckets || [], cline, 'int', opsYLabel(view, 'int'));
+      $('#ops-legend-' + view).innerHTML = '<span class="leg"><span class="swatch" style="background:' + SR_PALETTE[0] +
+        '"></span>' + esc(lbl) + ' <span class="sr-cnt">' + num(ov.total) + '</span></span>';
     }
     note = (d.view === 'skill_usage' ? 'Skill invocations' : 'Tool calls') + ' per bucket, dated at session start.';
   }
-  if (d.truncated) {
-    note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
-    legend += ' <a class="show-all-link" data-view="' + view + '" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + '</a>';
-  }
-  $('#ops-legend-' + view).innerHTML = legend;
+  if (d.truncated) note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
   $('#ops-note-' + view).innerHTML = esc(note);
-  var showAll = $('#ops-legend-' + view + ' .show-all-link');
-  if (showAll) showAll.onclick = function () { loadOps(this.getAttribute('data-view'), this.getAttribute('data-total')); };
 }

@@ -158,9 +158,10 @@ export function groupedBarChart(buckets, series, yLabel?) {
 // the global bucket axis; buckets a line has no data for become gaps. Sample
 // size per point lives in the hover tooltip (successes/total) — it can't share
 // this percent axis.
-export function lineChart(buckets, lines, opts?) {
+export function lineChart(buckets, lines, opts?, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
-  var W = 920, H = 240, padL = 36, padR = 12, padT = 16, padB = 28;
+  // A rotated y-axis caption needs a wider left margin so it clears the % ticks.
+  var W = 920, H = 240, padL = yLabel ? 48 : 36, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   // Y-axis top: full 100% by default (an honest absolute scale for the outcome rate);
   // opts.adaptive scales to the data so small rates (e.g. error rates of a few %)
@@ -185,6 +186,7 @@ export function lineChart(buckets, lines, opts?) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + lbl + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     if (i % step === 0) svg += xTick(xOf(i), H - padB + 14, b, padL, W - padR);
@@ -215,7 +217,7 @@ export function lineChart(buckets, lines, opts?) {
 // Stacked bar per bucket: track = total, emerald = filled (filled ≤ total).
 // format controls the y-axis + hover (usd or int). For throughput, filled=total
 // so the bar is fully emerald.
-export function stackChart(buckets, points, format) {
+export function stackChart(buckets, points, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 200, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
@@ -233,6 +235,7 @@ export function stackChart(buckets, points, format) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     var x = padL + i * bw + 2, w = Math.max(2, bw - 4), p = byB[b];
@@ -256,7 +259,7 @@ export function stackChart(buckets, points, format) {
 // For breakdowns whose components PARTITION the total (so segments sum honestly to
 // the bar height) — e.g. spend by model/repo/use_case. Each segment carries its own
 // hover tooltip. Series should be pre-sorted (biggest first → stacked at the bottom).
-export function stackedBarChart(buckets, series, format) {
+export function stackedBarChart(buckets, series, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
@@ -281,6 +284,7 @@ export function stackedBarChart(buckets, series, format) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     var x = padL + i * bw + 2, w = Math.max(2, bw - 4), acc = 0;
@@ -302,7 +306,7 @@ export function stackedBarChart(buckets, series, format) {
 // Value-axis multi-line chart. lines[i].points = [{bucket, y}]; format ('usd'|'int')
 // drives the y-axis labels + hover. Missing buckets are 0-filled (a real zero, not
 // a gap), so lines connect through quiet periods. Used by spend and sessions.
-export function valueLineChart(buckets, lines, format) {
+export function valueLineChart(buckets, lines, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
@@ -318,6 +322,7 @@ export function valueLineChart(buckets, lines, format) {
     svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="#ece7dc"/>';
     svg += '<text x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + esc(fmt(v)) + '</text>';
   });
+  svg += yAxisLabel(yLabel, padT, plotH);
   var step = Math.ceil(n / 9);
   buckets.forEach(function (b, i) {
     if (i % step === 0) svg += xTick(xOf(i), H - padB + 14, b, padL, W - padR);
