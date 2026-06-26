@@ -69,12 +69,17 @@ export const outcomesGit: Processor = {
         status: 'open',
       }
 
-      const res = await sh('gh', ['pr', 'view', url, '--json', 'title,state,mergedAt,additions,deletions,author'], { cwd })
+      const res = await sh(
+        'gh',
+        ['pr', 'view', url, '--json', 'title,state,createdAt,mergedAt,additions,deletions,author'],
+        { cwd },
+      )
       if (res && res.code === 0) {
         try {
           const j = JSON.parse(res.stdout) as {
             title?: string
             state?: string
+            createdAt?: string | null
             mergedAt?: string | null
             additions?: number
             deletions?: number
@@ -82,6 +87,7 @@ export const outcomesGit: Processor = {
           }
           if (typeof j.title === 'string') art.title = j.title
           if (typeof j.state === 'string') art.status = j.state.toLowerCase()
+          if (j.createdAt) art.createdAt = j.createdAt
           if (j.mergedAt) art.completedAt = j.mergedAt
           const churn = (j.additions ?? 0) + (j.deletions ?? 0)
           if (churn > 0) {

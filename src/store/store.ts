@@ -1729,7 +1729,7 @@ export class Store {
     const rows = this.db
       .prepare(
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
-                a.external_id AS externalId, a.completed_at AS completedAt,
+                a.external_id AS externalId, a.created_at AS createdAt, a.completed_at AS completedAt,
                 a.parent_artifact_id AS parentId,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
@@ -1754,7 +1754,7 @@ export class Store {
          WHERE a.kind IN (${placeholders})
          GROUP BY a.id
          HAVING (COUNT(DISTINCT sa.session_id) > 0 OR COALESCE(a.source,'') = 'user')
-         ORDER BY costUsd DESC, sessions DESC`,
+         ORDER BY COALESCE(a.created_at, a.completed_at) DESC, costUsd DESC`,
       )
       .all(...kinds) as ArtifactListItem[]
     // Attach the repos each row spans and its last session time. Features use the
@@ -1987,6 +1987,8 @@ export interface ArtifactListItem {
   status: string | null
   source: string | null
   externalId: string | null
+  /** PR creation time (from `gh`); null when not captured (offline / pre-backfill). */
+  createdAt: string | null
   completedAt: string | null
   parentId: string | null
   sessions: number
