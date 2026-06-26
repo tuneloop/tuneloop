@@ -13,7 +13,7 @@ const PR_URL = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
  */
 export const outcomesGit: Processor = {
   name: 'outcomes-git',
-  version: 2,
+  version: 3,
   kind: 'static',
   needs: { network: true },
   requires: ['segment-blocks'],
@@ -29,13 +29,15 @@ export const outcomesGit: Processor = {
     const prHits: Array<{ url: string; toolIndex: number }> = []
     session.toolCalls.forEach((t, i) => {
       if (t.action === 'shell' && typeof t.target.command === 'string') {
-        const cmd = t.target.command
-        if (/\bgit\b[^\n]*\bcommit\b/.test(cmd)) committed = true
+        // Detect against the executable skeleton (see stripInertRegions) so
+        // fixture/doc text that merely contains these commands isn't counted.
+        const exec = stripInertRegions(t.target.command)
+        if (/\bgit\b[^\n]*\bcommit\b/.test(exec)) committed = true
+        if (/\bgh\s+pr\s+(?:create|merge)\b/.test(exec)) {
         // Only attribute a PR the session actually created/merged via gh — NOT a
         // PR URL that merely appeared in read/fetch/search output (e.g. while
         // researching a public repo). That blanket scan caused false positives.
-        if (/\bgh\s+pr\s+(?:create|merge)\b/.test(cmd)) {
-          const url = matchPrUrl(t.result.raw) ?? matchPrUrl(cmd)
+          const url = matchPrUrl(t.result.raw) ?? matchPrUrl(exec)
           if (url) prHits.push({ url, toolIndex: i })
         }
       } else if (t.action === 'mcp_call' && /pull_request/i.test(t.name) && /(?:create|merge|update)/i.test(t.name)) {
@@ -145,6 +147,47 @@ export const outcomesGit: Processor = {
 
     return { artifacts: updated, outcomes }
   },
+}
+
+// Sinks that execute their heredoc body; for any other sink (cat, tee, a file
+// redirect) the body is inert data and gets stripped.
+const HEREDOC_INTERPRETER = /\b(?:bash|sh|zsh|ksh|dash|python3?|node|ruby|perl|php|fish|eval|source)\b/
+const HEREDOC_START = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/
+
+/**
+ * Strip the parts of a shell command the shell would never run as a command —
+ * non-executing heredoc bodies and quoted string literals — leaving an
+ * "executable skeleton" to match against. Best-effort heuristic, not a parser.
+ */
+export function stripInertRegions(cmd: string): string {
+  const lines = cmd.split('\n')
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    const m = HEREDOC_START.exec(line)
+    if (!m || m.index === undefined) {
+      out.push(line)
+      continue
+    }
+    const delim = m[2]
+    const dashed = line.slice(m.index, m.index + 3).includes('<<-')
+    const executes = HEREDOC_INTERPRETER.test(line.slice(0, m.index))
+    out.push(line) // introducing line is itself a real command
+    let j = i + 1
+    for (; j < lines.length; j++) {
+      const body = lines[j] ?? ''
+      if ((dashed ? body.replace(/^\t+/, '') : body) === delim) break
+      if (executes) out.push(body)
+    }
+    if (j < lines.length) out.push(lines[j] ?? '') // closing delimiter
+    i = j
+  }
+  // Blank quoted literals (keeping token boundaries); after heredocs so quoted
+  // delimiters above still match.
+  return out
+    .join('\n')
+    .replace(/'[^']*'/g, "''")
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
 }
 
 function matchPrUrl(raw: unknown): string | null {
