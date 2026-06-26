@@ -3,9 +3,9 @@
 // Each graph can break down by tool/skill name on its own (same "Break down by"
 // dropdown the other metric graphs use). Error rate reuses the percent line
 // chart; counts use int bars (overall) or int lines (breakdown).
-import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
+import { state, $, esc, num, dayOf, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { lineChart, valueLineChart } from '../charts'
-import { filterByErrorCategory } from '../sessions'
+import { filterByErrorCategory, startErrorWalk } from '../sessions'
 
 // Per-view, in-memory line show/hide (keyed by tool/skill name), like the
 // outcome chart's legend. Reset on every load (new query); preserved across
@@ -85,16 +85,64 @@ export function loadErrorCats() {
       var meta = tips[key] || { label: key, description: '' };
       var pct = max ? Math.round((row.value / max) * 100) : 0;
       var share = total ? Math.round((row.value / total) * 100) : 0;
-      return '<div class="bar-row errcat-row" data-cat="' + esc(key) + '"><span class="name" title="' + esc(meta.description) + '">' + esc(meta.label) +
+      // Each category is an accordion: the bar + a collapsible occurrence list.
+      return '<div class="errcat-item" data-cat="' + esc(key) + '">' +
+        '<div class="bar-row errcat-row" data-cat="' + esc(key) + '"><span class="name" title="' + esc(meta.description) + '">' + esc(meta.label) +
         '</span><span class="bar-track"><span class="bar-fill" style="width:' + pct + '%"></span></span>' +
-        '<span class="n"><span class="cnt">' + num(row.value) + '</span><span class="pct">' + share + '%</span></span></div>';
+        '<span class="n"><span class="cnt">' + num(row.value) + '</span><span class="pct">' + share + '%</span></span></div>' +
+        '<div class="errcat-occ" hidden></div></div>';
     }).join('');
-    // Click a row → Sessions list filtered to that category, in the current window.
+    // Click a category → expand its actual failed tool calls (the occurrence list).
     Array.prototype.forEach.call(box.querySelectorAll('.errcat-row'), function (el) {
-      el.onclick = function () { filterByErrorCategory(this.getAttribute('data-cat')); };
+      el.onclick = function () { toggleOcc(el.parentNode, el.getAttribute('data-cat'), tips); };
     });
   }).catch(function () { box.innerHTML = '<div class="empty">Could not load error categories.</div>'; });
 }
+
+// Accordion: expand one category's occurrence list (single-open). Lazy-loads the
+// failed tool calls on first open, then caches them on the panel.
+function toggleOcc(item, cat, tips) {
+  var panel = item.querySelector('.errcat-occ');
+  if (!panel) return;
+  var wasOpen = !panel.hidden;
+  Array.prototype.forEach.call(document.querySelectorAll('#ops-errcat .errcat-occ'), function (p) {
+    p.hidden = true; p.parentNode.querySelector('.errcat-row').classList.remove('open');
+  });
+  if (wasOpen) return; // toggle closed
+  panel.hidden = false;
+  item.querySelector('.errcat-row').classList.add('open');
+  if (panel.getAttribute('data-loaded')) return;
+  panel.innerHTML = '<div class="occ-loading">Loading…</div>';
+  get('/api/error-occurrences?category=' + encodeURIComponent(cat) + windowQs()).then(function (occ) {
+    panel.setAttribute('data-loaded', '1');
+    renderOcc(panel, cat, occ || [], tips);
+  });
+}
+
+function renderOcc(panel, cat, occ, tips) {
+  if (!occ.length) { panel.innerHTML = '<div class="occ-empty">No occurrences in this window.</div>'; return; }
+  var label = (tips[cat] && tips[cat].label) || cat;
+  var head = '<div class="occ-head">' + occ.length + ' occurrence' + (occ.length > 1 ? 's' : '') +
+    ' · <a class="occ-sessions" href="#">view sessions →</a></div>';
+  var list = occ.map(function (o, i) {
+    var cmd = o.command || o.targetPath || '';
+    return '<div class="occ-row" data-i="' + i + '" title="click to open the transcript at this error">' +
+      '<span class="occ-tool">' + esc(o.name) + '</span>' +
+      '<span class="occ-cmd" title="' + esc(cmd) + '">' + esc(clip(cmd, 44)) + '</span>' +
+      '<span class="occ-msg" title="' + esc(o.message || '') + '">' + esc(clip(o.message || '', 60)) + '</span>' +
+      '<span class="occ-sess">' + esc(clip(o.title || '(untitled)', 22)) + '</span>' +
+      '<span class="occ-date">' + esc(dayOf(o.startedAt || o.ts)) + '</span></div>';
+  }).join('');
+  panel.innerHTML = head + '<div class="occ-list">' + list + '</div>';
+  // Click an occurrence → open its transcript at that exact error + start the walk.
+  Array.prototype.forEach.call(panel.querySelectorAll('.occ-row'), function (el) {
+    el.onclick = function () { startErrorWalk(label, occ, parseInt(el.getAttribute('data-i'), 10)); };
+  });
+  var sl = panel.querySelector('.occ-sessions');
+  if (sl) sl.onclick = function (e) { e.preventDefault(); filterByErrorCategory(cat); };
+}
+
+function clip(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
 export function renderOpsControls() {
   var activeBucket = autoBucket(state.ops.bucket);

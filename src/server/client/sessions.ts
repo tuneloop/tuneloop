@@ -817,9 +817,10 @@ export function openDetail(id, focus?: any) {
       // Error panel for failed calls (stepper jump target)
       var errPanel = '';
       if (!tl.ok && tl.error) {
-        var id = errSeq++;
-        if (errSink) errSink.push(id);
-        errPanel = '<div class="tx-error" id="txerr-' + id + '">' +
+        errSeq++;                                            // count total errors (errCount)
+        var anchor = tl.idx != null ? tl.idx : 's' + errSeq;  // stable per-call anchor for deep-links
+        if (errSink) errSink.push(anchor);
+        errPanel = '<div class="tx-error" id="txerr-' + anchor + '">' +
           '<div class="tx-error-h">⚠ ' + esc(tl.name) + '</div>' +
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
@@ -1541,6 +1542,15 @@ export function openDetail(id, focus?: any) {
     showTab(hasTx ? 'transcript' : 'summary');
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
+
+    // Deep-link from the error-occurrence drill-down: scroll to + flash the exact
+    // failed tool call (txerr-<idx>) once the transcript pane is visible.
+    if (focus && focus.errTarget != null) {
+      requestAnimationFrame(function () {
+        var el = document.getElementById('txerr-' + focus.errTarget);
+        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+      });
+    }
   });
 }
 
@@ -1565,7 +1575,57 @@ export function filterByErrorCategory(category) {
   setTimePreset(state.days === 'all' ? 'all' : state.days);
 }
 
-export function closeDrawer() { $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on'); }
+export function closeDrawer() {
+  $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on');
+  errWalk = null; renderErrWalkBar(); // closing the drawer ends any error walk
+}
+
+// ---- Cross-session error walk -------------------------------------------------
+// "Step through every occurrence of one error category." The dashboard widget
+// hands us the occurrence list; we open each occurrence's transcript at its exact
+// error block (txerr-<idx>) and show a floating pager that walks ACROSS sessions.
+// The pager lives outside #drawerBody so it survives the drawer re-rendering as we
+// move between sessions.
+var errWalk = null; // { label, occ:[{sessionId,idx,name,title,...}], i, openId }
+
+export function startErrorWalk(label, occ, i) {
+  if (!occ || !occ.length) return;
+  errWalk = { label: label, occ: occ, i: 0, openId: null };
+  openWalkOcc(i || 0);
+}
+
+function openWalkOcc(i) {
+  if (!errWalk) return;
+  var n = errWalk.occ.length;
+  errWalk.i = ((i % n) + n) % n; // wrap
+  var o = errWalk.occ[errWalk.i];
+  if (o.sessionId === errWalk.openId) {
+    // Same session already open → just scroll to the next error block.
+    var el = document.getElementById('txerr-' + o.idx);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+  } else {
+    errWalk.openId = o.sessionId;
+    openDetail(o.sessionId, { errTarget: o.idx });
+  }
+  renderErrWalkBar();
+}
+
+function renderErrWalkBar() {
+  var bar = document.getElementById('errwalk');
+  if (!errWalk) { if (bar) bar.parentNode.removeChild(bar); return; }
+  if (!bar) { bar = document.createElement('div'); bar.id = 'errwalk'; document.body.appendChild(bar); }
+  var o = errWalk.occ[errWalk.i];
+  bar.innerHTML =
+    '<span class="ew-cat">⚠ ' + esc(errWalk.label) + '</span>' +
+    '<button class="ew-btn" id="ew-prev" type="button">‹</button>' +
+    '<span class="ew-pos">' + (errWalk.i + 1) + ' / ' + errWalk.occ.length + '</span>' +
+    '<button class="ew-btn" id="ew-next" type="button">›</button>' +
+    '<span class="ew-cur" title="' + esc(o.title || '') + '">' + esc(o.name) + '</span>' +
+    '<button class="ew-btn ew-x" id="ew-close" type="button">✕</button>';
+  $('#ew-prev').onclick = function () { openWalkOcc(errWalk.i - 1); };
+  $('#ew-next').onclick = function () { openWalkOcc(errWalk.i + 1); };
+  $('#ew-close').onclick = function () { errWalk = null; renderErrWalkBar(); };
+}
 
 export function setView(name) {
   ['dashboard', 'artifacts', 'sessions'].forEach(function (v) {

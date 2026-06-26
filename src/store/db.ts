@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 6
+const SCHEMA_VERSION = 7
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   action       TEXT,
   ok           INTEGER,
   is_error     INTEGER,
-  error_category TEXT,       
+  error_category TEXT,        -- fingerprinted category for failed calls; NULL when ok
+  error_message TEXT,         -- clipped one-line error text for failed calls; NULL when ok
   target_path  TEXT,
   command      TEXT,
   is_sidechain INTEGER,
@@ -311,5 +312,8 @@ function migrate(db: DB): void {
   const tableExists = (db.prepare(`SELECT name FROM pragma_table_info('tool_calls')`).all() as unknown[]).length > 0
   if (tableExists && !has('tool_calls', 'error_category')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_category TEXT')
+  }
+  if (tableExists && !has('tool_calls', 'error_message')) {
+    db.exec('ALTER TABLE tool_calls ADD COLUMN error_message TEXT')
   }
 }

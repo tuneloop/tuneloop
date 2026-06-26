@@ -61,6 +61,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, ERROR_CATEGORIES)
     return
   }
+  if (path === '/api/error-occurrences') {
+    // Drill-down: every failed tool call of one category, windowed, for the widget.
+    const category = url.searchParams.get('category')
+    if (!category) {
+      sendJson(res, 400, { error: 'missing category' })
+      return
+    }
+    const window = { from: url.searchParams.get('from') ?? undefined, to: url.searchParams.get('to') ?? undefined }
+    sendJson(res, 200, store.errorOccurrences(category, window))
+    return
+  }
   if (path === '/api/distribution') {
     const facet = url.searchParams.get('facet')
     if (!facet) {

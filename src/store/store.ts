@@ -18,6 +18,20 @@ export interface Dist {
   count: number
 }
 
+/** One failed tool call in the "Errors by category" drill-down (see errorOccurrences). */
+export interface ErrorOccurrence {
+  sessionId: string
+  title: string | null
+  idx: number
+  name: string
+  action: string
+  command: string | null
+  targetPath: string | null
+  message: string | null
+  ts: string | null
+  startedAt: string | null
+}
+
 export interface Summary {
   sessions: number
   costUsd: number
@@ -121,12 +135,15 @@ export class Store {
       this.db.prepare('DELETE FROM tool_calls WHERE session_id = ?').run(session.id)
       const insTool = this.db.prepare(
         `INSERT INTO tool_calls
-           (session_id, idx, name, action, ok, is_error, error_category, target_path, command, is_sidechain, ts, duration_ms)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+           (session_id, idx, name, action, ok, is_error, error_category, error_message, target_path, command, is_sidechain, ts, duration_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       session.toolCalls.forEach((t, idx) => {
-        // Fingerprint failed calls into a cross-harness category (NULL when ok)
-        const category = t.result.ok ? null : classifyError(t.action, resultText(t.result.raw).slice(0, 8000))
+        // For failed calls, fingerprint a cross-harness category + keep a one-line
+        // error snippet (both NULL when ok), computed at ingest. Clip before classify.
+        const errText = t.result.ok ? null : resultText(t.result.raw)
+        const category = errText == null ? null : classifyError(t.action, errText.slice(0, 8000))
+        const message = errText == null ? null : errText.replace(/\s+/g, ' ').trim().slice(0, 200) || null
         insTool.run(
           session.id,
           idx,
@@ -135,6 +152,7 @@ export class Store {
           t.result.ok ? 1 : 0,
           t.result.isError ? 1 : 0,
           category,
+          message,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,
@@ -1428,6 +1446,30 @@ export class Store {
     return { rows: [{ bucket: null, value: r?.value ?? 0 }], total: r?.value ?? 0 }
   }
 
+  /**
+   * Every failed tool call of one error category — the occurrence list behind the
+   * "Errors by category" drill-down. Newest session first; `idx` is the tool call's
+   * position in its session, which the transcript anchors as `txerr-<idx>` so a row
+   * deep-links to that exact error block. Windowed like breakdown.
+   */
+  errorOccurrences(category: string, window?: { from?: string; to?: string }): ErrorOccurrence[] {
+    const where = ['t.error_category = ?']
+    const params: unknown[] = [category]
+    if (window?.from && window?.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(window.from, window.to)
+    }
+    const sql = `SELECT t.session_id AS sessionId, s.title AS title, t.idx AS idx,
+                        t.name AS name, t.action AS action, t.command AS command,
+                        t.target_path AS targetPath, t.error_message AS message,
+                        t.ts AS ts, s.started_at AS startedAt
+                 FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+                 WHERE ${where.join(' AND ')}
+                 ORDER BY s.started_at DESC, t.idx ASC
+                 LIMIT 300`
+    return this.db.prepare(sql).all(...params) as ErrorOccurrence[]
+  }
+
   /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
   sessionList(f: SessionFilter): SessionListItem[] {
     const scalar = (key: string) =>
@@ -2229,6 +2271,8 @@ export interface TranscriptTool {
   name: string
   action: string
   ok: boolean
+  /** This call's index in session.toolCalls — the transcript anchors a failed call as `txerr-<idx>`. */
+  idx?: number
   target?: string
   /** Full tool input rendered as displayable text (key field or JSON). */
   command?: string
@@ -2452,6 +2496,7 @@ function buildTranscriptCore(session: Session): {
   toolTurn: Map<string, { turn: number; userTurn: number }>
 } {
   const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
+  const idxById = new Map(session.toolCalls.map((t, i) => [t.id, i]))
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -2477,7 +2522,7 @@ function buildTranscriptCore(session: Session): {
           const ok = res ? res.ok : true
           const command = toolCommandText(tc, input)
           const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
-          const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          const tool: TranscriptTool = { name: b.name, action: '', ok, idx: idxById.get(b.id), target: clip(target, 1500) }
           if (command) tool.command = command
           if (output) tool.output = output
           // file_write → inline diff. The before/after strings aren't in the
