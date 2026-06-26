@@ -135,6 +135,24 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     processed++
   }
 
+  // Refresh stale artifacts: let each processor with a refresh() method re-check
+  // its unresolved artifacts against the live source (e.g. open PRs → gh).
+  for (const p of processors) {
+    if (!p.refresh) continue
+    const stale = store.unresolvedArtifacts(p.name)
+    if (!stale.length) continue
+    log.debug(`refreshing ${stale.length} unresolved artifact(s) for ${p.name}`)
+    try {
+      const result = await p.refresh({ artifacts: stale, log, sh })
+      if (result.artifacts?.length || result.outcomes?.length) {
+        store.persistRefresh(p.name, result)
+        log.info(`${p.name}: refreshed ${result.artifacts?.length ?? 0} artifact(s)`)
+      }
+    } catch (err) {
+      log.warn(`refresh failed for ${p.name}: ${(err as Error).message}`)
+    }
+  }
+
   const pruned = store.pruneOrphanArtifacts()
   if (pruned > 0) log.debug(`pruned ${pruned} orphan artifact(s)`)
 

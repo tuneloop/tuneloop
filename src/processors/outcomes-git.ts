@@ -1,6 +1,6 @@
 import { registerProcessor } from '../core/registry'
 import { attributeBlocksToPrs, blockMembership, deterministicBlocks } from '../core/blocks'
-import type { Processor } from '../core/processor'
+import type { Processor, RefreshContext, RefreshResult } from '../core/processor'
 import type { ArtifactInput, BlockArtifactInput, OutcomeInput, SessionArtifactInput } from '../store/types'
 
 const PR_URL = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
@@ -120,6 +120,30 @@ export const outcomesGit: Processor = {
     }
 
     return { artifacts, sessionArtifacts, outcomes, blockArtifacts }
+  },
+
+  async refresh(ctx: RefreshContext): Promise<RefreshResult> {
+    const { artifacts: stale, sh, log } = ctx
+    const updated: ArtifactInput[] = []
+    const outcomes: OutcomeInput[] = []
+
+    for (const art of stale) {
+      if (art.kind !== 'pr' || !art.externalId) continue
+      const res = await sh('gh', ['pr', 'view', art.externalId, '--json', 'state,mergedAt'], {})
+      if (!res || res.code !== 0) continue
+      try {
+        const j = JSON.parse(res.stdout) as { state?: string; mergedAt?: string | null }
+        const status = j.state?.toLowerCase()
+        if (!status || status === art.status) continue
+        log.debug(`refresh: ${art.externalId} ${art.status} → ${status}`)
+        updated.push({ ...art, status, completedAt: j.mergedAt ?? art.completedAt })
+        if (status === 'merged' && j.mergedAt) {
+          outcomes.push({ type: 'pr_merged', artifactId: art.id, ts: j.mergedAt })
+        }
+      } catch { /* skip unparseable */ }
+    }
+
+    return { artifacts: updated, outcomes }
   },
 }
 
