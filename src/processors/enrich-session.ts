@@ -16,7 +16,7 @@ import type {
 } from '../store/types'
 
 const USE_CASES = ['plan', 'implement', 'debug', 'research', 'review', 'docs', 'other']
-const COMPLEXITY = ['low', 'medium', 'high']
+const COMPLEXITY = ['trivial', 'routine', 'substantial', 'open-ended']
 const AUTONOMY = ['autonomous', 'guided', 'minimal']
 const SUCCESS = ['success', 'partial', 'failure', 'unknown']
 
@@ -244,6 +244,13 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     `  "use_case_runs": [ { "from": <block idx>, "to": <block idx>, "use_case": one of [${USE_CASES.join(', ')}] } ],`,
     '  "feature_runs": [ { "from": <block idx>, "to": <block idx>, "feature": <0-based index into the "features" array above> } ]',
     '}',
+    'How to classify complexity — judge the DIFFICULTY of what the session set out to do, not how long it ran or',
+    'whether it succeeded. The axis runs from mechanical effort up to specification clarity (how well-defined the',
+    'goal and the shape of a correct answer were at the outset).',
+    '- "trivial": a tiny, fully-specified, mechanical change — a typo, rename, one-line fix, or config tweak. Obvious how to do it.',
+    '- "routine": standard, well-understood work with a clear goal and a known approach — a typical feature, an ordinary bugfix, or following an established pattern. The path is clear even if it takes a while.',
+    '- "substantial": large or intricate but still specifiable — spans many files or systems, or needs real design or coordination, yet the goal and the shape of a correct answer are known up front.',
+    '- "open-ended": no clear specification — the goal is ambiguous and even the shape of a correct answer is unclear at the outset, so the work requires exploration or diagnosis just to figure out what "done" means. A clear comprehension goal ("understand how X works") is NOT open-ended, however much reading it takes — open-ended means you could not tell what a correct answer looks like at the outset, not merely that the work was read-heavy.',
     'How to classify autonomy — it measures how much the AGENT ran on its own. Look at the user turns AFTER the',
     'opening request and judge how much they STEERED the work. Steering = a correction, a redirection, a design',
     'choice, or a new requirement. NOT steering: the opening request itself, bare approvals ("yes", "continue",',
@@ -284,13 +291,14 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     'Rules for use_case_runs (the use-case of each block, in time order):',
     `- Cover EVERY block index 0..${Math.max(0, blocks.length - 1)} with contiguous, non-overlapping runs (a partition). Merge adjacent blocks of the same use-case into one run; expect FEW runs (work changes use-case only a few times).`,
     '- Pick the single dominant use_case per run.',
+    '- Bias toward bundling with the previous block: a block that does no substantive work of its own and only carries the prior work to a checkpoint (committing, pushing, opening/merging a PR, marking a task done, a confirming test run) inherits the PREVIOUS run\'s use_case — do not start a new run, and never an "other" run, for mechanical follow-through.',
     'What each use_case means (pick the best fit; when two could apply, choose the one the block\'s actions center on):',
     '- plan: deciding the SHAPE of the solution (architecture, interfaces, data models, tradeoffs, laying out an approach, breaking work into steps) — before or with little code written yet.',
     '- implement: writing or changing code/config to build or modify functionality — the default for hands-on building.',
     '- debug: diagnosing and fixing a specific failure — reproducing, tracing, and correcting a bug, test failure, or error.',
     '- research: searching external or internal data sources for gathering information — reading docs, analyzing data, web search, or learning something.',
     '- review: evaluating existing code or a change for quality/correctness (PR or code review, critique, security/architecture audit), not authoring the feature.',
-    '- docs: writing or updating human-facing prose — docs, READMEs, guides.',
+    '- docs: writing or updating human-facing prose — docs, READMEs, guides, marketing/product copy.',
     '- other: work that fits none of the above — chores, dependency bumps, environment/CI setup.',
     'Rules for feature_runs (which blocks advanced which feature):',
     '- SPARSE: emit a run ONLY for blocks that substantially advanced a feature; chores/research/fixups belong to no feature — leave them out.',
@@ -338,9 +346,26 @@ function digest(s: Session): string {
     .slice(0, 20)
   const tail = assistantTail(s).slice(-1200)
 
+  // Activity profile: breadth of work, biased toward signals the complexity
+  // rubric needs — reads/searches/web/subagents reveal exploration & diagnosis
+  // that file-writes alone hide (a heavy investigation can write almost nothing).
+  const nAction = (a: string) => s.toolCalls.filter((t) => t.action === a).length
+  const distinctPaths = (a: string) =>
+    unique(s.toolCalls.filter((t) => t.action === a).flatMap((t) => t.target.paths ?? [])).length
+  const activity = [
+    `${distinctPaths('file_write')} written`,
+    `${distinctPaths('file_read')} read`,
+    `${nAction('search')} search`,
+    `${nAction('web')} web`,
+    `${nAction('task_spawn')} subagent`,
+    `${nAction('mcp_call')} mcp`,
+    `${nAction('shell')} shell`,
+  ].join(', ')
+
   return [
     `Models: ${s.models.join(', ') || 'unknown'}`,
     `User turns: ${turns.length} | Tool calls: ${s.toolCalls.length}`,
+    `Activity profile (distinct files for read/write, else call counts — gauges scope & exploration): ${activity}`,
     `Steering signal: ${followups.length} of ${turns.length} user turn(s) were follow-ups after the opening ` +
       `request (bare approvals like "yes"/"continue" already excluded). Judge how many GENUINELY steered the ` +
       `work — a correction, redirection, design choice, or new requirement — versus routine "do the next step" ` +
