@@ -88,6 +88,17 @@ export interface ProcessorResult {
   selfCost?: { tokens: TokenUsage; usd: number }
 }
 
+export interface RefreshContext {
+  artifacts: ArtifactInput[]
+  log: Logger
+  sh: (cmd: string, args: string[], opts?: { cwd?: string }) => Promise<ShResult | null>
+}
+
+export interface RefreshResult {
+  artifacts?: ArtifactInput[]
+  outcomes?: OutcomeInput[]
+}
+
 export interface Processor {
   name: string
   /** Bump to invalidate cached results and force reprocessing. */
@@ -102,4 +113,6 @@ export interface Processor {
   /** Measures this processor contributes (over numeric facts it emits). */
   measures?: MeasureSpec[]
   run(ctx: ProcessorContext): Promise<ProcessorResult> | ProcessorResult
+  /** Re-check artifacts this processor owns that may have gone stale. */
+  refresh?(ctx: RefreshContext): Promise<RefreshResult>
 }

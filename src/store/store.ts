@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import type { CanonicalAction, Session, ToolCall } from '../core/model'
-import type { ProcessorResult } from '../core/processor'
+import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
 import { deterministicBlocks } from '../core/blocks'
 import { facetGroupCompatible, grainOf } from '../core/facets'
@@ -9,7 +9,7 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
+import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
 
 export interface Dist {
   value: string
@@ -189,6 +189,44 @@ export class Store {
       )
       .get(sessionId, processor) as ProcessorRunRow | undefined
     return row
+  }
+
+  unresolvedArtifacts(producer: string): ArtifactInput[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, kind, repo, ident, external_id AS externalId, source, title, owner,
+                complexity, complexity_basis AS complexityBasis, status,
+                created_at AS createdAt, completed_at AS completedAt,
+                parent_artifact_id AS parentArtifactId
+         FROM artifacts
+         WHERE producer = ? AND status IS NOT NULL AND status NOT IN ('merged', 'closed', 'shipped')`,
+      )
+      .all(producer) as ArtifactInput[]
+    return rows
+  }
+
+  persistRefresh(producer: string, result: RefreshResult) {
+    const tx = this.db.transaction(() => {
+      for (const a of result.artifacts ?? []) {
+        this.db
+          .prepare(
+            `UPDATE artifacts SET status = ?, completed_at = ? WHERE id = ? AND producer = ?`,
+          )
+          .run(a.status ?? null, a.completedAt ?? null, a.id, producer)
+      }
+      for (const o of result.outcomes ?? []) {
+        const sessionId = (
+          this.db
+            .prepare('SELECT session_id FROM session_artifacts WHERE artifact_id = ? LIMIT 1')
+            .get(o.artifactId) as { session_id: string } | undefined
+        )?.session_id
+        if (!sessionId) continue
+        this.db
+          .prepare('INSERT INTO outcomes (session_id, type, artifact_id, ts, producer) VALUES (?,?,?,?,?)')
+          .run(sessionId, o.type, o.artifactId, o.ts ?? null, producer)
+      }
+    })
+    tx()
   }
 
   /**
