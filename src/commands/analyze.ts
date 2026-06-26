@@ -7,13 +7,14 @@ import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
-import { runProcessors } from '../core/runner'
+import { orderProcessors, runProcessors } from '../core/runner'
 import { createLlmClient } from '../llm'
 import { computeSessionCost, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import type { Summary } from '../store/store'
 import { createLogger } from '../util/log'
+import { Progress } from '../util/progress'
 import { makeSh } from '../util/sh'
 
 export interface AnalyzeOptions {
@@ -178,6 +179,38 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const merged = [...groups.values()].map((group) => mergeSessions(group))
   merged.sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''))
 
+  // Pre-scan: count sessions that will need processing (at least one cache miss).
+  const sessionsToProcess = opts.limit != null ? merged.slice(0, opts.limit) : merged
+  const ordered = orderProcessors(processors)
+  let totalNeedingWork = 0
+  for (const session of sessionsToProcess) {
+    const prior = store.storedMeta(session.id)
+    const parseVersion = parseVersionBySource.get(session.source) ?? NORMALIZE_VERSION
+    if (prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion) {
+      totalNeedingWork++
+      continue
+    }
+    const inputHash = session.raw.contentHash
+    let anyMiss = false
+    for (const p of ordered) {
+      if (p.needs?.llm && !llmEnabled) continue
+      const model = p.needs?.llm ? llmModel : null
+      const cached = store.processorRun(session.id, p.name)
+      if (!cached || cached.version !== p.version || cached.inputHash !== inputHash || cached.model !== model) {
+        anyMiss = true
+        break
+      }
+    }
+    if (anyMiss) totalNeedingWork++
+  }
+  const n = sessionsToProcess.length
+  log.info(
+    `${n} ${n === 1 ? 'session' : 'sessions'} to scan, ` +
+      `${totalNeedingWork} ${totalNeedingWork === 1 ? 'needs' : 'need'} processing.`,
+  )
+
+  const progress = new Progress(sessionsToProcess.length, totalNeedingWork)
+
   let processed = 0
   for (const session of merged) {
     if (opts.limit != null && processed >= opts.limit) break
@@ -186,9 +219,10 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     if (repo) session.project.repo = repo
     const prior = store.storedMeta(session.id)
     const parseVersion = parseVersionBySource.get(session.source) ?? NORMALIZE_VERSION
+    const needsIngest = prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion
     // Re-ingest when the transcript changed OR a newer parser can extract more
     // from the same bytes (e.g. skill names — the adapter's parseVersion bumped).
-    if (prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion) {
+    if (needsIngest) {
       const cost = computeSessionCost(session)
       store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, parseVersion)
       if (cost.unpriced.length > 0) {
@@ -199,9 +233,16 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     // Backfill repo onto already-ingested (unchanged) sessions too, without a
     // version bump. Populate-only: never overwrite a known repo with null.
     if (repo) store.setSessionRepo(session.id, repo)
-    await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
+
+    const t0 = Date.now()
+    const { costUsd: sessionCost } = await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
+    const elapsedMs = Date.now() - t0
+
+    const didWork = elapsedMs > 50 || sessionCost > 0
+    progress.tick(didWork, elapsedMs, sessionCost)
     processed++
   }
+  progress.clear()
 
   // Refresh stale artifacts: let each processor with a refresh() method re-check
   // its unresolved artifacts against the live source (e.g. open PRs → gh).
@@ -262,45 +303,6 @@ function printSummary(s: Summary): void {
     out.push(`  Cost / merged PR  ${usd(s.costPerMergedPr.costPerUnit)} (${s.costPerMergedPr.count} merged)`)
   }
   if (s.analysisCostUsd > 0) out.push('  Analysis spend  ' + usd(s.analysisCostUsd) + ' (enrichment)')
-
-  const dist = (label: string, rows: { value: string; count: number }[]) => {
-    if (!rows.length) return
-    out.push('')
-    out.push('  ' + label)
-    for (const r of rows.slice(0, 8)) out.push(`    ${String(r.value).padEnd(22)} ${r.count}`)
-  }
-
-  if (s.models.length) {
-    out.push('')
-    out.push('  Models')
-    for (const m of s.models.slice(0, 6)) out.push(`    ${m.model.padEnd(22)} ${m.count}`)
-  }
-
-  if (s.outcomes.length) {
-    out.push('')
-    out.push('  Outcomes')
-    for (const o of s.outcomes) out.push(`    ${o.type.padEnd(22)} ${o.count}`)
-  }
-
-  if (s.topTools.length) {
-    out.push('')
-    out.push('  Top tools')
-    for (const t of s.topTools) {
-      const errs = t.errors > 0 ? ` (${t.errors} err)` : ''
-      out.push(`    ${t.name.padEnd(22)} ${t.calls}${errs}`)
-    }
-  }
-
-  // Enrichment (only present when LLM enrichment has run)
-  dist('Work type', s.useCases)
-  dist('Complexity', s.complexity)
-  dist('Autonomy', s.autonomy)
-  // 'Session success' is no longer a facet/distribution — it surfaces as the
-  // `session_success` outcome in the Outcomes section above.
-  if (s.features.total > 0) {
-    out.push('')
-    out.push(`  Features        ${s.features.linked} linked (${s.features.derived} LLM-proposed)`)
-  }
 
   out.push('')
   process.stdout.write(out.join('\n') + '\n')

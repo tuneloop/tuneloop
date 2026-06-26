@@ -38,8 +38,12 @@ export interface RunOptions {
   sh: ProcessorContext['sh']
 }
 
+export interface RunResult {
+  costUsd: number
+}
+
 /** Run every applicable processor for one session, honoring deps + the cache. */
-export async function runProcessors(opts: RunOptions): Promise<void> {
+export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   const { session, store, log, llmEnabled, llmModel, llm, sh } = opts
   // Read the feature hierarchy fresh for every session, not once per run, so a
   // session sees features that earlier sessions in this run created, renamed, or
@@ -49,6 +53,7 @@ export async function runProcessors(opts: RunOptions): Promise<void> {
   const existingFeatures: FeatureRef[] = store.listFeatures()
   const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, sh }
   const inputHash = session.raw.contentHash
+  let costUsd = 0
 
   for (const p of orderProcessors(opts.processors)) {
     if (p.needs?.llm && !llmEnabled) continue
@@ -63,8 +68,10 @@ export async function runProcessors(opts: RunOptions): Promise<void> {
     try {
       const result = await p.run(ctx)
       store.persistResult(session.id, p.name, p.version, inputHash, model, result)
+      costUsd += result.selfCost?.usd ?? 0
     } catch (err) {
       log.warn(`processor ${p.name} failed on ${session.id}: ${(err as Error).message}`)
     }
   }
+  return { costUsd }
 }
