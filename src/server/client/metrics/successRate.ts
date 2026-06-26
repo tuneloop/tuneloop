@@ -187,8 +187,8 @@ export function renderRateChart(d) {
   } else {
     $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || [], 'Sessions');
     $('#sr-legend').innerHTML =
-      '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>with a selected outcome</span>' +
-      '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no outcome</span>';
+      '<span class="leg-overall">Overall ' + (ov.rate != null ? Math.round(ov.rate * 100) + '%' : 'n/a') +
+        ' · ' + num(ov.num) + ' of ' + num(ov.denom) + ' sessions with a selected outcome</span>';
     note = 'Bar height is sessions started in the bucket; the filled portion produced a selected outcome.';
     // No breakdown → nothing to compare; hide the per-value cost table.
     $('#sr-tbl-panel').style.display = 'none';

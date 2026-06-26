@@ -88,7 +88,7 @@ export function renderSm(d) {
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.count, filled: p.count }; });
     $('#sm-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int', 'Sessions');
-    $('#sm-legend').innerHTML = '';
+    $('#sm-legend').innerHTML = '<span class="leg-overall">Total ' + num(ov.total) + ' sessions</span>';
     $('#sm-note').innerHTML = esc('Sessions started per ' + autoBucket(state.sm.bucket) + '. Break down by a dimension to split it.');
   }
 }

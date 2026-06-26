@@ -95,7 +95,7 @@ export function renderSpend(d) {
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.spend, filled: p.spend }; });
     $('#sp-chart').innerHTML = stackChart(d.buckets || [], barPts, 'usd');
-    $('#sp-legend').innerHTML = '';
+    $('#sp-legend').innerHTML = '<span class="leg-overall">Total ' + esc(usd(ov.total)) + '</span>';
     $('#sp-note').innerHTML = esc('Spend per ' + autoBucket(state.spend.bucket) + ', dated at session start. Break down by a dimension to split it.');
   }
 }

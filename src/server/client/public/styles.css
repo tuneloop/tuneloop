@@ -68,6 +68,8 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-legend { margin-top: 10px; }
 .sr-legend .leg { display: inline-flex; align-items: center; vertical-align: middle; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
 .sr-legend .leg[data-key] { cursor: pointer; user-select: none; }
+/* overall aggregate shown in the legend when there's no breakdown */
+.leg-overall { font-size: 12px; font-weight: 600; color: var(--ink); vertical-align: middle; }
 .sr-legend .leg.off { opacity: 0.4; text-decoration: line-through; }
 .sr-legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
 .sr-legend .show-all-link { display: inline-flex; align-items: center; vertical-align: middle; font-size: 12px; color: var(--emerald); cursor: pointer; text-decoration: underline; margin-left: 8px; }
