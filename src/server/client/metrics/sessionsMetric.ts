@@ -73,7 +73,7 @@ export function renderSm(d) {
     }).join('');
     var note = d.truncated
       ? 'Showing the top ' + d.truncated.shown + ' of ' + d.truncated.total +
-        ' value combinations by session count; the rest are grouped as “Other”. '
+        ' value combinations by session count; the rest are grouped as “... other values”. '
       : '';
     note += 'Each session is grouped by the set of values it used, so the segments partition the bar — its height is the total session count.';
     if (d.truncated) {

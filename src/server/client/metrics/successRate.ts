@@ -176,7 +176,7 @@ export function renderRateChart(d) {
     $('#sr-tbl-panel').style.display = '';
     note = d.truncated
       ? 'Showing the top ' + d.truncated.shown + ' of ' + d.truncated.total +
-        ' value combinations by session volume; the rest are grouped as “Other”. '
+        ' value combinations by session volume; the rest are grouped as “... other values”. '
       : '';
     note += 'Each session is grouped by the set of values it used, so the bars partition sessions (no double-counting). ' +
       'The solid lower portion of each bar produced a selected outcome, the faded upper portion did not. ' +

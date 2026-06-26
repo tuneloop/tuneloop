@@ -196,11 +196,14 @@ export function fmtVal(v, format) {
 
 // Format a composite breakdown key (a ", "-joined value set) for display: a
 // multi-value set is truncated to the first few members + "+N", with the full
-// set kept for the title/tooltip. Single values and the synthetic
-// "(none)"/"Other" labels pass through unchanged. Shared by the outcome and
+// set kept for the title/tooltip. Single values and the synthetic "(none)"
+// placeholder pass through unchanged. The top-K rollup key "Other" is relabeled
+// to "... other values" so it can't be mistaken for a real value named "other"
+// (the legend's "Show all" link expands it). Shared by the outcome and
 // session-count breakdown charts.
 export function comboLabel(key) {
-  if (key === '(none)' || key === 'Other') return { text: key, full: key };
+  if (key === '(none)') return { text: key, full: key };
+  if (key === 'Other') return { text: '... other values', full: '... other values' };
   var parts = String(key).split(', ');
   if (parts.length <= 1) return { text: key, full: key };
   var MAX = 3, shown = parts.slice(0, MAX).join(', ');
