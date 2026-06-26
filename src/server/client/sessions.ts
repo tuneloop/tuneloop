@@ -1554,6 +1554,17 @@ export function filterByArtifact(text, kind) {
   setTimePreset('all');
 }
 
+// Drill-in from the dashboard's "Errors by category" widget: jump to the Sessions
+// list filtered to one error category, over the SAME window the user clicked from
+export function filterByErrorCategory(category) {
+  setView('sessions');
+  buildFilters();
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter[data-key="error_category"]'), function (s) {
+    s.value = category || '';
+  });
+  setTimePreset(state.days === 'all' ? 'all' : state.days);
+}
+
 export function closeDrawer() { $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on'); }
 
 export function setView(name) {

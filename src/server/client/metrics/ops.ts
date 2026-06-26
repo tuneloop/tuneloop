@@ -5,6 +5,7 @@
 // chart; counts use int bars (overall) or int lines (breakdown).
 import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { lineChart, valueLineChart } from '../charts'
+import { filterByErrorCategory } from '../sessions'
 
 // Per-view, in-memory line show/hide (keyed by tool/skill name), like the
 // outcome chart's legend. Reset on every load (new query); preserved across
@@ -84,10 +85,14 @@ export function loadErrorCats() {
       var meta = tips[key] || { label: key, description: '' };
       var pct = max ? Math.round((row.value / max) * 100) : 0;
       var share = total ? Math.round((row.value / total) * 100) : 0;
-      return '<div class="bar-row"><span class="name" title="' + esc(meta.description) + '">' + esc(meta.label) +
+      return '<div class="bar-row errcat-row" data-cat="' + esc(key) + '"><span class="name" title="' + esc(meta.description) + '">' + esc(meta.label) +
         '</span><span class="bar-track"><span class="bar-fill" style="width:' + pct + '%"></span></span>' +
         '<span class="n"><span class="cnt">' + num(row.value) + '</span><span class="pct">' + share + '%</span></span></div>';
     }).join('');
+    // Click a row → Sessions list filtered to that category, in the current window.
+    Array.prototype.forEach.call(box.querySelectorAll('.errcat-row'), function (el) {
+      el.onclick = function () { filterByErrorCategory(this.getAttribute('data-cat')); };
+    });
   }).catch(function () { box.innerHTML = '<div class="empty">Could not load error categories.</div>'; });
 }
 

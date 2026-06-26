@@ -97,6 +97,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .errcat .n { white-space: nowrap; }
 .errcat .n .cnt { color: var(--ink); }
 .errcat .n .pct { margin-left: 6px; }
+/* Rows drill into the Sessions list filtered to that category. */
+.errcat .bar-row.errcat-row { cursor: pointer; }
+.errcat .bar-row.errcat-row:hover .name { color: var(--emerald); text-decoration: underline; }
+.errcat .bar-row.errcat-row:hover .bar-fill { opacity: .85; }
 .empty { color: var(--muted); font-size: 13px; font-style: italic; }
 .btn { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .btn:hover { border-color: var(--emerald); color: var(--emerald); }
