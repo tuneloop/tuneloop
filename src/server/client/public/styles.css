@@ -56,11 +56,15 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-by-ctrl { display: inline-flex; align-items: center; gap: 8px; }
 /* Metric filter clauses: a fixed field label + live value <select> + ✕, grouped
    as one pill, inline between Bucket and Break-down. */
-.mfl-clause { display: inline-flex; align-items: center; gap: 6px; background: var(--track); border: 1px solid var(--line); border-radius: 8px; padding: 3px 4px 3px 10px; }
-.mfl-clause .sr-by { padding: 3px 8px; }
+.mfl-clause { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; background: var(--track); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px 3px 10px; }
+.mfl-clause .sr-by { padding: 3px 6px; }
 .mfl-k { font-size: 12px; color: var(--muted); }
-.mfl-x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; border-radius: 999px; }
-.mfl-x:hover { color: var(--red); }
+/* selected value chip (OR within a field) */
+.mfl-v { display: inline-flex; align-items: center; gap: 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 1px 2px 1px 8px; font-size: 12px; }
+.mfl-vx { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; border-radius: 999px; }
+.mfl-vx:hover { color: var(--red); }
+/* compact "+ value" adder inside a clause */
+.mfl-addv { padding: 2px 4px; font-size: 12px; }
 .sr-legend { margin-top: 10px; }
 .sr-legend .leg { display: inline-flex; align-items: center; vertical-align: middle; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
 .sr-legend .leg[data-key] { cursor: pointer; user-select: none; }
