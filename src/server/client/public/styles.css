@@ -508,9 +508,13 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .turn .tnum { margin-left: 6px; color: var(--emerald); font-family: ui-monospace, Menlo, monospace; }
 /* Jump highlight: an outline pulse that doesn't fight the turn/error backgrounds. */
 @keyframes flashpulse { 0% { box-shadow: 0 0 0 2px var(--emerald); } 100% { box-shadow: 0 0 0 2px transparent; } }
-@keyframes flashpulseR { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 2px transparent; } }
+/* Error reveal: a glowing box that HOLDS, then fades */
+@keyframes flashpulseR {
+  0%, 55% { box-shadow: 0 0 0 3px var(--red), 0 0 16px 3px rgba(180, 69, 47, .45); }
+  100%    { box-shadow: 0 0 0 3px transparent, 0 0 16px 3px transparent; }
+}
 .turn.flash { animation: flashpulse 1.2s ease; }
-.tx-error.flash { animation: flashpulseR 1.2s ease; }
+.tx-error.flash { animation: flashpulseR 1.6s ease-out; }
 /* Transcript search — central, grows to fill the row between Turn (left) and Errors (right). */
 .tx-search { flex: 1 1 auto; min-width: 180px; }
 .tx-search-input { flex: 1 1 auto; min-width: 0; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; background: var(--paper); color: var(--ink); }

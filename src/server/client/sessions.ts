@@ -1259,14 +1259,28 @@ export function openDetail(id, focus?: any) {
 
     // Error stepper: ‹ / › cycle through the ACTIVE scope's error panels (errIds
     // are global panel ids, so the anchors resolve even with all scopes in the DOM).
+    // Scroll to an error panel, FIRST revealing it: a call beyond the per-turn cap
+    // sits in a collapsed ".tool-rest" group (display:none), where scrollIntoView is
+    // a no-op. Expand that group (and hide its "+N more" button), then scroll+flash.
+    function revealErr(anchor) {
+      var el = document.getElementById('txerr-' + anchor);
+      if (!el) return;
+      var rest = el.closest && el.closest('.tool-rest');
+      if (rest && !rest.classList.contains('on')) {
+        rest.classList.add('on');
+        var mb = rest.nextElementSibling as any;
+        if (mb && mb.classList.contains('tool-more')) mb.style.display = 'none';
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      flashEl(el);
+    }
     var errIdx = -1;
     function gotoErr(next) {
       if (!errIds.length) return;
       errIdx = ((next % errIds.length) + errIds.length) % errIds.length;
       var pos = $('#drawerBody .tx-err-pos');
       if (pos) pos.textContent = String(errIdx + 1);
-      var el = document.getElementById('txerr-' + errIds[errIdx]);
-      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+      revealErr(errIds[errIdx]);
     }
     var ep = $('#drawerBody .tx-err-prev'), en = $('#drawerBody .tx-err-next');
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
@@ -1543,13 +1557,15 @@ export function openDetail(id, focus?: any) {
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
 
-    // Deep-link from the error-occurrence drill-down: scroll to + flash the exact
-    // failed tool call (txerr-<idx>) once the transcript pane is visible.
+    // Deep-link from the error-occurrence drill-down: reveal + flash the exact failed
+    // tool call (txerr-<idx>). The error may live in a subagent scope (a hidden pane),
+    // so switch to that scope first; revealErr then expands any collapsed tool group.
     if (focus && focus.errTarget != null) {
-      requestAnimationFrame(function () {
-        var el = document.getElementById('txerr-' + focus.errTarget);
-        if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
-      });
+      var tgt = focus.errTarget;
+      var tgtScope = 'main';
+      scopeOrder.forEach(function (k) { if (scopeByKey[k].errIds.indexOf(tgt) >= 0) tgtScope = k; });
+      if (tgtScope !== activeScope) switchScope(tgtScope);
+      requestAnimationFrame(function () { revealErr(tgt); });
     }
   });
 }
