@@ -4,7 +4,8 @@ import type { CanonicalAction } from '../../core/model'
  * Map Codex tool names to canonical actions. This is the ONE place that knows
  * Codex's tool vocabulary — common extractors stay vendor-neutral.
  *
- * Codex has no `Read`/MCP tools (files are read via the shell). Skills are also
+ * Codex reads files via the shell (no `Read` tool). MCP tools arrive as namespaced
+ * `function_call`s (`mcp__<server>`) and map to `action='mcp_call'`. Skills are
  * shell-based — `SKILL.md` + scripts — but a skill is loaded by reading its
  * `SKILL.md`, which we recognize and reclassify to `action='skill'` so Codex skills
  * join Claude's in one facet. Anything unmapped falls through to `other`.
@@ -12,7 +13,7 @@ import type { CanonicalAction } from '../../core/model'
 export interface MappedAction {
   action: CanonicalAction
   target: { paths?: string[]; command?: string }
-  /** Refined identity for `action='skill'` (the specific skill name) */
+  /** Refined tool-call identity: the skill name for `skill`, the `mcp__server__tool` id for `mcp_call`. */
   name?: string
 }
 
@@ -22,7 +23,13 @@ export interface MappedAction {
 // project `skills/` dirs. A non-dot relocated home is the documented residual.
 const SKILL_RE = /\/\.[\w-]+\/skills\/(?:\.system\/)?([\w-]+)\/SKILL\.md\b/
 
-export function mapAction(name: string, input: unknown): MappedAction {
+export function mapAction(name: string, input: unknown, namespace?: string): MappedAction {
+  // MCP tools carry a `mcp__<server>` namespace with the bare tool in `name` (built-ins
+  // also have namespaces, e.g. `multi_agent_v1`, so match the prefix, not mere presence).
+  // Rebuild Claude's `mcp__<server>__<tool>` identity so both harnesses share one facet.
+  if (namespace?.startsWith('mcp__')) {
+    return { action: 'mcp_call', name: `${namespace}__${name}`, target: {} }
+  }
   switch (name) {
     case 'exec_command':
     case 'shell_command': {

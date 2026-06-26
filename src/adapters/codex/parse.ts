@@ -184,13 +184,16 @@ export async function parseCodex(path: string): Promise<Session | null> {
       // function_call: `arguments` is a JSON STRING. custom_tool_call (apply_patch): `input`
       // is the raw patch text. tool_search_call: `arguments` is an object.
       const input = p.type === 'function_call' ? parseArgs(p.arguments) : (p.input ?? p.arguments)
-      const mapped = mapAction(name, input)
+      // `namespace` (function_call only) tags MCP tools as `mcp__<server>`.
+      const namespace = typeof p.namespace === 'string' ? p.namespace : undefined
+      const mapped = mapAction(name, input, namespace)
       const out = resultById.get(callId)
-      // Derive success from the tool's exit code across Codex's output shapes (shell
-      // wrappers, apply_patch, and the structured `{metadata:{exit_code}}` form). No
-      // code present → assume ok.
+      // Derive failure from the tool's exit code across Codex's output shapes (shell
+      // wrappers, apply_patch, and the structured `{metadata:{exit_code}}` form). MCP
+      // calls carry no exit code, so fall back to Codex's `tool call error:` marker.
+      // No signal at all → assume ok.
       const code = exitCodeOf(out)
-      const isError = code != null && code !== 0
+      const isError = code != null ? code !== 0 : toolCallFailed(out)
       pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name
       toolCalls.push({
         id: callId,
@@ -254,6 +257,14 @@ function exitCodeOf(out: string | undefined): number | null {
   }
   const m = /^(?:Process exited with code|Exit code:)\s*(\d+)/m.exec(out)
   return m ? parseInt(m[1]!, 10) : null
+}
+
+/**
+ * A failed MCP/tool call with no exit code. Codex frames these with a literal
+ * `tool call error:` prefix in the output text, while a success carries the tool's JSON result.
+ */
+function toolCallFailed(out: string | undefined): boolean {
+  return out != null && out.includes('tool call error:')
 }
 
 /** Shared zero-usage sentinel — its identity flags a content-only (no token_count) flush. */
