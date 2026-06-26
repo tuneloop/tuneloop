@@ -16,11 +16,60 @@ export function renderArtKindSeg() {
 
 function renderArtifacts(rows, kind) {
   if (kind === 'feature') { renderFeatureManager(rows || []); return; }
-  if (!rows || !rows.length) {
+  renderPrTab(rows || []);
+}
+
+// The PR sub-tab: a search box (by title or identifier) over a sortable table.
+// Rows are held in module state so search + column sort re-render only the table
+// body, leaving the (outside) search input focused.
+var prRows = [];
+var prSort = { col: 'created', dir: 'desc' };
+// [key, label, numeric?] — numeric columns right-align and default to descending.
+var PR_COLS = [['pr', 'Pull request', 0], ['status', 'Status', 0], ['sessions', 'Sessions', 1],
+  ['cost', 'Cost', 1], ['created', 'Created', 1], ['merged', 'Merged', 1]];
+
+function renderPrTab(rows) {
+  prRows = rows;
+  if (!rows.length) {
     $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>';
     return;
   }
-  var head = '<tr><th>Pull request</th><th>Status</th><th>Sessions</th><th>Cost</th><th>Merged</th><th></th></tr>';
+  $('#artifacts').innerHTML =
+    '<input id="pr-search" class="feat-search" type="search" placeholder="Search PRs by title or #identifier…" autocomplete="off" />' +
+    '<div id="pr-table-wrap"></div>';
+  $('#pr-search').oninput = renderPrTable;
+  renderPrTable();
+}
+
+// Sort key for a column; `created` falls back to merge time (mirrors the server COALESCE).
+function prVal(r, col) {
+  if (col === 'pr') return Number(r.ident) || 0;
+  if (col === 'status') return (r.status || '').toLowerCase();
+  if (col === 'sessions') return r.sessions || 0;
+  if (col === 'cost') return r.costUsd || 0;
+  if (col === 'created') return r.createdAt || r.completedAt || '';
+  if (col === 'merged') return r.completedAt || '';
+  return '';
+}
+
+function renderPrTable() {
+  var search = $('#pr-search');
+  var q = (search && search.value || '').trim().toLowerCase();
+  var rows = prRows.filter(function (r) {
+    if (!q) return true;
+    var hay = ((r.title || '') + ' #' + (r.ident || '') + ' ' + (r.repo || '') + ' ' + (r.externalId || '')).toLowerCase();
+    return hay.indexOf(q) !== -1;
+  });
+  var dir = prSort.dir === 'asc' ? 1 : -1;
+  rows.sort(function (a, b) {
+    var x = prVal(a, prSort.col), y = prVal(b, prSort.col);
+    return x < y ? -dir : x > y ? dir : 0;
+  });
+
+  var head = '<tr>' + PR_COLS.map(function (c) {
+    var arrow = c[0] === prSort.col ? (prSort.dir === 'asc' ? ' &#9652;' : ' &#9662;') : '';
+    return '<th class="pr-th' + (c[2] ? ' num' : '') + '" data-sort="' + c[0] + '">' + c[1] + arrow + '</th>';
+  }).join('') + '<th></th></tr>';
   var body = rows.map(function (r) {
     var key = r.externalId || r.ident;
     var idLabel = (r.repo ? esc(r.repo) + ' ' : '') + '#' + esc(r.ident);
@@ -33,11 +82,22 @@ function renderArtifacts(rows, kind) {
       '<td>' + (r.status ? esc(r.status) : '—') + '</td>' +
       '<td class="num">' + r.sessions + '</td>' +
       '<td class="num">' + usd(r.costUsd) + '</td>' +
-      '<td class="num">' + esc(dayOf(r.completedAt)) + '</td>' +
+      '<td class="num">' + (esc(dayOf(r.createdAt)) || '—') + '</td>' +
+      '<td class="num">' + (esc(dayOf(r.completedAt)) || '—') + '</td>' +
       '<td><button class="btn sess-btn" data-art="' + esc(key) + '">Sessions &rarr;</button></td></tr>';
   }).join('');
-  $('#artifacts').innerHTML = '<table>' + head + body + '</table>';
-  Array.prototype.forEach.call(document.querySelectorAll('.sess-btn'), function (btn) {
+  var note = rows.length ? '' : '<div class="empty">No PRs match your search.</div>';
+  $('#pr-table-wrap').innerHTML = '<table>' + head + body + '</table>' + note;
+
+  Array.prototype.forEach.call(document.querySelectorAll('#pr-table-wrap .pr-th'), function (th) {
+    th.onclick = function () {
+      var col = th.getAttribute('data-sort');
+      if (prSort.col === col) prSort.dir = prSort.dir === 'asc' ? 'desc' : 'asc';
+      else { prSort.col = col; prSort.dir = (col === 'pr' || col === 'status') ? 'asc' : 'desc'; }
+      renderPrTable();
+    };
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#pr-table-wrap .sess-btn'), function (btn) {
     btn.onclick = function () { filterByArtifact(btn.getAttribute('data-art'), 'pr'); };
   });
 }

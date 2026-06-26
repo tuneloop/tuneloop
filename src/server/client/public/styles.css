@@ -102,6 +102,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .feat-search { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--paper); color: var(--ink); margin-bottom: 10px; }
 .feat-search:focus { outline: none; border-color: var(--emerald); }
 .fh-num, .feat-num { text-align: right; }
+/* Sortable PR table headers. */
+.pr-th { cursor: pointer; user-select: none; white-space: nowrap; }
+.pr-th:hover { color: var(--ink); }
 .feat-num { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .feat-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 /* Secondary actions live behind a per-row hamburger. The menu is position:fixed
