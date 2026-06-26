@@ -981,19 +981,21 @@ export function openDetail(id, focus?: any) {
           '<div class="tx-ol-wrap"><button class="tx-ol-btn" type="button" title="Jump to a turn">▾</button>' +
             '<div class="tx-outline" id="tx-outline">' + outlineHtml(userTurns) + '</div></div>' +
         '</div>' +
+        '<div class="tx-grp tx-search">' +
+          '<input class="tx-search-input" type="text" placeholder="Search — press Enter" />' +
+          '<div class="tx-search-results">' +
+            '<button class="btn tx-search-prev" type="button" title="Previous match">‹</button>' +
+            '<span class="tx-pos"><b class="tx-search-pos">0</b>/<span class="tx-search-total">0</span></span>' +
+            '<button class="btn tx-search-next" type="button" title="Next match">›</button>' +
+            '<button class="btn tx-search-x" type="button" title="Clear">×</button>' +
+          '</div>' +
+        '</div>' +
         (errCount
           ? '<div class="tx-grp tx-errs"><span class="tx-grp-lbl">⚠ Errors</span>' +
             '<button class="btn tx-err-prev" type="button">‹</button>' +
             '<span class="tx-pos"><b class="tx-err-pos">—</b>/<span class="tx-err-total">' + errIds.length + '</span></span>' +
             '<button class="btn tx-err-next" type="button">›</button></div>'
           : '<span class="tx-grp none">no tool errors</span>') +
-        '<div class="tx-grp tx-search">' +
-          '<input class="tx-search-input" type="text" placeholder="Search…" />' +
-          '<button class="btn tx-search-prev" type="button" title="Previous match">‹</button>' +
-          '<span class="tx-pos"><b class="tx-search-pos">0</b>/<span class="tx-search-total">0</span></span>' +
-          '<button class="btn tx-search-next" type="button" title="Next match">›</button>' +
-          '<button class="btn tx-search-x" type="button" title="Clear">×</button>' +
-        '</div>' +
       '</div>' +
       '<div class="tx-now" id="tx-now"></div>' +
       '</div>';
@@ -1269,16 +1271,25 @@ export function openDetail(id, focus?: any) {
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
     if (en) en.onclick = function () { gotoErr(errIdx + 1); };
 
-    // Search event wiring
+    // Search runs on explicit Enter, not per keystroke: a full-transcript DOM walk
+    // that wraps a <mark> around every hit is far too expensive to run live on big
+    // sessions (a short prefix like "a" would mutate thousands of nodes and hang
+    // the page). First Enter searches the term; pressing Enter again with the same
+    // term steps to the next match, Shift+Enter to the previous.
     var searchInput = $('#drawerBody .tx-search-input') as HTMLInputElement;
-    var searchTimer = 0;
     if (searchInput) {
       searchInput.oninput = function () {
-        clearTimeout(searchTimer);
-        searchTimer = setTimeout(function () { transcriptSearch(searchInput.value.trim()); }, 200) as any;
+        // Only the cheap "box emptied" case acts live (clears highlights); a term
+        // change waits for Enter rather than re-running the expensive pass.
+        if (!searchInput.value.trim()) transcriptSearch('');
       };
       searchInput.onkeydown = function (e) {
-        if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? jumpToSearchMatch(searchIdx - 1) : jumpToSearchMatch(searchIdx + 1); }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          var q = searchInput.value.trim();
+          if (q !== lastSearched) transcriptSearch(q);
+          else if (searchMatches.length) jumpToSearchMatch(searchIdx + (e.shiftKey ? -1 : 1));
+        }
         if (e.key === 'Escape') { searchInput.value = ''; transcriptSearch(''); searchInput.blur(); }
       };
     }
@@ -1358,12 +1369,17 @@ export function openDetail(id, focus?: any) {
     if (dimsAvail.length) applyTxFilter();
 
     // ----- Transcript search: highlight + step through matches in active scope ---
+    var SEARCH_MIN = 2;     // ignore terms shorter than this (kills 'a'/'e' noise)
+    var SEARCH_CAP = 100;   // stop wrapping after this many hits — a page-freeze
+                            // backstop; a common term shows "100+", a cue to refine.
     var searchMatches = [];
     var searchIdx = -1;
+    var searchCapped = false;
+    var lastSearched = null;  // term of the last executed search (null = none yet)
 
     function updateSearchUI(pos, total) {
       var p = $('#drawerBody .tx-search-pos'); if (p) p.textContent = String(pos);
-      var t = $('#drawerBody .tx-search-total'); if (t) t.textContent = String(total);
+      var t = $('#drawerBody .tx-search-total'); if (t) t.textContent = total + (searchCapped ? '+' : '');
     }
 
     function clearHighlights() {
@@ -1375,6 +1391,7 @@ export function openDetail(id, focus?: any) {
       });
       searchMatches = [];
       searchIdx = -1;
+      searchCapped = false;
     }
 
     function expandAncestors(el) {
@@ -1407,7 +1424,12 @@ export function openDetail(id, focus?: any) {
 
     function transcriptSearch(query) {
       clearHighlights();
-      if (!query) { updateSearchUI(0, 0); return; }
+      lastSearched = query;
+      // Below the minimum, treat it as no active search: clear and collapse the
+      // stepper rather than wrap thousands of noise hits.
+      var sg = $('#drawerBody .tx-search');
+      if (query.length < SEARCH_MIN) { if (sg) sg.classList.remove('on'); updateSearchUI(0, 0); return; }
+      if (sg) sg.classList.add('on');
       var pane = document.querySelector('#dpane-transcript .tx-scope-pane.on');
       if (!pane) return;
       var lowerQ = query.toLowerCase();
@@ -1432,7 +1454,7 @@ export function openDetail(id, focus?: any) {
       });
       var textNodes = [];
       while (walker.nextNode()) textNodes.push(walker.currentNode);
-      for (var ni = 0; ni < textNodes.length; ni++) {
+      for (var ni = 0; ni < textNodes.length && searchMatches.length < SEARCH_CAP; ni++) {
         var node = textNodes[ni];
         var text = node.textContent;
         var lower = text.toLowerCase();
@@ -1451,6 +1473,7 @@ export function openDetail(id, focus?: any) {
         }
         searchMatches = searchMatches.concat(nodeMarks);
       }
+      searchCapped = searchMatches.length >= SEARCH_CAP;
       updateSearchUI(searchMatches.length ? 1 : 0, searchMatches.length);
       if (searchMatches.length) jumpToSearchMatch(0);
     }

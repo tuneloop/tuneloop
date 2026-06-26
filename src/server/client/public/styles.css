@@ -414,7 +414,7 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-scope-pane.on { display: block; }
 .tx-nav { display: none; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .tx-nav.on { display: block; }
-.tx-nav-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 9px; }
+.tx-nav-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 9px; }
 .tx-grp { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
 .tx-grp.none { color: var(--muted); font-style: italic; }
 .tx-grp-lbl { color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-size: 11px; }
@@ -459,10 +459,13 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 @keyframes flashpulseR { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 2px transparent; } }
 .turn.flash { animation: flashpulse 1.2s ease; }
 .tx-error.flash { animation: flashpulseR 1.2s ease; }
-/* Transcript search */
-.tx-search { margin-left: auto; }
-.tx-search-input { width: 150px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; background: var(--paper); color: var(--ink); }
+/* Transcript search — central, grows to fill the row between Turn (left) and Errors (right). */
+.tx-search { flex: 1 1 auto; min-width: 180px; }
+.tx-search-input { flex: 1 1 auto; min-width: 0; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; background: var(--paper); color: var(--ink); }
 .tx-search-input:focus { border-color: var(--emerald); outline: none; }
 .tx-search-input::placeholder { color: var(--muted); }
+/* Result stepper appears only once a term is entered. */
+.tx-search-results { display: none; align-items: center; gap: 7px; flex: none; }
+.tx-search.on .tx-search-results { display: inline-flex; }
 .tx-hl { background: #fde68a !important; border-radius: 2px; padding: 0 1px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 .tx-hl.active { background: #f97316 !important; color: #fff !important; outline: 2px solid #f97316; }
