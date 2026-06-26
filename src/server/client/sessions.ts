@@ -410,17 +410,21 @@ function flashEl(el) {
   el.classList.add('flash');
 }
 
-// Flash an element once its smooth-scroll has SETTLED (position stable a few
-// frames), so a far scroll doesn't burn the flash before arrival. Capped so it always fires.
+// Flash when the element ARRIVES in view (center reaches the viewport's central
+// band), not after the smooth-scroll's easing tail. Falls back to scroll-stopped /
+// a frame cap so it always fires.
 function flashOnSettle(el) {
   if (!el) return;
   var last = null, stable = 0, frames = 0;
   function tick() {
     frames++;
-    var y = el.getBoundingClientRect().top;
-    if (last !== null && Math.abs(y - last) < 0.5) stable++; else stable = 0;
-    last = y;
-    if (stable >= 3 || frames > 90) { flashEl(el); return; }
+    var r = el.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight || 800;
+    var center = r.top + r.height / 2;
+    var inView = center > vh * 0.25 && center < vh * 0.75;
+    if (last !== null && Math.abs(r.top - last) < 0.5) stable++; else stable = 0;
+    last = r.top;
+    if (inView || stable >= 2 || frames > 90) { flashEl(el); return; }
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
