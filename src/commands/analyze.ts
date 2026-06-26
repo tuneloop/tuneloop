@@ -3,7 +3,7 @@ import { loadConfig } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
 import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
-import { mergeSessions } from '../core/merge'
+import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
@@ -113,14 +113,26 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     }
   }
 
-  // Group sessions into logical sessions. Same-id sessions merge (Claude resume/sidechain).
-  // A sub-agent transcript that lives in its own file (Codex) carries `forkedFromId`
-  // pointing at its parent; fold it under its ROOT ancestor so the parent merge pulls
-  // it in as a sidechain (ADR-0003). Resolve to root in a second pass since a child can
-  // be parsed before its parent and nest more than one level deep.
   const byId = new Map<string, Session>()
   for (const s of parsedSessions) byId.set(s.id, s)
+
+  // A Codex child (`/fork` or sub-agent) replays its parent's transcript prefix —
+  // including the parent's token_count usage. Trim that inherited prefix so it's not
+  // counted twice; leaves each child with only its own divergent work.
+  for (const s of parsedSessions) {
+    if (!s.forkedFromId) continue
+    const parent = byId.get(`${s.source}:${s.forkedFromId}`)
+    if (parent) trimInheritedPrefix(s, parent)
+  }
+
+  // Group sessions into logical sessions. Same-id sessions merge (Claude resume/sidechain).
+  // A sub-agent transcript that lives in its own file (Codex) folds under its ROOT ancestor
+  // via `forkedFromId` so the parent merge pulls it in as a sidechain (ADR-0003). A `/fork`
+  // also carries `forkedFromId` but is its OWN top-level session (ADR-0005), so only
+  // sub-agents fold. Resolve to root in a second pass since a child can be parsed before
+  // its parent and nest more than one level deep.
   const rootKey = (s: Session): string => {
+    if (!s.isSubagent) return s.id // forks and top-level sessions key on their own id
     const seen = new Set<string>()
     let cur = s
     while (cur.forkedFromId && !seen.has(cur.id)) {

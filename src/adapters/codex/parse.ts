@@ -88,6 +88,11 @@ export async function parseCodex(path: string): Promise<Session | null> {
   // Strategy 1 (ADR-0001): accumulate assistant-side blocks; each token_count flushes
   // them into one AssistantMessage carrying that inference call's usage.
   let pending: ContentBlock[] = []
+  // Cumulative-total signature of the last counted token_count. Older-format rollouts
+  // re-emit a token_count with an unchanged `total_token_usage` (a turn-finalize echo);
+  // skipping those avoids double-counting (ADR-0005). Equal cumulative total ⟺ a re-emit,
+  // since a real inference call always advances the total — so usage-only records survive.
+  let prevTotalSig: string | null = null
   const flush = (usage: TokenUsage, ts: string | undefined): void => {
     if (!pending.length && usage === ZERO) return
     const ev: AssistantMessage = {
@@ -120,7 +125,20 @@ export async function parseCodex(path: string): Promise<Session | null> {
     }
 
     if (r.type === 'event_msg' && p.type === 'token_count') {
-      if (p.info && p.info.last_token_usage) flush(mapUsage(p.info.last_token_usage), ts)
+      const info = p.info
+      if (info && info.last_token_usage) {
+        const total = info.total_token_usage
+        const sig =
+          total && (total.input_tokens != null || total.output_tokens != null)
+            ? `${num(total.input_tokens)}/${num(total.output_tokens)}`
+            : null
+        // Skip a re-emit (same cumulative total as the previous count); a null sig
+        // (no total) can't be deduped, so always count it.
+        if (sig === null || sig !== prevTotalSig) {
+          prevTotalSig = sig
+          flush(mapUsage(info.last_token_usage), ts)
+        }
+      }
       continue
     }
 
@@ -168,11 +186,11 @@ export async function parseCodex(path: string): Promise<Session | null> {
       const input = p.type === 'function_call' ? parseArgs(p.arguments) : (p.input ?? p.arguments)
       const mapped = mapAction(name, input)
       const out = resultById.get(callId)
-      // Codex wraps exec output as "…\nProcess exited with code N\nOutput:\n<stdout>";
-      // match the FIRST line-anchored status line (before stdout, which could echo
-      // the phrase) and flag any non-zero exit. No status line → assume ok.
-      const exit = out != null ? /^Process exited with code (\d+)/m.exec(out) : null
-      const isError = exit != null && exit[1] !== '0'
+      // Derive success from the tool's exit code across Codex's output shapes (shell
+      // wrappers, apply_patch, and the structured `{metadata:{exit_code}}` form). No
+      // code present → assume ok.
+      const code = exitCodeOf(out)
+      const isError = code != null && code !== 0
       pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name
       toolCalls.push({
         id: callId,
@@ -206,6 +224,7 @@ export async function parseCodex(path: string): Promise<Session | null> {
     title: undefined,
     project: { cwd: typeof meta.cwd === 'string' ? meta.cwd : undefined, branch: meta?.git?.branch },
     forkedFromId,
+    isSubagent: isSubagent || undefined,
     startedAt: firstTs,
     endedAt: lastTs,
     models: [...models],
@@ -215,6 +234,26 @@ export async function parseCodex(path: string): Promise<Session | null> {
     subagents,
     raw: { path, contentHash: contentHash(content) },
   }
+}
+
+/**
+ * Exit code for a tool call across Codex's output shapes, or null when none is present
+ * (→ treated as success). Handles the structured `{output, metadata:{exit_code}}` form
+ * and the line-anchored shell wrappers (`Process exited with code N` / `Exit code: N`),
+ * matched before stdout so an echoed phrase can't masquerade as the status line.
+ */
+function exitCodeOf(out: string | undefined): number | null {
+  if (out == null) return null
+  try {
+    const o = JSON.parse(out)
+    if (o && typeof o === 'object' && o.metadata && typeof o.metadata.exit_code === 'number') {
+      return o.metadata.exit_code
+    }
+  } catch {
+    /* not JSON — fall through to the text wrappers */
+  }
+  const m = /^(?:Process exited with code|Exit code:)\s*(\d+)/m.exec(out)
+  return m ? parseInt(m[1]!, 10) : null
 }
 
 /** Shared zero-usage sentinel — its identity flags a content-only (no token_count) flush. */
