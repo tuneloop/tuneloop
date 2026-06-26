@@ -1941,6 +1941,21 @@ export class Store {
    * link (e.g. PRs whose false-positive links were removed on re-derivation).
    * Never touches user-authored artifacts.
    */
+  /**
+   * Delete sessions whose parse_version is below the current version for their
+   * source — these are sessions the parser now returns null for (e.g. synthetic-only).
+   */
+  pruneStaleSessionsByVersion(versionBySource: Map<string, number>): number {
+    let total = 0
+    for (const [source, version] of versionBySource) {
+      const r = this.db
+        .prepare('DELETE FROM sessions WHERE source = ? AND parse_version < ?')
+        .run(source, version)
+      total += r.changes
+    }
+    return total
+  }
+
   pruneOrphanArtifacts(): number {
     const r = this.db
       .prepare(

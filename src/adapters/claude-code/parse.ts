@@ -206,6 +206,9 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
     }
   }
 
+  // Skip sessions where the model was never reached (e.g. only synthetic messages).
+  if (!events.some((e) => e.kind === 'assistant')) return null
+
   // A sidechain file carries one (occasionally more) subagent. Its sibling
   // `<file>.meta.json` names the subagent type/description and the parent tool
   // call that spawned it, which is what links the call to this transcript.
