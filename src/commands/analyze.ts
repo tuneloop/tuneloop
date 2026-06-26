@@ -2,9 +2,10 @@ import { basename } from 'node:path'
 import { loadConfig } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
-import { assignSeq } from '../core/blocks'
-import { mergeSessions } from '../core/merge'
+import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
+import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
+import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
 import { runProcessors } from '../core/runner'
 import { createLlmClient } from '../llm'
@@ -17,6 +18,8 @@ import { makeSh } from '../util/sh'
 
 export interface AnalyzeOptions {
   dirs?: string[]
+  /** `--source` entries: a harness name, optionally `name=dir` to override its roots. */
+  sources?: string[]
   db?: string
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
@@ -61,33 +64,90 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   let parsed = 0
   let reingested = 0
 
-  // Parse every file, then group files that share a session id and merge them
-  // so each logical session is ingested and processed exactly once.
+  // Parse every session, then group those that share a logical session (Claude
+  // resume/sidechain files, Codex forks) and merge them so each is ingested and
+  // processed exactly once.
   const groups = new Map<string, Session[]>()
-  // Per-source parse version, used by the re-ingest cache gate below. Each adapter
-  // owns its own so a parser change in one source doesn't rebuild the others.
+  const adapters = getAdapters()
+  // The stored parse_version is per-adapter (`parseVersion`) composed with the
+  // shared NORMALIZE_VERSION, so a per-vendor parser bump re-ingests only that
+  // vendor and a normalization bump re-ingests everyone. See ADR-0002.
   const parseVersionBySource = new Map<string, number>()
-  for (const adapter of getAdapters()) {
-    parseVersionBySource.set(adapter.id, adapter.parseVersion)
-    const roots = opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots()
+  for (const a of adapters) parseVersionBySource.set(a.id, a.parseVersion * 1000 + NORMALIZE_VERSION)
+
+  // --source name[=dir] (repeatable): pick a subset of harnesses, each optionally
+  // with its own roots. No --source → every adapter with its own default. Roots
+  // precedence per source: explicit `=dir` ▸ positional [dirs] ▸ defaultRoots().
+  const sourceRoots = new Map<string, string[]>()
+  const selected = new Set<string>()
+  for (const entry of opts.sources ?? []) {
+    const eq = entry.indexOf('=')
+    const id = resolveSource((eq >= 0 ? entry.slice(0, eq) : entry).trim(), adapters)
+    selected.add(id)
+    const dir = eq >= 0 ? entry.slice(eq + 1).trim() : ''
+    if (dir) sourceRoots.set(id, [...(sourceRoots.get(id) ?? []), dir])
+  }
+  const activeAdapters = selected.size ? adapters.filter((a) => selected.has(a.id)) : adapters
+
+  const parsedSessions: Session[] = []
+  for (const adapter of activeAdapters) {
+    const roots = sourceRoots.get(adapter.id) ?? (opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots())
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
-    const collect = (session: Session | null): void => {
-      if (!session) return
-      parsed++
-      const g = groups.get(session.id)
-      if (g) g.push(session)
-      else groups.set(session.id, [session])
-    }
     if (adapter.discoverSessions) {
       // Store-backed adapter (e.g. OpenCode): one DB yields many sessions.
       const sessions = await adapter.discoverSessions(roots)
       discovered += sessions.length
-      for (const session of sessions) collect(session)
+      for (const session of sessions) {
+        parsed++
+        parsedSessions.push(session)
+      }
     } else {
       const files = await adapter.discover(roots)
       discovered += files.length
-      for (const file of files) collect(await adapter.parse(file))
+      for (const file of files) {
+        const session = await adapter.parse(file)
+        if (!session) continue
+        parsed++
+        parsedSessions.push(session)
+      }
     }
+  }
+
+  const byId = new Map<string, Session>()
+  for (const s of parsedSessions) byId.set(s.id, s)
+
+  // A Codex child (`/fork` or sub-agent) replays its parent's transcript prefix —
+  // including the parent's token_count usage. Trim that inherited prefix so it's not
+  // counted twice; leaves each child with only its own divergent work.
+  for (const s of parsedSessions) {
+    if (!s.forkedFromId) continue
+    const parent = byId.get(`${s.source}:${s.forkedFromId}`)
+    if (parent) trimInheritedPrefix(s, parent)
+  }
+
+  // Group sessions into logical sessions. Same-id sessions merge (Claude resume/sidechain).
+  // A sub-agent transcript that lives in its own file (Codex) folds under its ROOT ancestor
+  // via `forkedFromId` so the parent merge pulls it in as a sidechain (ADR-0003). A `/fork`
+  // also carries `forkedFromId` but is its OWN top-level session (ADR-0005), so only
+  // sub-agents fold. Resolve to root in a second pass since a child can be parsed before
+  // its parent and nest more than one level deep.
+  const rootKey = (s: Session): string => {
+    if (!s.isSubagent) return s.id // forks and top-level sessions key on their own id
+    const seen = new Set<string>()
+    let cur = s
+    while (cur.forkedFromId && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      const parent = byId.get(`${cur.source}:${cur.forkedFromId}`)
+      if (!parent) return `${cur.source}:${cur.forkedFromId}` // parent file absent — group under it anyway
+      cur = parent
+    }
+    return cur.id
+  }
+  for (const s of parsedSessions) {
+    const key = rootKey(s)
+    const g = groups.get(key)
+    if (g) g.push(s)
+    else groups.set(key, [s])
   }
 
   // Resolve a session's repo from its cwd via git (the parser only sees cwd, and
@@ -117,9 +177,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     const repo = await resolveRepo(session.project.cwd)
     if (repo) session.project.repo = repo
     const prior = store.storedMeta(session.id)
-    const parseVersion = parseVersionBySource.get(session.source) ?? 1
+    const parseVersion = parseVersionBySource.get(session.source) ?? NORMALIZE_VERSION
     // Re-ingest when the transcript changed OR a newer parser can extract more
-    // from the same bytes (e.g. skill names — PARSE_VERSION bumped to 2).
+    // from the same bytes (e.g. skill names — the adapter's parseVersion bumped).
     if (prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion) {
       const cost = computeSessionCost(session)
       store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, parseVersion)
@@ -161,6 +221,19 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   )
   printSummary(store.summary())
   store.close()
+}
+
+/** Resolve a --source name to a registered adapter id, tolerant of a short alias (`claude` → `claude-code`). */
+function resolveSource(name: string, adapters: SourceAdapter[]): string {
+  const exact = adapters.find((a) => a.id === name)
+  if (exact) return exact.id
+  const prefix = adapters.filter((a) => a.id.startsWith(name))
+  if (prefix.length === 1) return prefix[0]!.id
+  const available = adapters.map((a) => a.id).join(', ')
+  if (prefix.length > 1) {
+    throw new Error(`ambiguous --source "${name}" (matches ${prefix.map((a) => a.id).join(', ')})`)
+  }
+  throw new Error(`unknown --source "${name}" (available: ${available})`)
 }
 
 function printSummary(s: Summary): void {

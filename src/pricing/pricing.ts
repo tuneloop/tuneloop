@@ -10,7 +10,7 @@ export interface ModelPrice {
 }
 
 /** Bump when models.json rates change so stored costs can be recomputed. */
-export const PRICE_TABLE_VERSION = '2026-06-04'
+export const PRICE_TABLE_VERSION = '2026-06-25'
 
 type Table = Record<string, Record<string, ModelPrice>>
 const TABLE = models as unknown as Table
@@ -25,7 +25,9 @@ export function priceFor(provider: string, model: string): ModelPrice | undefine
   if (byProvider[model]) return byProvider[model]
   const stripped = model.replace(/[-@]\d{8}$/, '')
   if (byProvider[stripped]) return byProvider[stripped]
-  for (const key of Object.keys(byProvider)) {
+  // Longest key first so a specific variant wins over a shorter prefix of it
+  // (e.g. `gpt-5.2-codex-*` matches `gpt-5.2-codex`, not the pricier `gpt-5.2`).
+  for (const key of Object.keys(byProvider).sort((a, b) => b.length - a.length)) {
     if (model.startsWith(key)) return byProvider[key]
   }
   return undefined

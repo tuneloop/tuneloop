@@ -11,10 +11,18 @@ program
   .description('Local analytics for your AI coding sessions. Count outcomes, not tokens.')
   .version('0.0.1')
 
+const appendValue = (val: string, acc: string[]): string[] => (acc.push(val), acc)
+
 program
   .command('analyze')
   .description('Analyze session transcripts, build the local store, then serve the dashboard.')
-  .argument('[dirs]', 'comma-separated session directories (default: ~/.claude/projects, ~/.local/share/opencode)')
+  .argument('[dirs]', "comma-separated session directories (default: each harness's own location)")
+  .option(
+    '--source <name>',
+    'limit to these harnesses (repeatable). NAME or NAME=DIR to override its roots, e.g. --source codex=/path',
+    appendValue,
+    [],
+  )
   .option('--db <path>', 'path to the aivue SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
@@ -23,12 +31,12 @@ program
   .action(
     async (
       dirs: string | undefined,
-      options: { db?: string; limit?: number; port?: number; serve?: boolean; verbose?: boolean },
+      options: { source: string[]; db?: string; limit?: number; port?: number; serve?: boolean; verbose?: boolean },
     ) => {
       const dirList = dirs
         ? dirs.split(',').map((s) => s.trim()).filter(Boolean)
         : undefined
-      await analyze({ dirs: dirList, db: options.db, limit: options.limit, verbose: options.verbose })
+      await analyze({ dirs: dirList, sources: options.source, db: options.db, limit: options.limit, verbose: options.verbose })
       // Serve + open the browser by default so results are visible immediately; --no-serve opts out.
       if (options.serve !== false) {
         await serve({ db: options.db, port: options.port })

@@ -7,9 +7,10 @@ export interface SourceAdapter {
   /** LLM vendor family, e.g. `anthropic`. */
   provider: string
   /**
-   * Bump when ingest-time derivation changes so stored sessions are rebuilt on the
-   * same source bytes (see analyze.ts's re-ingest gate). Keyed per-adapter so each
-   * source owns its own cache invalidation.
+   * Version of THIS adapter's parse output. Bumped when the adapter extracts more
+   * (or different) data from the same transcript bytes. Combined with the shared
+   * `NORMALIZE_VERSION` into the stored `parse_version` (see analyze.ts), so a
+   * per-vendor bump re-ingests only that vendor's sessions.
    */
   parseVersion: number
   /** Locations to scan when the user passes no directories. */

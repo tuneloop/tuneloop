@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-million-token USD rates. cache_write_5m = 1.25x input (ephemeral 5-minute TTL, what Claude Code uses), cache_write_1h = 2x input, cache_read = 0.1x input. Update as vendor prices change; community PRs welcome.",
+  "_comment": "Per-million-token USD rates. cache_write_5m = 1.25x input (ephemeral 5-minute TTL, what Claude Code uses), cache_write_1h = 2x input, cache_read = 0.1x input. Update as vendor prices change; community PRs welcome. NOTE: cache_write_* are an Anthropic concept; OpenAI has no cache-write charge (Codex sets cacheCreate=0), so the openai entries set cache_write_* = input as inert placeholders and only cache_read is meaningful",
   "anthropic": {
     "claude-fable-5":    { "input": 10.0, "output": 50.0, "cache_write_5m": 12.5,  "cache_write_1h": 20.0, "cache_read": 1.0 },
     "claude-opus-4-8":   { "input": 5.0,  "output": 25.0, "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.5 },
@@ -7,5 +7,14 @@
     "claude-opus-4-6":   { "input": 5.0,  "output": 25.0, "cache_write_5m": 6.25,  "cache_write_1h": 10.0, "cache_read": 0.5 },
     "claude-sonnet-4-6": { "input": 3.0,  "output": 15.0, "cache_write_5m": 3.75,  "cache_write_1h": 6.0,  "cache_read": 0.3 },
     "claude-haiku-4-5":  { "input": 1.0,  "output": 5.0,  "cache_write_5m": 1.25,  "cache_write_1h": 2.0,  "cache_read": 0.1 }
+  },
+  "openai": {
+    "gpt-5.5":            { "input": 5.0,  "output": 30.0, "cache_write_5m": 5.0,  "cache_write_1h": 5.0,  "cache_read": 0.5 },
+    "gpt-5.4":            { "input": 2.5,  "output": 15.0, "cache_write_5m": 2.5,  "cache_write_1h": 2.5,  "cache_read": 0.25 },
+    "gpt-5.2":            { "input": 2.5,  "output": 15.0, "cache_write_5m": 2.5,  "cache_write_1h": 2.5,  "cache_read": 0.25 },
+    "gpt-5.3-codex":      { "input": 1.75, "output": 14.0, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175 },
+    "gpt-5.2-codex":      { "input": 1.75, "output": 14.0, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175 },
+    "gpt-5.1-codex-max":  { "input": 1.25, "output": 10.0, "cache_write_5m": 1.25, "cache_write_1h": 1.25, "cache_read": 0.125 },
+    "gpt-5.1-codex":      { "input": 1.25, "output": 10.0, "cache_write_5m": 1.25, "cache_write_1h": 1.25, "cache_read": 0.125 }
   }
 }

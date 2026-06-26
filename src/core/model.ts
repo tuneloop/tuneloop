@@ -133,6 +133,19 @@ export interface Session {
   /** LLM vendor family for slicing, e.g. `anthropic`. */
   provider: string
   title?: string
+  /**
+   * For a child transcript that lives in its own file (Codex sub-agent or `/fork`),
+   * the parent session's raw id. Used to (a) fold sub-agents into the parent as
+   * sidechains and (b) trim the replayed parent prefix both kinds inherit
+   * (see analyze.ts / merge.ts, ADR-0005). Undefined for top-level sessions.
+   */
+  forkedFromId?: string
+  /**
+   * True only for a sub-agent (sidechain) child. Distinguishes it from a `/fork`,
+   * which also carries `forkedFromId` but is its own top-level session: only
+   * sub-agents fold into the parent group (ADR-0005).
+   */
+  isSubagent?: boolean
   project: { cwd?: string; repo?: string; branch?: string }
   startedAt?: string
   endedAt?: string
