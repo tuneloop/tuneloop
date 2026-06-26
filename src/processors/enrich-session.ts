@@ -291,7 +291,7 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     '- debug: diagnosing and fixing a specific failure — reproducing, tracing, and correcting a bug, test failure, or error.',
     '- review: evaluating existing code or a change for quality/correctness (PR or code review, critique, security/architecture audit), not authoring the feature.',
     '- research: gathering EXTERNAL or unfamiliar information — reading vendor docs, web search, learning a new library/API.',
-    '- analysis: examining THIS project\'s own code or data to understand or measure it — tracing how something works, auditing, computing metrics (internal focus, vs research\'s external focus).',
+    '- analysis: examining the project\'s own code or data to understand or measure it — tracing how something works, auditing, computing metrics (internal focus, vs research\'s external focus).',
     '- docs: writing or updating human-facing prose — READMEs, code comments, changelogs, guides.',
     '- other: work that fits none of the above — chores, dependency bumps, environment/CI setup, git mechanics.',
     'Rules for feature_runs (which blocks advanced which feature):',
