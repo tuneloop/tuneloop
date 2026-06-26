@@ -61,8 +61,8 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   action       TEXT,
   ok           INTEGER,
   is_error     INTEGER,
-  error_category TEXT,        -- fingerprinted category for failed calls; NULL when ok
-  error_message TEXT,         -- clipped one-line error text for failed calls; NULL when ok
+  error_category TEXT,
+  error_message TEXT,
   target_path  TEXT,
   command      TEXT,
   is_sidechain INTEGER,

@@ -410,6 +410,22 @@ function flashEl(el) {
   el.classList.add('flash');
 }
 
+// Flash an element once its smooth-scroll has SETTLED (position stable a few
+// frames), so a far scroll doesn't burn the flash before arrival. Capped so it always fires.
+function flashOnSettle(el) {
+  if (!el) return;
+  var last = null, stable = 0, frames = 0;
+  function tick() {
+    frames++;
+    var y = el.getBoundingClientRect().top;
+    if (last !== null && Math.abs(y - last) < 0.5) stable++; else stable = 0;
+    last = y;
+    if (stable >= 3 || frames > 90) { flashEl(el); return; }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
 // ---- Files-changed view -----------------------------------------------------
 
 // Minimal line-level diff (LCS backtrace) → rows tagged ' ' (context), '-', '+'.
@@ -1272,7 +1288,7 @@ export function openDetail(id, focus?: any) {
         if (mb && mb.classList.contains('tool-more')) mb.style.display = 'none';
       }
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      flashEl(el);
+      flashOnSettle(el);
     }
     var errIdx = -1;
     function gotoErr(next) {
@@ -1557,16 +1573,16 @@ export function openDetail(id, focus?: any) {
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
 
-    // Deep-link from the error-occurrence drill-down: reveal + flash the exact failed
-    // tool call (txerr-<idx>). The error may live in a subagent scope (a hidden pane),
-    // so switch to that scope first; revealErr then expands any collapsed tool group.
-    if (focus && focus.errTarget != null) {
-      var tgt = focus.errTarget;
-      var tgtScope = 'main';
-      scopeOrder.forEach(function (k) { if (scopeByKey[k].errIds.indexOf(tgt) >= 0) tgtScope = k; });
-      if (tgtScope !== activeScope) switchScope(tgtScope);
-      requestAnimationFrame(function () { revealErr(tgt); });
+    // Reveal a failed tool call inside THIS drawer: switch to its scope if needed,
+    // then revealErr. Published to activeReveal so the pager reuses it same-session.
+    function revealErrorTarget(target) {
+      var sc = 'main';
+      scopeOrder.forEach(function (k) { if (scopeByKey[k].errIds.indexOf(target) >= 0) sc = k; });
+      if (sc !== activeScope) switchScope(sc);
+      requestAnimationFrame(function () { revealErr(target); });
     }
+    activeReveal = revealErrorTarget;
+    if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
   });
 }
 
@@ -1593,8 +1609,13 @@ export function filterByErrorCategory(category) {
 
 export function closeDrawer() {
   $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on');
+  activeReveal = null;
   errWalk = null; renderErrWalkBar(); // closing the drawer ends any error walk
 }
+
+// The open drawer publishes its error-reveal fn here so the pager can reveal the
+// next error in place without re-opening the session. Null when no drawer is open.
+var activeReveal: ((idx: number) => void) | null = null;
 
 // ---- Cross-session error walk -------------------------------------------------
 // "Step through every occurrence of one error category." The dashboard widget
@@ -1615,10 +1636,8 @@ function openWalkOcc(i) {
   var n = errWalk.occ.length;
   errWalk.i = ((i % n) + n) % n; // wrap
   var o = errWalk.occ[errWalk.i];
-  if (o.sessionId === errWalk.openId) {
-    // Same session already open → just scroll to the next error block.
-    var el = document.getElementById('txerr-' + o.idx);
-    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+  if (o.sessionId === errWalk.openId && activeReveal) {
+    activeReveal(o.idx); // same session open → reveal in place
   } else {
     errWalk.openId = o.sessionId;
     openDetail(o.sessionId, { errTarget: o.idx });
