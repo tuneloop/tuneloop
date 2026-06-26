@@ -203,7 +203,11 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     }
     if (anyMiss) totalNeedingWork++
   }
-  log.info(`${sessionsToProcess.length} session(s) to scan, ${totalNeedingWork} need processing.`)
+  const n = sessionsToProcess.length
+  log.info(
+    `${n} ${n === 1 ? 'session' : 'sessions'} to scan, ` +
+      `${totalNeedingWork} ${totalNeedingWork === 1 ? 'needs' : 'need'} processing.`,
+  )
 
   const progress = new Progress(sessionsToProcess.length, totalNeedingWork)
 
@@ -299,45 +303,6 @@ function printSummary(s: Summary): void {
     out.push(`  Cost / merged PR  ${usd(s.costPerMergedPr.costPerUnit)} (${s.costPerMergedPr.count} merged)`)
   }
   if (s.analysisCostUsd > 0) out.push('  Analysis spend  ' + usd(s.analysisCostUsd) + ' (enrichment)')
-
-  const dist = (label: string, rows: { value: string; count: number }[]) => {
-    if (!rows.length) return
-    out.push('')
-    out.push('  ' + label)
-    for (const r of rows.slice(0, 8)) out.push(`    ${String(r.value).padEnd(22)} ${r.count}`)
-  }
-
-  if (s.models.length) {
-    out.push('')
-    out.push('  Models')
-    for (const m of s.models.slice(0, 6)) out.push(`    ${m.model.padEnd(22)} ${m.count}`)
-  }
-
-  if (s.outcomes.length) {
-    out.push('')
-    out.push('  Outcomes')
-    for (const o of s.outcomes) out.push(`    ${o.type.padEnd(22)} ${o.count}`)
-  }
-
-  if (s.topTools.length) {
-    out.push('')
-    out.push('  Top tools')
-    for (const t of s.topTools) {
-      const errs = t.errors > 0 ? ` (${t.errors} err)` : ''
-      out.push(`    ${t.name.padEnd(22)} ${t.calls}${errs}`)
-    }
-  }
-
-  // Enrichment (only present when LLM enrichment has run)
-  dist('Work type', s.useCases)
-  dist('Complexity', s.complexity)
-  dist('Autonomy', s.autonomy)
-  // 'Session success' is no longer a facet/distribution — it surfaces as the
-  // `session_success` outcome in the Outcomes section above.
-  if (s.features.total > 0) {
-    out.push('')
-    out.push(`  Features        ${s.features.linked} linked (${s.features.derived} LLM-proposed)`)
-  }
 
   out.push('')
   process.stdout.write(out.join('\n') + '\n')

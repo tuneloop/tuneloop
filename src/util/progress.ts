@@ -56,7 +56,7 @@ export class Progress {
       const remaining = needingWork - worked
       const avgCost = costUsd / worked
       const estTotal = costUsd + remaining * avgCost
-      line += ` | Cost: $${costUsd.toFixed(4)} (est. $${estTotal.toFixed(2)})`
+      line += ` | Cost: $${costUsd.toFixed(4)} (est. total $${estTotal.toFixed(2)})`
     }
 
     this.stream.clearLine(0)
