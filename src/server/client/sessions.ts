@@ -987,6 +987,13 @@ export function openDetail(id, focus?: any) {
             '<span class="tx-pos"><b class="tx-err-pos">—</b>/<span class="tx-err-total">' + errIds.length + '</span></span>' +
             '<button class="btn tx-err-next" type="button">›</button></div>'
           : '<span class="tx-grp none">no tool errors</span>') +
+        '<div class="tx-grp tx-search">' +
+          '<input class="tx-search-input" type="text" placeholder="Search…" />' +
+          '<button class="btn tx-search-prev" type="button" title="Previous match">‹</button>' +
+          '<span class="tx-pos"><b class="tx-search-pos">0</b>/<span class="tx-search-total">0</span></span>' +
+          '<button class="btn tx-search-next" type="button" title="Next match">›</button>' +
+          '<button class="btn tx-search-x" type="button" title="Clear">×</button>' +
+        '</div>' +
       '</div>' +
       '<div class="tx-now" id="tx-now"></div>' +
       '</div>';
@@ -1131,6 +1138,7 @@ export function openDetail(id, focus?: any) {
         b.innerHTML = on
           ? '<span class="tool-cmd-arrow" style="transform:rotate(-90deg)">&#9654;</span> collapse'
           : '<span class="tool-cmd-arrow" style="transform:rotate(90deg)">&#9654;</span> expand';
+        refreshSearch();
       };
     });
     // Expand overflow diff rows in tool blocks.
@@ -1150,6 +1158,7 @@ export function openDetail(id, focus?: any) {
       b.onclick = function () {
         var on = b.previousElementSibling.classList.toggle('on');
         b.textContent = on ? 'Show less ↑' : 'Show more ↓';
+        refreshSearch();
       };
     });
 
@@ -1260,15 +1269,33 @@ export function openDetail(id, focus?: any) {
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
     if (en) en.onclick = function () { gotoErr(errIdx + 1); };
 
+    // Search event wiring
+    var searchInput = $('#drawerBody .tx-search-input') as HTMLInputElement;
+    var searchTimer = 0;
+    if (searchInput) {
+      searchInput.oninput = function () {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(function () { transcriptSearch(searchInput.value.trim()); }, 200) as any;
+      };
+      searchInput.onkeydown = function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? jumpToSearchMatch(searchIdx - 1) : jumpToSearchMatch(searchIdx + 1); }
+        if (e.key === 'Escape') { searchInput.value = ''; transcriptSearch(''); searchInput.blur(); }
+      };
+    }
+    var spBtn = $('#drawerBody .tx-search-prev'), snBtn = $('#drawerBody .tx-search-next'), sxBtn = $('#drawerBody .tx-search-x');
+    if (spBtn) spBtn.onclick = function () { jumpToSearchMatch(searchIdx - 1); };
+    if (snBtn) snBtn.onclick = function () { jumpToSearchMatch(searchIdx + 1); };
+    if (sxBtn) sxBtn.onclick = function () { if (searchInput) { searchInput.value = ''; } transcriptSearch(''); };
+
     // ----- Block filter: focus the main thread on one PR / feature / use-case --
     function mainPaneEl() { return document.querySelector('#drawerBody .tx-scope-pane[data-scope="main"]'); }
     function renderFilterBar() {
       var c = $('#drawerBody .tx-filter-wrap'); if (!c) return;
       c.innerHTML = filterBarHtml();
       var sel = c.querySelector('.tx-fdim');
-      if (sel) sel.onchange = function () { fDim = this.value; fVal = null; renderFilterBar(); applyTxFilter(true); };
+      if (sel) sel.onchange = function () { fDim = this.value; fVal = null; renderFilterBar(); applyTxFilter(true); refreshSearch(); };
       Array.prototype.forEach.call(c.querySelectorAll('.tx-fchip'), function (b) {
-        b.onclick = function () { var v = b.getAttribute('data-v'); fVal = v === '' ? null : v; renderFilterBar(); applyTxFilter(true); };
+        b.onclick = function () { var v = b.getAttribute('data-v'); fVal = v === '' ? null : v; renderFilterBar(); applyTxFilter(true); refreshSearch(); };
       });
     }
     // `scroll` (a user chip/switcher click) lands at the top of the newly-focused
@@ -1330,16 +1357,123 @@ export function openDetail(id, focus?: any) {
     renderFilterBar();
     if (dimsAvail.length) applyTxFilter();
 
+    // ----- Transcript search: highlight + step through matches in active scope ---
+    var searchMatches = [];
+    var searchIdx = -1;
+
+    function updateSearchUI(pos, total) {
+      var p = $('#drawerBody .tx-search-pos'); if (p) p.textContent = String(pos);
+      var t = $('#drawerBody .tx-search-total'); if (t) t.textContent = String(total);
+    }
+
+    function clearHighlights() {
+      var marks = document.querySelectorAll('#dpane-transcript .tx-hl');
+      Array.prototype.forEach.call(marks, function (m) {
+        var parent = m.parentNode;
+        parent.replaceChild(document.createTextNode(m.textContent), m);
+        parent.normalize();
+      });
+      searchMatches = [];
+      searchIdx = -1;
+    }
+
+    function expandAncestors(el) {
+      var body = el.closest('.tool-block-body');
+      if (body && !body.classList.contains('on')) {
+        body.classList.add('on');
+        var tog = body.parentElement.querySelector('.tool-out-toggle');
+        if (tog) tog.classList.add('on');
+      }
+      var msg = el.closest('.msg');
+      if (msg && !msg.classList.contains('on')) msg.classList.add('on');
+      var rest = el.closest('.tool-rest');
+      if (rest && !rest.classList.contains('on')) rest.classList.add('on');
+      var dlr = el.closest('.dl-rest');
+      if (dlr && !dlr.classList.contains('on')) dlr.classList.add('on');
+      var cmd = el.closest('.tool-block-cmd.collapsible');
+      if (cmd && !cmd.classList.contains('on')) cmd.classList.add('on');
+    }
+
+    function jumpToSearchMatch(idx) {
+      if (!searchMatches.length) return;
+      if (searchIdx >= 0 && searchMatches[searchIdx]) searchMatches[searchIdx].classList.remove('active');
+      searchIdx = ((idx % searchMatches.length) + searchMatches.length) % searchMatches.length;
+      var mark = searchMatches[searchIdx];
+      mark.classList.add('active');
+      expandAncestors(mark);
+      mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      updateSearchUI(searchIdx + 1, searchMatches.length);
+    }
+
+    function transcriptSearch(query) {
+      clearHighlights();
+      if (!query) { updateSearchUI(0, 0); return; }
+      var pane = document.querySelector('#dpane-transcript .tx-scope-pane.on');
+      if (!pane) return;
+      var lowerQ = query.toLowerCase();
+      var qLen = query.length;
+      var walker = document.createTreeWalker(pane, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (n) {
+          var el = n.parentElement;
+          if (!el) return NodeFilter.FILTER_ACCEPT;
+          // Messages have .msg-prev (truncated) + .msg-full (complete). Always
+          // search the full version so matches beyond the preview are found;
+          // skip the preview to avoid duplicates. expandAncestors reveals .msg-full.
+          if (el.closest('.tx-hidden')) return NodeFilter.FILTER_REJECT;
+          if (el.closest('.msg-prev')) return NodeFilter.FILTER_REJECT;
+          // Commands have .tool-cmd-pre (first 2 lines) + .tool-cmd-full (complete).
+          // Same logic: search the full, skip the preview.
+          if (el.closest('.tool-cmd-pre')) {
+            var cmdWrap = el.closest('.tool-block-cmd.collapsible');
+            if (cmdWrap && cmdWrap.querySelector('.tool-cmd-full')) return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        }
+      });
+      var textNodes = [];
+      while (walker.nextNode()) textNodes.push(walker.currentNode);
+      for (var ni = 0; ni < textNodes.length; ni++) {
+        var node = textNodes[ni];
+        var text = node.textContent;
+        var lower = text.toLowerCase();
+        var offsets = [];
+        var idx = lower.indexOf(lowerQ);
+        while (idx !== -1) { offsets.push(idx); idx = lower.indexOf(lowerQ, idx + qLen); }
+        var nodeMarks = [];
+        for (var k = offsets.length - 1; k >= 0; k--) {
+          var range = document.createRange();
+          range.setStart(node, offsets[k]);
+          range.setEnd(node, offsets[k] + qLen);
+          var mark = document.createElement('mark');
+          mark.className = 'tx-hl';
+          range.surroundContents(mark);
+          nodeMarks.unshift(mark);
+        }
+        searchMatches = searchMatches.concat(nodeMarks);
+      }
+      updateSearchUI(searchMatches.length ? 1 : 0, searchMatches.length);
+      if (searchMatches.length) jumpToSearchMatch(0);
+    }
+
+    function refreshSearch() {
+      var q = searchInput && searchInput.value.trim();
+      if (q) transcriptSearch(q);
+    }
+
     // ----- Subagent scopes: switch tab, link from spawn calls, link back -------
     // Point the nav (turn stepper, outline, error stepper, scroll-spy) at a scope
     // and show its pane. Indices are global, so the steppers/anchors carry over.
     function switchScope(key) {
       if (!scopeByKey[key]) key = 'main';
+      if (key === activeScope) return;
       activeScope = key;
       userTurns = scopeByKey[key].userTurns;
       errIds = scopeByKey[key].errIds;
       errIdx = -1;
       curTurn = 0;
+      if (searchInput) { searchInput.value = ''; }
+      clearHighlights();
+      updateSearchUI(0, 0);
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
         b.classList.toggle('on', b.getAttribute('data-scope') === key);
       });

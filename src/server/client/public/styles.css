@@ -459,3 +459,10 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 @keyframes flashpulseR { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 2px transparent; } }
 .turn.flash { animation: flashpulse 1.2s ease; }
 .tx-error.flash { animation: flashpulseR 1.2s ease; }
+/* Transcript search */
+.tx-search { margin-left: auto; }
+.tx-search-input { width: 150px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; background: var(--paper); color: var(--ink); }
+.tx-search-input:focus { border-color: var(--emerald); outline: none; }
+.tx-search-input::placeholder { color: var(--muted); }
+.tx-hl { background: #fde68a !important; border-radius: 2px; padding: 0 1px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
+.tx-hl.active { background: #f97316 !important; color: #fff !important; outline: 2px solid #f97316; }
