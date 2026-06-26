@@ -154,9 +154,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
     const reserved = new Set(['bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    // Repeated params (?model=a&model=b) collect into one OR'd filter per facet.
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const sessTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
@@ -181,9 +182,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
     const reserved = new Set(['bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    // Repeated params (?model=a&model=b) collect into one OR'd filter per facet.
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const spendTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
@@ -262,9 +264,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
     const reserved = new Set(['outcomes', 'bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    // Repeated params (?model=a&model=b) collect into one OR'd filter per facet.
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const srTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(

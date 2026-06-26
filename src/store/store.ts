@@ -1255,39 +1255,45 @@ export class Store {
    * One compiler, reused by session filters today and cohort splits later. Column
    * identifiers and `base` are registry-defined (trusted); the value is a bound param.
    */
-  private facetPredicate(f: FacetSpec, value: string): { sql: string; params: unknown[] } {
+  private facetPredicate(f: FacetSpec, value: string | string[]): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
+    const vals = (Array.isArray(value) ? value : [value]).filter((v) => v != null && v !== '')
+    if (vals.length === 0) return { sql: '1=1', params: [] } // empty selection ⇒ no constraint
+    // One value keeps today's `= ?` (byte-identical SQL); several become an OR via
+    // `IN (?, ?, …)`. `cmp` wraps whichever column/JSON expression each source needs.
+    const ph = vals.map(() => '?').join(', ')
+    const cmp = (expr: string) => (vals.length === 1 ? `${expr} = ?` : `${expr} IN (${ph})`)
     if (f.source === 'session') {
       return f.multi
-        ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE je.value = ?)`, params: [value] }
-        : { sql: `s.${col} = ?`, params: [value] }
+        ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE ${cmp('je.value')})`, params: vals }
+        : { sql: cmp(`s.${col}`), params: vals }
     }
     if (f.source === 'annotation') {
       return f.multi
         ? {
             sql: `EXISTS (SELECT 1 FROM annotations a, json_each(a.value) je
-                  WHERE a.session_id = s.id AND a.key = ? AND je.value = ?)`,
-            params: [f.key, value],
+                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp('je.value')})`,
+            params: [f.key, ...vals],
           }
         : {
             sql: `EXISTS (SELECT 1 FROM annotations a
-                  WHERE a.session_id = s.id AND a.key = ? AND json_extract(a.value,'$') = ?)`,
-            params: [f.key, value],
+                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp("json_extract(a.value,'$')")})`,
+            params: [f.key, ...vals],
           }
     }
     if (f.source === 'block') {
-      // "sessions with a block labeled value" — session-scoped EXISTS, like model/skill.
+      // "sessions with a block labeled <any selected value>" — session-scoped EXISTS, like model/skill.
       return {
         sql: `EXISTS (SELECT 1 FROM block_annotations ba
-              WHERE ba.session_id = s.id AND ba.key = ? AND json_extract(ba.value,'$') = ?)`,
-        params: [f.key, value],
+              WHERE ba.session_id = s.id AND ba.key = ? AND ${cmp("json_extract(ba.value,'$')")})`,
+        params: [f.key, ...vals],
       }
     }
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
     const base = f.base ? `${f.base} AND ` : ''
     return {
-      sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}c.${col} = ?)`,
-      params: [value],
+      sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}${cmp(`c.${col}`)})`,
+      params: vals,
     }
   }
 
@@ -2040,8 +2046,9 @@ export interface SuccessRateQuery {
   by?: string
   from?: string
   to?: string
-  /** Session-level facet filters, applied to numerator and denominator alike. */
-  filters?: Record<string, string>
+  /** Session-level facet filters (multi-value OR within a facet), applied to
+   *  numerator and denominator alike. */
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2114,7 +2121,7 @@ export interface SessionsOverTimeQuery {
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2145,7 +2152,7 @@ export interface SpendOverTimeQuery {
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  filters?: Record<string, string[]>
   topK?: number
 }
 

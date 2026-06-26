@@ -36,14 +36,14 @@ export interface ClientState {
   metric: string | null // which headline KPI's detail view is open (null = overview)
   outcomeTypes: any[]
   days: number | 'all' // top-level KPI window (drives the whole headline row + cost-artifact curves)
-  sr: { outcomes: string[]; bucket: string; by: string } // success-rate detail controls
+  sr: { outcomes: string[]; bucket: string; by: string; filters: Record<string, string[]> } // success-rate detail controls
   // cost-per-artifact detail controls. `kind` follows defaultKind until the user
   // toggles it (userPicked), after which it sticks and the headline tile mirrors
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
   // a manual pick overrides until the window changes.
   ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string }
-  spend: { bucket: string; by: string } // total-spend detail controls
-  sm: { bucket: string; by: string } // sessions detail controls
+  spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
+  sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
   // operational detail: one shared bucket, plus a per-graph "break down by name"
   // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
   ops: { bucket: string; by: Record<string, boolean> }
@@ -58,10 +58,10 @@ export var state: ClientState = {
   days: 7,
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
-  sr: { outcomes: ['session_success'], bucket: '', by: '' },
+  sr: { outcomes: ['session_success'], bucket: '', by: '', filters: {} },
   ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '' },
-  spend: { bucket: '', by: '' },
-  sm: { bucket: '', by: '' },
+  spend: { bucket: '', by: '', filters: {} },
+  sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' }

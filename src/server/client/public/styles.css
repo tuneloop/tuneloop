@@ -54,9 +54,22 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-cnt { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .sr-by { border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
 .sr-by-ctrl { display: inline-flex; align-items: center; gap: 8px; }
+/* Metric filter clauses: a fixed field label + live value <select> + ✕, grouped
+   as one pill, inline between Bucket and Break-down. */
+.mfl-clause { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; background: var(--track); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px 3px 10px; }
+.mfl-clause .sr-by { padding: 3px 6px; }
+.mfl-k { font-size: 12px; color: var(--muted); }
+/* selected value chip (OR within a field) */
+.mfl-v { display: inline-flex; align-items: center; gap: 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 1px 2px 1px 8px; font-size: 12px; }
+.mfl-vx { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; border-radius: 999px; }
+.mfl-vx:hover { color: var(--red); }
+/* compact "+ value" adder inside a clause */
+.mfl-addv { padding: 2px 4px; font-size: 12px; }
 .sr-legend { margin-top: 10px; }
 .sr-legend .leg { display: inline-flex; align-items: center; vertical-align: middle; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
 .sr-legend .leg[data-key] { cursor: pointer; user-select: none; }
+/* overall aggregate shown in the legend when there's no breakdown */
+.leg-overall { font-size: 12px; font-weight: 600; color: var(--ink); vertical-align: middle; }
 .sr-legend .leg.off { opacity: 0.4; text-decoration: line-through; }
 .sr-legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
 .sr-legend .show-all-link { display: inline-flex; align-items: center; vertical-align: middle; font-size: 12px; color: var(--emerald); cursor: pointer; text-decoration: underline; margin-left: 8px; }

@@ -2,7 +2,7 @@
 // line per facet value.
 import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs, comboLabel } from '../core'
 import { stackChart, stackedBarChart } from '../charts'
-import { srBreakdownFacets } from '../facets'
+import { srBreakdownFacets, filterRowHtml, wireFacetFilters, facetFilterQs } from '../facets'
 
 export function renderSessionsMetric() {
   $('#metric-detail').innerHTML =
@@ -31,9 +31,12 @@ export function renderSmControls() {
     byOpts += '<option value="' + esc(f.key) + '"' + (f.key === sm.by ? ' selected' : '') + '>' + esc(f.label || f.key) + '</option>';
   });
   $('#sm-controls').innerHTML =
-    '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="sm-bucket">' + bucketBtns + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Break down by</span>' +
-      '<select class="sr-by" id="sm-by">' + byOpts + '</select></div>';
+    '<div class="sr-ctrl-row">' +
+      '<span class="sr-by-ctrl"><span class="sr-lbl">Bucket</span><span class="seg" id="sm-bucket">' + bucketBtns + '</span></span>' +
+      filterRowHtml('sm', state.sm.filters) +
+      '<span class="sr-by-ctrl" style="margin-left:18px"><span class="sr-lbl">Break down by</span>' +
+      '<select class="sr-by" id="sm-by">' + byOpts + '</select></span></div>';
+  wireFacetFilters('sm', $('#sm-controls'), state.sm.filters, renderSmControls, loadSessionsOverTime);
   Array.prototype.forEach.call($('#sm-bucket').children, function (btn) {
     btn.onclick = function () { state.sm.bucket = btn.getAttribute('data-b'); renderSmControls(); loadSessionsOverTime(); };
   });
@@ -45,7 +48,7 @@ export function loadSessionsOverTime(topK?) {
   var qs = ['bucket=' + encodeURIComponent(autoBucket(sm.bucket))];
   if (sm.by) qs.push('by=' + encodeURIComponent(sm.by));
   if (topK) qs.push('topK=' + topK);
-  get('/api/sessions-over-time?' + qs.join('&') + windowQs()).then(function (d) {
+  get('/api/sessions-over-time?' + qs.join('&') + windowQs() + facetFilterQs(sm.filters)).then(function (d) {
     if (!d || d.error) { $('#sm-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderSm(d);
   });
@@ -85,7 +88,7 @@ export function renderSm(d) {
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.count, filled: p.count }; });
     $('#sm-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int', 'Sessions');
-    $('#sm-legend').innerHTML = '';
+    $('#sm-legend').innerHTML = '<span class="leg-overall">Total ' + num(ov.total) + ' sessions</span>';
     $('#sm-note').innerHTML = esc('Sessions started per ' + autoBucket(state.sm.bucket) + '. Break down by a dimension to split it.');
   }
 }

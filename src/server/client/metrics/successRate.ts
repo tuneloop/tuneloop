@@ -6,7 +6,7 @@
 import { state, $, esc, usd, num, SR_PALETTE, get, saveSrPrefs, autoBucket, windowQs, outcomeRank, outcomeLabel, comboLabel } from '../core'
 import { loadKpis } from '../kpis'
 import { barChart, groupedBarChart } from '../charts'
-import { srBreakdownFacets } from '../facets'
+import { srBreakdownFacets, filterRowHtml, wireFacetFilters, facetFilterQs } from '../facets'
 
 // In-memory legend show/hide for the breakdown chart, keyed by series label.
 // Reset on every new query (loadSuccessRate); preserved across legend clicks,
@@ -56,9 +56,12 @@ export function renderSrControls() {
   $('#sr-controls').innerHTML =
     '<div class="sr-ctrl-row"><span class="sr-lbl">Count as success</span>' +
       '<span class="sr-checks">' + (checks || '<span class="empty">no outcomes yet</span>') + '</span></div>' +
-    '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="sr-bucket">' + bucketBtns + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Break down by</span>' +
-      '<select class="sr-by" id="sr-by">' + byOpts + '</select></div>';
+    '<div class="sr-ctrl-row">' +
+      '<span class="sr-by-ctrl"><span class="sr-lbl">Bucket</span><span class="seg" id="sr-bucket">' + bucketBtns + '</span></span>' +
+      filterRowHtml('sr', state.sr.filters) +
+      '<span class="sr-by-ctrl" style="margin-left:18px"><span class="sr-lbl">Break down by</span>' +
+      '<select class="sr-by" id="sr-by">' + byOpts + '</select></span></div>';
+  wireFacetFilters('sr', $('#sr-controls'), state.sr.filters, renderSrControls, loadSuccessRate);
   Array.prototype.forEach.call(document.querySelectorAll('.sr-oc'), function (c) {
     c.onchange = function () {
       var set = [];
@@ -81,7 +84,7 @@ export function loadSuccessRate(topK?) {
   var qs = ['outcomes=' + encodeURIComponent((sr.outcomes || []).join(',')), 'bucket=' + encodeURIComponent(autoBucket(sr.bucket))];
   if (sr.by) qs.push('by=' + encodeURIComponent(sr.by));
   if (topK) qs.push('topK=' + topK);
-  get('/api/success-rate?' + qs.join('&') + windowQs()).then(function (d) {
+  get('/api/success-rate?' + qs.join('&') + windowQs() + facetFilterQs(sr.filters)).then(function (d) {
     if (!d || d.error) { $('#sr-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderRateChart(d);
   });
@@ -184,8 +187,8 @@ export function renderRateChart(d) {
   } else {
     $('#sr-chart').innerHTML = barChart(d.buckets || [], ov.points || [], 'Sessions');
     $('#sr-legend').innerHTML =
-      '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>with a selected outcome</span>' +
-      '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>no outcome</span>';
+      '<span class="leg-overall">Overall ' + (ov.rate != null ? Math.round(ov.rate * 100) + '%' : 'n/a') +
+        ' · ' + num(ov.num) + ' of ' + num(ov.denom) + ' sessions with a selected outcome</span>';
     note = 'Bar height is sessions started in the bucket; the filled portion produced a selected outcome.';
     // No breakdown → nothing to compare; hide the per-value cost table.
     $('#sr-tbl-panel').style.display = 'none';
