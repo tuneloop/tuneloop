@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
+import { ERROR_CATEGORIES } from '../core/error-category'
 
 /** Read-only JSON API + dashboard SPA over the analyzed store. */
 export function createDashboardServer(store: Store, dbPath: string): Server {
@@ -55,6 +56,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, store.facetList())
     return
   }
+  if (path === '/api/error-categories') {
+    // Taxonomy metadata (labels + tooltip descriptions) for the error-category widget.
+    sendJson(res, 200, ERROR_CATEGORIES)
+    return
+  }
   if (path === '/api/distribution') {
     const facet = url.searchParams.get('facet')
     if (!facet) {
@@ -75,12 +81,13 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       sendJson(res, 400, { error: 'missing measure' })
       return
     }
-    const reserved = new Set(['measure', 'by'])
+    const reserved = new Set(['measure', 'by', 'from', 'to'])
     const filters: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) filters[k] = v
     }
-    sendJson(res, 200, store.breakdown(measure, q.get('by') ?? undefined, filters))
+    const window = { from: q.get('from') ?? undefined, to: q.get('to') ?? undefined }
+    sendJson(res, 200, store.breakdown(measure, q.get('by') ?? undefined, filters, window))
     return
   }
   if (path === '/api/kpis') {

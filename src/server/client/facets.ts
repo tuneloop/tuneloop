@@ -40,9 +40,16 @@ export function renderDists(o) {
 // Facets that can split a session-grain rate/count into series — any
 // session-scoped chart/filter dimension (we compile each value to a session
 // predicate, so counts explode safely). Shared by success-rate + sessions.
+//
+// error_category is suppressed here: a session hits MANY error categories, so the
+// per-session composite-set label (comboExpr) explodes into noisy combinations.
+// Skill is also tool-call grain but stays — sessions use few skills, so its split
+// stays legible. error_category's clean view is the Ops "Errors by category" widget.
+var SR_BREAKDOWN_EXCLUDE = { error_category: 1 };
 export function srBreakdownFacets() {
   return state.facets.filter(function (f) {
     var r = f.roles || [];
+    if (SR_BREAKDOWN_EXCLUDE[f.key]) return false;
     return r.indexOf('chart') >= 0 || r.indexOf('filter') >= 0;
   });
 }

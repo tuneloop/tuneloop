@@ -45,7 +45,7 @@ export interface BlockMembership {
  * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
  * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
  */
-export const NORMALIZE_VERSION = 1
+export const NORMALIZE_VERSION = 2
 
 /**
  * Assign a dense ordinal `seq` to every MAIN-THREAD event, in order. Sidechain

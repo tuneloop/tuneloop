@@ -5,6 +5,7 @@ import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
 import { deterministicBlocks } from '../core/blocks'
+import { classifyError } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
@@ -120,10 +121,12 @@ export class Store {
       this.db.prepare('DELETE FROM tool_calls WHERE session_id = ?').run(session.id)
       const insTool = this.db.prepare(
         `INSERT INTO tool_calls
-           (session_id, idx, name, action, ok, is_error, target_path, command, is_sidechain, ts, duration_ms)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+           (session_id, idx, name, action, ok, is_error, error_category, target_path, command, is_sidechain, ts, duration_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       session.toolCalls.forEach((t, idx) => {
+        // Fingerprint failed calls into a cross-harness category (NULL when ok)
+        const category = t.result.ok ? null : classifyError(t.action, resultText(t.result.raw).slice(0, 8000))
         insTool.run(
           session.id,
           idx,
@@ -131,6 +134,7 @@ export class Store {
           t.action,
           t.result.ok ? 1 : 0,
           t.result.isError ? 1 : 0,
+          category,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,
@@ -1366,6 +1370,7 @@ export class Store {
     measureKey: string,
     byFacetKey?: string,
     filters?: Record<string, string>,
+    window?: { from?: string; to?: string },
   ): { rows: Array<{ bucket: string | null; value: number }>; total: number } | { error: string } {
     const m = this.measure(measureKey)
     if (!m) return { error: 'unknown measure' }
@@ -1381,6 +1386,12 @@ export class Store {
     const where: string[] = []
     const params: unknown[] = []
     if (m.base) where.push(m.base)
+    // Window the population to the dashboard's selected range (both bounds or
+    // neither); every grain's FROM joins sessions s, so s.started_at is in scope.
+    if (window?.from && window?.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(window.from, window.to)
+    }
     for (const [k, v] of Object.entries(filters ?? {})) {
       if (!v) continue
       const spec = this.facet(k)

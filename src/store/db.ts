@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 5
+const SCHEMA_VERSION = 6
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   action       TEXT,
   ok           INTEGER,
   is_error     INTEGER,
+  error_category TEXT,       
   target_path  TEXT,
   command      TEXT,
   is_sidechain INTEGER,
@@ -71,6 +72,7 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 );
 CREATE INDEX IF NOT EXISTS ix_tool_calls_name ON tool_calls(name);
 CREATE INDEX IF NOT EXISTS ix_tool_calls_action ON tool_calls(action);
+CREATE INDEX IF NOT EXISTS ix_tool_calls_error_category ON tool_calls(error_category);
 
 -- Per-assistant-message usage facts: the atomic grain of token economics.
 -- Model / main-vs-sidechain / time are dimension columns, so every usage
@@ -286,10 +288,28 @@ export function openDb(path: string): DB {
   const db = new Database(path)
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
+  migrate(db) // add columns to pre-existing tables before SCHEMA (its indexes reference them)
   db.exec(SCHEMA)
   db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(
     'schema_version',
     String(SCHEMA_VERSION),
   )
   return db
+}
+
+/**
+ * Add columns that `CREATE TABLE IF NOT EXISTS` can't retrofit onto an existing
+ * table. Runs before SCHEMA so the schema's indexes on the new column succeed.
+ * A pragma on a not-yet-created table returns nothing, so fresh DBs skip these
+ * (SCHEMA creates the column directly) — keeping each step idempotent.
+ */
+function migrate(db: DB): void {
+  const has = (table: string, col: string): boolean => {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as Array<{ name: string }>
+    return cols.length > 0 && cols.some((c) => c.name === col)
+  }
+  const tableExists = (db.prepare(`SELECT name FROM pragma_table_info('tool_calls')`).all() as unknown[]).length > 0
+  if (tableExists && !has('tool_calls', 'error_category')) {
+    db.exec('ALTER TABLE tool_calls ADD COLUMN error_category TEXT')
+  }
 }

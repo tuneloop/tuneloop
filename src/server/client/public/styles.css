@@ -91,6 +91,12 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .bar-track { background: var(--track); border-radius: 4px; height: 10px; overflow: hidden; }
 .bar-fill { display: block; background: var(--emerald); height: 100%; }
 .bar-row .n { text-align: right; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+/* Errors-by-category rows carry "count + share", so widen the value column and keep
+   it on one line: count is the hero (ink), the percentage a muted secondary. */
+.errcat .bar-row { grid-template-columns: 130px 1fr 72px; }
+.errcat .n { white-space: nowrap; }
+.errcat .n .cnt { color: var(--ink); }
+.errcat .n .pct { margin-left: 6px; }
 .empty { color: var(--muted); font-size: 13px; font-style: italic; }
 .btn { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .btn:hover { border-color: var(--emerald); color: var(--emerald); }

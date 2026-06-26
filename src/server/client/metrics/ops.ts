@@ -43,13 +43,52 @@ export function renderOps() {
   $('#metric-detail').innerHTML =
     '<div class="metric-head"><h2>Operational Metrics</h2></div>' +
     '<div class="ops-controls" id="ops-controls"></div>' +
-    panels;
+    panels +
+    '<div class="panel"><div class="panel-head"><h2>Errors by category</h2></div>' +
+      '<div class="errcat" id="ops-errcat"></div>' +
+      '<div class="card-note">Count of failed tool calls per category (share of all errors), over the selected window. Hover a category for what it means.</div>' +
+    '</div>';
   renderOpsControls();
   OPS_VIEWS.forEach(function (v) {
     var sel = $('#ops-by-' + v.key);
     if (sel) sel.onchange = function () { state.ops.by[v.key] = this.value === 'name'; loadOps(v.key); };
     loadOps(v.key);
   });
+  loadErrorCats();
+}
+
+// Cached taxonomy metadata (key -> {label, description}) for the category tooltips.
+var errorCatTips = null;
+
+// Dedicated widget: error COUNT per category (a rate-by-category has no honest
+// denominator — categories exist only on failed rows), scoped to the window.
+export function loadErrorCats() {
+  var box = $('#ops-errcat');
+  if (!box) return;
+  var tipsP = errorCatTips
+    ? Promise.resolve(errorCatTips)
+    : get('/api/error-categories').then(function (cats) {
+        errorCatTips = {};
+        (cats || []).forEach(function (c) { errorCatTips[c.key] = c; });
+        return errorCatTips;
+      });
+  Promise.all([tipsP, get('/api/breakdown?measure=error_count&by=error_category' + windowQs())]).then(function (r) {
+    var tips = r[0] || {}, d = r[1] || {};
+    if (d.error) { box.innerHTML = '<div class="empty">Could not load error categories.</div>'; return; }
+    var rows = d.rows || [];
+    if (!rows.length) { box.innerHTML = '<div class="empty">No tool-call errors.</div>'; return; }
+    var total = d.total || 0;
+    var max = rows[0].value || 1; // rows arrive sorted by value DESC
+    box.innerHTML = rows.map(function (row) {
+      var key = row.bucket == null ? 'other' : row.bucket;
+      var meta = tips[key] || { label: key, description: '' };
+      var pct = max ? Math.round((row.value / max) * 100) : 0;
+      var share = total ? Math.round((row.value / total) * 100) : 0;
+      return '<div class="bar-row"><span class="name" title="' + esc(meta.description) + '">' + esc(meta.label) +
+        '</span><span class="bar-track"><span class="bar-fill" style="width:' + pct + '%"></span></span>' +
+        '<span class="n"><span class="cnt">' + num(row.value) + '</span><span class="pct">' + share + '%</span></span></div>';
+    }).join('');
+  }).catch(function () { box.innerHTML = '<div class="empty">Could not load error categories.</div>'; });
 }
 
 export function renderOpsControls() {
