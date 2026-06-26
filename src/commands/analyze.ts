@@ -64,8 +64,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   let parsed = 0
   let reingested = 0
 
-  // Parse every file, then group files that share a session id and merge them
-  // so each logical session is ingested and processed exactly once.
+  // Parse every session, then group those that share a logical session (Claude
+  // resume/sidechain files, Codex forks) and merge them so each is ingested and
+  // processed exactly once.
   const groups = new Map<string, Session[]>()
   const adapters = getAdapters()
   // The stored parse_version is per-adapter (`parseVersion`) composed with the
@@ -92,17 +93,27 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   for (const adapter of activeAdapters) {
     const roots = sourceRoots.get(adapter.id) ?? (opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots())
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
-    const files = await adapter.discover(roots)
-    discovered += files.length
-    for (const file of files) {
-      const session = await adapter.parse(file)
-      if (!session) continue
-      parsed++
-      parsedSessions.push(session)
+    if (adapter.discoverSessions) {
+      // Store-backed adapter (e.g. OpenCode): one DB yields many sessions.
+      const sessions = await adapter.discoverSessions(roots)
+      discovered += sessions.length
+      for (const session of sessions) {
+        parsed++
+        parsedSessions.push(session)
+      }
+    } else {
+      const files = await adapter.discover(roots)
+      discovered += files.length
+      for (const file of files) {
+        const session = await adapter.parse(file)
+        if (!session) continue
+        parsed++
+        parsedSessions.push(session)
+      }
     }
   }
 
-  // Group files into logical sessions. Same-id files merge (Claude resume/sidechain).
+  // Group sessions into logical sessions. Same-id sessions merge (Claude resume/sidechain).
   // A sub-agent transcript that lives in its own file (Codex) carries `forkedFromId`
   // pointing at its parent; fold it under its ROOT ancestor so the parent merge pulls
   // it in as a sidechain (ADR-0003). Resolve to root in a second pass since a child can
@@ -170,6 +181,24 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     if (repo) store.setSessionRepo(session.id, repo)
     await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
     processed++
+  }
+
+  // Refresh stale artifacts: let each processor with a refresh() method re-check
+  // its unresolved artifacts against the live source (e.g. open PRs → gh).
+  for (const p of processors) {
+    if (!p.refresh) continue
+    const stale = store.unresolvedArtifacts(p.name)
+    if (!stale.length) continue
+    log.debug(`refreshing ${stale.length} unresolved artifact(s) for ${p.name}`)
+    try {
+      const result = await p.refresh({ artifacts: stale, log, sh })
+      if (result.artifacts?.length || result.outcomes?.length) {
+        store.persistRefresh(p.name, result)
+        log.info(`${p.name}: refreshed ${result.artifacts?.length ?? 0} artifact(s)`)
+      }
+    } catch (err) {
+      log.warn(`refresh failed for ${p.name}: ${(err as Error).message}`)
+    }
   }
 
   const pruned = store.pruneOrphanArtifacts()

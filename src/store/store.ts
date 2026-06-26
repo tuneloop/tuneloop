@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
-import type { Session } from '../core/model'
-import type { ProcessorResult } from '../core/processor'
+import type { CanonicalAction, Session, ToolCall } from '../core/model'
+import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
 import { deterministicBlocks } from '../core/blocks'
 import { facetGroupCompatible, grainOf } from '../core/facets'
@@ -9,7 +9,7 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
+import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
 
 export interface Dist {
   value: string
@@ -189,6 +189,44 @@ export class Store {
       )
       .get(sessionId, processor) as ProcessorRunRow | undefined
     return row
+  }
+
+  unresolvedArtifacts(producer: string): ArtifactInput[] {
+    const rows = this.db
+      .prepare(
+        `SELECT id, kind, repo, ident, external_id AS externalId, source, title, owner,
+                complexity, complexity_basis AS complexityBasis, status,
+                created_at AS createdAt, completed_at AS completedAt,
+                parent_artifact_id AS parentArtifactId
+         FROM artifacts
+         WHERE producer = ? AND status IS NOT NULL AND status NOT IN ('merged', 'closed', 'shipped')`,
+      )
+      .all(producer) as ArtifactInput[]
+    return rows
+  }
+
+  persistRefresh(producer: string, result: RefreshResult) {
+    const tx = this.db.transaction(() => {
+      for (const a of result.artifacts ?? []) {
+        this.db
+          .prepare(
+            `UPDATE artifacts SET status = ?, completed_at = ? WHERE id = ? AND producer = ?`,
+          )
+          .run(a.status ?? null, a.completedAt ?? null, a.id, producer)
+      }
+      for (const o of result.outcomes ?? []) {
+        const sessionId = (
+          this.db
+            .prepare('SELECT session_id FROM session_artifacts WHERE artifact_id = ? LIMIT 1')
+            .get(o.artifactId) as { session_id: string } | undefined
+        )?.session_id
+        if (!sessionId) continue
+        this.db
+          .prepare('INSERT INTO outcomes (session_id, type, artifact_id, ts, producer) VALUES (?,?,?,?,?)')
+          .run(sessionId, o.type, o.artifactId, o.ts ?? null, producer)
+      }
+    })
+    tx()
   }
 
   /**
@@ -818,12 +856,12 @@ export class Store {
   }
 
   /**
-   * Session COUNT over time, optionally split into one series per facet value —
-   * the time-series form of the distribution cards. Counts explode safely, so
-   * (unlike spendOverTime) ANY facet works: each value adds a session-scoped
-   * predicate (via the facet compiler) to a COUNT over sessions, so "sessions
-   * that used model X / skill Y" is well-defined and multi-per-session facets
-   * (model, skill, use_case) overlap across series (`presenceInflated`).
+   * Session COUNT over time, optionally split into one series per COMPOSITE label
+   * — the time-series form of the distribution cards. Each session is labeled by
+   * the sorted set of its distinct values for the dimension (e.g. <opus, haiku>)
+   * and grouped by it, so every session lands in exactly one series and the
+   * counts partition the total (honest to STACK) — no presence-inflation. The
+   * tail past top-K collapses into "Other".
    */
   sessionsOverTime(q: SessionsOverTimeQuery): SessionsOverTimeResult {
     const bucket = q.bucket
@@ -864,27 +902,55 @@ export class Store {
 
     let series: CountSeries[] | undefined
     let truncated: { shown: number; total: number } | undefined
-    let presenceInflated: boolean | undefined
     if (q.by) {
       const f = this.facet(q.by)
       if (f) {
-        const values = this.facetDistribution(q.by)
-          .map((d) => d.value)
-          .filter((v) => v != null)
-        const shown = values.slice(0, topK)
-        if (values.length > shown.length) truncated = { shown: shown.length, total: values.length }
-        series = shown.map((v) => {
-          const p = this.facetPredicate(f, String(v))
-          const pts = runBuckets(p.sql, p.params)
-          return { key: String(v), points: pts, total: totals(pts) }
-        })
-        // A session can fall under several values when the facet is multi-valued
-        // or lives at a child grain (model/skill) → series sum past overall.
-        presenceInflated = !!f.multi || grainOf(f.source) !== 'session'
+        // Composite breakdown (mirrors successRate): GROUP BY (bucket, value-set),
+        // so each session is counted in exactly one series → the stack is honest.
+        const combo = this.comboExpr(f)
+        const params: unknown[] = [...combo.params, ...baseParams]
+        const rows = this.db
+          .prepare(
+            `SELECT tb, combo, COUNT(*) AS cnt FROM (
+               SELECT ${time} AS tb, ${combo.sql} AS combo
+               FROM sessions s WHERE ${baseWhere.join(' AND ')}
+             ) t GROUP BY tb, combo ORDER BY tb`,
+          )
+          .all(...params) as Array<{ tb: string; combo: string | null; cnt: number }>
+
+        // Order members within a combo by global volume (primary-first), which
+        // also canonicalizes the key for grouping.
+        const rank = new Map<string, number>()
+        this.facetDistribution(q.by).forEach((d, i) => { if (d.value != null) rank.set(String(d.value), i) })
+        const orderCombo = (c: string): string =>
+          c.split(', ').sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9) || (a < b ? -1 : 1)).join(', ')
+
+        const byCombo = new Map<string, CountPoint[]>()
+        for (const r of rows) {
+          const label = !r.combo ? '(none)' : orderCombo(r.combo)
+          const pts = byCombo.get(label) ?? []
+          pts.push({ bucket: r.tb, count: r.cnt })
+          byCombo.set(label, pts)
+        }
+        let all: CountSeries[] = [...byCombo.entries()]
+          .map(([key, points]) => ({ key, points, total: totals(points) }))
+          .sort((a, b) => b.total - a.total)
+
+        if (all.length > topK) {
+          // Collapse the tail into "Other" so the stack still sums to the total.
+          truncated = { shown: topK, total: all.length }
+          const otherByBucket = new Map<string, number>()
+          for (const s of all.slice(topK)) {
+            for (const p of s.points) otherByBucket.set(p.bucket, (otherByBucket.get(p.bucket) ?? 0) + p.count)
+          }
+          const otherPts = [...otherByBucket.entries()].map(([bucket, count]) => ({ bucket, count }))
+          all = [...all.slice(0, topK), { key: 'Other', points: otherPts, total: totals(otherPts) }]
+        }
+        series = all
       }
     }
 
-    return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, presenceInflated }
+    return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated }
   }
 
   /**
@@ -983,10 +1049,11 @@ export class Store {
    * sessions — cohorted by START date — that produced any outcome in the
    * selected set. Numerator = sessions with an outcome in `outcomes`; denominator
    * = all sessions in the bucket. Session-level filters apply to BOTH (so the
-   * rate is honest). With `by`, returns one series per facet value (top-K by
-   * volume): each value adds a session-scoped predicate to numerator AND
-   * denominator via the facet compiler, so multi-valued facets overlap
-   * (any_match) and nothing fans out past session grain.
+   * rate is honest). With `by`, returns one series per COMPOSITE label (top-K by
+   * volume, the tail collapsed into "Other"): each session is labeled by the
+   * sorted set of its distinct values for the dimension (e.g. <opus, haiku>), so
+   * every session falls in exactly one series and the bars partition the
+   * population — multi-valued sessions are counted once, not fanned out.
    */
   successRate(q: SuccessRateQuery): SuccessRateResult {
     const outcomes = q.outcomes.length ? q.outcomes : ['session_success']
@@ -1024,17 +1091,19 @@ export class Store {
       }
       const sql = `SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
                           COUNT(*) AS denom,
-                          SUM(CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS num
+                          SUM(CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS num,
+                          COALESCE(SUM(s.cost_usd),0) AS spend
                    FROM sessions s WHERE ${where.join(' AND ')}
                    GROUP BY bucket ORDER BY bucket`
-      const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; denom: number; num: number }>
-      return rows.map((r) => ({ bucket: r.bucket, num: r.num, denom: r.denom, rate: r.denom ? r.num / r.denom : null }))
+      const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; denom: number; num: number; spend: number }>
+      return rows.map((r) => ({ bucket: r.bucket, num: r.num, denom: r.denom, spend: r.spend, rate: r.denom ? r.num / r.denom : null }))
     }
 
     const totals = (points: RatePoint[]) => {
       const num = points.reduce((a, p) => a + p.num, 0)
       const denom = points.reduce((a, p) => a + p.denom, 0)
-      return { num, denom, rate: denom ? num / denom : null }
+      const spend = points.reduce((a, p) => a + p.spend, 0)
+      return { num, denom, spend, rate: denom ? num / denom : null }
     }
 
     const overallPoints = runBuckets('', [])
@@ -1045,16 +1114,61 @@ export class Store {
     if (q.by) {
       const f = this.facet(q.by)
       if (f) {
-        const values = this.facetDistribution(q.by)
-          .map((d) => d.value)
-          .filter((v) => v != null)
-        const shown = values.slice(0, topK)
-        if (values.length > shown.length) truncated = { shown: shown.length, total: values.length }
-        series = shown.map((v) => {
-          const p = this.facetPredicate(f, String(v))
-          const pts = runBuckets(p.sql, p.params)
-          return { key: String(v), points: pts, ...totals(pts) }
-        })
+        // Composite breakdown: label each session by the sorted SET of its distinct
+        // values (comboExpr is a correlated subquery yielding a ", "-joined string,
+        // NULL when empty), then GROUP BY (bucket, combo). Every session lands in
+        // exactly one combo, so the bars partition the population — no double-count.
+        const combo = this.comboExpr(f)
+        const where = ['s.started_at IS NOT NULL', ...filterClauses]
+        // SELECT-text param order: combo params, then numPred outcomes, then WHERE filters.
+        const params: unknown[] = [...combo.params, ...outcomes, ...filterParams]
+        const sql = `SELECT bucket, combo, COUNT(*) AS denom, SUM(has_outcome) AS num, COALESCE(SUM(cost),0) AS spend FROM (
+                       SELECT ${bucketExpr('s.started_at', bucket)} AS bucket,
+                              ${combo.sql} AS combo,
+                              (CASE WHEN ${numPred} THEN 1 ELSE 0 END) AS has_outcome,
+                              s.cost_usd AS cost
+                       FROM sessions s WHERE ${where.join(' AND ')}
+                     ) t GROUP BY bucket, combo ORDER BY bucket`
+        const rows = this.db.prepare(sql).all(...params) as Array<{ bucket: string; combo: string | null; denom: number; num: number; spend: number }>
+
+        // Order values WITHIN a combo by global volume so labels read primary-first
+        // (opus before haiku), independent of the SQL key's alpha order. Re-sorting
+        // in JS also canonicalizes the key, merging any combos SQLite emitted in a
+        // different member order.
+        const rank = new Map<string, number>()
+        this.facetDistribution(q.by).forEach((d, i) => { if (d.value != null) rank.set(String(d.value), i) })
+        const orderCombo = (c: string): string =>
+          c.split(', ').sort((a, b) => (rank.get(a) ?? 1e9) - (rank.get(b) ?? 1e9) || (a < b ? -1 : 1)).join(', ')
+
+        const byCombo = new Map<string, RatePoint[]>()
+        for (const r of rows) {
+          const label = !r.combo ? '(none)' : orderCombo(r.combo)
+          const pts = byCombo.get(label) ?? []
+          pts.push({ bucket: r.bucket, num: r.num, denom: r.denom, spend: r.spend, rate: r.denom ? r.num / r.denom : null })
+          byCombo.set(label, pts)
+        }
+        let all: RateSeries[] = [...byCombo.entries()]
+          .map(([key, points]) => ({ key, points, ...totals(points) }))
+          .sort((a, b) => b.denom - a.denom)
+
+        if (all.length > topK) {
+          // Collapse the long tail into a single "Other" series so bars still sum
+          // to the bucket total; the client offers "Show all" to expand it.
+          truncated = { shown: topK, total: all.length }
+          const otherByBucket = new Map<string, RatePoint>()
+          for (const s of all.slice(topK)) {
+            for (const p of s.points) {
+              const acc = otherByBucket.get(p.bucket) ?? { bucket: p.bucket, num: 0, denom: 0, spend: 0, rate: null }
+              acc.num += p.num
+              acc.denom += p.denom
+              acc.spend += p.spend
+              otherByBucket.set(p.bucket, acc)
+            }
+          }
+          const otherPts = [...otherByBucket.values()].map((p) => ({ ...p, rate: p.denom ? p.num / p.denom : null }))
+          all = [...all.slice(0, topK), { key: 'Other', points: otherPts, ...totals(otherPts) }]
+        }
+        series = all
       }
     }
 
@@ -1175,6 +1289,38 @@ export class Store {
       sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}c.${col} = ?)`,
       params: [value],
     }
+  }
+
+  /**
+   * Correlated subquery (alias `s`) yielding a session's DISTINCT values for a
+   * facet as one alpha-sorted, ", "-joined string — the composite label for the
+   * success-rate breakdown; empty set → NULL. Mirrors facetPredicate's source
+   * switch (identifiers/base are registry-defined and trusted, values are data).
+   */
+  private comboExpr(f: FacetSpec): { sql: string; params: unknown[] } {
+    const col = f.column ?? f.key
+    const cat = (valExpr: string, from: string, where: string, params: unknown[]) => ({
+      sql: `(SELECT group_concat(v, ', ') FROM
+             (SELECT DISTINCT ${valExpr} AS v FROM ${from}
+              WHERE ${where} AND ${valExpr} IS NOT NULL ORDER BY v))`,
+      params,
+    })
+    if (f.source === 'session') {
+      return f.multi
+        ? cat('je.value', `json_each(s.${col}) je`, '1=1', [])
+        : { sql: `s.${col}`, params: [] }
+    }
+    if (f.source === 'annotation') {
+      return f.multi
+        ? cat('je.value', 'annotations a, json_each(a.value) je', 'a.session_id = s.id AND a.key = ?', [f.key])
+        : { sql: `(SELECT json_extract(a.value,'$') FROM annotations a WHERE a.session_id = s.id AND a.key = ? LIMIT 1)`, params: [f.key] }
+    }
+    if (f.source === 'block') {
+      return cat(`json_extract(ba.value,'$')`, 'block_annotations ba', 'ba.session_id = s.id AND ba.key = ?', [f.key])
+    }
+    const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
+    const base = f.base ? `${f.base} AND ` : ''
+    return cat(`c.${col}`, `${table} c`, `${base}c.session_id = s.id`, [])
   }
 
   // ---- measures ------------------------------------------------------------
@@ -1542,20 +1688,28 @@ export class Store {
       const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
       let op: FileEdit['op']
       let hunks: Array<{ del: string; ins: string }>
-      if (tc.name === 'Write') {
+      // Distinguish write/multiedit/edit by input shape, not the raw tool name —
+      // names are case- and vendor-specific (`Write` vs `write`). Field spellings
+      // also differ (Claude Code: old_string/new_string; OpenCode: oldString/newString).
+      if (Array.isArray(input.edits)) {
+        op = 'multiedit'
+        hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
+          del: clip(String(e.old_string ?? e.oldString ?? ''), 4000),
+          ins: clip(String(e.new_string ?? e.newString ?? ''), 4000),
+        }))
+      } else if (input.content != null) {
         op = 'write'
         // Cap is generous because consecutive writes are diffed against each
         // other client-side; too small a window hides changes near the file end.
         hunks = [{ del: '', ins: clip(String(input.content ?? ''), 16000) }]
-      } else if (Array.isArray(input.edits)) {
-        op = 'multiedit'
-        hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
-          del: clip(String(e.old_string ?? ''), 4000),
-          ins: clip(String(e.new_string ?? ''), 4000),
-        }))
       } else {
         op = 'edit'
-        hunks = [{ del: clip(String(input.old_string ?? ''), 4000), ins: clip(String(input.new_string ?? ''), 4000) }]
+        hunks = [
+          {
+            del: clip(String(input.old_string ?? input.oldString ?? ''), 4000),
+            ins: clip(String(input.new_string ?? input.newString ?? ''), 4000),
+          },
+        ]
       }
       out.push({ path, op, hunks, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
     }
@@ -1841,6 +1995,11 @@ export interface RatePoint {
   bucket: string
   num: number
   denom: number
+  /** Total session cost (USD) in the bucket — feeds the per-value cost table
+   *  (total spend, and $/session = spend/denom). Summed over the SAME population
+   *  as `denom` (all sessions, not just successful ones), so spend/denom is an
+   *  honest avg cost per session. */
+  spend: number
   /** num/denom, or null when the bucket has no sessions (drawn as a gap). */
   rate: number | null
 }
@@ -1851,6 +2010,8 @@ export interface RateSeries {
   points: RatePoint[]
   num: number
   denom: number
+  /** Window-total session cost (USD); spend/denom = avg cost per session. */
+  spend: number
   rate: number | null
 }
 
@@ -1946,7 +2107,6 @@ export interface SessionsOverTimeResult {
   overall: { points: CountPoint[]; total: number }
   series?: CountSeries[]
   truncated?: { shown: number; total: number }
-  presenceInflated?: boolean
 }
 
 /** One bucket of a spend series. */
@@ -2025,6 +2185,12 @@ export interface TranscriptTool {
   action: string
   ok: boolean
   target?: string
+  /** Full tool input rendered as displayable text (key field or JSON). */
+  command?: string
+  /** Tool output/result text (clipped to OUTPUT_MAX, with an explicit tail notice if cut). */
+  output?: string
+  /** For Edit/Write: old→new hunks for inline diff rendering. */
+  hunks?: { del: string; ins: string }[]
   error?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
@@ -2240,7 +2406,7 @@ function buildTranscriptCore(session: Session): {
   turns: TranscriptTurn[]
   toolTurn: Map<string, { turn: number; userTurn: number }>
 } {
-  const resById = new Map(session.toolCalls.map((t) => [t.id, t.result]))
+  const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -2257,13 +2423,31 @@ function buildTranscriptCore(session: Session): {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
         else if (b.type === 'tool_use') {
           ids.push(b.id)
-          const input = b.input as { file_path?: string; command?: string; path?: string } | undefined
-          const target = input?.file_path ?? input?.path ?? input?.command
-          const res = resById.get(b.id)
+          const tc = tcById.get(b.id)
+          const input = b.input as Record<string, unknown> | undefined
+          // Prefer the adapter-normalized target (paths/command) over re-parsing the
+          // raw input blob, so per-vendor field spellings live in the adapter.
+          const target = tc?.target.paths?.[0] ?? tc?.target.command
+          const res = tc?.result
           const ok = res ? res.ok : true
-          // Keep the full command/path (capped for payload) so the UI can show a
-          // short preview on the chip and expand to the whole thing on demand.
+          const command = toolCommandText(tc, input)
+          const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
           const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          if (command) tool.command = command
+          if (output) tool.output = output
+          // file_write → inline diff. The before/after strings aren't in the
+          // normalized target, so read them from the raw input here; field names
+          // differ across harnesses (Claude Code: old_string/new_string;
+          // OpenCode: oldString/newString).
+          if (tc?.action === 'file_write' && input) {
+            const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
+            const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
+            if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
+            else {
+              const content = clip(String(input.content ?? ''), 2000)
+              if (content) tool.hunks = [{ del: '', ins: content }]
+            }
+          }
           if (!ok) tool.error = clipError(resultText(res?.raw))
           const spawned = spawnToAgent.get(b.id)
           if (spawned) tool.agentId = spawned
@@ -2286,9 +2470,99 @@ function buildTranscriptCore(session: Session): {
   return { turns, toolTurn }
 }
 
+/** Extract the meaningful output text for a tool, handling action-specific payloads. */
+function readableOutput(action: CanonicalAction | undefined, raw: unknown): string {
+  if (raw == null) return ''
+  if (action === 'file_read' && typeof raw === 'object' && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>
+    // Claude Code's Read result is {"type":"text","file":{"filePath":"...","content":"..."}};
+    // OpenCode stores a plain string, which falls through to resultText below.
+    const file = o.file as Record<string, unknown> | undefined
+    if (file && typeof file.content === 'string') return file.content
+  }
+  return resultText(raw)
+}
+
+/**
+ * One-line description of a tool call for the transcript. Dispatches on the
+ * adapter-assigned canonical `action` (not the raw vendor tool name), so the
+ * vocabulary differences across harnesses (`Bash` vs `bash`, `Agent` vs `task`,
+ * `AskUserQuestion` vs `question`) stay inside the adapters. Paths and shell
+ * commands come from the already-normalized `target`; everything else reads the
+ * genuinely vendor-neutral input fields (`prompt`, `pattern`, `url`, `todos`,
+ * `questions`), whose spellings match across harnesses.
+ */
+function toolCommandText(tc: ToolCall | undefined, input: Record<string, unknown> | undefined): string {
+  if (!input) return ''
+  switch (tc?.action) {
+    case 'file_read':
+    case 'file_write':
+      return clip(tc.target.paths?.[0] ?? '', 2000)
+    case 'shell':
+      return clip(tc.target.command ?? '', 2000)
+    case 'task_spawn':
+      return firstStringField(input, ['prompt'])
+    case 'skill':
+      return firstStringField(input, ['skill', 'name'])
+    case 'web':
+      return firstStringField(input, ['url', 'query'])
+    case 'search':
+      return firstStringField(input, ['pattern', 'query', 'path'])
+    case 'todo':
+      return renderTodos(input)
+  }
+  // 'other' / 'mcp_call' / unmapped: a question prompt (AskUserQuestion /
+  // OpenCode `question`) or generic query if present, else the raw input as JSON.
+  const qs = input.questions
+  if (Array.isArray(qs) && qs.length && typeof qs[0] === 'object' && qs[0]) {
+    return String((qs[0] as Record<string, unknown>).question ?? '')
+  }
+  const query = firstStringField(input, ['query'])
+  if (query) return query
+  try {
+    return clip(JSON.stringify(input, null, 2), 2000)
+  } catch {
+    return ''
+  }
+}
+
+/** First non-empty string among the given input keys, clipped for display. */
+function firstStringField(input: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const val = input[k]
+    if (typeof val === 'string' && val) return clip(val, 2000)
+  }
+  return ''
+}
+
+/** Render a todo-list tool's items as a checkbox summary. */
+function renderTodos(input: Record<string, unknown>): string {
+  const todos = input.todos
+  if (!Array.isArray(todos) || !todos.length) return ''
+  const lines = todos.map((t) => {
+    const o = (t && typeof t === 'object' ? t : {}) as Record<string, unknown>
+    const status = typeof o.status === 'string' ? o.status : ''
+    const mark = status === 'completed' ? '✓' : status === 'in_progress' ? '▶' : '○'
+    return `${mark} ${typeof o.content === 'string' ? o.content : ''}`
+  })
+  return clip(lines.join('\n'), 2000)
+}
+
 function clip(s: string | undefined, n: number): string {
   if (!s) return ''
   return s.length > n ? s.slice(0, n) + ' …' : s
+}
+
+/**
+ * Clip tool output for the transcript viewer. Generous cap (the detail payload is
+ * built per-session on demand, so this only ships for the one session being viewed),
+ * and the tail notice makes the cut explicit rather than a silent " …".
+ */
+const OUTPUT_MAX = 20000
+function clipOutput(s: string): string {
+  if (!s) return ''
+  if (s.length <= OUTPUT_MAX) return s
+  return s.slice(0, OUTPUT_MAX) + `\n\n… ${s.length - OUTPUT_MAX} more characters truncated …`
 }
 
 /**
@@ -2316,7 +2590,7 @@ function resultText(raw: unknown): string {
   }
   if (typeof raw === 'object') {
     const o = raw as Record<string, unknown>
-    for (const k of ['stderr', 'error', 'message', 'content']) {
+    for (const k of ['stdout', 'stderr', 'error', 'message', 'content']) {
       const v = o[k]
       if (typeof v === 'string' && v) return v
       if (Array.isArray(v)) return resultText(v)

@@ -2,7 +2,7 @@
 // free-text), the session table, the detail drawer, and view switching. The
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
-import { state, $, esc, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
+import { state, $, esc, renderMd, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
@@ -764,48 +764,78 @@ export function openDetail(id, focus?: any) {
     var TOOLCAP = 4;
     var errSeq = 0;        // running id per failed tool call → error-panel anchor (unique across scopes)
     var errSink = null;    // the scope currently rendering: its error-id list (errPanelHtml pushes here)
-    // A tool's target (command/path), previewed to one line with a ⋯ expand
-    // toggle when it's longer — so a long `node -e '…'` is fully inspectable.
-    var TGT_PREVIEW = 90;
-    function tgtHtml(target) {
-      if (!target) return '';
-      var t = String(target);
-      if (t.length <= TGT_PREVIEW) return ' <span class="tgt">' + esc(t) + '</span>';
-      return ' <span class="tgt"><span class="tgt-prev">' + esc(clipLine(t, TGT_PREVIEW)) + '</span>' +
-        '<span class="tgt-full">' + esc(t) + '</span>' +
-        '<button class="tgt-more" type="button" title="Show full command">⋯</button></span>';
-    }
-    function chipHtml(tl) {
-      // A spawning call with a known subagent renders as a link to that scope.
+    var CMD_COLLAPSE_LINES = 2;  // commands > this many lines get a collapse toggle
+
+    function toolBlockHtml(tl) {
       var agent = tl.agentId && subMeta[tl.agentId];
-      var go = agent ? ' <span class="tool-chip-go">view →</span>' : '';
+      var go = agent ? '<span class="tool-chip-go">view →</span>' : '';
       var attr = agent ? ' data-agent="' + esc(tl.agentId) + '"' : '';
-      return '<span class="tool-chip' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '"' + attr + '>' +
-        esc(tl.name) + tgtHtml(tl.target) + go + '</span>';
+      var errBadge = tl.ok ? '' : '<span class="tool-badge err">error</span>';
+      // Command/input — sits inline next to the tool name; collapsible if >2 lines
+      var cmd = '';
+      if (tl.command) {
+        var lines = tl.command.split('\n');
+        if (lines.length > CMD_COLLAPSE_LINES) {
+          var preview = lines.slice(0, CMD_COLLAPSE_LINES).join('\n');
+          cmd = '<div class="tool-block-cmd collapsible">' +
+            '<pre class="tool-cmd-pre">' + esc(preview) + '</pre>' +
+            '<pre class="tool-cmd-full">' + esc(tl.command) + '</pre>' +
+            '<button class="tool-cmd-toggle" type="button">' +
+            '<span class="tool-cmd-arrow" style="transform:rotate(90deg)">&#9654;</span> expand</button></div>';
+        } else {
+          cmd = '<div class="tool-block-cmd"><pre class="tool-cmd-pre">' + esc(tl.command) + '</pre></div>';
+        }
+      }
+      // Body: tool-specific output, collapsed by default behind an inline toggle
+      var body = '';
+      var toggle = '';
+      if (tl.hunks && tl.hunks.length) {
+        // Edit/Write: render as inline diff (same style as Files tab)
+        var diffRows = [];
+        tl.hunks.forEach(function (h, hi) {
+          if (hi) diffRows.push({ t: '~', s: '' });
+          diffRows = diffRows.concat(diffLines(h.del, h.ins));
+        });
+        var diffHead = diffRows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
+        var diffRest = diffRows.length > DIFF_ROW_CAP
+          ? '<div class="dl-rest">' + diffRows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
+            '<button class="fc-rows-more" type="button">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</button>'
+          : '';
+        body = '<div class="tool-block-body"><div class="fc-diff">' + diffHead + diffRest + '</div></div>';
+        toggle = '<button class="tool-out-toggle" type="button">diff</button>';
+      } else if (tl.output && tl.ok) {
+        // Generic tool output. Failed calls already surface their result in the error
+        // panel below, so an output toggle here would just duplicate it — skip it.
+        body = '<div class="tool-block-body"><pre class="tool-output-pre">' + esc(tl.output) + '</pre></div>';
+        toggle = '<button class="tool-out-toggle" type="button">output</button>';
+      }
+      // Single inline row: name · command · (output toggle / agent link) — replaces
+      // the old dedicated header row to keep each tool call compact.
+      var row = '<div class="tool-block-row"' + attr + '>' +
+        '<span class="tool-block-name">' + esc(tl.name) + '</span>' +
+        errBadge + cmd + go + toggle + '</div>';
+      // Error panel for failed calls (stepper jump target)
+      var errPanel = '';
+      if (!tl.ok && tl.error) {
+        var id = errSeq++;
+        if (errSink) errSink.push(id);
+        errPanel = '<div class="tx-error" id="txerr-' + id + '">' +
+          '<div class="tx-error-h">⚠ ' + esc(tl.name) + '</div>' +
+          '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
+      }
+      return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '">' +
+        row + body + errPanel + '</div>';
     }
-    // Failed calls get an always-visible detail panel (the error stepper's jump
-    // target): the full command (wrapped/scrollable, no truncation) above the
-    // error output, so the user sees both WHAT ran and WHY it failed.
-    function errPanelHtml(x) {
-      var id = errSeq++;
-      if (errSink) errSink.push(id);
-      return '<div class="tx-error" id="txerr-' + id + '">' +
-        '<div class="tx-error-h">⚠ ' + esc(x.name) + '</div>' +
-        (x.target ? '<div class="tx-error-cmd">' + esc(x.target) + '</div>' : '') +
-        (x.error
-          ? '<div class="tx-error-b">' + esc(x.error) + '</div>'
-          : '<div class="tx-error-b muted">(no error detail captured)</div>') + '</div>';
-    }
+
     function toolsHtml(tools) {
-      var head = tools.slice(0, TOOLCAP).map(chipHtml).join('');
+      var head = tools.slice(0, TOOLCAP).map(toolBlockHtml).join('');
       var restArr = tools.slice(TOOLCAP);
       var rest = restArr.length
-        ? '<span class="tool-rest">' + restArr.map(chipHtml).join('') + '</span>' +
+        ? '<div class="tool-rest">' + restArr.map(toolBlockHtml).join('') + '</div>' +
           '<button class="tool-more" type="button" data-n="' + restArr.length + '">+ ' + restArr.length +
           ' more tool call' + (restArr.length > 1 ? 's' : '') + '</button>'
         : '';
-      var panels = tools.filter(function (x) { return !x.ok; }).map(errPanelHtml).join('');
-      return '<div class="tools">' + head + rest + '</div>' + panels;
+      return '<div class="tools">' + head + rest + '</div>';
     }
     // A prominent, clickable banner standing in for a subagent-spawning call, so
     // the link into the subagent's scope is easy to find (and a stable anchor for
@@ -822,12 +852,16 @@ export function openDetail(id, focus?: any) {
     // (assistant/user text is capped at 20k server-side; this keeps walls of text
     // from dominating the scroll while still letting you read the whole thing).
     var MSG_PREVIEW = 1200;
-    function textBlock(text) {
+    // `md` renders the text as Markdown (assistant/subagent responses); user
+    // prompts stay plain-escaped so their literal formatting is preserved.
+    function textBlock(text, md?) {
       var t = String(text || '');
       if (!t) return '';
-      if (t.length <= 2000) return '<div class="text">' + esc(t) + '</div>';
-      return '<div class="text msg"><span class="msg-prev">' + esc(t.slice(0, MSG_PREVIEW)) + ' …</span>' +
-        '<span class="msg-full">' + esc(t) + '</span></div>' +
+      var render = md ? renderMd : esc;
+      var cls = 'text' + (md ? ' md' : '');
+      if (t.length <= 2000) return '<div class="' + cls + '">' + render(t) + '</div>';
+      return '<div class="' + cls + ' msg"><span class="msg-prev">' + render(t.slice(0, MSG_PREVIEW)) + ' …</span>' +
+        '<span class="msg-full">' + render(t) + '</span></div>' +
         '<button class="msg-more" type="button">Show more ↓</button>';
     }
 
@@ -871,7 +905,7 @@ export function openDetail(id, focus?: any) {
         } else if (t.text) {
           flushRun();
           blocks.push('<div class="turn asst" id="txt-' + i + '"' + ba + '><div class="role">' + (isSub ? 'Subagent' : 'Assistant') +
-            '</div>' + textBlock(t.text) + (tools.length ? toolsHtml(tools) : '') + '</div>');
+            '</div>' + textBlock(t.text, true) + (tools.length ? toolsHtml(tools) : '') + '</div>');
         } else if (tools.length) {
           // Surface spawning calls as their own banner; fold the rest into the run.
           // Flush when the block changes so a run stays within one block.
@@ -1088,15 +1122,27 @@ export function openDetail(id, focus?: any) {
         b.textContent = open ? '– show fewer' : '+ ' + n + ' more tool call' + (n > 1 ? 's' : '');
       };
     });
-    // Expand a chip's truncated command in place (the chip becomes a full-width block).
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tgt-more'), function (b) {
+    // Expand/collapse a tool's command section (>2 lines collapsed by default).
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tool-cmd-toggle'), function (b) {
       b.onclick = function (e) {
         e.stopPropagation();
-        var on = b.parentNode.classList.toggle('on');
-        var chip = b.closest('.tool-chip');
-        if (chip) chip.classList.toggle('exp', on);
-        b.textContent = on ? '⌃' : '⋯';
-        b.title = on ? 'Collapse' : 'Show full command';
+        var wrap = b.closest('.tool-block-cmd');
+        var on = wrap.classList.toggle('on');
+        b.innerHTML = on
+          ? '<span class="tool-cmd-arrow" style="transform:rotate(-90deg)">&#9654;</span> collapse'
+          : '<span class="tool-cmd-arrow" style="transform:rotate(90deg)">&#9654;</span> expand';
+      };
+    });
+    // Expand overflow diff rows in tool blocks.
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tool-block-body .fc-rows-more'), function (b) {
+      b.onclick = function () { b.previousElementSibling.classList.add('on'); b.style.display = 'none'; };
+    });
+    // Toggle a tool call's output/diff body (collapsed by default).
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tool-out-toggle'), function (b) {
+      b.onclick = function (e) {
+        e.stopPropagation();
+        var body = b.closest('.tool-block').querySelector('.tool-block-body');
+        if (body) b.classList.toggle('on', body.classList.toggle('on'));
       };
     });
     // Expand a long message's preview to its full text.
@@ -1320,7 +1366,7 @@ export function openDetail(id, focus?: any) {
       b.onclick = function () { switchScope(b.getAttribute('data-scope')); };
     });
     // A spawning call (banner or chip) opens its subagent's scope.
-    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-chip.agent'), function (b) {
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-block.agent .tool-block-row'), function (b) {
       b.onclick = function (e) { e.stopPropagation(); switchScope(b.getAttribute('data-agent')); };
     });
     // A subagent's "back" link returns to the main thread and flashes the call.

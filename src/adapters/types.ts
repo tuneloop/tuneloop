@@ -19,4 +19,10 @@ export interface SourceAdapter {
   discover(roots: string[]): Promise<string[]>
   /** Parse one file into a Session; null if it isn't a session this adapter owns. */
   parse(path: string): Promise<Session | null>
+  /**
+   * Store-backed alternative to discover/parse. Adapters whose sessions live in a
+   * single database (not one file per session) implement this to yield sessions
+   * directly; analyze.ts prefers it over the discover→parse file loop when present.
+   */
+  discoverSessions?(roots: string[]): Promise<Session[]>
 }

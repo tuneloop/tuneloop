@@ -77,6 +77,13 @@ export interface AssistantMessage extends BaseEvent {
   model?: string
   blocks: ContentBlock[]
   usage: TokenUsage
+  /**
+   * Native cost (USD) for this message as reported by the source, when the source
+   * computes its own cost (e.g. OpenCode, which routes to many providers aivue's
+   * rate table doesn't cover). Used by computeSessionCost as a fallback when the
+   * model has no entry in models.json. Absent for sources priced from tokens.
+   */
+  costUsd?: number
 }
 
 export interface SystemEvent extends BaseEvent {

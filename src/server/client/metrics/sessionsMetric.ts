@@ -1,7 +1,7 @@
 // Sessions detail: session count over time, optionally split into one cohort
 // line per facet value.
-import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs } from '../core'
-import { valueLineChart, stackChart } from '../charts'
+import { state, $, esc, num, SR_PALETTE, get, autoBucket, windowQs, comboLabel } from '../core'
+import { stackChart, stackedBarChart } from '../charts'
 import { srBreakdownFacets } from '../facets'
 
 export function renderSessionsMetric() {
@@ -11,6 +11,7 @@ export function renderSessionsMetric() {
     '</div>' +
     '<div class="panel">' +
       '<div class="sr-controls" id="sm-controls"></div>' +
+      '<div class="chart-title">Session Count</div>' +
       '<div id="sm-chart"></div>' +
       '<div class="sr-legend" id="sm-legend"></div>' +
       '<div class="card-note" id="sm-note"></div>' +
@@ -39,10 +40,11 @@ export function renderSmControls() {
   $('#sm-by').onchange = function () { state.sm.by = this.value; loadSessionsOverTime(); };
 }
 
-export function loadSessionsOverTime() {
+export function loadSessionsOverTime(topK?) {
   var sm = state.sm;
   var qs = ['bucket=' + encodeURIComponent(autoBucket(sm.bucket))];
   if (sm.by) qs.push('by=' + encodeURIComponent(sm.by));
+  if (topK) qs.push('topK=' + topK);
   get('/api/sessions-over-time?' + qs.join('&') + windowQs()).then(function (d) {
     if (!d || d.error) { $('#sm-chart').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderSm(d);
@@ -52,24 +54,37 @@ export function loadSessionsOverTime() {
 export function renderSm(d) {
   var ov = d.overall || { total: 0, points: [] };
   if (d.series && d.series.length) {
-    var lines = d.series.map(function (s, i) {
+    // Composite labels partition the sessions, so the breakdown stacks honestly:
+    // bar height = total session count, each segment = one value combination.
+    // Series arrive biggest-first (Other last) → biggest stacked at the bottom.
+    var series = d.series.map(function (s, i) {
+      var lab = comboLabel(s.key);
       return {
-        label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
+        // stackedBarChart reads `label` for its bar tooltip — give it the full set.
+        label: lab.full, text: lab.text, full: lab.full, total: s.total,
+        color: SR_PALETTE[i % SR_PALETTE.length],
         points: s.points.map(function (p) { return { bucket: p.bucket, y: p.count }; })
       };
     });
-    $('#sm-chart').innerHTML = valueLineChart(d.buckets || [], lines, 'int');
-    $('#sm-legend').innerHTML = lines.map(function (l) {
-      return '<span class="leg"><span class="swatch" style="background:' + l.color + '"></span>' + esc(l.label) +
-        ' <span class="sr-cnt">' + num(l.total) + '</span></span>';
+    $('#sm-chart').innerHTML = stackedBarChart(d.buckets || [], series, 'int', 'Sessions');
+    $('#sm-legend').innerHTML = series.map(function (l) {
+      return '<span class="leg" title="' + esc(l.full) + '"><span class="swatch" style="background:' + l.color + '"></span>' +
+        esc(l.text) + ' <span class="sr-cnt">' + num(l.total) + '</span></span>';
     }).join('');
-    var note = d.truncated ? 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by session count. ' : '';
-    note += 'Each line is one cohort. Hover a point for that bucket count.';
-    if (d.presenceInflated) note += ' A session can fall under several values here, so the lines sum to more than total sessions.';
+    var note = d.truncated
+      ? 'Showing the top ' + d.truncated.shown + ' of ' + d.truncated.total +
+        ' value combinations by session count; the rest are grouped as “Other”. '
+      : '';
+    note += 'Each session is grouped by the set of values it used, so the segments partition the bar — its height is the total session count.';
+    if (d.truncated) {
+      $('#sm-legend').innerHTML += ' <a class="show-all-link" data-total="' + d.truncated.total + '">Show all ' + d.truncated.total + ' combinations</a>';
+      var smLink = $('#sm-legend .show-all-link');
+      if (smLink) smLink.onclick = function () { loadSessionsOverTime(this.getAttribute('data-total')); };
+    }
     $('#sm-note').innerHTML = esc(note);
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.count, filled: p.count }; });
-    $('#sm-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int');
+    $('#sm-chart').innerHTML = stackChart(d.buckets || [], barPts, 'int', 'Sessions');
     $('#sm-legend').innerHTML = '';
     $('#sm-note').innerHTML = esc('Sessions started per ' + autoBucket(state.sm.bucket) + '. Break down by a dimension to split it.');
   }
