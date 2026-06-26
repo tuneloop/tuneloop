@@ -15,7 +15,7 @@ import type {
   SessionArtifactInput,
 } from '../store/types'
 
-const USE_CASES = ['plan', 'design', 'implement', 'research', 'debug', 'review', 'analysis', 'docs', 'other']
+const USE_CASES = ['plan', 'implement', 'debug', 'research', 'review', 'docs', 'other']
 const COMPLEXITY = ['low', 'medium', 'high']
 const AUTONOMY = ['autonomous', 'guided', 'minimal']
 const SUCCESS = ['success', 'partial', 'failure', 'unknown']
@@ -285,15 +285,13 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     `- Cover EVERY block index 0..${Math.max(0, blocks.length - 1)} with contiguous, non-overlapping runs (a partition). Merge adjacent blocks of the same use-case into one run; expect FEW runs (work changes use-case only a few times).`,
     '- Pick the single dominant use_case per run.',
     'What each use_case means (pick the best fit; when two could apply, choose the one the block\'s actions center on):',
-    '- plan: laying out an approach or breaking work into steps before building — little or no code written yet.',
-    '- design: deciding the SHAPE of the solution (architecture, interfaces, data models, tradeoffs), beyond just sequencing steps.',
+    '- plan: deciding the SHAPE of the solution (architecture, interfaces, data models, tradeoffs, laying out an approach, breaking work into steps) — before or with little code written yet.',
     '- implement: writing or changing code/config to build or modify functionality — the default for hands-on building.',
     '- debug: diagnosing and fixing a specific failure — reproducing, tracing, and correcting a bug, test failure, or error.',
+    '- research: searching external or internal data sources for gathering information — reading docs, analyzing data, web search, or learning something.',
     '- review: evaluating existing code or a change for quality/correctness (PR or code review, critique, security/architecture audit), not authoring the feature.',
-    '- research: gathering EXTERNAL or unfamiliar information — reading vendor docs, web search, learning a new library/API.',
-    '- analysis: examining the project\'s own code or data to understand or measure it — tracing how something works, auditing, computing metrics (internal focus, vs research\'s external focus).',
-    '- docs: writing or updating human-facing prose — READMEs, code comments, changelogs, guides.',
-    '- other: work that fits none of the above — chores, dependency bumps, environment/CI setup, git mechanics.',
+    '- docs: writing or updating human-facing prose — docs, READMEs, guides.',
+    '- other: work that fits none of the above — chores, dependency bumps, environment/CI setup.',
     'Rules for feature_runs (which blocks advanced which feature):',
     '- SPARSE: emit a run ONLY for blocks that substantially advanced a feature; chores/research/fixups belong to no feature — leave them out.',
     '- "feature" is the 0-based index into the "features" array above. Runs must not overlap. Most sessions need 0–2 feature_runs.',
