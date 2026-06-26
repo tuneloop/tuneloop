@@ -213,6 +213,11 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     }
   }
 
+  // Remove sessions that the parser now skips (returns null) — their parse_version
+  // stays stale since they were never re-ingested this run.
+  const staleSessionCount = store.pruneStaleSessionsByVersion(parseVersionBySource)
+  if (staleSessionCount > 0) log.debug(`pruned ${staleSessionCount} stale session(s)`)
+
   const pruned = store.pruneOrphanArtifacts()
   if (pruned > 0) log.debug(`pruned ${pruned} orphan artifact(s)`)
 

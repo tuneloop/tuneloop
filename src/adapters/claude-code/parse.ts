@@ -19,7 +19,8 @@ import { mapAction } from './actions'
 // same bytes (see analyze.ts). 4: capture subagent identity (agentId on events +
 // session.subagents from the sidechain `.meta.json`) for the tabbed transcript.
 // 5: assign main-thread `seq` (assignSeq) so the block partition + blob carry it.
-export const PARSE_VERSION = 5
+// 6: skip <synthetic> messages — emit api errors as SystemEvent, drop no-ops.
+export const PARSE_VERSION = 6
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -95,6 +96,30 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
 
     if (r.type === 'assistant' && r.message) {
       const m = r.message
+
+      // Claude Code injects synthetic assistant messages (model: "<synthetic>")
+      // for API errors and no-op turns — these never hit the real model.
+      if (m.model === '<synthetic>') {
+        // add only only if it's a terminal api error, skip no-op
+        if (r.isApiErrorMessage) {
+          const text = Array.isArray(m.content)
+            ? m.content.filter((b: Raw) => b?.type === 'text').map((b: Raw) => String(b.text ?? '')).join('\n')
+            : undefined
+          const ev: SystemEvent = {
+            kind: 'system',
+            uuid: r.uuid,
+            parentUuid: r.parentUuid ?? null,
+            ts,
+            isSidechain,
+            agentId,
+            subtype: 'api_error',
+            text,
+          }
+          events.push(ev)
+        }
+        continue // skip adding to token accumulator and models
+      }
+
       const model: string | undefined = typeof m.model === 'string' ? m.model : undefined
       if (model) models.add(model)
       const usage = usageOf(m.usage)
@@ -180,6 +205,9 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
       events.push(ev)
     }
   }
+
+  // Skip sessions where the model was never reached (e.g. only synthetic messages).
+  if (!events.some((e) => e.kind === 'assistant')) return null
 
   // A sidechain file carries one (occasionally more) subagent. Its sibling
   // `<file>.meta.json` names the subagent type/description and the parent tool
