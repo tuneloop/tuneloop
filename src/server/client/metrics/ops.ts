@@ -2,9 +2,10 @@
 // counts, tool error rate, and skill-usage counts — sharing one bucket control,
 // split across two tabs. The Tools tab shows error rate, the errors-by-category
 // breakdown, then tool-call counts; the Skills tab shows skill-usage counts.
-// Each graph can break down by tool/skill name on its own (same "Break down by"
-// dropdown the other metric graphs use). Error rate reuses the percent line
-// chart; counts use int bars (overall) or int lines (breakdown).
+// Each graph can break down by tool/skill name; the error-rate graph can also
+// break down by error category and carries row-level filters (tool name / error
+// category) that scope the rate to those calls. Error rate reuses the percent
+// line chart; counts use int bars (overall) or int lines (breakdown).
 import { state, $, esc, num, dayOf, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { lineChart, valueLineChart } from '../charts'
 import { filterByErrorCategory, startErrorWalk } from '../sessions'
@@ -33,16 +34,31 @@ function opsView(key) {
   return { key: key, title: key };
 }
 
-// One metric panel (chart + its own "break down by name" control + legend/note).
+// Break-down options for a view: none / by name, plus by-error-category on the
+// error-rate chart (which decomposes the rate into per-category contribution lines).
+function opsByOptions(v) {
+  var cur = state.ops.by[v.key] || '';
+  var html = '<option value=""' + (cur === '' ? ' selected' : '') + '>none</option>' +
+    '<option value="name"' + (cur === 'name' ? ' selected' : '') + '>' + esc(opsByLabel(v.key)) + '</option>';
+  if (v.key === 'error_rate') {
+    html += '<option value="error_category"' + (cur === 'error_category' ? ' selected' : '') + '>error category</option>';
+  }
+  return html;
+}
+
+// One metric panel (chart + its own break-down control + legend/note). The
+// error-rate panel head reads left-to-right Title → Filter → Break-down on one
+// wrapping row (the row-level filter sits inline; break-down drops to the next
+// line as a whole once the filter clauses grow). Other panels keep the title-left
+// / break-down-right head.
 function opsPanel(v) {
-  return '<div class="panel">' +
-    '<div class="panel-head"><h2>' + esc(v.title) + '</h2>' +
-      '<span class="sr-by-ctrl"><span class="sr-lbl">Break down by</span>' +
-      '<select class="sr-by" id="ops-by-' + v.key + '">' +
-        '<option value="">none</option>' +
-        '<option value="name"' + (state.ops.by[v.key] ? ' selected' : '') + '>' + esc(opsByLabel(v.key)) + '</option>' +
-      '</select></span>' +
-    '</div>' +
+  var byCtrl = '<span class="sr-by-ctrl"><span class="sr-lbl">Break down by</span>' +
+    '<select class="sr-by" id="ops-by-' + v.key + '">' + opsByOptions(v) + '</select></span>';
+  var head = v.key === 'error_rate'
+    ? '<div class="panel-head ops-erhead"><h2>' + esc(v.title) + '</h2>' +
+        '<span class="ops-flt" id="ops-flt-error_rate"></span>' + byCtrl + '</div>'
+    : '<div class="panel-head"><h2>' + esc(v.title) + '</h2>' + byCtrl + '</div>';
+  return '<div class="panel">' + head +
     '<div id="ops-chart-' + v.key + '"></div>' +
     '<div class="sr-legend" id="ops-legend-' + v.key + '"></div>' +
     '<div class="card-note" id="ops-note-' + v.key + '"></div>' +
@@ -52,7 +68,7 @@ function opsPanel(v) {
 function opsErrcatPanel() {
   return '<div class="panel"><div class="panel-head"><h2>Errors by category</h2></div>' +
     '<div class="errcat" id="ops-errcat"></div>' +
-    '<div class="card-note">Count of failed tool calls per category (share of all errors), over the selected window. Hover a category for what it means.</div>' +
+    '<div class="card-note" id="ops-errcat-note"></div>' +
   '</div>';
 }
 
@@ -72,10 +88,105 @@ export function renderOps() {
   // toggles visibility), so wire + load every one up front.
   OPS_VIEWS.forEach(function (v) {
     var sel = $('#ops-by-' + v.key);
-    if (sel) sel.onchange = function () { state.ops.by[v.key] = this.value === 'name'; loadOps(v.key); };
+    if (sel) sel.onchange = function () { state.ops.by[v.key] = this.value; loadOps(v.key); };
     loadOps(v.key);
   });
   loadErrorCats();
+  // The error-rate filter row needs the tool-name + category value lists; fetch
+  // (cached) then render + wire it.
+  ensureOpsFilterData().then(renderOpsFilter);
+}
+
+// Value sources for the error-rate filter, fetched once and cached.
+var opsToolNames = null; // string[]
+var opsFilterCats = null; // [{ key, label }]
+function ensureOpsFilterData() {
+  var ps = [];
+  if (opsToolNames == null) ps.push(get('/api/tool-names').then(function (d) { opsToolNames = d || []; }));
+  if (opsFilterCats == null) ps.push(get('/api/error-categories').then(function (d) { opsFilterCats = d || []; }));
+  return Promise.all(ps);
+}
+
+// The two row-level filter fields, each as {key, label, vals:[{value,label}]}.
+function opsFilterFields() {
+  return [
+    { key: 'toolNames', label: 'Tool name', vals: (opsToolNames || []).map(function (n) { return { value: n, label: n }; }) },
+    { key: 'errorCategories', label: 'Error category', vals: (opsFilterCats || []).map(function (c) { return { value: c.key, label: c.label }; }) },
+  ];
+}
+
+// Render + wire the error-rate filter row. Mirrors the shared metric-filter
+// look (chips + "+ value" + "+ filter") but stays ops-local: it reads its values
+// from opsToolNames / opsFilterCats and writes state.ops.filters, never the
+// global facets. Re-renders itself on change, then reloads just the error chart.
+function renderOpsFilter() {
+  var box = $('#ops-flt-error_rate');
+  if (!box) return;
+  var f = state.ops.filters;
+  var fields = opsFilterFields();
+  var clauses = fields.filter(function (fld) { return (f[fld.key] || []).length; }).map(function (fld) {
+    var sel = f[fld.key];
+    var labelOf = {};
+    fld.vals.forEach(function (v) { labelOf[v.value] = v.label; });
+    var chips = sel.map(function (v) {
+      return '<span class="mfl-v">' + esc(labelOf[v] || v) +
+        '<button class="mfl-vx" type="button" data-field="' + esc(fld.key) + '" data-val="' + esc(v) + '" title="Remove value">×</button></span>';
+    }).join('');
+    var rest = fld.vals.filter(function (v) { return sel.indexOf(v.value) < 0; });
+    var addv = '';
+    if (rest.length) {
+      var o = '<option value="">+</option>';
+      rest.forEach(function (v) { o += '<option value="' + esc(v.value) + '">' + esc(v.label) + '</option>'; });
+      addv = '<select class="sr-by mfl-addv" data-field="' + esc(fld.key) + '" title="Add value">' + o + '</select>';
+    }
+    return '<span class="mfl-clause"><span class="mfl-k">' + esc(fld.label) + '</span>' + chips + addv + '</span>';
+  }).join('');
+  var avail = fields.filter(function (fld) { return !(f[fld.key] || []).length; });
+  var addOpts = '<option value="">+ filter</option>';
+  avail.forEach(function (fld) { addOpts += '<option value="' + esc(fld.key) + '">' + esc(fld.label) + '</option>'; });
+  var add = '<select class="sr-by mfl-field" id="ops-er-fl-field"' + (avail.length ? '' : ' disabled') + '>' + addOpts + '</select>' +
+    '<select class="sr-by mfl-addval" id="ops-er-fl-val" hidden></select>';
+  box.innerHTML = '<span class="sr-lbl">Filter</span>' + clauses + add;
+
+  // Reload the chart on any change; also refresh the "Errors by category" widget
+  // when the TOOL filter changed (it scopes that widget too — but the category
+  // filter doesn't, so don't disturb an open accordion for it).
+  var reload = function (changed) {
+    renderOpsFilter();
+    loadOps('error_rate');
+    if (changed === 'toolNames') loadErrorCats();
+  };
+  Array.prototype.forEach.call(box.querySelectorAll('.mfl-vx'), function (b) {
+    b.onclick = function () {
+      var k = this.getAttribute('data-field'), v = this.getAttribute('data-val');
+      f[k] = (f[k] || []).filter(function (x) { return x !== v; });
+      reload(k);
+    };
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('.mfl-addv'), function (s) {
+    s.onchange = function () {
+      if (!this.value) return;
+      var k = this.getAttribute('data-field');
+      (f[k] = f[k] || []).push(this.value);
+      reload(k);
+    };
+  });
+  var field = $('#ops-er-fl-field'), val = $('#ops-er-fl-val');
+  if (field && val) {
+    var byKey = {};
+    fields.forEach(function (fl) { byKey[fl.key] = fl.vals; });
+    field.onchange = function () {
+      if (!this.value) { val.hidden = true; return; }
+      var o = '<option value="">value…</option>';
+      (byKey[this.value] || []).forEach(function (v) { o += '<option value="' + esc(v.value) + '">' + esc(v.label) + '</option>'; });
+      val.innerHTML = o; val.hidden = false; val.focus();
+    };
+    val.onchange = function () {
+      if (!field.value || !this.value) return;
+      f[field.value] = [this.value];
+      reload(field.value);
+    };
+  }
 }
 
 // Cached taxonomy metadata (key -> {label, description}) for the category tooltips.
@@ -86,6 +197,14 @@ var errorCatTips = null;
 export function loadErrorCats() {
   var box = $('#ops-errcat');
   if (!box) return;
+  // Mirror the chart's tool filter: the widget counts are scoped to it too.
+  var noteEl = $('#ops-errcat-note');
+  if (noteEl) {
+    var tn = state.ops.filters.toolNames || [];
+    noteEl.innerHTML = 'Count of failed tool calls per category (share of all errors)' +
+      (tn.length ? ' for ' + esc(tn.join(', ')) : '') +
+      ', over the selected window. Hover a category for what it means.';
+  }
   var tipsP = errorCatTips
     ? Promise.resolve(errorCatTips)
     : get('/api/error-categories').then(function (cats) {
@@ -93,7 +212,7 @@ export function loadErrorCats() {
         (cats || []).forEach(function (c) { errorCatTips[c.key] = c; });
         return errorCatTips;
       });
-  Promise.all([tipsP, get('/api/breakdown?measure=error_count&by=error_category' + windowQs())]).then(function (r) {
+  Promise.all([tipsP, get('/api/breakdown?measure=error_count&by=error_category' + windowQs() + opsToolQs())]).then(function (r) {
     var tips = r[0] || {}, d = r[1] || {};
     if (d.error) { box.innerHTML = '<div class="empty">Could not load error categories.</div>'; return; }
     var rows = d.rows || [];
@@ -137,7 +256,7 @@ function toggleOcc(item, cat, tips) {
   // True category total (the bar count); the occurrence list is capped, so renderOcc
   // shows a "+N more" note when total exceeds the fetched rows.
   var total = parseInt(item.getAttribute('data-total'), 10) || 0;
-  get('/api/error-occurrences?category=' + encodeURIComponent(cat) + windowQs()).then(function (occ) {
+  get('/api/error-occurrences?category=' + encodeURIComponent(cat) + windowQs() + opsToolQs()).then(function (occ) {
     panel.setAttribute('data-loaded', '1');
     renderOcc(panel, cat, occ || [], tips, total);
   }).catch(function () {
@@ -205,10 +324,28 @@ export function renderOpsControls() {
   });
 }
 
+// Tool-name params alone (repeated per value). Shared by the error-rate chart and
+// the "Errors by category" widget/drilldown, which the tool filter also scopes.
+function opsToolQs() {
+  var qs = '';
+  (state.ops.filters.toolNames || []).forEach(function (v) { qs += '&tool_name=' + encodeURIComponent(v); });
+  return qs;
+}
+
+// Full row-level filter params for the error-rate chart: tool names + the
+// error-category numerator scope. Empty for the other views.
+function opsFilterQs() {
+  var qs = opsToolQs();
+  (state.ops.filters.errorCategories || []).forEach(function (v) { qs += '&error_category=' + encodeURIComponent(v); });
+  return qs;
+}
+
 export function loadOps(view, topK?) {
   var by = state.ops.by[view];
   opsHidden[view] = {}; // a new query may have a different set of lines — start all-visible
-  var qs = 'view=' + encodeURIComponent(view) + '&bucket=' + encodeURIComponent(autoBucket(state.ops.bucket)) + (by ? '&by=name' : '') + windowQs();
+  var qs = 'view=' + encodeURIComponent(view) + '&bucket=' + encodeURIComponent(autoBucket(state.ops.bucket)) +
+    (by ? '&by=' + encodeURIComponent(by) : '') + windowQs();
+  if (view === 'error_rate') qs += opsFilterQs();
   if (topK) qs += '&topK=' + topK;
   get('/api/ops-over-time?' + qs).then(function (d) {
     if (!d || d.error) { $('#ops-chart-' + view).innerHTML = '<div class="empty">No data.</div>'; return; }
@@ -270,7 +407,7 @@ export function renderOpsChart(view, d) {
     // Error rate → percent line chart (reusing the success-rate renderer).
     if (hasBreakdown) {
       var rlines = d.series.map(function (s, i) {
-        return { key: s.key, label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
+        return { key: s.key, label: s.label || s.key, color: SR_PALETTE[i % SR_PALETTE.length], rate: s.total,
           points: s.points.map(function (p) { return { bucket: p.bucket, rate: p.value, num: p.errors, denom: p.calls }; }) };
       });
       paintOps(view, d, rlines, 'pct'); // interactive legend (hide/show lines)
@@ -281,12 +418,14 @@ export function renderOpsChart(view, d) {
       $('#ops-legend-' + view).innerHTML = '<span class="leg"><span class="swatch" style="background:' + oline[0].color + '"></span>error rate' +
         (oline[0].rate != null ? ' <span class="sr-cnt">' + Math.round(oline[0].rate * 100) + '%</span>' : '') + '</span>';
     }
-    note = 'Error rate = errored tool calls / all tool calls, dated at session start.';
+    note = d.by === 'error_category'
+      ? 'Each line = a category\'s errored calls ÷ all calls in the bucket; the lines sum to the overall error rate.'
+      : 'Error rate = errored tool calls / all tool calls, dated at session start.';
   } else {
     // Counts → int bars (overall) / int lines (breakdown).
     if (hasBreakdown) {
       var clines = d.series.map(function (s, i) {
-        return { key: s.key, label: s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
+        return { key: s.key, label: s.label || s.key, color: SR_PALETTE[i % SR_PALETTE.length], total: s.total,
           points: s.points.map(function (p) { return { bucket: p.bucket, y: p.value }; }) };
       });
       paintOps(view, d, clines, 'int'); // interactive legend (hide/show lines)
@@ -302,6 +441,7 @@ export function renderOpsChart(view, d) {
     }
     note = (d.view === 'skill_usage' ? 'Skill invocations' : 'Tool calls') + ' per bucket, dated at session start.';
   }
-  if (d.truncated) note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total + ' by call volume. ' + note;
+  if (d.truncated) note = 'Showing top ' + d.truncated.shown + ' of ' + d.truncated.total +
+    (d.by === 'error_category' ? ' by error volume. ' : ' by call volume. ') + note;
   $('#ops-note-' + view).innerHTML = esc(note);
 }

@@ -80,6 +80,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 22px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .panel-head h2 { margin: 0; font-size: 18px; }
+/* Ops error-rate head: Title → Filter → Break-down, left-aligned and wrapping, so
+   the break-down group drops to the next line as a whole once filters accumulate. */
+.panel-head.ops-erhead { justify-content: flex-start; flex-wrap: wrap; gap: 10px 14px; }
+.ops-flt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; background: var(--paper); padding: 5px 12px; cursor: pointer; font-size: 13px; color: var(--muted); }
 .seg button.on { background: var(--ink); color: #f3efe6; }
