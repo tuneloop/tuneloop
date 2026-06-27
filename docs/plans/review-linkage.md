@@ -1,0 +1,123 @@
+# PR ↔ review-session linkage
+
+Status: **planned, no code written.** Branch: `pr-review-linkage` (off `main`).
+
+## Goal
+
+aivue today links a PR to the session that **created/merged** it. We want to also
+link a PR to the session(s) that **reviewed** it — a new `reviewed` relationship —
+so the dashboard can answer "who reviewed PR X" and "what did reviewing cost."
+
+**Scope: Layer 2 only (derived).** Link a session to a PR as `reviewed` when the
+session (a) has work classified `use_case = 'review'` and (b) read that PR's
+diff/contents. Explicit `gh pr review` posting (Layer 1) and block-grain review
+**cost** are deferred follow-ups.
+
+## Relevant current state (context)
+
+- **PR detection** lives in `src/processors/outcomes-git.ts`. It only fires on
+  `gh pr create|merge` (shell) or an MCP tool named `*pull_request*` +
+  `create|merge|update`. It upserts a PR artifact (natural key
+  `pr:owner/repo:num`), `gh pr view`-enriches it (title/state/mergedAt/diff/author),
+  links the session `role:'created'`, and emits `pr_created`/`pr_merged` outcomes.
+  It **deliberately ignores** bare PR URLs in read/fetch output (past false-positive fix).
+- **`use_case`** is block-grain, produced by the LLM in `src/processors/enrich-session.ts`
+  and stored in `block_annotations` (key `use_case`). `USE_CASES` currently =
+  `['plan','implement','debug','research','review','docs','other']` — `review` exists.
+- **Processor order:** registration order is `segment-blocks → files-touched →
+  outcomes-git → enrich-session` (`src/processors/index.ts`); the runner
+  (`src/core/runner.ts` `orderProcessors`) topo-sorts by `requires`. `enrich-session`
+  only `requires: ['segment-blocks']`, so it runs after `outcomes-git` **only by
+  registration tiebreak, not by an explicit dependency.**
+- **Processors have no store access.** `ProcessorContext = { session, log, llmEnabled,
+  llm, existingFeatures, sh }`. A processor returns a `ProcessorResult`; the runner
+  persists it per-`producer` (delete-then-insert → idempotent). So a *separate*
+  review processor could not read the `use_case` that enrich-session just wrote.
+- **Tables** (`src/store/db.ts`):
+  - `artifacts(id PK, kind, repo, ident, owner, title, status, completed_at,
+    complexity, parent_artifact_id, producer, …)` — PR id = `pr:owner/repo:num`.
+  - `session_artifacts(session_id→sessions FK, artifact_id [NO FK], role, source,
+    confidence, producer)` PK `(session_id, artifact_id, role)`.
+  - `block_artifacts(… block_idx … artifact_id [NO FK], role, …)` — block-grain.
+  - `artifact_links(from_id, to_id, relation, …)` — artifact↔artifact.
+  - `outcomes(session_id→sessions FK, type, artifact_id [NO FK], ts, producer)`.
+  - **No FK on `artifact_id`** anywhere — a relationship may reference a missing
+    artifact with no error (it just dangles → PR invisible in joins).
+  - Artifact upsert is `INSERT OR REPLACE` (whole-row) — a stub write clobbers a
+    richer row, so any writer must write the fully-enriched artifact, not a stub.
+  - `pruneOrphanArtifacts()` deletes non-`user` artifacts with no `session_artifacts`
+    link and no `artifact_links` — **link-based, not producer-based** (self-cleaning).
+  - `SessionArtifactRole = 'created' | 'edited' | 'contributed'`.
+
+## The gate (Layer 2)
+
+Link session → PR `reviewed` when ALL hold:
+1. The session has ≥1 block with `use_case === 'review'` (from `parsed.use_case_runs`
+   in enrich-session — no store read needed).
+2. The session **read** that PR (`kind: 'read'`): `gh pr view`/`gh pr diff`, MCP
+   `get_pull_request*`, a web fetch of the PR URL, or the PR URL in a genuine human
+   prompt — with **resolvable** `owner/repo/num`.
+3. The session did **not** create/merge that PR (self-review exclusion).
+
+## Proposed solution
+
+**Do the linkage inside `enrich-session`** (it already has `use_case`, `session.toolCalls`,
+`session.events`, and `ctx.sh` in hand — no runner/context change). Keep artifact
+ownership out of it.
+
+### Ownership split (so the reviewing session never writes the `artifacts` table)
+- **`outcomes-git` owns `artifacts`.** Extend it to also detect **read** PRs
+  (resolvable identity only) and create + `gh`-enrich those artifact rows, in
+  addition to today's created/merged. (No link for read-only PRs — just the row.)
+- **`enrich-session` owns only the `reviewed` relationship.** Gated on the rule
+  above, it emits `session_artifacts { role:'reviewed', source:'derived',
+  confidence:~0.6 }` + a `pr_reviewed` outcome, referencing the natural key. It
+  never touches `artifacts`.
+- Make ordering explicit: add `requires: ['outcomes-git']` to `enrich-session` so
+  the artifact exists before the relationship references it (no FK → otherwise the
+  link dangles and the PR is invisible, silently).
+
+### Wrinkle 1 — PR identity extraction (`parsePrRefs`, shared helper)
+Resolve **only** to `owner/repo/num`, else skip. Priority:
+1. Full PR URL `https://github.com/(owner)/(repo)/pull/(num)` in: human prompt text
+   (machinery filtered), `tool.target.command`, `tool.result.raw`, MCP `tool.input`.
+2. `gh pr <view|diff|create|merge|review|checkout|comment> (num) … --repo (owner)/(repo)`.
+3. Bare number (`gh pr diff 21`, no `--repo`, no URL) → **skip** (cwd gives repo
+   basename but no owner).
+Dedupe by `pr:owner/repo:num`; tag `kind` (`create`/`merge` vs read-ish `view`/`diff`).
+
+### Wrinkle 2 — artifact ownership (decided: reviewing session writes relationships only)
+Resolved by the ownership split above. **One open decision** on *how* the read-PR
+artifact gets created:
+- **Design X (recommended, leaning):** `outcomes-git` creates+enriches artifacts for
+  **all** resolvable read PRs. Ones never reviewed/created end up unlinked →
+  `pruneOrphanArtifacts` deletes them. Cost: an extra `gh pr view` per viewed PR +
+  transient rows. Clean ownership; enrich stays purely relational.
+- **Design Y (alternative):** `enrich-session` does a **non-destructive**
+  `INSERT … ON CONFLICT DO NOTHING` to ensure the artifact exists only for PRs it
+  actually links. Avoids wasted enrichment, but is technically "the reviewer touching
+  `artifacts`" (harmlessly) and needs a new non-clobbering upsert path.
+- **TODO: confirm X vs Y before implementing.**
+
+## Implementation steps
+1. `src/processors/github-pr.ts` (new): `parsePrRefs(session)` + `enrichPrArtifact(sh, base)`,
+   refactored out of `outcomes-git.ts`. Refactor `outcomes-git` to use them (no behavior change).
+2. [Design X] Extend `outcomes-git` to create+enrich artifacts for resolvable **read** PRs
+   (no link).
+3. `src/store/types.ts`: add `'reviewed'` to `SessionArtifactRole` (no migration — TEXT,
+   already part of the `session_artifacts` PK so `created` + `reviewed` coexist).
+4. `src/processors/enrich-session.ts`: after parsing, if a `review` block exists, derive
+   reviewed read-PRs (shared parser) minus self-created, emit `session_artifacts`
+   `role:'reviewed'` + `outcome 'pr_reviewed'`. Add `requires: ['outcomes-git']`. Bump
+   `version` 12 → 13 (so existing sessions re-run).
+5. Test: fixture session (review `use_case` + `gh pr diff` + prompt URL) asserts the
+   `reviewed` link is created; a self-created PR is **not** double-linked; an
+   owner-unknown read is skipped.
+
+## Open questions / deferred
+- **Confirm Design X vs Y** (the only blocking decision).
+- Block-grain review **cost** (`block_artifacts` `role:'reviewed'` → cost-per-review) — follow-up.
+- Layer 1 (explicit `gh pr review` posting → `pr_reviewed`/`pr_approved`) — follow-up.
+- Layer 2 is **LLM-dependent** (no `use_case` without enrichment) — accepted.
+- The read path already returns `sa.role`/`sa.source` per session artifact, so a
+  `reviewed` role surfaces in session detail with no client change.
