@@ -260,11 +260,22 @@ function exitCodeOf(out: string | undefined): number | null {
 }
 
 /**
- * A failed MCP/tool call with no exit code. Codex frames these with a literal
- * `tool call error:` prefix in the output text, while a success carries the tool's JSON result.
+ * A failed tool call with no exit code — three Codex framings, none carrying one:
+ *  - MCP/tool transport failures get a literal `tool call error:` prefix.
+ *  - A command that never ran (binary missing, or a sandbox/spawn error) is framed
+ *    `exec_command failed for ...` — exec-tool-specific, line-anchored so echoed
+ *    stdout can't masquerade as the status line.
+ *  - A user-DENIED approval. Codex attaches the decision reason `rejected by user`
+ *    regardless of which tool was gated, so we match THAT rather than any one
+ *    tool's wrapper — an exec rejection arrives as `exec_command failed for ...:
+ *    CreateProcess { message: "Rejected("rejected by user")" }`, but a denied
+ *    apply_patch / MCP call won't carry the exec prefix. Without this a rejected
+ *    call reads as a success (no exit code, no `tool call error:`) and vanishes.
+ *    Keep in sync with error-category's `user_rejected` rule (same text).
  */
 function toolCallFailed(out: string | undefined): boolean {
-  return out != null && out.includes('tool call error:')
+  if (out == null) return false
+  return out.includes('tool call error:') || /^exec_command failed for /m.test(out) || out.includes('rejected by user')
 }
 
 /** Shared zero-usage sentinel — its identity flags a content-only (no token_count) flush. */

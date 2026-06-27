@@ -37,13 +37,16 @@ export function renderDists(o) {
   if (box) box.innerHTML = cards.join('');
 }
 
-// Facets that can split a session-grain rate/count into series — any
-// session-scoped chart/filter dimension (we compile each value to a session
-// predicate, so counts explode safely). Shared by success-rate + sessions.
+// Facets that can split a session-grain rate/count into series — any facet
+// declared as a CHART dimension (we compile each value to a session predicate,
+// so counts explode safely). Shared by success-rate + sessions. A facet declares
+// its own eligibility via the `chart` role: error_category is `filter`-only, so a
+// session's MANY error categories never explode the per-session composite-set
+// label here — its clean view is the Ops "Errors by category" widget. Skill stays
+// (tool-call grain but a chart dimension), since sessions use few skills.
 export function srBreakdownFacets() {
   return state.facets.filter(function (f) {
-    var r = f.roles || [];
-    return r.indexOf('chart') >= 0 || r.indexOf('filter') >= 0;
+    return (f.roles || []).indexOf('chart') >= 0;
   });
 }
 

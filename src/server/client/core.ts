@@ -44,9 +44,10 @@ export interface ClientState {
   ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string }
   spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
   sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
-  // operational detail: one shared bucket, plus a per-graph "break down by name"
-  // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
-  ops: { bucket: string; by: Record<string, boolean> }
+  // operational detail: one shared bucket, a per-graph "break down by" choice
+  // ('' | 'name' | 'error_category'), and row-level scopes for the error-rate
+  // chart (tool names + error categories — ops-specific, not the shared facets).
+  ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
 }
@@ -62,7 +63,7 @@ export var state: ClientState = {
   ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
-  ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
+  ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' }
 };

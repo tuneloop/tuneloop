@@ -27,7 +27,7 @@ export function renderSmControls() {
     return '<button class="' + (b === activeBucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
   var byOpts = '<option value="">none</option>';
-  srBreakdownFacets().forEach(function (f) { // any chart/filter facet (counts explode safely)
+  srBreakdownFacets().forEach(function (f) { // any chart-dimension facet (counts explode safely)
     byOpts += '<option value="' + esc(f.key) + '"' + (f.key === sm.by ? ' selected' : '') + '>' + esc(f.label || f.key) + '</option>';
   });
   $('#sm-controls').innerHTML =
