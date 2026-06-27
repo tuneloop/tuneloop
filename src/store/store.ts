@@ -3,6 +3,7 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import type { CanonicalAction, Session, ToolCall } from '../core/model'
 import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
+import { parseApplyPatch } from './apply-patch'
 import { deterministicBlocks } from '../core/blocks'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
@@ -1688,10 +1689,19 @@ export class Store {
     const out: FileEdit[] = []
     for (const tc of session.toolCalls) {
       if (tc.action !== 'file_write' || !tc.result.ok) continue
+      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
+      // Codex's `apply_patch` stores the raw V4A patch TEXT (a string) and can touch
+      // several files in one call. Expand it to one FileEdit per file; the object-shaped
+      // path below (Claude Code, OpenCode) handles `{content}` / `{old_string,…}` inputs.
+      if (typeof tc.input === 'string') {
+        for (const fe of parseApplyPatch(tc.input)) {
+          out.push({ ...fe, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
+        }
+        continue
+      }
       const path = tc.target.paths?.[0]
       if (!path) continue
       const input = (tc.input ?? {}) as Record<string, unknown>
-      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
       let op: FileEdit['op']
       let hunks: Array<{ del: string; ins: string }>
       // Distinguish write/multiedit/edit by input shape, not the raw tool name —
