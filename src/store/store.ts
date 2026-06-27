@@ -615,10 +615,48 @@ export class Store {
     }
   }
 
-  /** The windowed "reliable facts" behind the Highlights digest — biggest shipped
-   *  artifact, converted spend, busiest source file, and the feature you put the
-   *  most sessions into — all scoped to [from, to) (omit for all-time) so the whole
-   *  digest honors the dashboard window. */
+  /** The single most significant week-over-week move to lead the digest with:
+   *  compares this window's headline KPIs (spend, success rate, session count) to
+   *  the prior equal-length window and returns the biggest mover — normalized to
+   *  how many times over its own "notable" bar each one is, so one metric type
+   *  can't dominate just because its natural swings run larger. Null when nothing
+   *  clears its bar, or the prior window's base is too thin to trust the delta.
+   *  Only called for a bounded [from, to). */
+  private trendHeadline(from: string, to: string): Highlight | null {
+    const span = new Date(to).getTime() - new Date(from).getTime()
+    const prevFrom = new Date(new Date(from).getTime() - span).toISOString()
+    const cur = this.kpis(from, to)
+    const prev = this.kpis(prevFrom, from)
+    const cands: Array<{ score: number; h: Highlight }> = []
+    // Spend: relative change; needs a non-trivial prior base so a $1→$3 blip
+    // doesn't read as "+200%".
+    if (prev.totalSpend >= 5) {
+      const pct = ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
+      if (Math.abs(pct) >= 20)
+        cands.push({ score: Math.abs(pct) / 20, h: { kind: 'trend', metric: 'spend', cur: cur.totalSpend, prev: prev.totalSpend, pct: Math.round(pct) } })
+    }
+    // Success rate: percentage-point change; needs enough sessions both sides for
+    // the rate to mean anything.
+    if (cur.successRate != null && prev.successRate != null && cur.sessions >= 3 && prev.sessions >= 3) {
+      const pp = (cur.successRate - prev.successRate) * 100
+      if (Math.abs(pp) >= 10)
+        cands.push({ score: Math.abs(pp) / 10, h: { kind: 'trend', metric: 'rate', cur: cur.successRate, prev: prev.successRate, pp: Math.round(pp) } })
+    }
+    // Session count: relative change; needs a non-trivial prior base.
+    if (prev.sessions >= 3) {
+      const pct = ((cur.sessions - prev.sessions) / prev.sessions) * 100
+      if (Math.abs(pct) >= 25)
+        cands.push({ score: Math.abs(pct) / 25, h: { kind: 'trend', metric: 'sessions', cur: cur.sessions, prev: prev.sessions, pct: Math.round(pct) } })
+    }
+    if (!cands.length) return null
+    cands.sort((a, b) => b.score - a.score)
+    return cands[0]!.h
+  }
+
+  /** The windowed "reliable facts" behind the Highlights digest — most-spend
+   *  shipped artifact, its stalled (not-yet-shipped) counterpart, converted spend,
+   *  and the busiest source file — all scoped to [from, to) (omit for all-time) so
+   *  the whole digest honors the dashboard window. */
   private windowedFacts(from?: string, to?: string) {
     const w = from && to ? ' AND s.started_at >= ? AND s.started_at < ?' : ''
     const wp: string[] = from && to ? [from, to] : []
@@ -631,26 +669,23 @@ export class Store {
                      WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL)${w}`,
     )
 
-    // Busiest source file — most distinct sessions, skipping generated noise.
-    const topFile = this.db
+    // Busiest source file — most distinct sessions, skipping generated noise. We
+    // fetch the top two so the digest can require a CLEAR leader (a lone winner,
+    // not one of a big pack tied at the same low count — that tie is what made the
+    // old "more than any other" claim misleading).
+    const topFiles = this.db
       .prepare(
         `SELECT fi.path AS path, COUNT(DISTINCT fi.session_id) AS sessions
          FROM files_index fi JOIN sessions s ON s.id = fi.session_id
          WHERE 1=1${w}
            AND fi.path NOT LIKE '%.lock' AND fi.path NOT LIKE '%lock.json'
            AND fi.path NOT LIKE '%lock.yaml' AND fi.path NOT LIKE '%/go.sum'
-         GROUP BY fi.repo, fi.path ORDER BY sessions DESC, fi.path LIMIT 1`,
+         GROUP BY fi.repo, fi.path ORDER BY sessions DESC, fi.path LIMIT 2`,
       )
-      .get(...wp) as { path: string; sessions: number } | undefined
-
-    const feature = this.db
-      .prepare(
-        `SELECT a.title AS title, COUNT(DISTINCT s.id) AS sessions
-         FROM artifacts a JOIN session_artifacts sa ON sa.artifact_id = a.id JOIN sessions s ON s.id = sa.session_id
-         WHERE a.kind = 'feature'${w}
-         GROUP BY a.id ORDER BY sessions DESC, a.title LIMIT 1`,
-      )
-      .get(...wp) as { title: string; sessions: number } | undefined
+      .all(...wp) as Array<{ path: string; sessions: number }>
+    const topFile = topFiles[0]
+      ? { path: topFiles[0].path, sessions: topFiles[0].sessions, clearLead: !topFiles[1] || topFiles[0].sessions > topFiles[1].sessions }
+      : undefined
 
     // Biggest shipped: shipped feature → merged PR → wip feature, among artifacts
     // active in the window, ranked by block-attributed cost (matches the Artifacts table).
@@ -666,32 +701,44 @@ export class Store {
         ? `EXISTS (SELECT 1 FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
                    WHERE sa.artifact_id = a.id AND s.started_at >= ? AND s.started_at < ?)`
         : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id)`
-    const pickWin = (kind: string, shippedOnly: boolean) =>
+    const pickWin = (kind: string, completion: 'shipped' | 'unshipped') =>
       this.db
         .prepare(
           `SELECT a.title AS title, a.repo AS repo, a.ident AS ident, ${blockCost} AS cost
-           FROM artifacts a WHERE a.kind = ?${shippedOnly ? ' AND a.completed_at IS NOT NULL' : ''} AND ${inWindow}
+           FROM artifacts a
+           WHERE a.kind = ? AND a.completed_at IS ${completion === 'shipped' ? 'NOT NULL' : 'NULL'} AND ${inWindow}
            ORDER BY cost DESC LIMIT 1`,
         )
         .get(...(from && to ? [kind, from, to] : [kind])) as
         | { title: string; repo: string | null; ident: string | null; cost: number }
         | undefined
 
-    let spotlight:
-      | { kind: 'feature' | 'pr'; verb: 'shipping' | 'working on'; title: string; repo: string | null; ident: string | null; cost: number }
-      | null = null
-    const sf = pickWin('feature', true)
-    if (sf) spotlight = { kind: 'feature', verb: 'shipping', ...sf }
+    type Pick = { kind: 'feature' | 'pr'; title: string; repo: string | null; ident: string | null; cost: number }
+    // Most AI spend on SHIPPED work: a shipped feature if the user marks any
+    // shipped, else the costliest merged PR. No unshipped fallback — that's what
+    // `stalled` is for.
+    const shippedFeat = pickWin('feature', 'shipped')
+    let spotlight: Pick | null = null
+    if (shippedFeat) spotlight = { kind: 'feature', ...shippedFeat }
     else {
-      const pr = pickWin('pr', true)
-      if (pr) spotlight = { kind: 'pr', verb: 'shipping', ...pr }
-      else {
-        const wf = pickWin('feature', false)
-        if (wf) spotlight = { kind: 'feature', verb: 'working on', ...wf }
-      }
+      const pr = pickWin('pr', 'shipped')
+      if (pr) spotlight = { kind: 'pr', ...pr }
     }
 
-    return { total, shipped, topFile, feature, spotlight }
+    // Most AI spend NOT yet shipped (stalled): an unshipped feature, but only when
+    // the user actually marks features shipped (otherwise every feature is
+    // trivially "unshipped" and it's noise) — else fall back to the costliest
+    // open/unmerged PR, a reliable git-derived signal that works for new users.
+    let stalled: Pick | null = null
+    if (shippedFeat) {
+      const uf = pickWin('feature', 'unshipped')
+      if (uf) stalled = { kind: 'feature', ...uf }
+    } else {
+      const up = pickWin('pr', 'unshipped')
+      if (up) stalled = { kind: 'pr', ...up }
+    }
+
+    return { total, shipped, topFile, spotlight, stalled }
   }
 
   /** The Highlights digest: a few reliably-interesting facts plus facet-WALKED
@@ -703,20 +750,38 @@ export class Store {
    *  omit for all-time. */
   highlights(from?: string, to?: string): Highlight[] {
     const out: Highlight[] = []
+    // A stalled-spend insight only fires when the costliest unshipped artifact is a
+    // meaningful slice of the window's spend (so a tiny unshipped feature is quiet).
+    const STALLED_MIN_SHARE = 0.15
     const f = this.windowedFacts(from, to)
+
+    // --- Week-over-week trend headline (only over a bounded window, where a
+    // "previous window" exists to compare against) ---
+    if (from && to) {
+      const trend = this.trendHeadline(from, to)
+      if (trend) out.push(trend)
+    }
 
     // --- Reliable facts, windowed (show when the data exists) ---
     if (f.spotlight) {
       const sp = f.spotlight
-      out.push({ kind: 'biggest_shipped', artifactKind: sp.kind, verb: sp.verb, title: sp.title, repo: sp.repo, ident: sp.ident, cost: sp.cost })
+      out.push({ kind: 'biggest_shipped', artifactKind: sp.kind, title: sp.title, repo: sp.repo, ident: sp.ident, cost: sp.cost })
     }
+    // The stalled counterpart to biggest_shipped — kept adjacent so they read as a
+    // shipped/not-yet-shipped pair.
+    if (f.stalled && f.total > 0 && f.stalled.cost / f.total >= STALLED_MIN_SHARE)
+      out.push({ kind: 'stalled_spend', artifactKind: f.stalled.kind, title: f.stalled.title, repo: f.stalled.repo, ident: f.stalled.ident, cost: f.stalled.cost })
     if (f.total > 0 && f.shipped > 0)
       out.push({ kind: 'converted_spend', shipped: f.shipped, total: f.total, pct: Math.round((100 * f.shipped) / f.total) })
-    if (f.topFile) out.push({ kind: 'active_file', path: f.topFile.path, sessions: f.topFile.sessions })
-    if (f.feature && f.feature.sessions >= 2) out.push({ kind: 'feature_focus', title: f.feature.title, sessions: f.feature.sessions })
+    // Busiest file — only with a CLEAR leader and real repetition (≥3 sessions), so
+    // we never surface an arbitrary file from a big low-count tie.
+    if (f.topFile && f.topFile.sessions >= 3 && f.topFile.clearLead)
+      out.push({ kind: 'active_file', path: f.topFile.path, sessions: f.topFile.sessions })
 
-    // --- Facet-walked: spend concentration (one value leads, but doesn't own it all) ---
-    for (const facet of ['use_case', 'repo', 'model', 'harness']) {
+    // --- Facet-walked: spend concentration (one value leads, but doesn't own it
+    // all). use_case is excluded: `implement` dominates almost everyone's spend, so
+    // it always won the walk with an uninteresting result. ---
+    for (const facet of ['repo', 'model', 'harness']) {
       const r = this.spendOverTime({ bucket: 'month', by: facet, from, to })
       if ('error' in r || !r.series || r.series.length < 2) continue
       const total = (r.overall?.points ?? []).reduce((a, p) => a + p.spend, 0)

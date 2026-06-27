@@ -99,8 +99,8 @@ export function loadKpis() {
 }
 
 // Tiles act as nav: one section is always expanded; clicking a tile switches to it.
-export function openMetric(m) {
-  if (state.metric === m) return; // already expanded
+export function openMetric(m, force?) {
+  if (state.metric === m && !force) return; // already expanded (unless forced)
   state.metric = m;
   state.view = 'dashboard';
   syncKpiActive();

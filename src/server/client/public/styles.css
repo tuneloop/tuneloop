@@ -553,10 +553,14 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .hrow-to i { font-style: normal; display: inline-block; transition: transform .12s; }
 .hrow-to:hover { color: var(--emerald); }
 .hrow-to:hover i { transform: translateX(3px); }
-/* Facet/artifact mention inside a highlight sentence — "complexity: routine".
-   Uniform grey chip; the per-type plain-language tooltip (title=) carries the meaning. */
-.hl-tag { background: var(--track); border-radius: 5px; padding: 1px 7px; }
-.hl-tag-k { color: var(--muted); }
+/* Facet/artifact mention inside a highlight sentence — a small muted uppercase
+   label ("PR", "FILE", "REPO") carries the tagging; the value is left as plain
+   text (no fill/underline, which sat heavy or read link-like on long wrapping
+   titles). The per-type tooltip (title=) carries the meaning. */
+.hl-tag-k {
+  margin-right: 5px; vertical-align: .5px; color: var(--muted);
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+}
 .home-ask { max-width: 720px; margin-top: 18px; padding: 14px 16px; background: var(--track); border-radius: 10px; font-size: 13px; color: var(--ink); }
 .home-ask code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--paper); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
 .home-ask .muted { color: var(--muted); }

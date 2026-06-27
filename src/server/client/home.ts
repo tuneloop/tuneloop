@@ -4,7 +4,7 @@
 // surface behind it (with a grounding banner, see askbanner.ts). Rendered into
 // #metric-detail when state.metric === 'highlights' (the landing default).
 import { state, $, esc, usd, num, get } from './core'
-import { openMetric } from './kpis'
+import { openMetric, renderWindow, loadKpis } from './kpis'
 import { filterByArtifact, setView } from './sessions'
 import { openArtifactSearch } from './artifacts'
 import { renderAskBanner, clearAsked } from './askbanner'
@@ -12,33 +12,56 @@ import { renderAskBanner, clearAsked } from './askbanner'
 function base(p) { var a = String(p || '').split('/'); return a[a.length - 1] || p; }
 function pct(n) { return Math.round(n) + '%'; }
 function ratePct(r) { return Math.round((r || 0) * 100) + '%'; }
+function signed(n) { return (Number(n) >= 0 ? '+' : '') + n + '%'; }
 function stripTags(s) { return String(s || '').replace(/<[^>]+>/g, ''); }
+
+// The change clause for a relative trend (spend, sessions). A big INCREASE (≥2×)
+// switches from an unreadable percentage ("+2169%") to a multiple with the prior
+// value for context ("≈23× the previous 7 days ($63.57)"); everything else (and
+// any decrease, which is naturally bounded at −100%) stays a signed percentage.
+// `fmt` formats the prior absolute value (usd for spend, num for counts).
+function relChange(cur, prev, pctNum, fmt) {
+  if (pctNum >= 100 && prev > 0) {
+    var mult = cur / prev;
+    var multStr = mult >= 10 ? String(Math.round(mult)) : String(Math.round(mult * 10) / 10);
+    return '<b>≈' + multStr + '×</b> the previous 7 days (' + esc(fmt(prev)) + ')';
+  }
+  return '<b>' + signed(pctNum) + '</b> vs the previous 7 days';
+}
+
+// A highlight that drills into the Dashboard pins its window to 7 days first, so
+// the chart matches the 7-day statement the user just clicked (the Dashboard
+// otherwise keeps whatever window it was last left on).
+function dash7() {
+  state.days = 7;
+  setView('dashboard');
+  renderWindow();
+  loadKpis();
+}
 
 // Friendly noun for a walked facet, used in the orientation line + the tag labels.
 var FACET_NOUN = { use_case: 'work type', repo: 'repo', model: 'model', harness: 'agent', complexity: 'complexity', autonomy: 'autonomy' };
 
-// Per-tag-key metadata: `cat` drives the background tint (artifacts — the concrete
-// things the AI produced — get a faint emerald; facets — the dimensions aivue
-// slices by — stay neutral), and `tip` is a plain-language hover tooltip.
+// Per-tag-key plain-language hover tooltip, surfaced via the tag's title=.
 var TAG_INFO = {
-  file: { cat: 'artifact', tip: 'A file your AI changed.' },
-  PR: { cat: 'artifact', tip: 'A pull request your AI opened or merged.' },
-  feature: { cat: 'artifact', tip: 'A unit of work your sessions are linked to.' },
-  repo: { cat: 'facet', tip: 'The repository the work was in.' },
-  model: { cat: 'facet', tip: 'The LLM model used.' },
-  agent: { cat: 'facet', tip: 'The agent/harness used (Claude Code, Codex…).' },
-  complexity: { cat: 'facet', tip: 'How hard the task was (LLM-judged).' },
-  autonomy: { cat: 'facet', tip: 'How much the AI worked unaided (LLM-judged).' },
-  'work type': { cat: 'facet', tip: 'The kind of work — implement, debug, research… (LLM-judged).' },
+  file: { tip: 'A file your AI changed.' },
+  PR: { tip: 'A pull request your AI opened or merged.' },
+  feature: { tip: 'A unit of work your sessions are linked to.' },
+  repo: { tip: 'The repository the work was in.' },
+  model: { tip: 'The LLM model used.' },
+  agent: { tip: 'The agent/harness used (Claude Code, Codex…).' },
+  complexity: { tip: 'How hard the task was (LLM-judged).' },
+  autonomy: { tip: 'How much the AI worked unaided (LLM-judged).' },
+  'work type': { tip: 'The kind of work — implement, debug, research… (LLM-judged).' },
 };
 
-// A facet/artifact mention styled as a labeled tag — "complexity: routine",
-// "feature: <name>" — so a bare value isn't mistaken for prose. Numbers stay bold
-// (<b>); these get the tag treatment + a tooltip explaining what the thing is.
+// A facet/artifact mention styled as a labeled tag — a small muted uppercase key
+// ("PR", "FILE", "REPO") then the value with a faint underline — so a bare value
+// isn't mistaken for prose. Numbers stay bold (<b>); the label + tooltip explain it.
 function tag(key, value) {
   var info = TAG_INFO[key] || { tip: '' };
   return '<span class="hl-tag"' + (info.tip ? ' title="' + esc(info.tip) + '"' : '') +
-    '><span class="hl-tag-k">' + esc(key) + ':</span> ' + esc(value) + '</span>';
+    '><span class="hl-tag-k">' + esc(key) + '</span><span class="hl-tag-v">' + esc(value) + '</span></span>';
 }
 
 // Map an insight payload -> { html sentence, destination label, grounding `about`,
@@ -46,14 +69,49 @@ function tag(key, value) {
 function present(h) {
   switch (h.kind) {
     case 'biggest_shipped': {
-      var verb = h.verb === 'shipping' ? 'shipped' : 'worked on';
       var t = h.artifactKind === 'pr'
         ? tag('PR', h.repo && h.ident ? h.repo + '#' + h.ident + ' (' + h.title + ')' : h.title)
         : tag('feature', h.title);
       return {
-        html: 'The biggest thing you ' + verb + ': ' + t + ' — <b>' + esc(usd(h.cost)) + '</b> in AI spend.',
+        html: 'Most AI spend on shipped work: ' + t + ' — <b>' + esc(usd(h.cost)) + '</b>.',
         to: h.artifactKind === 'pr' ? 'Artifacts · PRs' : 'Artifacts · Features', section: 'artifacts',
         about: 'The Artifacts view lists every PR and feature your AI touched, with its block-attributed cost.',
+        run: function () { openArtifactSearch(h.artifactKind, h.title); },
+      };
+    }
+    case 'trend': {
+      if (h.metric === 'rate') {
+        var moved = (h.pp || 0) >= 0 ? 'rose' : 'fell';
+        return {
+          html: 'Your success rate ' + moved + ' from <b>' + ratePct(h.prev) + '</b> to <b>' + ratePct(h.cur) + '</b> vs the previous 7 days.',
+          to: 'Session Outcome Rate', section: 'success_rate',
+          about: 'The outcome rate over time — the same signal as the headline tile, here over the last 7 days.',
+          run: function () { dash7(); state.sr.by = ''; openMetric('success_rate', true); },
+        };
+      }
+      if (h.metric === 'sessions') {
+        return {
+          html: 'You ran <b>' + num(h.cur) + ' sessions</b> — ' + relChange(h.cur, h.prev, h.pct, num) + '.',
+          to: 'Sessions over time', section: 'sessions_metric',
+          about: 'Session count over time — the same signal as the headline tile, here over the last 7 days.',
+          run: function () { dash7(); state.sm.by = ''; state.sm.bucket = ''; openMetric('sessions', true); },
+        };
+      }
+      return {
+        html: 'You spent <b>' + esc(usd(h.cur)) + '</b> — ' + relChange(h.cur, h.prev, h.pct, usd) + '.',
+        to: 'Total spend', section: 'total_spend',
+        about: 'Spend over time — the same signal as the headline tile, here over the last 7 days.',
+        run: function () { dash7(); state.spend.by = ''; openMetric('total_spend', true); },
+      };
+    }
+    case 'stalled_spend': {
+      var st = h.artifactKind === 'pr'
+        ? tag('PR', h.repo && h.ident ? h.repo + '#' + h.ident + ' (' + h.title + ')' : h.title)
+        : tag('feature', h.title);
+      return {
+        html: 'Most AI spend not yet shipped: ' + st + ' — <b>' + esc(usd(h.cost)) + '</b>.',
+        to: h.artifactKind === 'pr' ? 'Artifacts · PRs' : 'Artifacts · Features', section: 'artifacts',
+        about: 'The Artifacts view shows each PR and feature with its block-attributed cost and whether it has shipped yet.',
         run: function () { openArtifactSearch(h.artifactKind, h.title); },
       };
     }
@@ -62,28 +120,21 @@ function present(h) {
         html: '<b>' + pct(h.pct) + '</b> of your AI spend (<b>' + esc(usd(h.shipped)) + '</b> of ' + esc(usd(h.total)) + ') turned into shipped work.',
         to: 'Cost per shipped artifact', section: 'cost_artifact',
         about: 'The burn curve shades how much of each period’s spend converted into shipped work versus what’s still in flight.',
-        run: function () { setView('dashboard'); state.ca.kind = 'pr'; state.ca.userPicked = true; openMetric('cost_artifact'); },
+        run: function () { dash7(); state.ca.kind = 'pr'; state.ca.userPicked = true; openMetric('cost_artifact', true); },
       };
     case 'active_file':
       return {
         html: 'You touched ' + tag('file', base(h.path)) + ' in <b>' + num(h.sessions) + ' sessions</b> — more than any other.',
         to: 'Sessions · Files', section: 'sessions',
         about: 'This is your session list filtered to one file; open a session’s Files tab to see exactly what changed.',
-        run: function () { filterByArtifact(h.path, 'file'); },
-      };
-    case 'feature_focus':
-      return {
-        html: 'You’ve put <b>' + num(h.sessions) + ' sessions</b> into ' + tag('feature', h.title) + '.',
-        to: 'Sessions', section: 'sessions',
-        about: 'This is your session list filtered to one feature; click a row to open its transcript and summary.',
-        run: function () { filterByArtifact(h.title, 'feature'); },
+        run: function () { filterByArtifact(h.path, 'file', 7); },
       };
     case 'spend_concentration':
       return {
         html: '<b>' + pct(h.pct) + '</b> of your spend went to ' + tag(FACET_NOUN[h.facet] || h.facet, h.value) + '.',
         to: 'Total spend', section: 'total_spend',
         about: 'Spend over time, split by ' + (FACET_NOUN[h.facet] || h.facet) + ' — change the breakdown or filter to dig in.',
-        run: function () { setView('dashboard'); state.spend.by = h.facet; openMetric('total_spend'); },
+        run: function () { dash7(); state.spend.by = h.facet; openMetric('total_spend', true); },
       };
     case 'success_spread': {
       var k = FACET_NOUN[h.facet] || h.facet;
@@ -92,7 +143,7 @@ function present(h) {
           ' sessions) but <b>' + ratePct(h.worst.rate) + '</b> for ' + tag(k, h.worst.value) + ' (' + num(h.worst.n) + ').',
         to: 'Session Outcome Rate', section: 'success_rate',
         about: 'The outcome rate broken down by ' + k + ', so you can see where your AI does well.',
-        run: function () { setView('dashboard'); state.sr.by = h.facet; openMetric('success_rate'); },
+        run: function () { dash7(); state.sr.by = h.facet; openMetric('success_rate', true); },
       };
     }
     case 'autonomy_complex': {
@@ -103,11 +154,11 @@ function present(h) {
         to: 'Sessions over time', section: 'sessions_metric',
         about: 'Session count over time, filtered to complex tasks and broken down by autonomy — how much your agent takes on unaided.',
         run: function () {
-          setView('dashboard');
+          dash7();
           state.sm.by = 'autonomy';
           state.sm.bucket = 'week';
           state.sm.filters = { complexity: ['substantial', 'open-ended'] };
-          openMetric('sessions');
+          openMetric('sessions', true);
         },
       };
     }

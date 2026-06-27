@@ -1665,14 +1665,15 @@ export function openDetail(id, focus?: any) {
   });
 }
 
-export function filterByArtifact(text, kind) {
+export function filterByArtifact(text, kind, preset?) {
   closeDrawer();
   setView('sessions');
   var af = $('#f-artifact');
   if (af) { af.value = text || ''; af.dataset.kind = kind || ''; } // kind rides along on the input (no visible kind dropdown)
-  // Drilling into one artifact should show its FULL history, not just the default
-  // window — widen to all-time. setTimePreset() re-applies the filters.
-  setTimePreset('all');
+  // Drilling into one artifact defaults to its FULL history (all-time). A caller
+  // can pin a window instead — e.g. a 7-day highlight drills to 7d so the session
+  // count the user lands on matches the headline. setTimePreset() re-applies.
+  setTimePreset(preset == null ? 'all' : preset);
 }
 
 // Drill-in from the dashboard's "Errors by category" widget: jump to the Sessions
