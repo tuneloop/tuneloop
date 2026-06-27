@@ -1,5 +1,7 @@
 // Operational metrics detail: three independent time-series graphs — tool-call
-// counts, tool error rate, and skill-usage counts — sharing one bucket control.
+// counts, tool error rate, and skill-usage counts — sharing one bucket control,
+// split across two tabs. The Tools tab shows error rate, the errors-by-category
+// breakdown, then tool-call counts; the Skills tab shows skill-usage counts.
 // Each graph can break down by tool/skill name on its own (same "Break down by"
 // dropdown the other metric graphs use). Error rate reuses the percent line
 // chart; counts use int bars (overall) or int lines (breakdown).
@@ -26,30 +28,48 @@ function opsYLabel(view, fmt) {
   return fmt === 'pct' ? 'Error rate' : view === 'skill_usage' ? 'Skill invocations' : 'Tool calls';
 }
 
+function opsView(key) {
+  for (var i = 0; i < OPS_VIEWS.length; i++) if (OPS_VIEWS[i].key === key) return OPS_VIEWS[i];
+  return { key: key, title: key };
+}
+
+// One metric panel (chart + its own "break down by name" control + legend/note).
+function opsPanel(v) {
+  return '<div class="panel">' +
+    '<div class="panel-head"><h2>' + esc(v.title) + '</h2>' +
+      '<span class="sr-by-ctrl"><span class="sr-lbl">Break down by</span>' +
+      '<select class="sr-by" id="ops-by-' + v.key + '">' +
+        '<option value="">none</option>' +
+        '<option value="name"' + (state.ops.by[v.key] ? ' selected' : '') + '>' + esc(opsByLabel(v.key)) + '</option>' +
+      '</select></span>' +
+    '</div>' +
+    '<div id="ops-chart-' + v.key + '"></div>' +
+    '<div class="sr-legend" id="ops-legend-' + v.key + '"></div>' +
+    '<div class="card-note" id="ops-note-' + v.key + '"></div>' +
+  '</div>';
+}
+
+function opsErrcatPanel() {
+  return '<div class="panel"><div class="panel-head"><h2>Errors by category</h2></div>' +
+    '<div class="errcat" id="ops-errcat"></div>' +
+    '<div class="card-note">Count of failed tool calls per category (share of all errors), over the selected window. Hover a category for what it means.</div>' +
+  '</div>';
+}
+
 export function renderOps() {
-  var panels = OPS_VIEWS.map(function (v) {
-    return '<div class="panel">' +
-      '<div class="panel-head"><h2>' + esc(v.title) + '</h2>' +
-        '<span class="sr-by-ctrl"><span class="sr-lbl">Break down by</span>' +
-        '<select class="sr-by" id="ops-by-' + v.key + '">' +
-          '<option value="">none</option>' +
-          '<option value="name"' + (state.ops.by[v.key] ? ' selected' : '') + '>' + esc(opsByLabel(v.key)) + '</option>' +
-        '</select></span>' +
-      '</div>' +
-      '<div id="ops-chart-' + v.key + '"></div>' +
-      '<div class="sr-legend" id="ops-legend-' + v.key + '"></div>' +
-      '<div class="card-note" id="ops-note-' + v.key + '"></div>' +
-    '</div>';
-  }).join('');
+  var tab = state.ops.tab || 'tools';
+  // Tools tab: error rate + category breakdown first, then tool-call counts.
+  var toolsPane = opsPanel(opsView('error_rate')) + opsErrcatPanel() + opsPanel(opsView('tool_calls'));
+  // Skills tab: skill-usage counts.
+  var skillsPane = opsPanel(opsView('skill_usage'));
   $('#metric-detail').innerHTML =
     '<div class="metric-head"><h2>Operational Metrics</h2></div>' +
     '<div class="ops-controls" id="ops-controls"></div>' +
-    panels +
-    '<div class="panel"><div class="panel-head"><h2>Errors by category</h2></div>' +
-      '<div class="errcat" id="ops-errcat"></div>' +
-      '<div class="card-note">Count of failed tool calls per category (share of all errors), over the selected window. Hover a category for what it means.</div>' +
-    '</div>';
+    '<div class="ops-tabpane" id="ops-tab-tools"' + (tab === 'tools' ? '' : ' hidden') + '>' + toolsPane + '</div>' +
+    '<div class="ops-tabpane" id="ops-tab-skills"' + (tab === 'skills' ? '' : ' hidden') + '>' + skillsPane + '</div>';
   renderOpsControls();
+  // All views live in the DOM regardless of active tab (cheap; tab switch just
+  // toggles visibility), so wire + load every one up front.
   OPS_VIEWS.forEach(function (v) {
     var sel = $('#ops-by-' + v.key);
     if (sel) sel.onchange = function () { state.ops.by[v.key] = this.value === 'name'; loadOps(v.key); };
@@ -86,7 +106,8 @@ export function loadErrorCats() {
       var pct = max ? Math.round((row.value / max) * 100) : 0;
       var share = total ? Math.round((row.value / total) * 100) : 0;
       // Each category is an accordion: the bar + a collapsible occurrence list.
-      return '<div class="errcat-item" data-cat="' + esc(key) + '">' +
+      // data-total is the true count (occurrences are capped → drives "+N more").
+      return '<div class="errcat-item" data-cat="' + esc(key) + '" data-total="' + (row.value || 0) + '">' +
         '<div class="bar-row errcat-row" data-cat="' + esc(key) + '"><span class="name" title="' + esc(meta.description) + '">' + esc(meta.label) +
         '</span><span class="bar-track"><span class="bar-fill" style="width:' + pct + '%"></span></span>' +
         '<span class="n"><span class="cnt">' + num(row.value) + '</span><span class="pct">' + share + '%</span></span></div>' +
@@ -113,16 +134,24 @@ function toggleOcc(item, cat, tips) {
   item.querySelector('.errcat-row').classList.add('open');
   if (panel.getAttribute('data-loaded')) return;
   panel.innerHTML = '<div class="occ-loading">Loading…</div>';
+  // True category total (the bar count); the occurrence list is capped, so renderOcc
+  // shows a "+N more" note when total exceeds the fetched rows.
+  var total = parseInt(item.getAttribute('data-total'), 10) || 0;
   get('/api/error-occurrences?category=' + encodeURIComponent(cat) + windowQs()).then(function (occ) {
     panel.setAttribute('data-loaded', '1');
-    renderOcc(panel, cat, occ || [], tips);
+    renderOcc(panel, cat, occ || [], tips, total);
+  }).catch(function () {
+    // Leave data-loaded unset so re-opening retries the fetch.
+    panel.innerHTML = '<div class="occ-empty">Could not load occurrences.</div>';
   });
 }
 
-function renderOcc(panel, cat, occ, tips) {
+function renderOcc(panel, cat, occ, tips, total) {
   if (!occ.length) { panel.innerHTML = '<div class="occ-empty">No occurrences in this window.</div>'; return; }
   var label = (tips[cat] && tips[cat].label) || cat;
-  var head = '<div class="occ-head">' + occ.length + ' occurrence' + (occ.length > 1 ? 's' : '') +
+  var count = total || occ.length;             // the bar count is the true total; occ is capped
+  var moreN = Math.max(0, count - occ.length); // occurrences beyond the fetched cap
+  var head = '<div class="occ-head">' + count + ' occurrence' + (count > 1 ? 's' : '') +
     ' · <a class="occ-sessions" href="#">view sessions →</a></div>';
   var list = occ.map(function (o, i) {
     var cmd = o.command || o.targetPath || '';
@@ -133,7 +162,8 @@ function renderOcc(panel, cat, occ, tips) {
       '<span class="occ-sess">' + esc(clip(o.title || '(untitled)', 22)) + '</span>' +
       '<span class="occ-date">' + esc(dayOf(o.startedAt || o.ts)) + '</span></div>';
   }).join('');
-  panel.innerHTML = head + '<div class="occ-list">' + list + '</div>';
+  var more = moreN ? '<div class="occ-more">+ ' + moreN + ' more (showing ' + occ.length + ')</div>' : '';
+  panel.innerHTML = head + '<div class="occ-list">' + list + '</div>' + more;
   // Click an occurrence → open its transcript at that exact error + start the walk.
   Array.prototype.forEach.call(panel.querySelectorAll('.occ-row'), function (el) {
     el.onclick = function () { startErrorWalk(label, occ, parseInt(el.getAttribute('data-i'), 10)); };
@@ -149,13 +179,28 @@ export function renderOpsControls() {
   var bucketBtns = ['day', 'week', 'month'].map(function (b) {
     return '<button class="' + (b === activeBucket ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
+  var activeTab = state.ops.tab || 'tools';
+  var tabBtns = [['tools', 'Tools'], ['skills', 'Skills']].map(function (t) {
+    return '<button class="' + (t[0] === activeTab ? 'on' : '') + '" data-t="' + t[0] + '">' + t[1] + '</button>';
+  }).join('');
   $('#ops-controls').innerHTML =
-    '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="ops-bucket">' + bucketBtns + '</span></div>';
+    '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="ops-bucket">' + bucketBtns + '</span>' +
+    '<span class="sr-lbl">View</span><span class="seg" id="ops-tab">' + tabBtns + '</span></div>';
   Array.prototype.forEach.call($('#ops-bucket').children, function (btn) {
     btn.onclick = function () {
       state.ops.bucket = btn.getAttribute('data-b');
       renderOpsControls();
       OPS_VIEWS.forEach(function (v) { loadOps(v.key); }); // bucket is shared — reload all three
+    };
+  });
+  // Tab switch only toggles pane visibility — every chart is already loaded.
+  Array.prototype.forEach.call($('#ops-tab').children, function (btn) {
+    btn.onclick = function () {
+      state.ops.tab = btn.getAttribute('data-t');
+      var isTools = state.ops.tab === 'tools';
+      var tools = $('#ops-tab-tools'); if (tools) tools.hidden = !isTools;
+      var skills = $('#ops-tab-skills'); if (skills) skills.hidden = isTools;
+      renderOpsControls(); // refresh the 'on' highlight
     };
   });
 }

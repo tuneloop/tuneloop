@@ -1450,7 +1450,8 @@ export class Store {
    * Every failed tool call of one error category — the occurrence list behind the
    * "Errors by category" drill-down. Newest session first; `idx` is the tool call's
    * position in its session, which the transcript anchors as `txerr-<idx>` so a row
-   * deep-links to that exact error block. Windowed like breakdown.
+   * deep-links to that exact error block. Windowed like breakdown. Capped at 50; the
+   * widget shows the true total (the bar count) with a "+N more" note past the cap.
    */
   errorOccurrences(category: string, window?: { from?: string; to?: string }): ErrorOccurrence[] {
     const where = ['t.error_category = ?']
@@ -1466,7 +1467,7 @@ export class Store {
                  FROM tool_calls t JOIN sessions s ON s.id = t.session_id
                  WHERE ${where.join(' AND ')}
                  ORDER BY s.started_at DESC, t.idx ASC
-                 LIMIT 300`
+                 LIMIT 50`
     return this.db.prepare(sql).all(...params) as ErrorOccurrence[]
   }
 

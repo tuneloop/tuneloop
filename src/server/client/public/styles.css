@@ -104,8 +104,12 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .errcat .bar-row.errcat-row.open .name { color: var(--emerald); font-weight: 600; }
 .errcat-occ { margin: 0 0 12px; padding-left: 8px; border-left: 2px solid var(--line); }
 .occ-loading, .occ-empty { color: var(--muted); font-size: 12px; font-style: italic; padding: 6px 4px; }
+.occ-more { color: var(--muted); font-size: 12px; padding: 6px 6px 2px; }
 .occ-head { font-size: 12px; color: var(--muted); margin: 4px 0 6px; }
 .occ-head .occ-sessions { color: var(--emerald); cursor: pointer; }
+/* The drill-down fetches up to 50 occurrences; bound the list so a big category
+   scrolls WITHIN the panel instead of pushing the rest of the page down. */
+.occ-list { max-height: 300px; overflow-y: auto; }
 .occ-row {
   display: grid; grid-template-columns: 92px minmax(0,1.1fr) minmax(0,1.4fr) 150px 78px;
   gap: 10px; align-items: baseline; padding: 5px 6px; font-size: 12px;

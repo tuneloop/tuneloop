@@ -13,6 +13,23 @@ const CASES: Array<[string, string]> = [
   ['Error: Blocked: sleep 45 followed by tail -40. To wait for a condition, use Monitor.', 'policy_blocked'],
   ['HTTP 401 Unauthorized: bad credentials, your token may be expired', 'auth'],
   ['error: failed to push some refs; merge conflict in src/app.ts (non-fast-forward)', 'conflict'],
+  ['! [rejected]        main -> main (non-fast-forward); Updates were rejected', 'conflict'],
+  // User declines an approval prompt — must NOT be swept into VCS `conflict` by the
+  // bare word "rejected". Both the short and long harness phrasings.
+  ['User rejected tool use', 'user_rejected'],
+  ["Error: The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).", 'user_rejected'],
+  // Codex's denied-approval shape — totally different wording from Claude's.
+  ['exec_command failed for `/bin/zsh -lc "echo hi"`: CreateProcess { message: "Rejected(\\"rejected by user\\")" }', 'user_rejected'],
+  // OpenCode's denied-approval shape (state.status === 'error', error string).
+  ['The user rejected permission to use this specific tool call.', 'user_rejected'],
+  // Structured output that failed its schema (ajv-style) — its own bucket.
+  ["Error: Output does not match required schema: root: must have required property 'surfaces', root: must have required property 'not_in_ui'", 'schema_validation'],
+  // Schema-checked INPUT failures + EISDIR fold into invalid_call (the call was wrong).
+  ['InputValidationError: [ { "expected": "number", "code": "invalid_type", "path": [ "offset" ], "message": "Invalid input: expected number, received array" } ]', 'invalid_call'],
+  ['InputValidationError: JSON parse failed (86 bytes)', 'invalid_call'],
+  ["Error: EISDIR: illegal operation on a directory, read '/Users/x/src/adapters'", 'invalid_call'],
+  // Edit-target mismatch (Claude/OpenCode "oldString" not found) is a precondition.
+  ['Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.', 'precondition'],
   ['Test Suites: 1 failed, 2 passed; 3 failing tests; AssertionError: expected true', 'test_failure'],
   ['src/x.ts(12,3): error TS2345: Argument of type string is not assignable', 'compile_error'],
   // Precedence locks: `cannot find module/name` must beat not_found's broad `cannot find`.

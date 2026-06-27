@@ -46,7 +46,7 @@ export interface ClientState {
   sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
   // operational detail: one shared bucket, plus a per-graph "break down by name"
   // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
-  ops: { bucket: string; by: Record<string, boolean> }
+  ops: { bucket: string; tab: string; by: Record<string, boolean> }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
 }
@@ -62,7 +62,7 @@ export var state: ClientState = {
   ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
-  ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
+  ops: { bucket: '', tab: 'tools', by: { tool_calls: true, error_rate: true, skill_usage: true } },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' }
 };
