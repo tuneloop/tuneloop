@@ -9,6 +9,7 @@ describe('parseHash', () => {
   })
 
   it('parses each view + sub-selection', () => {
+    expect(parseHash('#/highlights')).toMatchObject({ view: 'highlights' })
     expect(parseHash('#/dashboard/cost_artifact')).toMatchObject({ view: 'dashboard', metric: 'cost_artifact' })
     expect(parseHash('#/artifacts/pr')).toMatchObject({ view: 'artifacts', artKind: 'pr' })
     expect(parseHash('#/sessions')).toMatchObject({ view: 'sessions' })
@@ -55,6 +56,7 @@ describe('serializeRoute', () => {
   const nav = (o: Partial<NavState>): NavState => ({ view: 'dashboard', metric: 'success_rate', artKind: 'feature', ...o })
 
   it('serializes each view path', () => {
+    expect(serializeRoute(nav({ view: 'highlights' }), {})).toBe('#/highlights')
     expect(serializeRoute(nav({ view: 'dashboard', metric: 'total_spend' }), {})).toBe('#/dashboard/total_spend')
     expect(serializeRoute(nav({ view: 'artifacts', artKind: 'pr' }), {})).toBe('#/artifacts/pr')
     expect(serializeRoute(nav({ view: 'sessions' }), {})).toBe('#/sessions')
@@ -84,6 +86,7 @@ describe('parseQuery / serializeQuery round-trip', () => {
 
 describe('route round-trip', () => {
   const cases: Array<{ nav: NavState; query: Record<string, string> }> = [
+    { nav: { view: 'highlights', metric: 'success_rate', artKind: 'feature' }, query: {} },
     { nav: { view: 'dashboard', metric: 'cost_artifact', artKind: 'feature' }, query: { session: 'opencode:xyz' } },
     { nav: { view: 'artifacts', metric: 'success_rate', artKind: 'pr' }, query: { q: 'fix', sort: 'cost', dir: 'asc' } },
     { nav: { view: 'sessions', metric: 'success_rate', artKind: 'feature' }, query: { win: 'all', 'f.repo': 'a/b', q: 'x' } },

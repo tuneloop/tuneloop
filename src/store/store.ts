@@ -51,6 +51,13 @@ export interface Summary {
   features: { total: number; derived: number; linked: number }
 }
 
+/** One computed insight for the Highlights digest. The client maps `kind` to the
+ *  display sentence + its drill-in; the payload carries the data. */
+export interface Highlight {
+  kind: string
+  [field: string]: unknown
+}
+
 export class Store {
   constructor(private db: DB) {}
 
@@ -606,6 +613,177 @@ export class Store {
       autonomy: this.scalarDist('autonomy'),
       features,
     }
+  }
+
+  /** The windowed "reliable facts" behind the Highlights digest — biggest shipped
+   *  artifact, converted spend, busiest source file, and the feature you put the
+   *  most sessions into — all scoped to [from, to) (omit for all-time) so the whole
+   *  digest honors the dashboard window. */
+  private windowedFacts(from?: string, to?: string) {
+    const w = from && to ? ' AND s.started_at >= ? AND s.started_at < ?' : ''
+    const wp: string[] = from && to ? [from, to] : []
+    const scalar = (sql: string) => (this.db.prepare(sql).get(...wp) as { v: number }).v
+
+    const total = scalar(`SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s WHERE 1=1${w}`)
+    const shipped = scalar(
+      `SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s
+       WHERE EXISTS (SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+                     WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL)${w}`,
+    )
+
+    // Busiest source file — most distinct sessions, skipping generated noise.
+    const topFile = this.db
+      .prepare(
+        `SELECT fi.path AS path, COUNT(DISTINCT fi.session_id) AS sessions
+         FROM files_index fi JOIN sessions s ON s.id = fi.session_id
+         WHERE 1=1${w}
+           AND fi.path NOT LIKE '%.lock' AND fi.path NOT LIKE '%lock.json'
+           AND fi.path NOT LIKE '%lock.yaml' AND fi.path NOT LIKE '%/go.sum'
+         GROUP BY fi.repo, fi.path ORDER BY sessions DESC, fi.path LIMIT 1`,
+      )
+      .get(...wp) as { path: string; sessions: number } | undefined
+
+    const feature = this.db
+      .prepare(
+        `SELECT a.title AS title, COUNT(DISTINCT s.id) AS sessions
+         FROM artifacts a JOIN session_artifacts sa ON sa.artifact_id = a.id JOIN sessions s ON s.id = sa.session_id
+         WHERE a.kind = 'feature'${w}
+         GROUP BY a.id ORDER BY sessions DESC, a.title LIMIT 1`,
+      )
+      .get(...wp) as { title: string; sessions: number } | undefined
+
+    // Biggest shipped: shipped feature → merged PR → wip feature, among artifacts
+    // active in the window, ranked by block-attributed cost (matches the Artifacts table).
+    const blockCost = `COALESCE((SELECT SUM(cost_usd) FROM (
+        SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
+        JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+        JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx WHERE ba.artifact_id = a.id
+        UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
+        JOIN usage_facts u ON u.session_id = sa2.session_id WHERE sa2.artifact_id = a.id
+        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id))), 0)`
+    const inWindow =
+      from && to
+        ? `EXISTS (SELECT 1 FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
+                   WHERE sa.artifact_id = a.id AND s.started_at >= ? AND s.started_at < ?)`
+        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id)`
+    const pickWin = (kind: string, shippedOnly: boolean) =>
+      this.db
+        .prepare(
+          `SELECT a.title AS title, a.repo AS repo, a.ident AS ident, ${blockCost} AS cost
+           FROM artifacts a WHERE a.kind = ?${shippedOnly ? ' AND a.completed_at IS NOT NULL' : ''} AND ${inWindow}
+           ORDER BY cost DESC LIMIT 1`,
+        )
+        .get(...(from && to ? [kind, from, to] : [kind])) as
+        | { title: string; repo: string | null; ident: string | null; cost: number }
+        | undefined
+
+    let spotlight:
+      | { kind: 'feature' | 'pr'; verb: 'shipping' | 'working on'; title: string; repo: string | null; ident: string | null; cost: number }
+      | null = null
+    const sf = pickWin('feature', true)
+    if (sf) spotlight = { kind: 'feature', verb: 'shipping', ...sf }
+    else {
+      const pr = pickWin('pr', true)
+      if (pr) spotlight = { kind: 'pr', verb: 'shipping', ...pr }
+      else {
+        const wf = pickWin('feature', false)
+        if (wf) spotlight = { kind: 'feature', verb: 'working on', ...wf }
+      }
+    }
+
+    return { total, shipped, topFile, feature, spotlight }
+  }
+
+  /** The Highlights digest: a few reliably-interesting facts plus facet-WALKED
+   *  comparisons (spend concentration, outcome-rate spread) — for each, we go down
+   *  an ordered facet list and keep the FIRST facet whose breakdown clears an
+   *  interestingness threshold, so nothing is hardcoded to `repo` and a dominated
+   *  split (e.g. one harness at 99%) is skipped. Each insight is a typed payload;
+   *  the client renders the sentence + drill-in. `from`/`to` window everything;
+   *  omit for all-time. */
+  highlights(from?: string, to?: string): Highlight[] {
+    const out: Highlight[] = []
+    const f = this.windowedFacts(from, to)
+
+    // --- Reliable facts, windowed (show when the data exists) ---
+    if (f.spotlight) {
+      const sp = f.spotlight
+      out.push({ kind: 'biggest_shipped', artifactKind: sp.kind, verb: sp.verb, title: sp.title, repo: sp.repo, ident: sp.ident, cost: sp.cost })
+    }
+    if (f.total > 0 && f.shipped > 0)
+      out.push({ kind: 'converted_spend', shipped: f.shipped, total: f.total, pct: Math.round((100 * f.shipped) / f.total) })
+    if (f.topFile) out.push({ kind: 'active_file', path: f.topFile.path, sessions: f.topFile.sessions })
+    if (f.feature && f.feature.sessions >= 2) out.push({ kind: 'feature_focus', title: f.feature.title, sessions: f.feature.sessions })
+
+    // --- Facet-walked: spend concentration (one value leads, but doesn't own it all) ---
+    for (const facet of ['use_case', 'repo', 'model', 'harness']) {
+      const r = this.spendOverTime({ bucket: 'month', by: facet, from, to })
+      if ('error' in r || !r.series || r.series.length < 2) continue
+      const total = (r.overall?.points ?? []).reduce((a, p) => a + p.spend, 0)
+      if (total <= 0) continue
+      const top = r.series.slice().sort((a, b) => b.total - a.total)[0]
+      if (!top || !top.key || top.key === 'Other') continue
+      const share = top.total / total
+      if (share >= 0.5 && share <= 0.9) {
+        out.push({ kind: 'spend_concentration', facet, value: top.key, spend: top.total, total, pct: Math.round(share * 100) })
+        break
+      }
+    }
+
+    // --- Facet-walked: outcome-rate spread (a real gap between best and worst value) ---
+    // use_case is intentionally excluded: it's multi-valued (a session counts under
+    // several work types), so per-value rates mix overlapping populations.
+    for (const facet of ['repo', 'complexity', 'model', 'autonomy']) {
+      const r = this.successRate({ outcomes: ['session_success'], bucket: 'month', by: facet, from, to })
+      const vals = (r.series ?? []).filter((s) => s.denom >= 3 && s.rate != null && s.key && s.key !== 'Other')
+      if (vals.length < 2) continue
+      const sorted = vals.slice().sort((a, b) => (b.rate as number) - (a.rate as number))
+      const best = sorted[0]
+      const worst = sorted[sorted.length - 1]
+      if (!best || !worst) continue
+      if ((best.rate as number) - (worst.rate as number) >= 0.2) {
+        out.push({
+          kind: 'success_spread',
+          facet,
+          best: { value: best.key, rate: best.rate, n: best.denom },
+          worst: { value: worst.key, rate: worst.rate, n: worst.denom },
+        })
+        break
+      }
+    }
+
+    // --- Autonomy on complex tasks: a count (enrichment-gated), with a guarded
+    // delta. Only shows when enrichment has run AND there are ≥2 such sessions; the
+    // "vs. prior window" delta is appended ONLY when the prior window has a real
+    // base (≥3), so a 1→2 jump never reads as "+100%". ---
+    if (this.db.prepare(`SELECT 1 FROM annotations WHERE key='autonomy' LIMIT 1`).get()) {
+      const countAC = (a?: string, b?: string) =>
+        (
+          this.db
+            .prepare(
+              // "complex" = the two hardest complexity tiers in the enricher's taxonomy.
+              `SELECT COUNT(*) AS n FROM sessions s
+               WHERE EXISTS (SELECT 1 FROM annotations an WHERE an.session_id = s.id AND an.key = 'autonomy'
+                             AND json_extract(an.value,'$') = 'autonomous')
+                 AND EXISTS (SELECT 1 FROM annotations an WHERE an.session_id = s.id AND an.key = 'complexity'
+                             AND json_extract(an.value,'$') IN ('substantial','open-ended'))${a && b ? ' AND s.started_at >= ? AND s.started_at < ?' : ''}`,
+            )
+            .get(...(a && b ? [a, b] : [])) as { n: number }
+        ).n
+      const cur = countAC(from, to)
+      if (cur >= 2) {
+        let delta: number | null = null
+        if (from && to) {
+          const span = new Date(to).getTime() - new Date(from).getTime()
+          const prevFrom = new Date(new Date(from).getTime() - span).toISOString()
+          const prev = countAC(prevFrom, from)
+          if (prev >= 3) delta = Math.round(((cur - prev) / prev) * 100)
+        }
+        out.push({ kind: 'autonomy_complex', count: cur, delta })
+      }
+    }
+
+    return out
   }
 
   /** Distribution of a scalar annotation value across sessions. */

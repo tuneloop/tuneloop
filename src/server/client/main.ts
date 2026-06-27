@@ -1,12 +1,15 @@
 // Dashboard entry point. Wires the static chrome (tabs, drawer), restores the
-// view/metric/open-session from the URL hash (or lands on the Session Outcome
-// Rate detail by default), then kicks off the async loads. Bundled by tsup into
-// dist/client/app.js and loaded by index.html.
+// view/metric/open-session from the URL hash, then kicks off the async loads.
+// Lands on the Highlights tab by default (when the hash is empty); an explicit
+// deep link to any other view wins. Bundled by tsup into dist/client/app.js and
+// loaded by index.html.
 import { state, $, esc, get, dayOf } from './core'
 import { initRouter, withoutSync, buildHash } from './router'
 import { loadFacets } from './facets'
 import { loadKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
+import { renderHighlights, goHighlights } from './home'
+import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
 
@@ -18,8 +21,14 @@ function init() {
   // (wired in openDetail); the overlay click still closes from anywhere.
   $('#overlay').onclick = closeDrawer;
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
-    b.onclick = function () { setView(b.getAttribute('data-view')); };
+    // Manual tab nav drops any question-grounding banner.
+    b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); };
   });
+
+  // Highlights is the landing tab: an empty/partial hash lands there, while a deep
+  // link to any other view (e.g. a shared #/dashboard/ops or #/sessions?…) wins.
+  var hash = window.location.hash;
+  var landHighlights = !hash || hash === '#' || hash === '#/';
 
   // Initial paint driven by the URL. Wrapped in withoutSync so none of these nav
   // calls mint history entries; the single replaceState below normalizes the URL
@@ -32,11 +41,17 @@ function init() {
     if (route.view === 'artifacts') {
       state.art = { q: route.query.q || '', sort: route.query.sort || 'created', dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
     }
-    setView(route.view);
     renderArtKindSeg();
-    renderOpenMetric(); // render the chosen dashboard metric's detail
+    renderOpenMetric(); // pre-render the chosen dashboard metric's detail
+    renderHighlights(); // pre-render the Highlights tab so it's ready whether we land there or tab in later
+    setView(landHighlights ? 'highlights' : route.view);
     if (route.session) openDetail(route.session); // deep-linked drawer
   });
+
+  // The brand logo returns to Highlights from anywhere.
+  var brand = document.querySelector('.brand') as HTMLElement | null;
+  if (brand) { brand.style.cursor = 'pointer'; brand.onclick = goHighlights; }
+
 
   get('/api/overview').then(function (o) {
     state.overview = o;

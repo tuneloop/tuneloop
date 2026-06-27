@@ -533,3 +533,49 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-search.on .tx-search-results { display: inline-flex; }
 .tx-hl { background: #fde68a !important; border-radius: 2px; padding: 0 1px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 .tx-hl.active { background: #f97316 !important; color: #fff !important; outline: 2px solid #f97316; }
+
+/* Highlights digest — the Dashboard's default view: computed insights about your
+   recent AI work, set as editorial sentences with the real numbers as emerald
+   accents, each drilling into the surface behind it. */
+.hl { max-width: 720px; margin: 4px 0 0; }
+.hl-head { font-size: 11px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin: 0; padding-bottom: 9px; border-bottom: 1px solid var(--ink); }
+/* The row is a plain container (text is selectable); only "See the data" clicks. */
+.hrow {
+  border-bottom: 1px solid var(--line); padding: 16px 0;
+  display: flex; align-items: baseline; gap: 22px; color: var(--ink);
+}
+.hrow-q { flex: 1; font-family: Georgia, "Times New Roman", serif; font-size: 17px; line-height: 1.5; }
+.hrow-q b { font-weight: 600; font-style: normal; color: var(--ink); }
+.hrow-to {
+  flex: none; border: 0; background: none; padding: 0; font-family: inherit; cursor: pointer;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--gray); white-space: nowrap;
+}
+.hrow-to i { font-style: normal; display: inline-block; transition: transform .12s; }
+.hrow-to:hover { color: var(--emerald); }
+.hrow-to:hover i { transform: translateX(3px); }
+/* Facet/artifact mention inside a highlight sentence — "complexity: routine".
+   Uniform grey chip; the per-type plain-language tooltip (title=) carries the meaning. */
+.hl-tag { background: var(--track); border-radius: 5px; padding: 1px 7px; }
+.hl-tag-k { color: var(--muted); }
+.home-ask { max-width: 720px; margin-top: 18px; padding: 14px 16px; background: var(--track); border-radius: 10px; font-size: 13px; color: var(--ink); }
+.home-ask code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--paper); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
+.home-ask .muted { color: var(--muted); }
+.home-back { display: inline-block; margin-top: 10px; cursor: pointer; }
+
+/* Grounding banner shown above a destination view when arriving from a question */
+/* Per-view slot the grounding message renders into (above the chart/table). Empty
+   = no space; when active it carries the .ask-banner below. scroll-margin keeps the
+   slot clear of the top when scrolled into view. */
+.ask-slot { scroll-margin-top: 14px; }
+.ask-slot.on { margin: 14px 0 18px; }
+.ask-banner { display: none; }
+.ask-banner.on { display: block; margin: 0; border: 1px solid var(--line); border-left: 3px solid var(--emerald); border-radius: 8px; background: var(--paper); overflow: hidden; }
+.ask-bc { display: flex; align-items: center; gap: 12px; padding: 9px 14px; background: var(--track); font-size: 13px; }
+.ask-q { flex: 1; color: var(--ink); }
+.ask-q b { font-weight: 600; }
+.ask-back { flex: none; cursor: pointer; color: var(--emerald); font-size: 12px; }
+.ask-orient { display: flex; align-items: flex-start; gap: 8px; padding: 11px 14px; font-size: 13px; line-height: 1.5; }
+.ask-ans { font-weight: 600; color: var(--ink); }
+.ask-about { color: var(--muted); flex: 1; }
+.ask-x { flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 4px; }
+.ask-x:hover { color: var(--ink); }

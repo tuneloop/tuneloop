@@ -1743,7 +1743,7 @@ function renderErrWalkBar() {
 }
 
 export function setView(name) {
-  ['dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {

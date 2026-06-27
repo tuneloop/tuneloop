@@ -3,6 +3,7 @@
 // expanded (default success_rate, set in main.ts).
 import { state, $, esc, usd, num, get, fmtVal, kpiDelta } from './core'
 import { syncHash } from './router'
+import { clearAsked } from './askbanner'
 import { renderSuccessRate } from './metrics/successRate'
 import { renderCostArtifact } from './metrics/costArtifact'
 import { renderTotalSpend } from './metrics/totalSpend'
@@ -92,7 +93,7 @@ export function loadKpis() {
         esc(t.value) + '</span>' + (t.delta || '') + '</div><div class="sub">' + esc(t.sub) + '</div></div>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#kpis .tile[data-metric]'), function (el) {
-      el.onclick = function () { openMetric(el.getAttribute('data-metric')); };
+      el.onclick = function () { clearAsked(); openMetric(el.getAttribute('data-metric')); };
     });
   });
 }

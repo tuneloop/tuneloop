@@ -2,8 +2,8 @@
 // (hierarchical list with ship-toggle, nest-under, move-to-top, delete). Feature
 // mutations POST to /api/features* and reload.
 import { state, $, esc, usd, dayOf, get, post } from './core'
-import { filterByArtifact } from './sessions'
 import { syncHash } from './router'
+import { filterByArtifact, setView } from './sessions'
 
 export function renderArtKindSeg() {
   var opts = [['feature', 'Features'], ['pr', 'PRs']];
@@ -392,8 +392,29 @@ function closeFeatMenus() {
   Array.prototype.forEach.call(document.querySelectorAll('#artifacts .feat-menu.on'), function (m) { m.classList.remove('on'); });
 }
 
+// When a deep-link (Explore Q1) lands here, pre-fill that sub-tab's search so the
+// list narrows to the one artifact instead of dropping the user into a full list.
+var pendingArtSearch = '';
+function applyArtSearch() {
+  if (!pendingArtSearch) return;
+  var input = document.getElementById(state.artKind === 'pr' ? 'pr-search' : 'feat-search') as any;
+  if (input) { input.value = pendingArtSearch; if (input.oninput) input.oninput(); }
+  pendingArtSearch = '';
+}
+
 export function loadArtifacts() {
   get('/api/artifacts?kind=' + encodeURIComponent(state.artKind)).then(function (rows) {
     renderArtifacts(rows, state.artKind);
+    applyArtSearch();
   });
+}
+
+// Open the Artifacts tab at a sub-kind (feature/pr) with its search pre-filled to
+// `query` — the list ends up narrowed to that artifact (showing its cost).
+export function openArtifactSearch(kind, query) {
+  setView('artifacts');
+  state.artKind = kind;
+  pendingArtSearch = query || '';
+  renderArtKindSeg();
+  loadArtifacts();
 }

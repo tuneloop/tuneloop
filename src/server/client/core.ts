@@ -29,12 +29,14 @@ export interface SessTime {
 export interface ClientState {
   // The top-level tab the app is showing. Mirrored into the URL hash by the
   // router; setView() keeps it in step with the DOM.
-  view: 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'dashboard' | 'artifacts' | 'sessions'
   // The session whose detail drawer is open (null = drawer closed). Mirrored into
   // the URL as `?session=<id>` so a session is shareable / reload-survivable.
   open: string | null
   artKind: string
   overview: any
+  home: any // Explore (question-led) stats; null until fetched
+  asked: any // the question the user clicked through from, for the grounding banner (null = none)
   filters: Partial<SessionFilters> // starts {}, filled in by applyFilters()
   facets: any[]
   dist: Record<string, any[]>
@@ -64,7 +66,7 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', overview: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 7,
