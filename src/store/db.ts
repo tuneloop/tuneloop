@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 8
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_id          TEXT,
   source              TEXT,
   provider            TEXT,
-  title               TEXT,
+  title               TEXT,        -- native title from the adapter (may be absent/weak)
+  llm_title           TEXT,        -- enrichment-derived intent title; preferred for display
   repo                TEXT,
   branch              TEXT,
   cwd                 TEXT,
@@ -309,11 +310,14 @@ function migrate(db: DB): void {
     const cols = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as Array<{ name: string }>
     return cols.length > 0 && cols.some((c) => c.name === col)
   }
-  const tableExists = (db.prepare(`SELECT name FROM pragma_table_info('tool_calls')`).all() as unknown[]).length > 0
-  if (tableExists && !has('tool_calls', 'error_category')) {
+  const tableExists = (table: string) => (db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as unknown[]).length > 0
+  if (tableExists('tool_calls') && !has('tool_calls', 'error_category')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_category TEXT')
   }
-  if (tableExists && !has('tool_calls', 'error_message')) {
+  if (tableExists('tool_calls') && !has('tool_calls', 'error_message')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_message TEXT')
+  }
+  if (tableExists('sessions') && !has('sessions', 'llm_title')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN llm_title TEXT')
   }
 }

@@ -276,6 +276,14 @@ export class Store {
       this.db.prepare('DELETE FROM block_annotations WHERE session_id = ? AND processor = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM block_artifacts WHERE session_id = ? AND producer = ?').run(sessionId, processor)
 
+      // Enrichment-derived display title (overwrites on re-run; lives in its own
+      // column so re-ingest's session upsert never clobbers it). Deliberately
+      // written only when present: a re-run that yields no title — or a re-analyze 
+      // with LLM disabled — keeps the prior title rather than reverting to `(untitled)`
+      if (result.title) {
+        this.db.prepare('UPDATE sessions SET llm_title = ? WHERE id = ?').run(result.title, sessionId)
+      }
+
       for (const a of result.annotations ?? []) {
         this.db
           .prepare('INSERT OR REPLACE INTO annotations (session_id, processor, key, value) VALUES (?,?,?,?)')
@@ -1533,7 +1541,7 @@ export class Store {
       where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
       params.push(...toolVals)
     }
-    const sql = `SELECT t.session_id AS sessionId, s.title AS title, t.idx AS idx,
+    const sql = `SELECT t.session_id AS sessionId, COALESCE(s.llm_title, s.title) AS title, t.idx AS idx,
                         t.name AS name, t.action AS action, t.command AS command,
                         t.target_path AS targetPath, t.error_message AS message,
                         t.ts AS ts, s.started_at AS startedAt
@@ -1565,10 +1573,10 @@ export class Store {
       // Search title + intent + the decisions list (matched against its raw JSON
       // text, which is enough to surface a decision by any word it contains).
       clauses.push(
-        `(s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
+        `(s.llm_title LIKE ? OR s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
           OR EXISTS (SELECT 1 FROM annotations WHERE session_id=s.id AND key='decisions' AND value LIKE ?))`,
       )
-      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
+      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
     }
     if (f.artifact || f.artifactKind) {
       const conds: string[] = []
@@ -1610,7 +1618,7 @@ export class Store {
 
     const rows = this.db
       .prepare(
-        `SELECT s.id AS id, COALESCE(s.title,'(untitled)') AS title, s.started_at AS startedAt,
+        `SELECT s.id AS id, COALESCE(s.llm_title, s.title, '(untitled)') AS title, s.started_at AS startedAt,
                 s.cost_usd AS costUsd, s.models AS modelsJson,
                 ${scalar('complexity')} AS complexity,
                 (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
@@ -1667,7 +1675,7 @@ export class Store {
   sessionDetail(id: string): SessionDetail | null {
     const s = this.db
       .prepare(
-        `SELECT id, title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
+        `SELECT id, COALESCE(llm_title, title) AS title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
                 n_turns AS nTurns, n_tool_calls AS nToolCalls, models AS modelsJson, cost_usd AS costUsd,
                 tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create AS tokCacheCreate, tok_cache_read AS tokCacheRead
          FROM sessions WHERE id = ?`,

@@ -59,7 +59,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 12,
+  version: 13,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],
@@ -87,6 +87,9 @@ export const enrichSession: Processor = {
       ctx.log.warn(`enrich-session: unparseable LLM output for ${session.id}`)
       return { selfCost } // record the spend; don't re-charge on every run
     }
+
+    // Intent-based display title, keeping the native-title fallback.
+    const title = sessionTitle(parsed.title)
 
     // Session-level classification (P4: success/autonomy/complexity stay per-session).
     // use_case is NOT here — it's block-grain (see block labels below).
@@ -194,6 +197,7 @@ export const enrichSession: Processor = {
     }
 
     return {
+      title,
       annotations,
       outcomes,
       artifacts,
@@ -234,6 +238,7 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     '',
     'Return a JSON object with EXACTLY these fields:',
     '{',
+    '  "title": a short Title-Case phrase naming the OVERALL intent of the session,',
     `  "complexity": one of [${COMPLEXITY.join(', ')}],`,
     `  "autonomy": one of [${AUTONOMY.join(', ')}],`,
     '  "intent_summary": one sentence stating what the user set out to accomplish (the goal, not the decisions),',
@@ -244,6 +249,13 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     `  "use_case_runs": [ { "from": <block idx>, "to": <block idx>, "use_case": one of [${USE_CASES.join(', ')}] } ],`,
     '  "feature_runs": [ { "from": <block idx>, "to": <block idx>, "feature": <0-based index into the "features" array above> } ]',
     '}',
+    'How to write the title — name the OVERALL intent of the WHOLE session in a short Title-Case noun phrase',
+    '(about 3–7 words). It should read like a PR title or a changelog heading: what the session set out to',
+    'accomplish, taken as a whole — not its first message, not a play-by-play, not a full sentence.',
+    '- Capture the dominant goal. If the session did several things, name the primary thread, not a list.',
+    '- Be specific and concrete (mention the actual feature/area), e.g. "Error-Category Fingerprinting & Drill-Down",',
+    '  "Codex Token Double-Count Fix", "Session Outcome-Rate Dashboard" — not vague ("Code Changes", "Bug Fixes").',
+    '- No trailing period, no quotes, no comma-spliced run-ons, and do not start with "The user"/"We".',
     'How to classify complexity — judge the DIFFICULTY of what the session set out to do, not how long it ran or',
     'whether it succeeded. The axis runs from mechanical effort up to specification clarity (how well-defined the',
     'goal and the shape of a correct answer were at the outset).',
@@ -564,6 +576,20 @@ function featureTitle(raw: unknown): string | null {
   if (!t) return null
   if (t.length > 72 || t.split(/\s+/).length > 9 || t.includes(',')) return null
   return t
+}
+
+/**
+ * Clean the model's session `title` for storage: collapse whitespace and peel any
+ * wrapping quotes / trailing period the model tends to add. We store the FULL title
+ * (display truncation is the UI's job, so search/hover keep the whole string);
+ */
+export function sessionTitle(raw: unknown): string | undefined {
+  let t = str(raw).replace(/\s+/g, ' ').trim()
+  for (let prev = ''; prev !== t; ) {
+    prev = t
+    t = t.replace(/^["'`]+|["'`.]+$/g, '').trim() // "Title". → Title (any order, repeated)
+  }
+  return t || undefined
 }
 
 /** Repo-qualified id for a derived feature, so identical titles in different repos don't collide. */
