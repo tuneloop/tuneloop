@@ -98,4 +98,38 @@ describe('parsePrRefs', () => {
   it('ignores a PR link in a sidechain (subagent) turn, not a real human prompt', () => {
     expect(parsePrRefs(sess([], [userEvent('https://github.com/acme/x/pull/8', true)]))).toEqual([])
   })
+
+  // ---- Layer 1: explicit reviews ------------------------------------------
+
+  it('detects an explicit approve via `gh pr review --approve`', () => {
+    const refs = parsePrRefs(sess([tc('shell', { target: { command: 'gh pr review 22 --repo o/r --approve' } })]))
+    expect(refs).toEqual([expect.objectContaining({ id: 'pr:o/r:22', kind: 'review', verdict: 'approved' })])
+  })
+
+  it('detects request-changes and comment verdicts', () => {
+    const rc = parsePrRefs(sess([tc('shell', { target: { command: 'gh pr review https://github.com/o/r/pull/5 --request-changes -b "fix"' } })]))
+    expect(rc[0]).toMatchObject({ id: 'pr:o/r:5', kind: 'review', verdict: 'changes_requested' })
+    const cm = parsePrRefs(sess([tc('shell', { target: { command: 'gh pr review 9 --repo o/r --comment -b "nit"' } })]))
+    expect(cm[0]).toMatchObject({ id: 'pr:o/r:9', kind: 'review', verdict: 'commented' })
+  })
+
+  it('treats `gh pr diff` as a read, not a review (verb split)', () => {
+    const refs = parsePrRefs(sess([tc('shell', { target: { command: 'gh pr diff 7 --repo o/r' } })]))
+    expect(refs[0]).toMatchObject({ id: 'pr:o/r:7', kind: 'read' })
+    expect(refs[0]).not.toHaveProperty('verdict')
+  })
+
+  it('detects an explicit review via a GitHub MCP review tool, with its event verdict', () => {
+    const refs = parsePrRefs(
+      sess([tc('mcp_call', { name: 'github__create_pull_request_review', input: { owner: 'o', repo: 'r', pull_number: 3, event: 'APPROVE' } })]),
+    )
+    expect(refs).toEqual([expect.objectContaining({ id: 'pr:o/r:3', kind: 'review', verdict: 'approved' })])
+  })
+
+  it('treats an MCP get_pull_request_reviews (reading reviews) as a read', () => {
+    const refs = parsePrRefs(
+      sess([tc('mcp_call', { name: 'github__get_pull_request_reviews', input: { owner: 'o', repo: 'r', pull_number: 3 } })]),
+    )
+    expect(refs).toEqual([expect.objectContaining({ id: 'pr:o/r:3', kind: 'read' })])
+  })
 })

@@ -10,8 +10,15 @@ import type { ArtifactInput } from '../store/types'
 
 const PR_URL = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
 
-/** create/merge = the session changed the PR; read = it only inspected the PR. */
-export type PrRefKind = 'create' | 'merge' | 'read'
+/**
+ * create/merge = the session changed the PR; read = it only inspected the PR;
+ * review = it EXPLICITLY posted a review (`gh pr review`, an MCP review tool) — a
+ * deterministic, non-LLM "this session reviewed PR X" signal (Layer 1).
+ */
+export type PrRefKind = 'create' | 'merge' | 'read' | 'review'
+
+/** The verdict carried by an explicit review, when the command/input reveals it. */
+export type PrVerdict = 'approved' | 'changes_requested' | 'commented'
 
 export interface PrRef {
   /** Natural key `pr:owner/repo:num`. */
@@ -24,16 +31,37 @@ export interface PrRef {
   kind: PrRefKind
   /** Index into `session.toolCalls` this ref came from; -1 for a human prompt. */
   toolIndex: number
+  /** Only set for kind 'review': approve / request-changes / comment. */
+  verdict?: PrVerdict
 }
 
 // gh verbs that MUTATE a PR (the only thing outcomes-git attributes as created).
 const CREATE_VERB = /\bgh\s+pr\s+create\b/
 const MERGE_VERB = /\bgh\s+pr\s+merge\b/
+// `gh pr review` = an explicit posted review (Layer 1) — handled before READ_VERB.
+const REVIEW_VERB = /\bgh\s+pr\s+review\b/
 // gh verbs that READ/inspect a PR — an intentful "this session looked at PR X".
-const READ_VERB = /\bgh\s+pr\s+(?:view|diff|checkout|comment|review|edit|ready|close|reopen|status)\b/
-// Pull the PR number out of a read command: `gh pr diff 21 ...` / `gh pr view #21`.
-const READ_NUM = /\bgh\s+pr\s+(?:view|diff|checkout|comment|review|edit|ready|close|reopen|status)\s+#?(\d+)\b/
+const READ_VERB = /\bgh\s+pr\s+(?:view|diff|checkout|comment|edit|ready|close|reopen|status)\b/
+// Pull the PR number out of a gh command: `gh pr diff 21 ...` / `gh pr review #21`.
+const PR_NUM = /\bgh\s+pr\s+(?:view|diff|checkout|comment|review|edit|ready|close|reopen|status)\s+#?(\d+)\b/
 const REPO_FLAG = /--repo[=\s]+([^\s/]+)\/([^\s]+)/
+
+/** Read the review verdict off a `gh pr review` command's flags. */
+function reviewVerdict(exec: string): PrVerdict {
+  if (/--approve\b/.test(exec)) return 'approved'
+  if (/--request-changes\b/.test(exec)) return 'changes_requested'
+  return 'commented'
+}
+
+/** Read the review verdict off a GitHub MCP review input ({ event: 'APPROVE' | ... }). */
+function mcpVerdict(input: unknown): PrVerdict {
+  const ev = input && typeof input === 'object' ? (input as Record<string, unknown>).event : undefined
+  if (typeof ev === 'string') {
+    if (/approve/i.test(ev)) return 'approved'
+    if (/request[_-]?changes/i.test(ev)) return 'changes_requested'
+  }
+  return 'commented'
+}
 
 /**
  * Find every PR this session intentfully created, merged, or read. "Intentful"
@@ -45,6 +73,9 @@ const REPO_FLAG = /--repo[=\s]+([^\s/]+)\/([^\s]+)/
  */
 export function parsePrRefs(session: Session): PrRef[] {
   const refs: PrRef[] = []
+  const pushRef = (owner: string, repo: string, num: string, kind: PrRefKind, toolIndex: number, verdict?: PrVerdict) => {
+    refs.push({ id: prId(owner, repo, num), owner, repo, num, url: canonicalUrl(owner, repo, num), kind, toolIndex, ...(verdict ? { verdict } : {}) })
+  }
   // Resolve a PR identity from the FIRST source that yields one (preferring tool
   // output, then the command) — mirrors the original `raw ?? exec` semantics.
   const addUrl = (kind: PrRefKind, toolIndex: number, ...sources: unknown[]): boolean => {
@@ -52,12 +83,22 @@ export function parsePrRefs(session: Session): PrRef[] {
       const url = matchPrUrl(src)
       if (!url) continue
       const m = PR_URL.exec(url)
-      if (!m) continue
-      const [, owner, repo, num] = m
-      if (!owner || !repo || !num) continue
-      refs.push({ id: prId(owner, repo, num), owner, repo, num, url: canonicalUrl(owner, repo, num), kind, toolIndex })
+      if (!m || !m[1] || !m[2] || !m[3]) continue
+      pushRef(m[1], m[2], m[3], kind, toolIndex)
       return true
     }
+    return false
+  }
+  // Identity from a `gh pr <verb> <num> ... --repo o/r` command (URL or num+repo).
+  const fromShell = (exec: string, kind: PrRefKind, toolIndex: number, verdict?: PrVerdict): boolean => {
+    const url = matchPrUrl(exec)
+    if (url) {
+      const m = PR_URL.exec(url)
+      if (m && m[1] && m[2] && m[3]) { pushRef(m[1], m[2], m[3], kind, toolIndex, verdict); return true }
+    }
+    const numM = PR_NUM.exec(exec)
+    const repoM = REPO_FLAG.exec(exec)
+    if (numM && repoM && repoM[1] && repoM[2]) { pushRef(repoM[1], repoM[2], numM[1]!, kind, toolIndex, verdict); return true }
     return false
   }
 
@@ -70,22 +111,26 @@ export function parsePrRefs(session: Session): PrRef[] {
         const kind: PrRefKind = MERGE_VERB.test(exec) ? 'merge' : 'create'
         // gh prints the new PR's URL to stdout on create; merge is often given it.
         addUrl(kind, i, t.result.raw, exec)
+      } else if (REVIEW_VERB.test(exec)) {
+        // Explicit posted review (Layer 1) — identity + verdict from the command.
+        fromShell(exec, 'review', i, reviewVerdict(exec))
       } else if (READ_VERB.test(exec)) {
         // Identity must come from the command itself (URL, or num + --repo) — we do
         // NOT scan result output for a read, to avoid incidental-URL false positives.
-        if (!addUrl('read', i, exec)) {
-          const numM = READ_NUM.exec(exec)
-          const repoM = REPO_FLAG.exec(exec)
-          if (numM && repoM && repoM[1] && repoM[2]) {
-            const owner = repoM[1]
-            const repo = repoM[2]
-            const num = numM[1]!
-            refs.push({ id: prId(owner, repo, num), owner, repo, num, url: canonicalUrl(owner, repo, num), kind: 'read', toolIndex: i })
-          }
-        }
+        fromShell(exec, 'read', i)
       }
     } else if (t.action === 'mcp_call' && /pull_request/i.test(t.name)) {
-      if (/(?:create|merge|update)/i.test(t.name)) {
+      if (/review/i.test(t.name)) {
+        // create/submit/add ...review = POSTING a review; get/list ...review = reading.
+        if (/(?:create|submit|add)/i.test(t.name)) {
+          const ref = resolveMcpInput(t.input)
+          if (ref) refs.push({ ...ref, kind: 'review', toolIndex: i, verdict: mcpVerdict(t.input) })
+        } else {
+          const ref = resolveMcpInput(t.input)
+          if (ref) refs.push({ ...ref, kind: 'read', toolIndex: i })
+          else addUrl('read', i, t.input)
+        }
+      } else if (/(?:create|merge|update)/i.test(t.name)) {
         const kind: PrRefKind = /merge/i.test(t.name) ? 'merge' : 'create'
         addUrl(kind, i, t.result.raw, t.input)
       } else {

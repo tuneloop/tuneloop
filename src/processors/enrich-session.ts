@@ -60,7 +60,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 14,
+  version: 15,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],
@@ -202,6 +202,10 @@ export const enrichSession: Processor = {
     // `gh pr review`. Gated on the LLM run, so disabled when no provider is set.
     const refs = parsePrRefs(session)
     const selfCreated = new Set(refs.filter((r) => r.kind === 'create' || r.kind === 'merge').map((r) => r.id))
+    // PRs this session EXPLICITLY reviewed (gh pr review / MCP review tool) are
+    // owned by outcomes-git's Layer 1 (deterministic, confidence 1.0). Skip them
+    // here so the soft derived link never clobbers the explicit one.
+    const explicitReviewed = new Set(refs.filter((r) => r.kind === 'review').map((r) => r.id))
     const toolBlock = blocks.length > 0 ? blockMembership(session, blocks).tool : []
     const sessionHasReview = useCases.includes('review')
     // prId → the review block(s) where it was read. The block set drives block-grain
@@ -211,7 +215,7 @@ export const enrichSession: Processor = {
     // stays conserved because the cost queries UNION-dedupe identical usage rows.
     const reviewed = new Map<string, Set<number>>()
     for (const ref of refs) {
-      if (ref.kind !== 'read' || selfCreated.has(ref.id)) continue
+      if (ref.kind !== 'read' || selfCreated.has(ref.id) || explicitReviewed.has(ref.id)) continue
       // Block-grain gate: the PR was read INSIDE a review block. A human-pasted PR
       // link has no owning tool call, so fall back to "the session reviewed somewhere".
       const blockIdx = ref.toolIndex >= 0 ? toolBlock[ref.toolIndex] : undefined

@@ -130,4 +130,15 @@ describe('enrich-session reviewed-PR linkage', () => {
     const res = await enrichSession.run(ctx(session, implementingLlm))
     expect((res.sessionArtifacts ?? []).some((s) => s.role === 'reviewed')).toBe(false)
   })
+
+  it('defers to Layer 1: a PR both read and explicitly reviewed gets no derived link', async () => {
+    // The explicit `gh pr review` is owned by outcomes-git (Layer 1), so enrich must
+    // NOT also derive-link the same PR — even though it was read in a review block.
+    const session = buildSession([
+      { command: 'gh pr diff 21 --repo o/r' },
+      { command: 'gh pr review 21 --repo o/r --approve' },
+    ])
+    const res = await enrichSession.run(ctx(session, reviewingLlm(1)))
+    expect((res.sessionArtifacts ?? []).some((s) => s.role === 'reviewed')).toBe(false)
+  })
 })

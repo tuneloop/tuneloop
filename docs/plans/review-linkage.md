@@ -64,6 +64,31 @@ Built on top of the above (enrich-session `version: 14`):
   review cost, prod+review total, reviewed series), plus a block-link assertion in
   `enrich-session.test.ts`.
 
+### Follow-up shipped: Layer 1 (explicit `gh pr review`)
+
+Built on top (outcomes-git `version: 4`, enrich-session `version: 15`):
+
+- **Explicit-review detection** (`github-pr.ts`): new `review` PrRefKind + `verdict`
+  (`approved` / `changes_requested` / `commented`). `gh pr review` is split out of the
+  read-verb set and parsed for its flag; GitHub MCP review tools
+  (`create_pull_request_review` etc.) are detected with their `event` verdict. Reading
+  reviews (`get_pull_request_reviews`) stays a `read`.
+- **Layer 1 lives in `outcomes-git`** (static, no LLM): for an explicitly reviewed PR
+  (not self-created) it ensure-enriches the artifact, writes a `reviewed` link with
+  **source='explicit', confidence 1.0**, emits `pr_reviewed` plus a verdict outcome
+  (`pr_approved` / `pr_changes_requested`), and attributes review cost at block grain
+  to the blocks where the PR was reviewed or read.
+- **`enrich-session` defers** (Layer 2): any PR with an explicit `review` ref is dropped
+  from the derived set, so the explicit (1.0) link never collides with the derived (0.6) one.
+- **Reuses existing metric plumbing**: same `reviewed` role + `pr_reviewed` outcome, so the
+  cost guards and the "PRs reviewed" graph pick Layer 1 up automatically. New verdict
+  outcomes added to the client OUTCOME_ORDER for sane chip ordering.
+- **Tests**: explicit-review detection + verdicts and MCP review tool in `github-pr.test.ts`;
+  `outcomes-git-layer1.test.ts` (explicit link conf 1.0, verdict outcomes, self-review
+  exclusion, block link); a defer-to-Layer-1 case in `enrich-session.test.ts`.
+
+Limitation: Layer 1 only catches reviews posted via CLI/MCP, not the GitHub web UI.
+
 The original plan (Design X leaning) is preserved below for context.
 
 ---
