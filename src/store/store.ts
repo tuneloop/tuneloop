@@ -607,9 +607,16 @@ export class Store {
   costPerArtifact(kind: string, from?: string, to?: string): { count: number; costPerUnit: number | null } {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
     const params = from && to ? [kind, from, to] : [kind]
+    // "Shipped" means a PR THIS store produced — a PR whose only link is `reviewed`
+    // (a teammate's PR you reviewed) is not yours to count or cost here; it belongs
+    // to the separate "PRs reviewed" view. Harmless for features (no reviewed role).
+    const produced =
+      kind === 'pr'
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = a.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        : ''
     const count = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}`)
         .get(...params) as { n: number }
     ).n
     if (count === 0) return { count: 0, costPerUnit: null }
@@ -617,21 +624,22 @@ export class Store {
       this.db
         .prepare(
           `SELECT COALESCE(SUM(cost_usd),0) AS s FROM (
-             -- block-attributed: usage rows in blocks linked to an in-window completed artifact
+             -- block-attributed: usage rows in blocks linked to an in-window completed artifact.
+             -- Reviewed block links are excluded so review cost never inflates production cost.
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
-             JOIN block_artifacts ba ON ba.artifact_id = a.id
+             JOIN block_artifacts ba ON ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
              UNION
-             -- fallback: whole sessions of in-window artifacts that have NO block links
+             -- fallback: whole sessions of in-window artifacts that have NO production block links
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
-             JOIN session_artifacts sa ON sa.artifact_id = a.id
+             JOIN session_artifacts sa ON sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
              JOIN usage_facts u ON u.session_id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
-               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
+               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed')
            )`,
         )
         .get(...params, ...params) as { s: number }
@@ -700,12 +708,22 @@ export class Store {
   ): {
     burn: Array<{ bucket: string; spend: number; shippedSpend: number }>
     throughput: Array<{ bucket: string; count: number }>
+    /** PRs reviewed per bucket, dated at REVIEW time (the pr_reviewed outcome ts). PRs only. */
+    reviewed: Array<{ bucket: string; count: number }>
     buckets: string[]
   } {
     // Anchored on usage_facts and dated at message time (COALESCE u.ts → session
     // start), so spend buckets at block-level time granularity (P5), and the
     // converted sub-band greens only the BLOCKS that produced a shipped artifact —
     // not the whole session. kind binds first (in the CASE subquery), then window.
+    // "Produced by this store" guard (PRs only): a PR whose only link is `reviewed`
+    // is a teammate's PR you reviewed — not something you shipped — so it's excluded
+    // from the shipped throughput and the green "shipped spend" sub-band. Its review
+    // spend lives in the separate "PRs reviewed" view.
+    const produced =
+      kind === 'pr'
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        : ''
     const burnRange = from && to ? 'AND COALESCE(u.ts, s.started_at) >= ? AND COALESCE(u.ts, s.started_at) < ?' : ''
     const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
@@ -715,6 +733,7 @@ export class Store {
                 COALESCE(SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM block_usage bu
                     JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
+                                            AND COALESCE(ba.role,'') <> 'reviewed'
                     JOIN artifacts a ON a.id = ba.artifact_id
                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
                       AND a.kind = ? AND a.completed_at IS NOT NULL
@@ -729,9 +748,24 @@ export class Store {
     const throughput = this.db
       .prepare(
         `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
-         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} GROUP BY bucket ORDER BY bucket`,
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} GROUP BY bucket ORDER BY bucket`,
       )
       .all(...thParams) as Array<{ bucket: string; count: number }>
+    // PRs reviewed per bucket, dated at REVIEW time (when you reviewed, not when the
+    // PR merged) — sourced from the pr_reviewed outcome. Distinct PRs, so two review
+    // sessions on the same PR count once. Features have no review signal → empty.
+    const revRange = from && to ? 'AND o.ts >= ? AND o.ts < ?' : ''
+    const reviewed =
+      kind === 'pr'
+        ? (this.db
+            .prepare(
+              `SELECT ${bucketExpr('o.ts', bucket)} AS bucket, COUNT(DISTINCT o.artifact_id) AS count
+               FROM outcomes o
+               WHERE o.type = 'pr_reviewed' AND o.ts IS NOT NULL ${revRange}
+               GROUP BY bucket ORDER BY bucket`,
+            )
+            .all(...(from && to ? [from, to] : [])) as Array<{ bucket: string; count: number }>)
+        : []
     // The x-axis: over a window, every bucket from `from` to `to` (so empty
     // periods show as gaps and the chart spans the whole window, not just the
     // periods that happen to have data); all-time falls back to the data's own
@@ -741,7 +775,8 @@ export class Store {
     if (from && to) this.bucketAxis(from, to, bucket).forEach((b) => set.add(b))
     burn.forEach((r) => set.add(r.bucket))
     throughput.forEach((r) => set.add(r.bucket))
-    return { burn, throughput, buckets: Array.from(set).sort() }
+    reviewed.forEach((r) => set.add(r.bucket))
+    return { burn, throughput, reviewed, buckets: Array.from(set).sort() }
   }
 
   /**
@@ -795,9 +830,15 @@ export class Store {
     ).s
     const thRange = from && to ? 'AND completed_at >= ? AND completed_at < ?' : ''
     const thParams = from && to ? [kind, from, to] : [kind]
+    // Same "produced by this store" guard as costPerArtifact, so this throughput
+    // (the KPI denominator) matches the cost-per-shipped count exactly (PRs only).
+    const produced =
+      kind === 'pr'
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        : ''
     const throughput = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced}`)
         .get(...thParams) as { n: number }
     ).n
     return { burn, throughput, efficiency: throughput ? burn / throughput : null }

@@ -92,6 +92,10 @@ describe('enrich-session reviewed-PR linkage', () => {
     expect(res.outcomes).toContainEqual(expect.objectContaining({ type: 'pr_reviewed', artifactId: 'pr:o/r:21' }))
     // The artifact row was enriched via the gh stub (so it isn't a bare stub).
     expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:21', kind: 'pr', title: 'Teammate PR', owner: 'bob' }))
+    // Block-level link so review cost attributes to the review block, not whole session.
+    expect(res.blockArtifacts).toContainEqual(
+      expect.objectContaining({ blockIdx: 0, artifactId: 'pr:o/r:21', role: 'reviewed' }),
+    )
   })
 
   it('does NOT mark a self-created PR as reviewed, even when it later views it', async () => {

@@ -39,6 +39,31 @@ Why Design Y over the plan's leaning-X: `enrich-session` already writes artifact
 and the COALESCE store fix removes the clobber hazard that motivated X's ownership
 split. Y does strictly less work (only enriches PRs it actually links).
 
+### Follow-up shipped: block-grain review cost + "PRs reviewed" graph
+
+Built on top of the above (enrich-session `version: 14`):
+
+- **Block-level review links.** `enrich-session` now also emits a `block_artifacts`
+  row (`role:'reviewed'`) for the review block(s) where a PR was read. So a reviewed
+  PR's cost attributes to the review block only — not the whole session. (A PR read
+  only via a human-pasted link, with no tool-read block, keeps just the session link
+  and falls back to whole-session cost — a pure-review session IS the review.)
+- **Per-PR total cost = production + review.** The PR-table cost (`artifactList`)
+  sums all block roles, so a PR that was built *and* reviewed shows prod + review.
+  No query change was needed there — it falls out of the new block links.
+- **"Cost per shipped PR" stays production-only.** `costPerArtifact`, `costPeriod`,
+  and the `costCurves` throughput/shipped-spend now carry a "produced by this store"
+  guard: a PR whose only link is `reviewed` (a teammate's PR you reviewed) is NOT
+  counted as shipped, and reviewed block cost is excluded from production cost. Without
+  this, reviewing a teammate's merged PR would have silently inflated the headline KPI.
+- **New "PRs reviewed" graph.** `costCurves` returns a `reviewed` series (distinct PRs
+  reviewed per bucket, dated at REVIEW time via the `pr_reviewed` outcome — PRs only).
+  Exposed through `/api/cost-artifact` and rendered as a throughput curve directly
+  below "PRs shipped" in the Cost-per-merged-PR detail view (`costArtifact.ts`).
+- **Tests:** `store/review-cost.test.ts` (production-only count/cost, block-attributed
+  review cost, prod+review total, reviewed series), plus a block-link assertion in
+  `enrich-session.test.ts`.
+
 The original plan (Design X leaning) is preserved below for context.
 
 ---

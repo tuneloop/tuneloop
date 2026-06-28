@@ -221,6 +221,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         period: store.costPeriod(kind),
         burn: curves.burn,
         throughput: curves.throughput,
+        reviewed: curves.reviewed,
         buckets: curves.buckets,
       })
       return
@@ -242,6 +243,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       period: store.costPeriod(kind, from, to),
       burn: curves.burn,
       throughput: curves.throughput,
+      reviewed: curves.reviewed,
       buckets: curves.buckets,
     })
     return
