@@ -280,12 +280,35 @@ export class Store {
             .run(a.id, a.repo ?? null, a.source ?? null, a.title ?? null, a.createdAt ?? null, a.parentArtifactId ?? null, processor)
           continue
         }
+        // Field-merging upsert (NOT INSERT OR REPLACE): the same PR can be written
+        // by several sessions (its creator, then any session that reviewed it), and
+        // an offline run may only have a stub (no title/state). COALESCE keeps a
+        // value a richer write already stored rather than blanking it. `status` gets
+        // a guard so a stub's optimistic 'open' can't overwrite a terminal merged/closed.
         this.db
           .prepare(
-            `INSERT OR REPLACE INTO artifacts
+            `INSERT INTO artifacts
                (id, kind, repo, ident, external_id, source, title, owner, complexity,
                 complexity_basis, status, created_at, completed_at, parent_artifact_id, json, producer)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               repo = COALESCE(excluded.repo, artifacts.repo),
+               ident = COALESCE(excluded.ident, artifacts.ident),
+               external_id = COALESCE(excluded.external_id, artifacts.external_id),
+               source = COALESCE(excluded.source, artifacts.source),
+               title = COALESCE(excluded.title, artifacts.title),
+               owner = COALESCE(excluded.owner, artifacts.owner),
+               complexity = COALESCE(excluded.complexity, artifacts.complexity),
+               complexity_basis = COALESCE(excluded.complexity_basis, artifacts.complexity_basis),
+               status = CASE
+                 WHEN artifacts.status IN ('merged', 'closed') AND COALESCE(excluded.status, '') = 'open'
+                   THEN artifacts.status
+                 ELSE COALESCE(excluded.status, artifacts.status) END,
+               created_at = COALESCE(excluded.created_at, artifacts.created_at),
+               completed_at = COALESCE(excluded.completed_at, artifacts.completed_at),
+               parent_artifact_id = COALESCE(excluded.parent_artifact_id, artifacts.parent_artifact_id),
+               json = COALESCE(excluded.json, artifacts.json),
+               producer = excluded.producer`,
           )
           .run(
             a.id, a.kind, a.repo ?? null, a.ident ?? null, a.externalId ?? null, a.source ?? null,

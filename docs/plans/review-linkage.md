@@ -1,5 +1,50 @@
 # PR ↔ review-session linkage
 
+Status: **implemented** on branch `pr-review-linkage` (off `main`). Typecheck + tests green.
+
+## What was built (differs from the original plan below — read this first)
+
+We chose **Design Y, not X**, and fixed a store bug the plan had only designed around:
+
+- **`src/processors/github-pr.ts` (new)** — shared `parsePrRefs(session)`,
+  `prArtifactBase(ref)`, `enrichPrArtifact(sh, base, cwd)`, and `stripInertRegions`.
+  `parsePrRefs` detects create / merge / read PRs **intentfully**: identity comes from
+  the command target, a web-fetch url, an MCP input, or a human-prompt URL — it does
+  NOT scan unrelated tool output for stray URLs (the old false-positive trap). A read
+  with no resolvable `owner/repo/num` (bare `gh pr diff 21`) is skipped.
+- **`outcomes-git.ts`** — refactored to use the shared helpers; behavior unchanged
+  (still only attributes create/merge here). Re-exports `stripInertRegions` for its test.
+- **`enrich-session.ts`** owns the whole `reviewed` flow (Design Y): for a PR read
+  **inside a block the LLM labeled `review`** (block-grain gate via `blockMembership` +
+  the per-block `use_case` array), excluding self-created PRs, it ensure-enriches the
+  PR artifact with the shared `gh` helper and emits `session_artifacts role:'reviewed'`
+  (`source:'derived'`, `confidence:0.6`) + a `pr_reviewed` outcome. A human-pasted PR
+  link (no owning block) falls back to "the session reviewed somewhere". **Version
+  bumped 12 → 13**, which re-runs LLM enrichment on every existing session (accepted
+  one-time cost). No `requires:['outcomes-git']` — enrich writes the artifact itself.
+- **`store.ts`** — the non-feature artifact upsert is now a **field-merging**
+  `ON CONFLICT DO UPDATE` (COALESCE), with a `CASE` guard so a stub `open` can't
+  overwrite a terminal `merged`/`closed`. Fixes the latent stub-clobber bug for ALL PR
+  writers (including the existing created/merged path) and is what makes Design Y safe.
+  No `outcomes-git` read-PR creation and no prune dependency — so X's wasted
+  `gh pr view` calls on never-reviewed PRs and its transient rows are avoided entirely.
+- **`types.ts`** — `SessionArtifactRole` gains `'reviewed'`.
+- **Tests** — `github-pr.test.ts` (intentful detection incl. incidental-URL rejection,
+  num+repo reads, MCP/web/human-prompt), `enrich-session.test.ts` (review-block link,
+  self-created exclusion, non-review skip), `store.test.ts` (stub doesn't clobber; a
+  real status transition still applies).
+
+Why Design Y over the plan's leaning-X: `enrich-session` already writes artifacts
+(features), so "the reviewer must never touch `artifacts`" was never a real invariant;
+and the COALESCE store fix removes the clobber hazard that motivated X's ownership
+split. Y does strictly less work (only enriches PRs it actually links).
+
+The original plan (Design X leaning) is preserved below for context.
+
+---
+
+# Original plan (superseded by the section above)
+
 Status: **planned, no code written.** Branch: `pr-review-linkage` (off `main`).
 
 ## Goal

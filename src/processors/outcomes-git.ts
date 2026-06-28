@@ -1,15 +1,20 @@
 import { registerProcessor } from '../core/registry'
 import { attributeBlocksToPrs, blockMembership, deterministicBlocks } from '../core/blocks'
 import type { Processor, RefreshContext, RefreshResult } from '../core/processor'
-import type { ArtifactInput, BlockArtifactInput, OutcomeInput, SessionArtifactInput } from '../store/types'
+import type { ArtifactInput, OutcomeInput, SessionArtifactInput, BlockArtifactInput } from '../store/types'
+import { enrichPrArtifact, parsePrRefs, prArtifactBase, stripInertRegions } from './github-pr'
 
-const PR_URL = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
+// Re-exported so existing tests (and any importer) keep their import path stable.
+export { stripInertRegions } from './github-pr'
 
 /**
  * Static + network extractor: detect commits and PRs from the transcript, then
  * query `gh` for live PR status (degrades gracefully when offline / gh missing).
  * A commit with no resolvable SHA yields a session-level `commit_pushed` outcome
  * with no artifact — the nullable-artifact case from the data model.
+ *
+ * PRs a session only READ are deliberately ignored here — reviewed-PR linkage is
+ * derived in `enrich-session` (it needs the `review` use-case, which is LLM-grade).
  */
 export const outcomesGit: Processor = {
   name: 'outcomes-git',
@@ -24,87 +29,33 @@ export const outcomesGit: Processor = {
     const sessionArtifacts: SessionArtifactInput[] = []
     const outcomes: OutcomeInput[] = []
 
+    // A commit with no resolvable SHA: a session-level outcome with no artifact.
     let committed = false
-    // Track each PR's create/merge tool-call index so it maps to its block below.
-    const prHits: Array<{ url: string; toolIndex: number }> = []
-    session.toolCalls.forEach((t, i) => {
+    for (const t of session.toolCalls) {
       if (t.action === 'shell' && typeof t.target.command === 'string') {
-        // Detect against the executable skeleton (see stripInertRegions) so
-        // fixture/doc text that merely contains these commands isn't counted.
-        const exec = stripInertRegions(t.target.command)
-        if (/\bgit\b[^\n]*\bcommit\b/.test(exec)) committed = true
-        if (/\bgh\s+pr\s+(?:create|merge)\b/.test(exec)) {
-        // Only attribute a PR the session actually created/merged via gh — NOT a
-        // PR URL that merely appeared in read/fetch/search output (e.g. while
-        // researching a public repo). That blanket scan caused false positives.
-          const url = matchPrUrl(t.result.raw) ?? matchPrUrl(exec)
-          if (url) prHits.push({ url, toolIndex: i })
+        // Match the executable skeleton so fixture/doc text isn't counted.
+        if (/\bgit\b[^\n]*\bcommit\b/.test(stripInertRegions(t.target.command))) {
+          committed = true
+          break
         }
-      } else if (t.action === 'mcp_call' && /pull_request/i.test(t.name) && /(?:create|merge|update)/i.test(t.name)) {
-        const url = matchPrUrl(t.result.raw) ?? matchPrUrl(t.input)
-        if (url) prHits.push({ url, toolIndex: i })
       }
-    })
-
+    }
     if (committed) outcomes.push({ type: 'commit_pushed', artifactId: null, ts: session.endedAt })
 
-    const prUrls = new Set(prHits.map((h) => h.url))
+    // Only attribute PRs this session actually created/merged — NOT ones it merely
+    // read (those are handled, gated on the review use-case, by enrich-session).
+    const refs = parsePrRefs(session)
+    const mutating = refs.filter((r) => r.kind === 'create' || r.kind === 'merge')
+    const byId = new Map<string, (typeof mutating)[number]>()
+    for (const r of mutating) if (!byId.has(r.id)) byId.set(r.id, r)
 
-    for (const url of prUrls) {
-      const m = PR_URL.exec(url)
-      if (!m) continue
-      const owner = m[1]
-      const repo = m[2]
-      const num = m[3]
-      if (!owner || !repo || !num) continue
-
-      const id = `pr:${owner}/${repo}:${num}`
-      const art: ArtifactInput = {
-        id,
-        kind: 'pr',
-        repo: `${owner}/${repo}`,
-        ident: num,
-        externalId: url,
-        source: 'github',
-        status: 'open',
-      }
-
-      const res = await sh(
-        'gh',
-        ['pr', 'view', url, '--json', 'title,state,createdAt,mergedAt,additions,deletions,author'],
-        { cwd },
-      )
-      if (res && res.code === 0) {
-        try {
-          const j = JSON.parse(res.stdout) as {
-            title?: string
-            state?: string
-            createdAt?: string | null
-            mergedAt?: string | null
-            additions?: number
-            deletions?: number
-            author?: { login?: string }
-          }
-          if (typeof j.title === 'string') art.title = j.title
-          if (typeof j.state === 'string') art.status = j.state.toLowerCase()
-          if (j.createdAt) art.createdAt = j.createdAt
-          if (j.mergedAt) art.completedAt = j.mergedAt
-          const churn = (j.additions ?? 0) + (j.deletions ?? 0)
-          if (churn > 0) {
-            art.complexity = churn
-            art.complexityBasis = 'diff_size'
-          }
-          if (j.author?.login) art.owner = j.author.login
-        } catch {
-          /* leave defaults */
-        }
-      }
-
+    for (const ref of byId.values()) {
+      const art = await enrichPrArtifact(sh, prArtifactBase(ref), cwd)
       artifacts.push(art)
-      sessionArtifacts.push({ artifactId: id, role: 'created', source: 'explicit' })
-      outcomes.push({ type: 'pr_created', artifactId: id, ts: session.endedAt })
+      sessionArtifacts.push({ artifactId: ref.id, role: 'created', source: 'explicit' })
+      outcomes.push({ type: 'pr_created', artifactId: ref.id, ts: session.endedAt })
       if (art.status === 'merged' || art.completedAt) {
-        outcomes.push({ type: 'pr_merged', artifactId: id, ts: art.completedAt })
+        outcomes.push({ type: 'pr_merged', artifactId: ref.id, ts: art.completedAt })
       }
     }
 
@@ -113,14 +64,12 @@ export const outcomesGit: Processor = {
     // producing the PR, including the commit-bounded blocks leading up to it.
     const blocks = deterministicBlocks(session)
     const blockArtifacts: BlockArtifactInput[] = []
-    if (blocks.length && prHits.length) {
+    if (blocks.length && mutating.length) {
       const tool = blockMembership(session, blocks).tool
       const closingBlockToArtifact = new Map<number, string>()
-      for (const hit of prHits) {
-        const m = PR_URL.exec(hit.url)
-        if (!m) continue
-        const blockIdx = tool[hit.toolIndex]
-        if (blockIdx != null) closingBlockToArtifact.set(blockIdx, `pr:${m[1]}/${m[2]}:${m[3]}`)
+      for (const ref of mutating) {
+        const blockIdx = tool[ref.toolIndex]
+        if (blockIdx != null) closingBlockToArtifact.set(blockIdx, ref.id)
       }
       for (const { blockIdx, artifactId } of attributeBlocksToPrs(blocks, closingBlockToArtifact)) {
         blockArtifacts.push({ blockIdx, artifactId, role: 'contributed', source: 'explicit' })
@@ -153,54 +102,6 @@ export const outcomesGit: Processor = {
 
     return { artifacts: updated, outcomes }
   },
-}
-
-// Sinks that execute their heredoc body; for any other sink (cat, tee, a file
-// redirect) the body is inert data and gets stripped.
-const HEREDOC_INTERPRETER = /\b(?:bash|sh|zsh|ksh|dash|python3?|node|ruby|perl|php|fish|eval|source)\b/
-const HEREDOC_START = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/
-
-/**
- * Strip the parts of a shell command the shell would never run as a command —
- * non-executing heredoc bodies and quoted string literals — leaving an
- * "executable skeleton" to match against. Best-effort heuristic, not a parser.
- */
-export function stripInertRegions(cmd: string): string {
-  const lines = cmd.split('\n')
-  const out: string[] = []
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? ''
-    const m = HEREDOC_START.exec(line)
-    if (!m || m.index === undefined) {
-      out.push(line)
-      continue
-    }
-    const delim = m[2]
-    const dashed = line.slice(m.index, m.index + 3).includes('<<-')
-    const executes = HEREDOC_INTERPRETER.test(line.slice(0, m.index))
-    out.push(line) // introducing line is itself a real command
-    let j = i + 1
-    for (; j < lines.length; j++) {
-      const body = lines[j] ?? ''
-      if ((dashed ? body.replace(/^\t+/, '') : body) === delim) break
-      if (executes) out.push(body)
-    }
-    if (j < lines.length) out.push(lines[j] ?? '') // closing delimiter
-    i = j
-  }
-  // Blank quoted literals (keeping token boundaries); after heredocs so quoted
-  // delimiters above still match.
-  return out
-    .join('\n')
-    .replace(/'[^']*'/g, "''")
-    .replace(/"(?:\\.|[^"\\])*"/g, '""')
-}
-
-function matchPrUrl(raw: unknown): string | null {
-  if (raw == null) return null
-  const s = typeof raw === 'string' ? raw : JSON.stringify(raw)
-  const m = PR_URL.exec(s)
-  return m ? m[0] : null
 }
 
 registerProcessor(outcomesGit)
