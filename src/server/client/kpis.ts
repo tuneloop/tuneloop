@@ -2,6 +2,7 @@
 // that metric's full-width detail section, and exactly one section is always
 // expanded (default success_rate, set in main.ts).
 import { state, $, esc, usd, num, get, fmtVal, kpiDelta } from './core'
+import { syncHash } from './router'
 import { renderSuccessRate } from './metrics/successRate'
 import { renderCostArtifact } from './metrics/costArtifact'
 import { renderTotalSpend } from './metrics/totalSpend'
@@ -40,7 +41,7 @@ export function renderWindow() {
 
 // Re-render the currently expanded metric's detail (shared by openMetric and the
 // window selector). No-op when no detail is open.
-function renderOpenMetric() {
+export function renderOpenMetric() {
   var m = state.metric;
   if (m === 'success_rate') renderSuccessRate();
   else if (m === 'cost_artifact') renderCostArtifact();
@@ -100,8 +101,10 @@ export function loadKpis() {
 export function openMetric(m) {
   if (state.metric === m) return; // already expanded
   state.metric = m;
+  state.view = 'dashboard';
   syncKpiActive();
   renderOpenMetric();
+  syncHash(); // mirror the metric into the URL (no-op while a route is applying)
 }
 
 export function syncKpiActive() {

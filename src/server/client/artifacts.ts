@@ -3,6 +3,7 @@
 // mutations POST to /api/features* and reload.
 import { state, $, esc, usd, dayOf, get, post } from './core'
 import { filterByArtifact } from './sessions'
+import { syncHash } from './router'
 
 export function renderArtKindSeg() {
   var opts = [['feature', 'Features'], ['pr', 'PRs']];
@@ -10,8 +11,49 @@ export function renderArtKindSeg() {
     return '<button class="' + (o[0] === state.artKind ? 'on' : '') + '" data-k="' + o[0] + '">' + o[1] + '</button>';
   }).join('');
   Array.prototype.forEach.call($('#artKindSeg').children, function (btn) {
-    btn.onclick = function () { state.artKind = btn.getAttribute('data-k'); renderArtKindSeg(); loadArtifacts(); };
+    btn.onclick = function () { setArtKind(btn.getAttribute('data-k')); };
   });
+}
+
+// Switch the Artifacts sub-tab (Features | PRs) from the segment buttons, and
+// mirror it into the URL. Switching kind resets the table's search/sort (each kind
+// gets a fresh list). No-op when already on that kind.
+export function setArtKind(kind) {
+  state.view = 'artifacts';
+  if (state.artKind === kind) { syncHash(); return; }
+  state.artKind = kind;
+  state.art = { q: '', sort: 'created', dir: 'desc' };
+  renderArtKindSeg();
+  loadArtifacts();
+  syncHash();
+}
+
+// ---- URL <-> artifacts-list bridge (used by the router) ----------------------
+
+// The current artifacts-table state as URL query params: free-text search (q) and,
+// for the PR table, the column sort. Defaults (created/desc) are omitted.
+export function getArtifactParams(): Record<string, string> {
+  var q: Record<string, string> = {};
+  if (state.art.q) q.q = state.art.q;
+  if (state.artKind === 'pr') {
+    if (state.art.sort && state.art.sort !== 'created') q.sort = state.art.sort;
+    if (state.art.dir === 'asc') q.dir = 'asc';
+  }
+  return q;
+}
+
+// Restore the artifacts kind + table search/sort from the URL, then reload. Used
+// by the router on Back/Forward and deep links (inverse of getArtifactParams).
+export function applyArtifactParams(kind, query) {
+  state.view = 'artifacts';
+  state.artKind = kind === 'pr' || kind === 'feature' ? kind : 'feature';
+  state.art = {
+    q: query.q || '',
+    sort: query.sort || 'created',
+    dir: query.dir === 'asc' ? 'asc' : 'desc',
+  };
+  renderArtKindSeg();
+  loadArtifacts();
 }
 
 function renderArtifacts(rows, kind) {
@@ -23,7 +65,8 @@ function renderArtifacts(rows, kind) {
 // Rows are held in module state so search + column sort re-render only the table
 // body, leaving the (outside) search input focused.
 var prRows = [];
-var prSort = { col: 'created', dir: 'desc' };
+// Column sort lives in state.art (state.art.sort / .dir) so it round-trips through
+// the URL; the search box value lives in state.art.q.
 // [key, label, numeric?] — numeric columns right-align and default to descending.
 var PR_COLS = [['pr', 'Pull request', 0], ['status', 'Status', 0], ['sessions', 'Sessions', 1],
   ['cost', 'Cost', 1], ['created', 'Created', 1], ['merged', 'Merged', 1]];
@@ -37,7 +80,9 @@ function renderPrTab(rows) {
   $('#artifacts').innerHTML =
     '<input id="pr-search" class="feat-search" type="search" placeholder="Search PRs by title or #identifier…" autocomplete="off" />' +
     '<div id="pr-table-wrap"></div>';
-  $('#pr-search').oninput = renderPrTable;
+  var srch = $('#pr-search');
+  srch.value = state.art.q || ''; // restore a URL-driven search
+  srch.oninput = function () { state.art.q = srch.value; syncHash({ replace: true }); renderPrTable(); };
   renderPrTable();
 }
 
@@ -60,14 +105,14 @@ function renderPrTable() {
     var hay = ((r.title || '') + ' #' + (r.ident || '') + ' ' + (r.repo || '') + ' ' + (r.externalId || '')).toLowerCase();
     return hay.indexOf(q) !== -1;
   });
-  var dir = prSort.dir === 'asc' ? 1 : -1;
+  var dir = state.art.dir === 'asc' ? 1 : -1;
   rows.sort(function (a, b) {
-    var x = prVal(a, prSort.col), y = prVal(b, prSort.col);
+    var x = prVal(a, state.art.sort), y = prVal(b, state.art.sort);
     return x < y ? -dir : x > y ? dir : 0;
   });
 
   var head = '<tr>' + PR_COLS.map(function (c) {
-    var arrow = c[0] === prSort.col ? (prSort.dir === 'asc' ? ' &#9652;' : ' &#9662;') : '';
+    var arrow = c[0] === state.art.sort ? (state.art.dir === 'asc' ? ' &#9652;' : ' &#9662;') : '';
     return '<th class="pr-th' + (c[2] ? ' num' : '') + '" data-sort="' + c[0] + '">' + c[1] + arrow + '</th>';
   }).join('') + '<th></th></tr>';
   var body = rows.map(function (r) {
@@ -92,8 +137,9 @@ function renderPrTable() {
   Array.prototype.forEach.call(document.querySelectorAll('#pr-table-wrap .pr-th'), function (th) {
     th.onclick = function () {
       var col = th.getAttribute('data-sort');
-      if (prSort.col === col) prSort.dir = prSort.dir === 'asc' ? 'desc' : 'asc';
-      else { prSort.col = col; prSort.dir = (col === 'pr' || col === 'status') ? 'asc' : 'desc'; }
+      if (state.art.sort === col) state.art.dir = state.art.dir === 'asc' ? 'desc' : 'asc';
+      else { state.art.sort = col; state.art.dir = (col === 'pr' || col === 'status') ? 'asc' : 'desc'; }
+      syncHash({ replace: true });
       renderPrTable();
     };
   });
@@ -293,9 +339,8 @@ function wireFeatureManager() {
   // Local name filter. A match reveals its WHOLE subtree (so searching an epic
   // shows everything under it) plus its ancestors (so the match keeps its place
   // in the tree). Pure show/hide in place — no refetch, keeps input focus.
-  var search = $('#feat-search');
-  if (search) search.oninput = function () {
-    var q = search.value.trim().toLowerCase();
+  function filterFeatRows(qRaw) {
+    var q = (qRaw || '').trim().toLowerCase();
     var rows = Array.prototype.slice.call(document.querySelectorAll('#artifacts .feat-row'));
     if (!q) { rows.forEach(function (r) { r.style.display = ''; }); return; }
     var childrenOf = {}, parentOf = {};
@@ -322,7 +367,13 @@ function wireFeatureManager() {
       }
     });
     rows.forEach(function (r) { r.style.display = visible[r.getAttribute('data-id')] ? '' : 'none'; });
-  };
+  }
+  var search = $('#feat-search');
+  if (search) {
+    search.value = state.art.q || ''; // restore a URL-driven search
+    search.oninput = function () { state.art.q = search.value; syncHash({ replace: true }); filterFeatRows(search.value); };
+    if (search.value) filterFeatRows(search.value);
+  }
 
   // One-time global closers: outside click and Escape dismiss any open menu.
   // Idempotent across reloads — they query the live DOM each time.
