@@ -38,7 +38,7 @@ function fmt(v: number): string {
 // Build a tree from the flat API nodes ([{id,title,parentId,ownCost,subtreeCost}]),
 // children sorted biggest-subtree-first. A parentId that doesn't resolve to a known
 // feature is treated as a root (matches the server normalization).
-function buildTree(nodes: any[]): TNode {
+function buildTree(nodes: any[], rootName: string): TNode {
   var byId: Record<string, TNode> = {};
   nodes.forEach(function (n) {
     byId[n.id] = { name: n.title || '(untitled)', total: n.subtreeCost || 0, own: n.ownCost || 0, children: [] };
@@ -53,7 +53,7 @@ function buildTree(nodes: any[]): TNode {
     list.sort(function (a, b) { return b.total - a.total; });
     list.forEach(function (c) { sortRec(c.children); });
   })(roots);
-  return { name: 'All features', total: roots.reduce(function (s, c) { return s + c.total; }, 0), children: roots };
+  return { name: rootName, total: roots.reduce(function (s, c) { return s + c.total; }, 0), children: roots };
 }
 
 // Color each family by its root hue (lighter by depth) and add an explicit
@@ -143,9 +143,12 @@ export function disposeFeatTreemap(): void {
   if (tipEl) tipEl.style.display = 'none';
 }
 
-// Mount the interactive treemap into `host`, driven by the flat feature-cost nodes.
-export function renderFeatTreemap(host: HTMLElement, nodes: any[]): void {
-  var root = buildTree(nodes);
+// Mount the interactive treemap into `host`, driven by the flat cost nodes
+// ([{id,title,parentId,ownCost,subtreeCost}]). `rootName` labels the breadcrumb
+// root (e.g. "All features" / "All PRs"). Flat node sets (no parentId) render as a
+// plain treemap — no drill-down or "(direct work)" tiles, just the roll-up slider.
+export function renderFeatTreemap(host: HTMLElement, nodes: any[], rootName: string): void {
+  var root = buildTree(nodes, rootName || 'All features');
   root.children.forEach(function (c, i) { decorate(c, PALETTE[i % PALETTE.length], 0); });
 
   host.innerHTML =
