@@ -21,14 +21,22 @@ export interface SessionFilters {
 // Sessions-list time window. `preset` drives from/to; 'custom' reads the date
 // inputs; 'all' means no bound. Independent of the dashboard KPI window.
 export interface SessTime {
-  preset: 7 | 30 | 90 | 'all' | 'custom'
+  preset: 7 | 14 | 30 | 90 | 'all' | 'custom'
   from: string // ISO date (yyyy-mm-dd) for custom range
   to: string
 }
 
 export interface ClientState {
+  // The top-level tab the app is showing. Mirrored into the URL hash by the
+  // router; setView() keeps it in step with the DOM.
+  view: 'highlights' | 'dashboard' | 'artifacts' | 'sessions'
+  // The session whose detail drawer is open (null = drawer closed). Mirrored into
+  // the URL as `?session=<id>` so a session is shareable / reload-survivable.
+  open: string | null
   artKind: string
   overview: any
+  home: any // Explore (question-led) stats; null until fetched
+  asked: any // the question the user clicked through from, for the grounding banner (null = none)
   filters: Partial<SessionFilters> // starts {}, filled in by applyFilters()
   facets: any[]
   dist: Record<string, any[]>
@@ -50,10 +58,15 @@ export interface ClientState {
   ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
+  // Artifacts tab list controls (PRs/Features table): free-text search + the PR
+  // table's column sort. Mirrored into the URL so a filtered/sorted table is a
+  // shareable, reload-survivable link. Reset when switching kind (feature ↔ pr).
+  art: { q: string; sort: string; dir: string }
 }
 
 export var state: ClientState = {
-  artKind: 'feature', overview: null, filters: {}, facets: [], dist: {}, measures: [],
+  view: 'dashboard', open: null,
+  artKind: 'feature', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 7,
@@ -65,7 +78,8 @@ export var state: ClientState = {
   sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
   ac: { items: [], sel: -1 },
-  sessTime: { preset: 30, from: '', to: '' }
+  sessTime: { preset: 30, from: '', to: '' },
+  art: { q: '', sort: 'created', dir: 'desc' }
 };
 
 // The success-rate detail controls persist across reloads: the user's "what
@@ -218,7 +232,7 @@ export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', 
 // down to the LLM-judged catch-all. Shared by the success-rate "Count as success"
 // picker and the sessions Outcomes column so they read consistently. Types not
 // listed sort to the end (preserving their relative order).
-export var OUTCOME_ORDER = ['pr_merged', 'pr_created', 'commit_pushed', 'file_written', 'session_success'];
+export var OUTCOME_ORDER = ['pr_merged', 'pr_created', 'pr_approved', 'pr_changes_requested', 'pr_reviewed', 'commit_pushed', 'file_written', 'session_success'];
 export function outcomeRank(type) { var i = OUTCOME_ORDER.indexOf(type); return i < 0 ? OUTCOME_ORDER.length : i; }
 
 // Friendly display for an outcome type in selection UIs (success-rate picker,

@@ -35,6 +35,14 @@ export function renderCostArtifact() {
       '<div class="panel-head"><h2>' + esc(caNoun().charAt(0).toUpperCase() + caNoun().slice(1)) + ' shipped <span class="metric-sub">' + win + ' &middot; dated at completion time</span></h2></div>' +
       '<div id="ca-throughput"></div>' +
     '</div>' +
+    // PRs reviewed sits directly under PRs shipped — a parallel throughput line for
+    // review work, dated when you reviewed (not when the PR merged). PRs only.
+    (state.ca.kind === 'pr'
+      ? '<div class="panel">' +
+          '<div class="panel-head"><h2>PRs reviewed <span class="metric-sub">' + win + ' &middot; dated at review time</span></h2></div>' +
+          '<div id="ca-reviewed"></div>' +
+        '</div>'
+      : '') +
     '<div class="card-note" id="ca-note"></div>';
   renderCaControls();
   loadCostArtifact();
@@ -80,6 +88,14 @@ export function renderCa(d) {
   $('#ca-throughput').innerHTML = anyShip
     ? stackChart(d.buckets || [], thPts, 'int')
     : '<div class="empty">No ' + esc(caNoun()) + ' completed in this window — mark one shipped in the Features tab (or merge a PR), or widen the window above.</div>';
+  // PRs reviewed curve (PRs only; the panel exists only when kind === 'pr').
+  var rvEl = $('#ca-reviewed');
+  if (rvEl) {
+    var rvPts = (d.reviewed || []).map(function (r) { return { bucket: r.bucket, total: r.count, filled: r.count }; });
+    rvEl.innerHTML = rvPts.some(function (p) { return p.total > 0; })
+      ? stackChart(d.buckets || [], rvPts, 'int')
+      : '<div class="empty">No PRs reviewed in this window — a session that reviews a PR (reads its diff during review work) shows here.</div>';
+  }
   var note = 'Unit cost includes every session that built these ' + caNoun() +
     ', even spend from before the window — so it will not equal spend within the window.';
   if (d.period && d.period.throughput > 0) {

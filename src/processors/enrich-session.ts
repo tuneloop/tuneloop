@@ -1,5 +1,6 @@
 import { registerProcessor } from '../core/registry'
-import { blockSpine, deterministicBlocks } from '../core/blocks'
+import { blockMembership, blockSpine, deterministicBlocks } from '../core/blocks'
+import { enrichPrArtifact, parsePrRefs, prArtifactBase } from './github-pr'
 import type { Block } from '../core/blocks'
 import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
@@ -59,7 +60,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 13,
+  version: 16,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],
@@ -148,10 +149,10 @@ export const enrichSession: Processor = {
     const blockAnnotations: BlockAnnotationInput[] = []
     const blockArtifacts: BlockArtifactInput[] = []
     const linked = new Set<string>()
+    // Per-block use-case, computed once and reused by the reviewed-PR gate below.
+    const useCases = blocks.length > 0 ? expandUseCaseRuns(parsed.use_case_runs, blocks.length) : []
     if (blocks.length > 0) {
-      expandUseCaseRuns(parsed.use_case_runs, blocks.length).forEach((uc, idx) =>
-        blockAnnotations.push({ blockIdx: idx, key: 'use_case', value: uc }),
-      )
+      useCases.forEach((uc, idx) => blockAnnotations.push({ blockIdx: idx, key: 'use_case', value: uc }))
       const assigned = new Set<number>()
       for (const run of featureRuns(parsed.feature_runs)) {
         const id = palette[run.feature]?.id || ''
@@ -191,6 +192,50 @@ export const enrichSession: Processor = {
       else if (rawParent && rawParent !== id && canParent(rawParent)) parentId = rawParent
       if (parentId === undefined) continue
       featureRevisions.push({ id, parentId })
+    }
+
+    // Reviewed-PR linkage (Layer 2, derived): when a block classified `review`
+    // actually READ a PR, link this session to that PR as `reviewed`. Identity and
+    // the artifact row come from the shared github-pr helpers. We exclude PRs this
+    // same session created/merged (you don't "review" your own PR here). Confidence
+    // is modest (0.6) — the signal is an LLM use-case plus a read, not an explicit
+    // `gh pr review`. Gated on the LLM run, so disabled when no provider is set.
+    const refs = parsePrRefs(session)
+    const selfCreated = new Set(refs.filter((r) => r.kind === 'create' || r.kind === 'merge').map((r) => r.id))
+    // PRs this session EXPLICITLY reviewed (gh pr review / MCP review tool) are
+    // owned by outcomes-git's Layer 1 (deterministic, confidence 1.0). Skip them
+    // here so the soft derived link never clobbers the explicit one.
+    const explicitReviewed = new Set(refs.filter((r) => r.kind === 'review').map((r) => r.id))
+    const toolBlock = blocks.length > 0 ? blockMembership(session, blocks).tool : []
+    const sessionHasReview = useCases.includes('review')
+    // prId → the review block(s) where it was read. The block set drives block-grain
+    // cost attribution below; a PR with no tool-read block (human-pasted link only)
+    // maps to an empty set and falls back to whole-session cost (a pure-review session
+    // IS the review). A block that reads several PRs links to each — aggregate cost
+    // stays conserved because the cost queries UNION-dedupe identical usage rows.
+    const reviewed = new Map<string, Set<number>>()
+    for (const ref of refs) {
+      if (ref.kind !== 'read' || selfCreated.has(ref.id) || explicitReviewed.has(ref.id)) continue
+      // Block-grain gate: the PR was read INSIDE a review block. A human-pasted PR
+      // link has no owning tool call, so fall back to "the session reviewed somewhere".
+      const blockIdx = ref.toolIndex >= 0 ? toolBlock[ref.toolIndex] : undefined
+      const inReviewBlock = blockIdx != null && useCases[blockIdx] === 'review'
+      const humanRef = ref.toolIndex < 0 && sessionHasReview
+      if (!inReviewBlock && !humanRef) continue
+      const set = reviewed.get(ref.id) ?? new Set<number>()
+      if (inReviewBlock) set.add(blockIdx!)
+      reviewed.set(ref.id, set)
+    }
+    for (const [id, reviewBlocks] of reviewed) {
+      const ref = refs.find((r) => r.id === id)! // any ref carrying this identity
+      artifacts.push(await enrichPrArtifact(ctx.sh, prArtifactBase(ref), session.project.cwd))
+      sessionArtifacts.push({ artifactId: id, role: 'reviewed', source: 'derived', confidence: 0.6 })
+      outcomes.push({ type: 'pr_reviewed', artifactId: id, ts: session.endedAt })
+      // Block-grain: attribute each review block's cost to the PR it reviewed, so
+      // "cost to review PR X" is the review blocks only, not the whole session.
+      for (const bi of reviewBlocks) {
+        blockArtifacts.push({ blockIdx: bi, artifactId: id, role: 'reviewed', source: 'derived', confidence: 0.6 })
+      }
     }
 
     return {
