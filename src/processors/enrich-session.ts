@@ -60,7 +60,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 13,
+  version: 12,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],

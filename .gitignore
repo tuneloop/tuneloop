@@ -9,7 +9,15 @@ coverage/
 # Claude Code local (machine-specific) settings; shared .claude/settings.json is fine to commit
 .claude/settings.local.json
 
+# Local secrets / env
+.env
+.env.*
+.aivue.local.env
+
 # OS / editor
 .DS_Store
 *.swp
 *.log
+.cursorindexingignore
+.specstory/
+.claude/
