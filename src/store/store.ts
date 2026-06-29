@@ -1853,7 +1853,7 @@ export class Store {
       where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
       params.push(...toolVals)
     }
-    const sql = `SELECT t.session_id AS sessionId, s.title AS title, t.idx AS idx,
+    const sql = `SELECT t.session_id AS sessionId, ${titleExpr('s')} AS title, t.idx AS idx,
                         t.name AS name, t.action AS action, t.command AS command,
                         t.target_path AS targetPath, t.error_message AS message,
                         t.ts AS ts, s.started_at AS startedAt
@@ -1885,10 +1885,10 @@ export class Store {
       // Search title + intent + the decisions list (matched against its raw JSON
       // text, which is enough to surface a decision by any word it contains).
       clauses.push(
-        `(s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
+        `(${scalar('title')} LIKE ? OR s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
           OR EXISTS (SELECT 1 FROM annotations WHERE session_id=s.id AND key='decisions' AND value LIKE ?))`,
       )
-      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
+      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
     }
     if (f.artifact || f.artifactKind) {
       const conds: string[] = []
@@ -1930,7 +1930,7 @@ export class Store {
 
     const rows = this.db
       .prepare(
-        `SELECT s.id AS id, COALESCE(s.title,'(untitled)') AS title, s.started_at AS startedAt,
+        `SELECT s.id AS id, COALESCE(${titleExpr('s')}, '(untitled)') AS title, s.started_at AS startedAt,
                 s.cost_usd AS costUsd, s.models AS modelsJson,
                 ${scalar('complexity')} AS complexity,
                 (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
@@ -1987,7 +1987,7 @@ export class Store {
   sessionDetail(id: string): SessionDetail | null {
     const s = this.db
       .prepare(
-        `SELECT id, title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
+        `SELECT id, ${titleExpr('sessions')} AS title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
                 n_turns AS nTurns, n_tool_calls AS nToolCalls, models AS modelsJson, cost_usd AS costUsd,
                 tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create AS tokCacheCreate, tok_cache_read AS tokCacheRead
          FROM sessions WHERE id = ?`,
@@ -2769,6 +2769,11 @@ function bucketExpr(col: string, bucket: Bucket): string {
   if (bucket === 'day') return `date(${col})`
   if (bucket === 'month') return `strftime('%Y-%m', ${col})`
   return `strftime('%Y-W%W', ${col})`
+}
+
+// Display title: the enrichment-derived `title` annotation, else the native adapter title
+function titleExpr(alias: string): string {
+  return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), ${alias}.title)`
 }
 
 function safeJson<T>(s: unknown, fallback: T): T {
