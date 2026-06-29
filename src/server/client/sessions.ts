@@ -478,6 +478,26 @@ function flashEl(el) {
   el.classList.add('flash');
 }
 
+// Flash when the element ARRIVES in view (center reaches the viewport's central
+// band), not after the smooth-scroll's easing tail. Falls back to scroll-stopped /
+// a frame cap so it always fires.
+function flashOnSettle(el) {
+  if (!el) return;
+  var last = null, stable = 0, frames = 0;
+  function tick() {
+    frames++;
+    var r = el.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight || 800;
+    var center = r.top + r.height / 2;
+    var inView = center > vh * 0.25 && center < vh * 0.75;
+    if (last !== null && Math.abs(r.top - last) < 0.5) stable++; else stable = 0;
+    last = r.top;
+    if (inView || stable >= 2 || frames > 90) { flashEl(el); return; }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
 // ---- Files-changed view -----------------------------------------------------
 
 // Minimal line-level diff (LCS backtrace) → rows tagged ' ' (context), '-', '+'.
@@ -892,9 +912,10 @@ export function openDetail(id, focus?: any) {
       // Error panel for failed calls (stepper jump target)
       var errPanel = '';
       if (!tl.ok && tl.error) {
-        var id = errSeq++;
-        if (errSink) errSink.push(id);
-        errPanel = '<div class="tx-error" id="txerr-' + id + '">' +
+        errSeq++;                                            // count total errors (errCount)
+        var anchor = tl.idx != null ? tl.idx : 's' + errSeq;  // stable per-call anchor for deep-links
+        if (errSink) errSink.push(anchor);
+        errPanel = '<div class="tx-error" id="txerr-' + anchor + '">' +
           '<div class="tx-error-h">⚠ ' + esc(tl.name) + '</div>' +
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
@@ -1333,14 +1354,28 @@ export function openDetail(id, focus?: any) {
 
     // Error stepper: ‹ / › cycle through the ACTIVE scope's error panels (errIds
     // are global panel ids, so the anchors resolve even with all scopes in the DOM).
+    // Scroll to an error panel, FIRST revealing it: a call beyond the per-turn cap
+    // sits in a collapsed ".tool-rest" group (display:none), where scrollIntoView is
+    // a no-op. Expand that group (and hide its "+N more" button), then scroll+flash.
+    function revealErr(anchor) {
+      var el = document.getElementById('txerr-' + anchor);
+      if (!el) return;
+      var rest = el.closest && el.closest('.tool-rest');
+      if (rest && !rest.classList.contains('on')) {
+        rest.classList.add('on');
+        var mb = rest.nextElementSibling as any;
+        if (mb && mb.classList.contains('tool-more')) mb.style.display = 'none';
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      flashOnSettle(el);
+    }
     var errIdx = -1;
     function gotoErr(next) {
       if (!errIds.length) return;
       errIdx = ((next % errIds.length) + errIds.length) % errIds.length;
       var pos = $('#drawerBody .tx-err-pos');
       if (pos) pos.textContent = String(errIdx + 1);
-      var el = document.getElementById('txerr-' + errIds[errIdx]);
-      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+      revealErr(errIds[errIdx]);
     }
     var ep = $('#drawerBody .tx-err-prev'), en = $('#drawerBody .tx-err-next');
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
@@ -1616,6 +1651,17 @@ export function openDetail(id, focus?: any) {
     showTab(hasTx ? 'transcript' : 'summary');
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
+
+    // Reveal a failed tool call inside THIS drawer: switch to its scope if needed,
+    // then revealErr. Published to activeReveal so the pager reuses it same-session.
+    function revealErrorTarget(target) {
+      var sc = 'main';
+      scopeOrder.forEach(function (k) { if (scopeByKey[k].errIds.indexOf(target) >= 0) sc = k; });
+      if (sc !== activeScope) switchScope(sc);
+      requestAnimationFrame(function () { revealErr(target); });
+    }
+    activeReveal = revealErrorTarget;
+    if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
   });
 }
 
@@ -1629,10 +1675,71 @@ export function filterByArtifact(text, kind) {
   setTimePreset('all');
 }
 
+// Drill-in from the dashboard's "Errors by category" widget: jump to the Sessions
+// list filtered to one error category, over the SAME window the user clicked from
+export function filterByErrorCategory(category) {
+  setView('sessions');
+  buildFilters();
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter[data-key="error_category"]'), function (s) {
+    s.value = category || '';
+  });
+  setTimePreset(state.days === 'all' ? 'all' : state.days);
+}
+
 export function closeDrawer() {
-  $('#drawer').classList.remove('on');
-  $('#overlay').classList.remove('on');
+  $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on');
+  activeReveal = null;
+  errWalk = null; renderErrWalkBar(); // closing the drawer ends any error walk
   if (state.open) { state.open = null; syncHash({ replace: true }); } // drop ?session= without adding history
+}
+
+// The open drawer publishes its error-reveal fn here so the pager can reveal the
+// next error in place without re-opening the session. Null when no drawer is open.
+var activeReveal: ((idx: number) => void) | null = null;
+
+// ---- Cross-session error walk -------------------------------------------------
+// "Step through every occurrence of one error category." The dashboard widget
+// hands us the occurrence list; we open each occurrence's transcript at its exact
+// error block (txerr-<idx>) and show a floating pager that walks ACROSS sessions.
+// The pager lives outside #drawerBody so it survives the drawer re-rendering as we
+// move between sessions.
+var errWalk = null; // { label, occ:[{sessionId,idx,name,title,...}], i, openId }
+
+export function startErrorWalk(label, occ, i) {
+  if (!occ || !occ.length) return;
+  errWalk = { label: label, occ: occ, i: 0, openId: null };
+  openWalkOcc(i || 0);
+}
+
+function openWalkOcc(i) {
+  if (!errWalk) return;
+  var n = errWalk.occ.length;
+  errWalk.i = ((i % n) + n) % n; // wrap
+  var o = errWalk.occ[errWalk.i];
+  if (o.sessionId === errWalk.openId && activeReveal) {
+    activeReveal(o.idx); // same session open → reveal in place
+  } else {
+    errWalk.openId = o.sessionId;
+    openDetail(o.sessionId, { errTarget: o.idx });
+  }
+  renderErrWalkBar();
+}
+
+function renderErrWalkBar() {
+  var bar = document.getElementById('errwalk');
+  if (!errWalk) { if (bar) bar.parentNode.removeChild(bar); return; }
+  if (!bar) { bar = document.createElement('div'); bar.id = 'errwalk'; document.body.appendChild(bar); }
+  var o = errWalk.occ[errWalk.i];
+  bar.innerHTML =
+    '<span class="ew-cat">⚠ ' + esc(errWalk.label) + '</span>' +
+    '<button class="ew-btn" id="ew-prev" type="button">‹</button>' +
+    '<span class="ew-pos">' + (errWalk.i + 1) + ' / ' + errWalk.occ.length + '</span>' +
+    '<button class="ew-btn" id="ew-next" type="button">›</button>' +
+    '<span class="ew-cur" title="' + esc(o.title || '') + '">' + esc(o.name) + '</span>' +
+    '<button class="ew-btn ew-x" id="ew-close" type="button">✕</button>';
+  $('#ew-prev').onclick = function () { openWalkOcc(errWalk.i - 1); };
+  $('#ew-next').onclick = function () { openWalkOcc(errWalk.i + 1); };
+  $('#ew-close').onclick = function () { errWalk = null; renderErrWalkBar(); };
 }
 
 export function setView(name) {

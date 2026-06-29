@@ -3,7 +3,9 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import type { CanonicalAction, Session, ToolCall } from '../core/model'
 import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
+import { parseApplyPatch } from './apply-patch'
 import { deterministicBlocks } from '../core/blocks'
+import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
@@ -14,6 +16,20 @@ import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, UsageFactInp
 export interface Dist {
   value: string
   count: number
+}
+
+/** One failed tool call in the "Errors by category" drill-down (see errorOccurrences). */
+export interface ErrorOccurrence {
+  sessionId: string
+  title: string | null
+  idx: number
+  name: string
+  action: string
+  command: string | null
+  targetPath: string | null
+  message: string | null
+  ts: string | null
+  startedAt: string | null
 }
 
 export interface Summary {
@@ -119,10 +135,15 @@ export class Store {
       this.db.prepare('DELETE FROM tool_calls WHERE session_id = ?').run(session.id)
       const insTool = this.db.prepare(
         `INSERT INTO tool_calls
-           (session_id, idx, name, action, ok, is_error, target_path, command, is_sidechain, ts, duration_ms)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+           (session_id, idx, name, action, ok, is_error, error_category, error_message, target_path, command, is_sidechain, ts, duration_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       session.toolCalls.forEach((t, idx) => {
+        // For failed calls, fingerprint a cross-harness category + keep a one-line
+        // error snippet (both NULL when ok), computed at ingest. Clip before classify.
+        const errText = t.result.ok ? null : resultText(t.result.raw)
+        const category = errText == null ? null : classifyError(t.action, errText.slice(0, 8000))
+        const message = errText == null ? null : errText.replace(/\s+/g, ' ').trim().slice(0, 200) || null
         insTool.run(
           session.id,
           idx,
@@ -130,6 +151,8 @@ export class Store {
           t.action,
           t.result.ok ? 1 : 0,
           t.result.isError ? 1 : 0,
+          category,
+          message,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,
@@ -1045,13 +1068,28 @@ export class Store {
       where.push(p.sql)
       params.push(...p.params)
     }
+    // Row-level tool-name scope: restrict which calls are aggregated, so the rate
+    // becomes that tool's own (denominator + numerator both shrink to these tools).
+    const toolVals = (q.toolNames ?? []).filter(Boolean)
+    if (toolVals.length) {
+      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      params.push(...toolVals)
+    }
     const fromSql = 'FROM tool_calls t JOIN sessions s ON s.id = t.session_id'
     const whereSql = 'WHERE ' + where.join(' AND ')
+    // Row-level error-category scope: redefine the numerator (which errors count)
+    // without touching the denominator — "rate of <these categories> among all
+    // in-scope calls". These params bind in the SELECT list, AHEAD of WHERE params.
+    const catVals = (q.errorCategories ?? []).filter(Boolean)
+    const errPh = catVals.map(() => '?').join(', ')
+    const errExpr = catVals.length
+      ? `COALESCE(SUM(CASE WHEN t.error_category IN (${errPh}) THEN 1 ELSE 0 END), 0)`
+      : 'COALESCE(SUM(t.is_error), 0)'
     const val = (cnt: number, errs: number) => (isRate ? (cnt ? errs / cnt : null) : cnt)
 
     const overallRows = this.db
-      .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt, COALESCE(SUM(t.is_error),0) AS errs ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
-      .all(...params) as Array<{ tb: string; cnt: number; errs: number }>
+      .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt, ${errExpr} AS errs ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
+      .all(...catVals, ...params) as Array<{ tb: string; cnt: number; errs: number }>
     const overallPoints: OpsPoint[] = overallRows.map((r) => ({
       bucket: r.tb,
       value: val(r.cnt, r.errs),
@@ -1066,8 +1104,8 @@ export class Store {
     let truncated: { shown: number; total: number } | undefined
     if (q.by === 'name') {
       const rows = this.db
-        .prepare(`SELECT ${time} AS tb, t.name AS nm, COUNT(*) AS cnt, COALESCE(SUM(t.is_error),0) AS errs ${fromSql} ${whereSql} GROUP BY tb, nm`)
-        .all(...params) as Array<{ tb: string; nm: string | null; cnt: number; errs: number }>
+        .prepare(`SELECT ${time} AS tb, t.name AS nm, COUNT(*) AS cnt, ${errExpr} AS errs ${fromSql} ${whereSql} GROUP BY tb, nm`)
+        .all(...catVals, ...params) as Array<{ tb: string; nm: string | null; cnt: number; errs: number }>
       const byVal = new Map<string, { points: OpsPoint[]; cnt: number; errs: number }>()
       for (const r of rows) {
         if (r.nm == null) continue
@@ -1089,9 +1127,52 @@ export class Store {
         all = all.slice(0, topK)
       }
       series = all
+    } else if (q.by === 'error_category') {
+      // Decompose the error rate by category: each line is a category's errored
+      // calls over ALL in-scope calls that bucket, so the lines sum to the overall
+      // rate. (A per-category denominator would be a flat 100% — the category
+      // column only exists on errored rows.) Honest only for the rate view.
+      const totalByBucket = new Map(overallRows.map((r) => [r.tb, r.cnt]))
+      const catWhere =
+        whereSql + ' AND t.error_category IS NOT NULL' + (catVals.length ? ` AND t.error_category IN (${errPh})` : '')
+      const rows = this.db
+        .prepare(`SELECT ${time} AS tb, t.error_category AS cat, COUNT(*) AS errs ${fromSql} ${catWhere} GROUP BY tb, cat`)
+        .all(...params, ...catVals) as Array<{ tb: string; cat: string | null; errs: number }>
+      const catLabel = new Map(ERROR_CATEGORIES.map((c) => [c.key, c.label]))
+      const byCat = new Map<string, { points: OpsPoint[]; errs: number }>()
+      for (const r of rows) {
+        if (r.cat == null) continue
+        const denom = totalByBucket.get(r.tb) ?? 0
+        const e = byCat.get(r.cat) ?? { points: [], errs: 0 }
+        e.points.push({ bucket: r.tb, value: denom ? r.errs / denom : null, calls: denom, errors: r.errs })
+        e.errs += r.errs
+        byCat.set(r.cat, e)
+      }
+      let all: OpsSeries[] = Array.from(byCat.entries()).map(([key, e]) => ({
+        key,
+        label: catLabel.get(key) ?? key,
+        points: e.points,
+        total: tCnt ? e.errs / tCnt : null,
+        calls: e.errs, // rank categories by error volume
+      }))
+      all.sort((a, b) => b.calls - a.calls)
+      if (all.length > topK) {
+        truncated = { shown: topK, total: all.length }
+        all = all.slice(0, topK)
+      }
+      series = all
     }
 
-    return { view: q.view, bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, format: isRate ? 'pct' : 'int' }
+    return { view: q.view, bucket, by: q.by, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, format: isRate ? 'pct' : 'int' }
+  }
+
+  /** Distinct tool-call names, busiest first — feeds the Ops error-rate tool filter. */
+  toolNames(): string[] {
+    return (
+      this.db
+        .prepare('SELECT name FROM tool_calls WHERE name IS NOT NULL GROUP BY name ORDER BY COUNT(*) DESC')
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name)
   }
 
   /**
@@ -1319,39 +1400,45 @@ export class Store {
    * One compiler, reused by session filters today and cohort splits later. Column
    * identifiers and `base` are registry-defined (trusted); the value is a bound param.
    */
-  private facetPredicate(f: FacetSpec, value: string): { sql: string; params: unknown[] } {
+  private facetPredicate(f: FacetSpec, value: string | string[]): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
+    const vals = (Array.isArray(value) ? value : [value]).filter((v) => v != null && v !== '')
+    if (vals.length === 0) return { sql: '1=1', params: [] } // empty selection ⇒ no constraint
+    // One value keeps today's `= ?` (byte-identical SQL); several become an OR via
+    // `IN (?, ?, …)`. `cmp` wraps whichever column/JSON expression each source needs.
+    const ph = vals.map(() => '?').join(', ')
+    const cmp = (expr: string) => (vals.length === 1 ? `${expr} = ?` : `${expr} IN (${ph})`)
     if (f.source === 'session') {
       return f.multi
-        ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE je.value = ?)`, params: [value] }
-        : { sql: `s.${col} = ?`, params: [value] }
+        ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE ${cmp('je.value')})`, params: vals }
+        : { sql: cmp(`s.${col}`), params: vals }
     }
     if (f.source === 'annotation') {
       return f.multi
         ? {
             sql: `EXISTS (SELECT 1 FROM annotations a, json_each(a.value) je
-                  WHERE a.session_id = s.id AND a.key = ? AND je.value = ?)`,
-            params: [f.key, value],
+                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp('je.value')})`,
+            params: [f.key, ...vals],
           }
         : {
             sql: `EXISTS (SELECT 1 FROM annotations a
-                  WHERE a.session_id = s.id AND a.key = ? AND json_extract(a.value,'$') = ?)`,
-            params: [f.key, value],
+                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp("json_extract(a.value,'$')")})`,
+            params: [f.key, ...vals],
           }
     }
     if (f.source === 'block') {
-      // "sessions with a block labeled value" — session-scoped EXISTS, like model/skill.
+      // "sessions with a block labeled <any selected value>" — session-scoped EXISTS, like model/skill.
       return {
         sql: `EXISTS (SELECT 1 FROM block_annotations ba
-              WHERE ba.session_id = s.id AND ba.key = ? AND json_extract(ba.value,'$') = ?)`,
-        params: [f.key, value],
+              WHERE ba.session_id = s.id AND ba.key = ? AND ${cmp("json_extract(ba.value,'$')")})`,
+        params: [f.key, ...vals],
       }
     }
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
     const base = f.base ? `${f.base} AND ` : ''
     return {
-      sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}c.${col} = ?)`,
-      params: [value],
+      sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}${cmp(`c.${col}`)})`,
+      params: vals,
     }
   }
 
@@ -1423,6 +1510,8 @@ export class Store {
     measureKey: string,
     byFacetKey?: string,
     filters?: Record<string, string>,
+    window?: { from?: string; to?: string },
+    toolNames?: string[],
   ): { rows: Array<{ bucket: string | null; value: number }>; total: number } | { error: string } {
     const m = this.measure(measureKey)
     if (!m) return { error: 'unknown measure' }
@@ -1438,6 +1527,20 @@ export class Store {
     const where: string[] = []
     const params: unknown[] = []
     if (m.base) where.push(m.base)
+    // Window the population to the dashboard's selected range (both bounds or
+    // neither); every grain's FROM joins sessions s, so s.started_at is in scope.
+    if (window?.from && window?.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(window.from, window.to)
+    }
+    // Row-level tool-name scope — only sound for tool-call-grain measures (the FROM
+    // is `tool_calls t`). Lets the Ops "Errors by category" widget show one tool's
+    // errors, matching the error-rate chart's tool filter.
+    const toolVals = (toolNames ?? []).filter(Boolean)
+    if (toolVals.length && gm !== 'session' && gm !== 'usage') {
+      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      params.push(...toolVals)
+    }
     for (const [k, v] of Object.entries(filters ?? {})) {
       if (!v) continue
       const spec = this.facet(k)
@@ -1472,6 +1575,37 @@ export class Store {
     const sql = `SELECT ${agg} AS value ${from} ${whereSql}`
     const r = this.db.prepare(sql).get(...params) as { value: number } | undefined
     return { rows: [{ bucket: null, value: r?.value ?? 0 }], total: r?.value ?? 0 }
+  }
+
+  /**
+   * Every failed tool call of one error category — the occurrence list behind the
+   * "Errors by category" drill-down. Newest session first; `idx` is the tool call's
+   * position in its session, which the transcript anchors as `txerr-<idx>` so a row
+   * deep-links to that exact error block. Windowed like breakdown. Capped at 50; the
+   * widget shows the true total (the bar count) with a "+N more" note past the cap.
+   */
+  errorOccurrences(category: string, window?: { from?: string; to?: string }, toolNames?: string[]): ErrorOccurrence[] {
+    const where = ['t.error_category = ?']
+    const params: unknown[] = [category]
+    if (window?.from && window?.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(window.from, window.to)
+    }
+    // Row-level tool scope, mirroring the widget's tool filter (Bash's timeouts, …).
+    const toolVals = (toolNames ?? []).filter(Boolean)
+    if (toolVals.length) {
+      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      params.push(...toolVals)
+    }
+    const sql = `SELECT t.session_id AS sessionId, s.title AS title, t.idx AS idx,
+                        t.name AS name, t.action AS action, t.command AS command,
+                        t.target_path AS targetPath, t.error_message AS message,
+                        t.ts AS ts, s.started_at AS startedAt
+                 FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+                 WHERE ${where.join(' AND ')}
+                 ORDER BY s.started_at DESC, t.idx ASC
+                 LIMIT 50`
+    return this.db.prepare(sql).all(...params) as ErrorOccurrence[]
   }
 
   /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
@@ -1746,10 +1880,19 @@ export class Store {
     const out: FileEdit[] = []
     for (const tc of session.toolCalls) {
       if (tc.action !== 'file_write' || !tc.result.ok) continue
+      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
+      // Codex's `apply_patch` stores the raw V4A patch TEXT (a string) and can touch
+      // several files in one call. Expand it to one FileEdit per file; the object-shaped
+      // path below (Claude Code, OpenCode) handles `{content}` / `{old_string,…}` inputs.
+      if (typeof tc.input === 'string') {
+        for (const fe of parseApplyPatch(tc.input)) {
+          out.push({ ...fe, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
+        }
+        continue
+      }
       const path = tc.target.paths?.[0]
       if (!path) continue
       const input = (tc.input ?? {}) as Record<string, unknown>
-      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
       let op: FileEdit['op']
       let hunks: Array<{ del: string; ins: string }>
       // Distinguish write/multiedit/edit by input shape, not the raw tool name —
@@ -2104,8 +2247,9 @@ export interface SuccessRateQuery {
   by?: string
   from?: string
   to?: string
-  /** Session-level facet filters, applied to numerator and denominator alike. */
-  filters?: Record<string, string>
+  /** Session-level facet filters (multi-value OR within a facet), applied to
+   *  numerator and denominator alike. */
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2132,6 +2276,8 @@ export interface OpsPoint {
 
 export interface OpsSeries {
   key: string
+  /** Display label when the key isn't already human-readable (error categories). */
+  label?: string
   points: OpsPoint[]
   /** Total count, or overall error rate, depending on the view. */
   total: number | null
@@ -2143,17 +2289,24 @@ export interface OpsOverTimeQuery {
   /** tool_calls = count all; error_rate = AVG(is_error); skill_usage = count where action='skill'. */
   view: 'tool_calls' | 'error_rate' | 'skill_usage'
   bucket: Bucket
-  /** 'name' splits by tool_calls.name (tool name, or skill name when skills-only). */
+  /** 'name' splits by tool name; 'error_category' decomposes the rate by category. */
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  /** Generic session-level facet filters (harness/repo/model); unused by the Ops UI today. */
+  filters?: Record<string, string[]>
+  /** Row-level scope: only count calls of these tool names (denominator + numerator). */
+  toolNames?: string[]
+  /** Row-level scope: only these categories count as errors (numerator only). */
+  errorCategories?: string[]
   topK?: number
 }
 
 export interface OpsOverTimeResult {
   view: string
   bucket: Bucket
+  /** The active breakdown dimension, echoed back so the client can label series. */
+  by?: string
   buckets: string[]
   overall: { points: OpsPoint[]; total: number | null }
   series?: OpsSeries[]
@@ -2178,7 +2331,7 @@ export interface SessionsOverTimeQuery {
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2209,7 +2362,7 @@ export interface SpendOverTimeQuery {
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2265,6 +2418,8 @@ export interface TranscriptTool {
   name: string
   action: string
   ok: boolean
+  /** This call's index in session.toolCalls — the transcript anchors a failed call as `txerr-<idx>`. */
+  idx?: number
   target?: string
   /** Full tool input rendered as displayable text (key field or JSON). */
   command?: string
@@ -2488,6 +2643,7 @@ function buildTranscriptCore(session: Session): {
   toolTurn: Map<string, { turn: number; userTurn: number }>
 } {
   const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
+  const idxById = new Map(session.toolCalls.map((t, i) => [t.id, i]))
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -2513,7 +2669,7 @@ function buildTranscriptCore(session: Session): {
           const ok = res ? res.ok : true
           const command = toolCommandText(tc, input)
           const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
-          const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          const tool: TranscriptTool = { name: b.name, action: '', ok, idx: idxById.get(b.id), target: clip(target, 1500) }
           if (command) tool.command = command
           if (output) tool.output = output
           // file_write → inline diff. The before/after strings aren't in the

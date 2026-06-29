@@ -54,9 +54,22 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .sr-cnt { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .sr-by { border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 13px; background: var(--paper); color: var(--ink); }
 .sr-by-ctrl { display: inline-flex; align-items: center; gap: 8px; }
+/* Metric filter clauses: a fixed field label + live value <select> + ✕, grouped
+   as one pill, inline between Bucket and Break-down. */
+.mfl-clause { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; background: var(--track); border: 1px solid var(--line); border-radius: 8px; padding: 3px 6px 3px 10px; }
+.mfl-clause .sr-by { padding: 3px 6px; }
+.mfl-k { font-size: 12px; color: var(--muted); }
+/* selected value chip (OR within a field) */
+.mfl-v { display: inline-flex; align-items: center; gap: 3px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 1px 2px 1px 8px; font-size: 12px; }
+.mfl-vx { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 3px; border-radius: 999px; }
+.mfl-vx:hover { color: var(--red); }
+/* compact "+ value" adder inside a clause */
+.mfl-addv { padding: 2px 4px; font-size: 12px; }
 .sr-legend { margin-top: 10px; }
 .sr-legend .leg { display: inline-flex; align-items: center; vertical-align: middle; gap: 6px; margin: 4px 14px 4px 0; font-size: 12px; }
 .sr-legend .leg[data-key] { cursor: pointer; user-select: none; }
+/* overall aggregate shown in the legend when there's no breakdown */
+.leg-overall { font-size: 12px; font-weight: 600; color: var(--ink); vertical-align: middle; }
 .sr-legend .leg.off { opacity: 0.4; text-decoration: line-through; }
 .sr-legend .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; }
 .sr-legend .show-all-link { display: inline-flex; align-items: center; vertical-align: middle; font-size: 12px; color: var(--emerald); cursor: pointer; text-decoration: underline; margin-left: 8px; }
@@ -67,6 +80,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 22px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .panel-head h2 { margin: 0; font-size: 18px; }
+/* Ops error-rate head: Title → Filter → Break-down, left-aligned and wrapping, so
+   the break-down group drops to the next line as a whole once filters accumulate. */
+.panel-head.ops-erhead { justify-content: flex-start; flex-wrap: wrap; gap: 10px 14px; }
+.ops-flt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; background: var(--paper); padding: 5px 12px; cursor: pointer; font-size: 13px; color: var(--muted); }
 .seg button.on { background: var(--ink); color: #f3efe6; }
@@ -78,6 +95,49 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .bar-track { background: var(--track); border-radius: 4px; height: 10px; overflow: hidden; }
 .bar-fill { display: block; background: var(--emerald); height: 100%; }
 .bar-row .n { text-align: right; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+/* Errors-by-category rows carry "count + share", so widen the value column and keep
+   it on one line: count is the hero (ink), the percentage a muted secondary. */
+.errcat .bar-row { grid-template-columns: 130px 1fr 72px; }
+.errcat .n { white-space: nowrap; }
+.errcat .n .cnt { color: var(--ink); }
+.errcat .n .pct { margin-left: 6px; }
+/* A category row expands an inline list of its actual failed tool calls. */
+.errcat .bar-row.errcat-row { cursor: pointer; }
+.errcat .bar-row.errcat-row:hover .name { color: var(--emerald); }
+.errcat .bar-row.errcat-row:hover .bar-fill { opacity: .85; }
+.errcat .bar-row.errcat-row.open .name { color: var(--emerald); font-weight: 600; }
+.errcat-occ { margin: 0 0 12px; padding-left: 8px; border-left: 2px solid var(--line); }
+.occ-loading, .occ-empty { color: var(--muted); font-size: 12px; font-style: italic; padding: 6px 4px; }
+.occ-more { color: var(--muted); font-size: 12px; padding: 6px 6px 2px; }
+.occ-head { font-size: 12px; color: var(--muted); margin: 4px 0 6px; }
+.occ-head .occ-sessions { color: var(--emerald); cursor: pointer; }
+/* The drill-down fetches up to 50 occurrences; bound the list so a big category
+   scrolls WITHIN the panel instead of pushing the rest of the page down. */
+.occ-list { max-height: 300px; overflow-y: auto; }
+.occ-row {
+  display: grid; grid-template-columns: 92px minmax(0,1.1fr) minmax(0,1.4fr) 150px 78px;
+  gap: 10px; align-items: baseline; padding: 5px 6px; font-size: 12px;
+  border-radius: 6px; cursor: pointer;
+}
+.occ-row:hover { background: var(--track); }
+.occ-row > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.occ-tool { font-family: ui-monospace, Menlo, monospace; color: var(--ink); }
+.occ-cmd { font-family: ui-monospace, Menlo, monospace; color: var(--muted); }
+.occ-msg { color: var(--red); }
+.occ-sess { color: var(--ink); }
+.occ-date { color: var(--muted); font-family: ui-monospace, Menlo, monospace; text-align: right; }
+/* Floating cross-session error-walk pager (steps through occurrences of a category). */
+#errwalk {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 1000;
+  display: flex; align-items: center; gap: 10px; background: var(--ink); color: #f3efe6;
+  border-radius: 10px; padding: 8px 12px; box-shadow: 0 6px 24px rgba(0,0,0,.28); font-size: 13px;
+}
+#errwalk .ew-cat { font-weight: 600; }
+#errwalk .ew-pos { font-family: ui-monospace, Menlo, monospace; min-width: 56px; text-align: center; }
+#errwalk .ew-cur { color: #b8b2a4; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#errwalk .ew-btn { border: 0; background: rgba(255,255,255,.12); color: #f3efe6; cursor: pointer; border-radius: 6px; padding: 2px 9px; font-size: 15px; line-height: 1; }
+#errwalk .ew-btn:hover { background: rgba(255,255,255,.24); }
+#errwalk .ew-x { margin-left: 4px; font-size: 12px; }
 .empty { color: var(--muted); font-size: 13px; font-style: italic; }
 .btn { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 7px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .btn:hover { border-color: var(--emerald); color: var(--emerald); }
@@ -456,9 +516,13 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .turn .tnum { margin-left: 6px; color: var(--emerald); font-family: ui-monospace, Menlo, monospace; }
 /* Jump highlight: an outline pulse that doesn't fight the turn/error backgrounds. */
 @keyframes flashpulse { 0% { box-shadow: 0 0 0 2px var(--emerald); } 100% { box-shadow: 0 0 0 2px transparent; } }
-@keyframes flashpulseR { 0% { box-shadow: 0 0 0 2px var(--red); } 100% { box-shadow: 0 0 0 2px transparent; } }
+/* Error reveal: a glowing box that HOLDS, then fades */
+@keyframes flashpulseR {
+  0%, 55% { box-shadow: 0 0 0 3px var(--red), 0 0 16px 3px rgba(180, 69, 47, .45); }
+  100%    { box-shadow: 0 0 0 3px transparent, 0 0 16px 3px transparent; }
+}
 .turn.flash { animation: flashpulse 1.2s ease; }
-.tx-error.flash { animation: flashpulseR 1.2s ease; }
+.tx-error.flash { animation: flashpulseR 1.6s ease-out; }
 /* Transcript search — central, grows to fill the row between Turn (left) and Errors (right). */
 .tx-search { flex: 1 1 auto; min-width: 180px; }
 .tx-search-input { flex: 1 1 auto; min-width: 0; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; background: var(--paper); color: var(--ink); }
