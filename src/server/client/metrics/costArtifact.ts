@@ -149,7 +149,7 @@ function renderTreemap() {
   var leg = $('#ca-feat-legend');
   if (leg) {
     leg.innerHTML = pr
-      ? '<span class="leg">Area &prop; cost &middot; each tile is a merged PR (no hierarchy). Use the slider to roll up the long tail into “Other”.</span>'
+      ? '<span class="leg">Area &prop; cost &middot; each tile is a merged PR. Use the slider to roll up the long tail into “Other”.</span>'
       : '<span class="leg">Area &prop; subtree cost &middot; Click a tile to drill in; use the slider to roll up the long tail.</span>';
   }
 }
