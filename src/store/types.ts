@@ -8,7 +8,7 @@ import type { TokenUsage } from '../core/model'
 export type ArtifactKind = 'file' | 'commit' | 'pr' | 'ticket' | 'feature'
 export type LinkSource = 'explicit' | 'transitive' | 'derived' | 'user'
 export type ArtifactRelation = 'part_of' | 'resolves' | 'child_of' | 'caused_by'
-export type SessionArtifactRole = 'created' | 'edited' | 'contributed'
+export type SessionArtifactRole = 'created' | 'edited' | 'contributed' | 'reviewed'
 
 export interface ArtifactInput {
   id: string
