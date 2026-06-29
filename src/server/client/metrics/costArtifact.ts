@@ -47,11 +47,12 @@ export function renderCostArtifact() {
         '<span class="leg"><span class="swatch" style="background:#ece7dc"></span>unconverted &mdash; in-flight or never ' + esc(shipVerb) + '</span>' +
       '</div>' +
     '</div>' +
-    // 3. PRs shipped/reviewed — one graph, toggle, default shipped. Always PRs.
+    // 3. Throughput — "Features shipped" (no toggle) for features, or "PRs
+    //    shipped/reviewed" (toggle, default shipped) for PRs (review is PR-only).
     '<div class="panel">' +
       '<div class="panel-head">' +
         '<h2 id="ca-flow-title"></h2>' +
-        '<span class="seg" id="ca-flow">' + flowButtons() + '</span>' +
+        (pr ? '<span class="seg" id="ca-flow">' + flowButtons() + '</span>' : '') +
       '</div>' +
       '<div id="ca-flow-chart"></div>' +
     '</div>' +
@@ -151,28 +152,21 @@ function renderTreemap() {
   }
 }
 
-// PR curves for the shipped/reviewed panel — always kind=pr, independent of the
-// Feature/PR toggle. Cached per load so the flow toggle re-renders without a refetch.
-var caPrCurves: any = null;
+// Curves for the toggled kind (one response feeds both the burn panel and the
+// throughput panel: d.burn, d.throughput = "shipped", d.reviewed = PR-only).
+var caCurves: any = null;
 
 export function loadCostArtifact() {
   var bucket = encodeURIComponent(caBucket());
   var days = encodeURIComponent(String(state.days));
-  // Panel 2 burn: the toggled kind.
+  caCurves = null;
+  renderFlow(); // show a loading state in the throughput panel
   get('/api/cost-artifact?kind=' + encodeURIComponent(state.ca.kind) + '&days=' + days + '&bucket=' + bucket).then(function (d) {
     if (!d || d.error) { var b = $('#ca-burn'); if (b) b.innerHTML = '<div class="empty">No data.</div>'; return; }
+    caCurves = d;
     renderBurn(d);
-    if (state.ca.kind === 'pr') { caPrCurves = d; renderFlow(); } // reuse the same response
-  });
-  // Panel 3 shipped/reviewed: always PRs (skip the duplicate fetch when kind is pr).
-  if (state.ca.kind !== 'pr') {
-    caPrCurves = null;
     renderFlow();
-    get('/api/cost-artifact?kind=pr&days=' + days + '&bucket=' + bucket).then(function (d) {
-      caPrCurves = (d && !d.error) ? d : null;
-      renderFlow();
-    });
-  }
+  });
 }
 
 function renderBurn(d) {
@@ -192,18 +186,25 @@ function renderBurn(d) {
 function renderFlow() {
   var el = $('#ca-flow-chart');
   if (!el) return;
-  var reviewed = state.ca.flow === 'reviewed';
+  var pr = state.ca.kind === 'pr';
+  var reviewed = pr && state.ca.flow === 'reviewed'; // review is PR-only
+  var noun = pr ? 'PRs' : 'Features';
   var titleEl = $('#ca-flow-title');
   if (titleEl) {
-    titleEl.innerHTML = (reviewed ? 'PRs reviewed' : 'PRs shipped') +
+    titleEl.innerHTML = noun + ' ' + (reviewed ? 'reviewed' : 'shipped') +
       ' <span class="metric-sub">' + esc(caWinLabel()) + ' &middot; dated at ' + (reviewed ? 'review' : 'completion') + ' time</span>';
   }
-  var d = caPrCurves;
+  var d = caCurves;
   if (!d) { el.innerHTML = '<div class="empty">Loading…</div>'; return; }
   var rows = reviewed ? (d.reviewed || []) : (d.throughput || []);
   var pts = rows.map(function (r) { return { bucket: r.bucket, total: r.count, filled: r.count }; });
-  el.innerHTML = pts.some(function (p) { return p.total > 0; })
-    ? stackChart(d.buckets || [], pts, 'int')
-    : '<div class="empty">No PRs ' + (reviewed ? 'reviewed' : 'merged') + ' in this window — ' +
-        (reviewed ? 'a session that reviews a PR (reads its diff) shows here' : 'merge a PR, or widen the window above') + '.</div>';
+  if (pts.some(function (p) { return p.total > 0; })) {
+    el.innerHTML = stackChart(d.buckets || [], pts, 'int');
+    return;
+  }
+  var hint = reviewed
+    ? 'a session that reviews a PR (reads its diff) shows here'
+    : (pr ? 'merge a PR' : 'mark a feature shipped in the Features tab') + ', or widen the window above';
+  el.innerHTML = '<div class="empty">No ' + noun.toLowerCase() + ' ' +
+    (reviewed ? 'reviewed' : (pr ? 'merged' : 'shipped')) + ' in this window — ' + hint + '.</div>';
 }
