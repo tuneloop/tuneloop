@@ -38,9 +38,14 @@ export function renderCostArtifact() {
       '<div id="ca-feat"></div>' +
       '<div class="sr-legend" id="ca-feat-legend"></div>' +
     '</div>' +
-    // 2. AI spend converted/unconverted (burn for the toggled kind).
+    // 2. AI spend converted/unconverted (burn for the toggled kind). The Bucket
+    //    control lives here (top-right) since it only affects this and the
+    //    throughput chart below — not the all-time treemap above.
     '<div class="panel">' +
-      '<div class="panel-head"><h2>AI spend: converted vs unconverted <span class="metric-sub">' + win + ' &middot; dated at session start time</span></h2></div>' +
+      '<div class="panel-head">' +
+        '<h2>AI spend: converted vs unconverted <span class="metric-sub">' + win + ' &middot; dated at session start time</span></h2>' +
+        '<span style="display:inline-flex;align-items:center;gap:8px"><span class="sr-lbl">Bucket</span><span class="seg" id="ca-bucket"></span></span>' +
+      '</div>' +
       '<div id="ca-burn"></div>' +
       '<div class="sr-legend">' +
         '<span class="leg"><span class="swatch" style="background:#0f7a55"></span>converted (linked to a ' + esc(shipVerb) + ' ' + esc(shipNoun) + ')</span>' +
@@ -73,14 +78,11 @@ export function renderCaControls() {
   }).join('');
   var el = $('#ca-controls');
   if (!el) return;
-  // Artifact (the section-scoping toggle) carries the prominent `seg-primary`
-  // styling; Bucket sits on the same row, set a little to the right, as the
-  // secondary control.
+  // Artifact (the section-scoping toggle) sits alone in the top controls with the
+  // prominent `seg-primary` styling. Bucket renders into the AI-spend panel header
+  // (#ca-bucket) since it only affects the time-series charts, not the treemap.
   el.innerHTML =
-    '<div class="sr-ctrl-row">' +
-      '<span class="sr-lbl">Artifact</span><span class="seg seg-primary" id="ca-type">' + type + '</span>' +
-      '<span class="sr-lbl" style="margin-left:24px">Bucket</span><span class="seg" id="ca-bucket">' + bk + '</span>' +
-    '</div>';
+    '<div class="sr-ctrl-row"><span class="sr-lbl">Artifact</span><span class="seg seg-primary" id="ca-type">' + type + '</span></div>';
   Array.prototype.forEach.call($('#ca-type').children, function (btn) {
     btn.onclick = function () {
       state.ca.kind = btn.getAttribute('data-k');
@@ -89,10 +91,13 @@ export function renderCaControls() {
       loadKpis();
     };
   });
-  Array.prototype.forEach.call($('#ca-bucket').children, function (btn) {
-    // Bucket only affects the time-series panels; the treemap is all-time.
-    btn.onclick = function () { state.ca.bucket = btn.getAttribute('data-b'); renderCaControls(); loadCostArtifact(); };
-  });
+  var bktEl = $('#ca-bucket');
+  if (bktEl) {
+    bktEl.innerHTML = bk;
+    Array.prototype.forEach.call(bktEl.children, function (btn) {
+      btn.onclick = function () { state.ca.bucket = btn.getAttribute('data-b'); renderCaControls(); loadCostArtifact(); };
+    });
+  }
 }
 
 // Shipped/reviewed toggle for the bottom PR graph — re-renders from cached PR
