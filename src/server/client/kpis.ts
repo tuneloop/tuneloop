@@ -3,6 +3,7 @@
 // expanded (default success_rate, set in main.ts).
 import { state, $, esc, usd, num, get, fmtVal, kpiDelta } from './core'
 import { syncHash } from './router'
+import { clearAsked } from './askbanner'
 import { renderSuccessRate } from './metrics/successRate'
 import { renderCostArtifact } from './metrics/costArtifact'
 import { renderTotalSpend } from './metrics/totalSpend'
@@ -12,7 +13,7 @@ import { renderOps } from './metrics/ops'
 // The top-level window selector + caption. Sets the window every headline tile
 // AND every expansion's charts are computed over. Lives where the caption used
 // to, so "Last N days" is now an adjustable control, not just a label.
-var WINDOWS = [['7', '7d'], ['30', '30d'], ['90', '90d'], ['all', 'All']];
+var WINDOWS = [['7', '7d'], ['14', '14d'], ['30', '30d'], ['90', '90d'], ['all', 'All']];
 export function renderWindow() {
   var cap = $('#kpi-caption');
   if (!cap) return;
@@ -92,14 +93,14 @@ export function loadKpis() {
         esc(t.value) + '</span>' + (t.delta || '') + '</div><div class="sub">' + esc(t.sub) + '</div></div>';
     }).join('');
     Array.prototype.forEach.call(document.querySelectorAll('#kpis .tile[data-metric]'), function (el) {
-      el.onclick = function () { openMetric(el.getAttribute('data-metric')); };
+      el.onclick = function () { clearAsked(); openMetric(el.getAttribute('data-metric')); };
     });
   });
 }
 
 // Tiles act as nav: one section is always expanded; clicking a tile switches to it.
-export function openMetric(m) {
-  if (state.metric === m) return; // already expanded
+export function openMetric(m, force?) {
+  if (state.metric === m && !force) return; // already expanded (unless forced)
   state.metric = m;
   state.view = 'dashboard';
   syncKpiActive();

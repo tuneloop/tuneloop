@@ -31,7 +31,7 @@ document.addEventListener('mousedown', function (e) {
 });
 
 var TIME_PRESETS = [
-  { d: 7, l: '7d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
+  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
 ];
 
 // Filter facets shown inline (in this order); every other filter-role facet —
@@ -188,7 +188,7 @@ export function applySessionParams(query: Record<string, string>) {
   state.view = 'sessions';
   if (query.from || query.to) state.sessTime = { preset: 'custom', from: query.from || '', to: query.to || '' };
   else if (query.win === 'all') state.sessTime = { preset: 'all', from: '', to: '' };
-  else if (query.win === '7' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 90, from: '', to: '' };
+  else if (query.win === '7' || query.win === '14' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 14 | 90, from: '', to: '' };
   else state.sessTime = { preset: 30, from: '', to: '' }; // default (win=30 or absent)
   var facets: Record<string, string> = {};
   Object.keys(query).forEach(function (k) { if (k.indexOf('f.') === 0 && query[k]) facets[k.slice(2)] = query[k]; });
@@ -1665,14 +1665,16 @@ export function openDetail(id, focus?: any) {
   });
 }
 
-export function filterByArtifact(text, kind) {
+export function filterByArtifact(text, kind, preset?) {
   closeDrawer();
   setView('sessions');
   var af = $('#f-artifact');
   if (af) { af.value = text || ''; af.dataset.kind = kind || ''; } // kind rides along on the input (no visible kind dropdown)
-  // Drilling into one artifact should show its FULL history, not just the default
-  // window — widen to all-time. setTimePreset() re-applies the filters.
-  setTimePreset('all');
+  // Drilling into one artifact defaults to its FULL history (all-time). A caller
+  // can pin a window instead — e.g. a Highlights drill passes its window (14d) so
+  // the session count the user lands on matches the headline. setTimePreset()
+  // re-applies (the matching preset chip must exist, else it shows none selected).
+  setTimePreset(preset == null ? 'all' : preset);
 }
 
 // Drill-in from the dashboard's "Errors by category" widget: jump to the Sessions
@@ -1743,7 +1745,7 @@ function renderErrWalkBar() {
 }
 
 export function setView(name) {
-  ['dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
