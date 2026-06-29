@@ -282,6 +282,17 @@ CREATE TABLE IF NOT EXISTS block_artifacts (
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_block_artifacts_artifact ON block_artifacts(artifact_id);
+
+-- User overrides for session→artifact links (e.g. rejecting a derived feature link).
+-- Processors check this before inserting derived links to respect user decisions.
+CREATE TABLE IF NOT EXISTS user_link_overrides (
+  session_id  TEXT,
+  artifact_id TEXT,
+  action      TEXT,              -- 'reject'
+  created_at  TEXT,
+  PRIMARY KEY (session_id, artifact_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 `
 
 export function openDb(path: string): DB {

@@ -2,7 +2,7 @@
 // free-text), the session table, the detail drawer, and view switching. The
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
-import { state, $, esc, renderMd, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
+import { state, $, esc, renderMd, usd, num, dayOf, badge, get, post, outcomeRank, outcomeLabel } from './core'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
@@ -606,6 +606,9 @@ function filesHtml(edits, transcript) {
     .map(function (g) { return fileCardHtml(g.key, g.items, promptSegmentsHtml(g.items, transcript)); }).join('');
 }
 
+var _activeTab = 'transcript';
+var _activeSessionId: string | null = null;
+
 export function openDetail(id, focus?: any) {
   get('/api/session?id=' + encodeURIComponent(id)).then(function (d) {
     if (!d || d.error) return;
@@ -648,22 +651,27 @@ export function openDetail(id, focus?: any) {
     }
 
     var arts = d.artifacts || [];
+    var sessionId = s.id;
     var feats = arts.filter(function (x) { return x.kind === 'feature'; });
+    sum += '<div class="sect-h">Features (' + feats.length + ') <button class="link-add-btn" type="button" data-link-kind="feature" data-session-id="' + esc(sessionId) + '" title="Link feature">+</button></div>';
     if (feats.length) {
-      sum += '<div class="sect-h">Features (' + feats.length + ')</div>';
       sum += chipList(feats, 6, function (f) {
+        var xBtn = '<button class="link-remove-btn" type="button" data-artifact-id="' + esc(f.id) + '" data-session-id="' + esc(sessionId) + '" title="Unlink">&times;</button>';
         return '<span class="tag click" data-art="' + esc(f.title) + '" data-kind="feature">' +
-          esc(f.title) + (f.source === 'derived' ? ' (proposed)' : '') + '</span>';
+          esc(f.title) + (f.source === 'derived' ? ' (proposed)' : '') + xBtn + '</span>';
       });
     }
+    sum += '<div class="link-add-area" data-link-kind="feature" data-session-id="' + esc(sessionId) + '"></div>';
     var prs = arts.filter(function (x) { return x.kind === 'pr'; });
+    sum += '<div class="sect-h">Pull requests (' + prs.length + ') <button class="link-add-btn" type="button" data-link-kind="pr" data-session-id="' + esc(sessionId) + '" title="Link PR">+</button></div>';
     if (prs.length) {
-      sum += '<div class="sect-h">Pull requests (' + prs.length + ')</div>';
       sum += chipList(prs, 8, function (p) {
+        var xBtn = p.source === 'user' ? '<button class="link-remove-btn" type="button" data-artifact-id="' + esc(p.id) + '" data-session-id="' + esc(sessionId) + '" title="Unlink">&times;</button>' : '';
         var label = (p.repo ? esc(p.repo) + ' ' : '') + '#' + esc(p.ident) + (p.status ? ' (' + esc(p.status) + ')' : '');
-        return '<span class="tag click" data-art="' + esc(p.externalId || p.ident) + '" data-kind="pr">' + label + '</span>';
+        return '<span class="tag click" data-art="' + esc(p.externalId || p.ident) + '" data-kind="pr">' + label + xBtn + '</span>';
       });
     }
+    sum += '<div class="link-add-area" data-link-kind="pr" data-session-id="' + esc(sessionId) + '"></div>';
     var files = arts.filter(function (x) { return x.kind === 'file'; });
     if (files.length) {
       sum += '<div class="sect-h">Files touched (' + files.length + ')</div>';
@@ -1075,6 +1083,7 @@ export function openDetail(id, focus?: any) {
       if (filesRendered) { expandFile(path); pendingFile = null; }
     }
     function showTab(name) {
+      _activeTab = name;
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (x) {
         x.classList.toggle('on', x.getAttribute('data-dtab') === name);
       });
@@ -1203,6 +1212,50 @@ export function openDetail(id, focus?: any) {
       } else {
         el.onclick = function () { filterByArtifact(art, kind); };
       }
+    });
+
+    // ----- Link-add buttons: "+" opens inline typeahead to link artifacts ------
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .link-add-btn'), function (btn) {
+      btn.onclick = function () {
+        var kind = btn.getAttribute('data-link-kind');
+        var sid = btn.getAttribute('data-session-id');
+        var area = document.querySelector('#drawerBody .link-add-area[data-link-kind="' + kind + '"][data-session-id="' + sid + '"]') as HTMLElement;
+        if (!area) return;
+        if (area.classList.contains('on')) { area.classList.remove('on'); area.innerHTML = ''; return; }
+        area.classList.add('on');
+        area.innerHTML =
+          '<div class="link-ac">' +
+            '<input class="link-ac-input" placeholder="' + (kind === 'feature' ? 'Search features or type a name to create…' : kind === 'pr' ? 'Paste URL or type owner/repo#123…' : 'Search…') + '" />' +
+            '<div class="link-ac-menu"></div>' +
+          '</div>';
+        var inp = area.querySelector('.link-ac-input') as HTMLInputElement;
+        var menu = area.querySelector('.link-ac-menu') as HTMLElement;
+        var debounce: any = null;
+        inp.focus();
+        inp.oninput = function () {
+          var err = area.querySelector('.link-ac-error');
+          if (err) err.remove();
+          clearTimeout(debounce);
+          debounce = setTimeout(function () { linkAcFetch(inp, menu, sid, kind); }, 200);
+        };
+        inp.onkeydown = function (e) {
+          if (e.key === 'Escape') { area.classList.remove('on'); area.innerHTML = ''; }
+          if (e.key === 'Enter') { linkAcSelect(inp, menu, sid, kind, -1); }
+        };
+      };
+    });
+
+    // ----- Link-remove buttons: "✕" on feature chips rejects the link ----------
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .link-remove-btn'), function (btn) {
+      btn.onclick = function (e) {
+        e.stopPropagation();
+        var sid = btn.getAttribute('data-session-id');
+        var aid = btn.getAttribute('data-artifact-id');
+        if (!sid || !aid) return;
+        post('/api/session-links/remove', { sessionId: sid, artifactId: aid }).then(function (res) {
+          if (res && res.ok) openDetail(sid);
+        }).catch(function () {});
+      };
     });
 
     // ----- Transcript navigation: turn stepper + scroll-spy + error stepper ----
@@ -1572,8 +1625,12 @@ export function openDetail(id, focus?: any) {
       };
     });
 
-    // Land on Transcript by default (global default); empty sessions fall to Summary.
-    showTab(hasTx ? 'transcript' : 'summary');
+    // Land on Transcript by default; restore previous tab only when re-opening the same session.
+    var restoreTab = (_activeSessionId === id ? _activeTab : null) || 'transcript';
+    if (restoreTab === 'files' && !fileCount) restoreTab = 'transcript';
+    if (restoreTab === 'transcript' && !hasTx) restoreTab = 'summary';
+    _activeSessionId = id;
+    showTab(restoreTab);
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
 
@@ -1664,6 +1721,78 @@ function renderErrWalkBar() {
   $('#ew-prev').onclick = function () { openWalkOcc(errWalk.i - 1); };
   $('#ew-next').onclick = function () { openWalkOcc(errWalk.i + 1); };
   $('#ew-close').onclick = function () { errWalk = null; renderErrWalkBar(); };
+}
+
+// ---- Link-add typeahead helpers (session detail) ----------------------------
+
+function linkAcFetch(inp: HTMLInputElement, menu: HTMLElement, sessionId: string, kind: string) {
+  var q = inp.value.trim();
+  if (!q) { menu.innerHTML = ''; return; }
+  var url = '/api/session-links/suggest?sessionId=' + encodeURIComponent(sessionId) +
+    '&q=' + encodeURIComponent(q) +
+    (kind ? '&kind=' + encodeURIComponent(kind) : '');
+  get(url).then(function (items) {
+    var html = '';
+    (items || []).forEach(function (it, i) {
+      html += '<div class="link-ac-item" data-idx="' + i + '" data-id="' + esc(it.id) + '">' + esc(it.label) + '</div>';
+    });
+    if (kind === 'feature') {
+      html += '<div class="link-ac-item link-ac-create" data-idx="-1">Create &ldquo;' + esc(q) + '&rdquo;</div>';
+    }
+    if (kind === 'pr' && (/^[^\s#]+#\d+$/.test(q) || /^(?:https?:\/\/)?github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(q))) {
+      html += '<div class="link-ac-item link-ac-create" data-idx="-2">Link PR ' + esc(q) + '</div>';
+    }
+    menu.innerHTML = html;
+    Array.prototype.forEach.call(menu.querySelectorAll('.link-ac-item'), function (el) {
+      el.onclick = function () { linkAcSelect(inp, menu, sessionId, kind, parseInt(el.getAttribute('data-idx'))); };
+    });
+  });
+}
+
+function linkAcSelect(inp: HTMLInputElement, menu: HTMLElement, sessionId: string, kind: string, idx: number) {
+  var q = inp.value.trim();
+  if (!q) return;
+  var item = idx >= 0 ? menu.querySelector('[data-idx="' + idx + '"]') : null;
+  var promise: Promise<any>;
+  if (item && item.getAttribute('data-id')) {
+    promise = post('/api/session-links/add', { sessionId: sessionId, artifactId: item.getAttribute('data-id') });
+  } else if (kind === 'feature') {
+    promise = post('/api/session-links/create-feature', { sessionId: sessionId, title: q });
+  } else if (kind === 'pr') {
+    var m = q.match(/^([^\s#]+)#(\d+)$/) || q.match(/^(?:https?:\/\/)?github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+    if (!m) return;
+    promise = post('/api/session-links/add-pr', { sessionId: sessionId, repo: m[1], prNumber: m[2] });
+  } else {
+    return;
+  }
+  var area = document.querySelector('#drawerBody .link-add-area[data-link-kind="' + kind + '"].on') as HTMLElement;
+  if (area) {
+    var existing = area.querySelector('.link-ac-error');
+    if (existing) existing.remove();
+    var spinner = document.createElement('div');
+    spinner.className = 'link-ac-spinner';
+    spinner.textContent = 'Validating…';
+    area.querySelector('.link-ac').appendChild(spinner);
+  }
+  promise.then(function (res) {
+    if (area) { var sp = area.querySelector('.link-ac-spinner'); if (sp) sp.remove(); }
+    if (res && (res.ok || res.id)) {
+      openDetail(sessionId);
+    } else if (res && res.error) {
+      if (area) {
+        var err = area.querySelector('.link-ac-error');
+        if (!err) { err = document.createElement('div'); err.className = 'link-ac-error'; area.querySelector('.link-ac').appendChild(err); }
+        err.textContent = res.error;
+      }
+    }
+  }).catch(function () {
+    if (area) {
+      var sp = area.querySelector('.link-ac-spinner'); if (sp) sp.remove();
+      var err = area.querySelector('.link-ac-error');
+      if (!err) { err = document.createElement('div'); err.className = 'link-ac-error'; area.querySelector('.link-ac').appendChild(err); }
+      err.textContent = 'Request failed — check your connection';
+    }
+  });
 }
 
 export function setView(name) {

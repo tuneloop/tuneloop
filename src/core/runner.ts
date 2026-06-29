@@ -51,7 +51,8 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   // The whole (cross-repo) hierarchy is sent; repo isolation is enforced on
   // linkage inside the processor, not by hiding other repos' features.
   const existingFeatures: FeatureRef[] = store.listFeatures()
-  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, sh }
+  const rejectedFeatureTitles = store.rejectedFeatureTitles(session.id)
+  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, rejectedFeatureTitles, sh }
   const inputHash = session.raw.contentHash
   let costUsd = 0
 

@@ -1,10 +1,20 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { loadConfig } from '../config'
-import { createDashboardServer } from '../server/http'
+import { createDashboardServer, type ShFn } from '../server/http'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { createLogger } from '../util/log'
+
+function makeSh(): ShFn {
+  return (cmd, args) =>
+    new Promise((resolve) => {
+      execFile(cmd, args, { timeout: 10_000 }, (err, stdout) => {
+        if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') resolve(null)
+        else resolve({ code: err ? (err as any).status ?? 1 : 0, stdout: stdout ?? '' })
+      })
+    })
+}
 
 export interface ServeOptions {
   db?: string
@@ -25,7 +35,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const port = opts.port ?? 4319
-  const server = createDashboardServer(store, config.dbPath)
+  const server = createDashboardServer(store, config.dbPath, makeSh())
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') log.error(`port ${port} is in use — try --port <n>`)
