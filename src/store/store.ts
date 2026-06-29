@@ -2772,6 +2772,7 @@ function bucketExpr(col: string, bucket: Bucket): string {
 }
 
 // Display title: the enrichment-derived `title` annotation, else the native adapter title
+function titleExpr(alias: string): string {
   return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), ${alias}.title)`
 }
 
