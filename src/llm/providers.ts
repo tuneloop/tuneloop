@@ -22,7 +22,7 @@ export interface ProviderPreset {
 
 export const PROVIDERS: Record<string, ProviderPreset> = {
   anthropic: { shape: 'anthropic', keyEnv: 'ANTHROPIC_API_KEY', defaultModel: 'claude-haiku-4-5' },
-  openai: { shape: 'openai', keyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-5-mini' },
+  openai: { shape: 'openai', keyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-5.4-mini' },
 
   openrouter: { shape: 'openai-compatible', baseURL: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', defaultModel: 'openai/gpt-5-mini' },
   groq: { shape: 'openai-compatible', baseURL: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', defaultModel: 'llama-3.3-70b-versatile' },

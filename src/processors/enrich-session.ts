@@ -86,7 +86,8 @@ export const enrichSession: Processor = {
       user,
       schema: outputSchema(blocks.length),
       toolName: TOOL_NAME,
-      maxTokens: 2200,
+      // Headroom for the full structured output on large sessions
+      maxTokens: 4096,
     })
     const selfCost = { tokens: usage, usd: costOfUsage(llm.provider, llm.model, usage) }
 

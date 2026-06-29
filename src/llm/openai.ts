@@ -14,6 +14,13 @@ import type { ClientOpts, LlmClient, LlmResult, StructuredRequest } from './type
  * normalizes defensively anyway. Token cap uses `max_completion_tokens` (native
  * gpt-5/o-series require it; compatible endpoints accept it — verified on
  * Ollama/Groq/Gemini).
+ *
+ * Model choice matters: pick one that doesn't burn the token budget on hidden
+ * reasoning before emitting the tool call. The default `gpt-5.4-mini` doesn't
+ * reason on this Chat-Completions+tools path (reasoning there is gated to the
+ * Responses API), so it never starves. An older reasoning-by-default model like
+ * `gpt-5-mini` can exhaust the budget reasoning and return empty output on large
+ * sessions — prefer the default.
  */
 export function createOpenAiClient(apiKey: string, model: string, opts?: ClientOpts): LlmClient {
   const client = new OpenAI({ apiKey, baseURL: opts?.baseURL })
