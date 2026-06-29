@@ -73,9 +73,12 @@ export function renderCaControls() {
   }).join('');
   var el = $('#ca-controls');
   if (!el) return;
+  // Artifact (the section-scoping toggle) gets its own row + the prominent
+  // `seg-primary` styling; Bucket sits below as the secondary control. Labels share
+  // a min-width so both segmented controls line up.
   el.innerHTML =
-    '<div class="sr-ctrl-row"><span class="sr-lbl">Artifact</span><span class="seg" id="ca-type">' + type + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Bucket</span><span class="seg" id="ca-bucket">' + bk + '</span></div>';
+    '<div class="sr-ctrl-row"><span class="sr-lbl" style="min-width:60px">Artifact</span><span class="seg seg-primary" id="ca-type">' + type + '</span></div>' +
+    '<div class="sr-ctrl-row"><span class="sr-lbl" style="min-width:60px">Bucket</span><span class="seg" id="ca-bucket">' + bk + '</span></div>';
   Array.prototype.forEach.call($('#ca-type').children, function (btn) {
     btn.onclick = function () {
       state.ca.kind = btn.getAttribute('data-k');

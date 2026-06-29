@@ -70,6 +70,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; background: var(--paper); padding: 5px 12px; cursor: pointer; font-size: 13px; color: var(--muted); }
 .seg button.on { background: var(--ink); color: #f3efe6; }
+/* Primary segmented control (the section-scoping Artifact toggle): emerald active
+   fill + slightly larger, so it reads as more important than the neutral Bucket. */
+.seg.seg-primary button { padding: 8px 18px; font-size: 14px; }
+.seg.seg-primary button.on { background: var(--emerald); color: #f3efe6; }
 .dist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 22px; }
 .card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .card h3 { margin: 0 0 12px; font-size: 14px; }
