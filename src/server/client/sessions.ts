@@ -3,6 +3,7 @@
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
 import { state, $, esc, renderMd, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
+import { syncHash } from './router'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
@@ -93,6 +94,20 @@ export function buildFilters() {
     (more ? '<div class="flt-row flt-more" id="f-more" hidden>' + more + '</div>' : '') +
     '<div class="flt-active" id="filter-active"></div>';
 
+  // Reflect current filter state into the freshly-built controls, so a restored or
+  // URL-driven filter shows in the bar (not just in the request). Time + dates are
+  // already rendered from state.sessTime above; do the rest here.
+  var ff = state.filters || {};
+  var ffacets = ff.facets || {};
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) {
+    var v = ffacets[s.getAttribute('data-key')];
+    if (v != null) s.value = v; // a value absent from the options list leaves it at "all"
+  });
+  if ($('#f-q')) $('#f-q').value = ff.q || '';
+  var afEl0 = $('#f-artifact');
+  if (afEl0) { afEl0.value = ff.artifact || ''; afEl0.dataset.kind = ff.artifactKind || ''; }
+  updateOutcomeCount((ff.outcomes || []).length);
+
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) { s.onchange = applyFilters; });
 
   // Time segmented control (presets + custom range).
@@ -140,7 +155,52 @@ function updateMoreCount() {
 // chip row (so the "Clear all" button itself disappears — nothing left to clear).
 export function clearAllFilters() {
   state.sessTime = { preset: 'all', from: '', to: '' };
+  // buildFilters() now reflects state.filters into the controls, so clearing the
+  // bar means clearing the state too (not just rebuilding empty DOM).
+  state.filters = { facets: {}, q: '', artifact: '', artifactKind: '', outcomes: [], from: '', to: '' };
   buildFilters();
+}
+
+// ---- URL <-> sessions-filter bridge (used by the router) ---------------------
+
+// The current sessions filter as URL query params: window (win / from+to), free
+// text (q), artifact (+kind), outcomes (csv), and each facet as `f.<key>`.
+// Defaults (the 30-day window) are omitted so an unfiltered list stays `#/sessions`.
+export function getSessionParams(): Record<string, string> {
+  var q: Record<string, string> = {};
+  var st = state.sessTime;
+  if (st.preset === 'custom') { if (st.from) q.from = st.from; if (st.to) q.to = st.to; }
+  else if (st.preset === 'all') q.win = 'all';
+  else if (st.preset !== 30) q.win = String(st.preset); // 30d is the default
+  var f = state.filters || {};
+  if (f.q) q.q = f.q;
+  if (f.artifact) { q.artifact = f.artifact; if (f.artifactKind) q.artifactKind = f.artifactKind; }
+  if (f.outcomes && f.outcomes.length) q.outcomes = f.outcomes.join(',');
+  var facets = f.facets || {};
+  Object.keys(facets).forEach(function (k) { if (facets[k]) q['f.' + k] = facets[k]; });
+  return q;
+}
+
+// Restore the sessions filter from URL query params, then rebuild the bar (which
+// reflects the state into the controls and reloads the list). Inverse of
+// getSessionParams; unknown/absent params fall back to defaults.
+export function applySessionParams(query: Record<string, string>) {
+  state.view = 'sessions';
+  if (query.from || query.to) state.sessTime = { preset: 'custom', from: query.from || '', to: query.to || '' };
+  else if (query.win === 'all') state.sessTime = { preset: 'all', from: '', to: '' };
+  else if (query.win === '7' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 90, from: '', to: '' };
+  else state.sessTime = { preset: 30, from: '', to: '' }; // default (win=30 or absent)
+  var facets: Record<string, string> = {};
+  Object.keys(query).forEach(function (k) { if (k.indexOf('f.') === 0 && query[k]) facets[k.slice(2)] = query[k]; });
+  state.filters = {
+    facets: facets,
+    q: query.q || '',
+    artifact: query.artifact || '',
+    artifactKind: query.artifactKind || '',
+    outcomes: query.outcomes ? query.outcomes.split(',').filter(Boolean) : [],
+    from: '', to: '', // resolved by applyFilters() → sessWindow()
+  };
+  buildFilters(); // renders the bar from state.* and calls applyFilters() → loadSessions
 }
 
 // Resolve the sessions-list window to ISO {from,to} for the request. Empty
@@ -190,6 +250,9 @@ function buildOutcomeMenu() {
   }).join('');
   menu.setAttribute('data-built', '1');
   Array.prototype.forEach.call(menu.querySelectorAll('input'), function (cb) { cb.onchange = applyFilters; });
+  // Reflect the current (possibly URL-restored) selection now that the boxes exist.
+  var selO = (state.filters && state.filters.outcomes) || [];
+  Array.prototype.forEach.call(menu.querySelectorAll('input'), function (cb) { cb.checked = selO.indexOf(cb.value) >= 0; });
 }
 
 function updateOutcomeCount(n) {
@@ -321,7 +384,11 @@ export function applyFilters() {
   });
   var af = $('#f-artifact');
   var win = sessWindow();
-  var outcomes = selectedOutcomes();
+  // The outcome popover is built lazily on first open, so before that the DOM has
+  // no checkboxes to read — fall back to the state (which a URL restore populated)
+  // rather than wiping it. Once built, the DOM is the source of truth.
+  var menu = $('#f-outcome-menu');
+  var outcomes = menu && menu.getAttribute('data-built') ? selectedOutcomes() : ((state.filters && state.filters.outcomes) || []);
   updateOutcomeCount(outcomes.length);
   state.filters = {
     facets: facets,
@@ -335,6 +402,7 @@ export function applyFilters() {
   updateMoreCount();
   renderActiveChips();
   loadSessions();
+  syncHash({ replace: true }); // mirror the filter into the URL, in place (no history spam)
 }
 
 export function renderSessions(rows) {
@@ -587,8 +655,15 @@ function filesHtml(edits, transcript) {
 }
 
 export function openDetail(id, focus?: any) {
+  // Reflect the open session in the URL immediately (a shareable, Back-closable
+  // entry) — before the async fetch. A stale/deleted id reverts below.
+  state.open = id;
+  syncHash();
   get('/api/session?id=' + encodeURIComponent(id)).then(function (d) {
-    if (!d || d.error) return;
+    if (!d || d.error) {
+      if (state.open === id) { state.open = null; syncHash({ replace: true }); }
+      return;
+    }
     var s = d.session, a = d.annotations || {};
 
     // Sticky-header pieces (title+close, tab subnav, transcript nav) are assembled
@@ -1554,7 +1629,11 @@ export function filterByArtifact(text, kind) {
   setTimePreset('all');
 }
 
-export function closeDrawer() { $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on'); }
+export function closeDrawer() {
+  $('#drawer').classList.remove('on');
+  $('#overlay').classList.remove('on');
+  if (state.open) { state.open = null; syncHash({ replace: true }); } // drop ?session= without adding history
+}
 
 export function setView(name) {
   ['dashboard', 'artifacts', 'sessions'].forEach(function (v) {
@@ -1563,6 +1642,8 @@ export function setView(name) {
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     b.classList.toggle('on', b.getAttribute('data-view') === name);
   });
+  state.view = name;
+  syncHash(); // mirror the active tab into the URL (no-op while a route is applying)
 }
 
 export function loadSessions() {

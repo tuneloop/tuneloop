@@ -27,6 +27,12 @@ export interface SessTime {
 }
 
 export interface ClientState {
+  // The top-level tab the app is showing. Mirrored into the URL hash by the
+  // router; setView() keeps it in step with the DOM.
+  view: 'dashboard' | 'artifacts' | 'sessions'
+  // The session whose detail drawer is open (null = drawer closed). Mirrored into
+  // the URL as `?session=<id>` so a session is shareable / reload-survivable.
+  open: string | null
   artKind: string
   overview: any
   filters: Partial<SessionFilters> // starts {}, filled in by applyFilters()
@@ -49,9 +55,14 @@ export interface ClientState {
   ops: { bucket: string; by: Record<string, boolean> }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
+  // Artifacts tab list controls (PRs/Features table): free-text search + the PR
+  // table's column sort. Mirrored into the URL so a filtered/sorted table is a
+  // shareable, reload-survivable link. Reset when switching kind (feature ↔ pr).
+  art: { q: string; sort: string; dir: string }
 }
 
 export var state: ClientState = {
+  view: 'dashboard', open: null,
   artKind: 'feature', overview: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
@@ -64,7 +75,8 @@ export var state: ClientState = {
   sm: { bucket: '', by: '' },
   ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
   ac: { items: [], sel: -1 },
-  sessTime: { preset: 30, from: '', to: '' }
+  sessTime: { preset: 30, from: '', to: '' },
+  art: { q: '', sort: 'created', dir: 'desc' }
 };
 
 // The success-rate detail controls persist across reloads: the user's "what
