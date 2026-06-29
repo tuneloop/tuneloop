@@ -150,8 +150,7 @@ function renderTreemap() {
   if (leg) {
     leg.innerHTML = pr
       ? '<span class="leg">Area &prop; cost &middot; each tile is a merged PR (no hierarchy). Use the slider to roll up the long tail into “Other”.</span>'
-      : '<span class="leg">Area &prop; subtree cost &middot; each top-level feature has its own color, sub-features are lighter tints. ' +
-        'Click a tile to drill in (striped = the feature’s own/direct work); use the slider to roll up the long tail.</span>';
+      : '<span class="leg">Area &prop; subtree cost &middot; Click a tile to drill in; use the slider to roll up the long tail.</span>';
   }
 }
 
