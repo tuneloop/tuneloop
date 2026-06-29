@@ -69,8 +69,6 @@ export interface ProcessorContext {
 
 /** Everything a processor can emit. The runner stamps each row with the processor name. */
 export interface ProcessorResult {
-  /** Enrichment-derived session title; preferred for display over the native title. */
-  title?: string
   annotations?: AnnotationInput[]
   artifacts?: ArtifactInput[]
   links?: ArtifactLinkInput[]

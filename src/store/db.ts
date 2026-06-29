@@ -23,8 +23,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_id          TEXT,
   source              TEXT,
   provider            TEXT,
-  title               TEXT,        -- native title from the adapter (may be absent/weak)
-  llm_title           TEXT,        -- enrichment-derived intent title; preferred for display
+  title               TEXT,
   repo                TEXT,
   branch              TEXT,
   cwd                 TEXT,
@@ -316,8 +315,5 @@ function migrate(db: DB): void {
   }
   if (tableExists('tool_calls') && !has('tool_calls', 'error_message')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_message TEXT')
-  }
-  if (tableExists('sessions') && !has('sessions', 'llm_title')) {
-    db.exec('ALTER TABLE sessions ADD COLUMN llm_title TEXT')
   }
 }

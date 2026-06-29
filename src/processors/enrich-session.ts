@@ -88,9 +88,6 @@ export const enrichSession: Processor = {
       return { selfCost } // record the spend; don't re-charge on every run
     }
 
-    // Intent-based display title, keeping the native-title fallback.
-    const title = sessionTitle(parsed.title)
-
     // Session-level classification (P4: success/autonomy/complexity stay per-session).
     // use_case is NOT here — it's block-grain (see block labels below).
     const annotations: AnnotationInput[] = [
@@ -102,6 +99,9 @@ export const enrichSession: Processor = {
       { key: 'intent_summary', value: str(parsed.intent_summary) },
       { key: 'decisions', value: decisionList(parsed.decisions) },
     ]
+    // Intent-based display title (read at display time, falling back to the native title)
+    const title = sessionTitle(parsed.title)
+    if (title) annotations.push({ key: 'title', value: title })
 
     // The LLM-judged "did this session accomplish its task(s)" signal lives in the
     // outcomes list (alongside git-derived pr_merged etc.), not as a facet.
@@ -197,7 +197,6 @@ export const enrichSession: Processor = {
     }
 
     return {
-      title,
       annotations,
       outcomes,
       artifacts,
