@@ -9,9 +9,9 @@ import { createLogger } from '../util/log'
 function makeSh(): ShFn {
   return (cmd, args) =>
     new Promise((resolve) => {
-      execFile(cmd, args, { timeout: 10_000 }, (err, stdout) => {
+      execFile(cmd, args, { timeout: 10_000 }, (err, stdout, stderr) => {
         if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') resolve(null)
-        else resolve({ code: err ? (err as any).status ?? 1 : 0, stdout: stdout ?? '' })
+        else resolve({ code: err ? (err as any).status ?? 1 : 0, stdout: (stdout || stderr) ?? '' })
       })
     })
 }

@@ -2474,13 +2474,6 @@ export class Store {
     return true
   }
 
-  /** Remove a rejection tombstone (user changed their mind). */
-  unrejectSessionLink(sessionId: string, artifactId: string): boolean {
-    const r = this.db
-      .prepare('DELETE FROM user_link_overrides WHERE session_id = ? AND artifact_id = ?')
-      .run(sessionId, artifactId)
-    return r.changes > 0
-  }
 
   /** Titles of features the user rejected for this session (for LLM prompt context). */
   rejectedFeatureTitles(sessionId: string): string[] {

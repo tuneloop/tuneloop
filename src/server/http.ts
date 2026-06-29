@@ -75,7 +75,8 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         if (ghRes === null) {
           warning = 'gh CLI not available — PR not validated'
         } else if (ghRes.code !== 0) {
-          sendJson(res, 404, { error: `PR ${prRef} not found on GitHub` })
+          const detail = ghRes.stdout.trim().split('\n')[0] || 'not found'
+          sendJson(res, 404, { error: `PR ${prRef}: ${detail}` })
           return
         } else {
           try {

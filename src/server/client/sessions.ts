@@ -1327,6 +1327,7 @@ export function openDetail(id, focus?: any) {
         var sid = btn.getAttribute('data-session-id');
         var aid = btn.getAttribute('data-artifact-id');
         if (!sid || !aid) return;
+        if (!confirm('Unlink this artifact from the session?')) return;
         post('/api/session-links/remove', { sessionId: sid, artifactId: aid }).then(function (res) {
           if (res && res.ok) openDetail(sid);
         }).catch(function () {});
