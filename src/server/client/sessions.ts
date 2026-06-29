@@ -31,7 +31,7 @@ document.addEventListener('mousedown', function (e) {
 });
 
 var TIME_PRESETS = [
-  { d: 7, l: '7d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
+  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
 ];
 
 // Filter facets shown inline (in this order); every other filter-role facet —
@@ -1671,8 +1671,9 @@ export function filterByArtifact(text, kind, preset?) {
   var af = $('#f-artifact');
   if (af) { af.value = text || ''; af.dataset.kind = kind || ''; } // kind rides along on the input (no visible kind dropdown)
   // Drilling into one artifact defaults to its FULL history (all-time). A caller
-  // can pin a window instead — e.g. a 7-day highlight drills to 7d so the session
-  // count the user lands on matches the headline. setTimePreset() re-applies.
+  // can pin a window instead — e.g. a Highlights drill passes its window (14d) so
+  // the session count the user lands on matches the headline. setTimePreset()
+  // re-applies (the matching preset chip must exist, else it shows none selected).
   setTimePreset(preset == null ? 'all' : preset);
 }
 

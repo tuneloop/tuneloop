@@ -52,7 +52,6 @@ function init() {
   var brand = document.querySelector('.brand') as HTMLElement | null;
   if (brand) { brand.style.cursor = 'pointer'; brand.onclick = goHighlights; }
 
-
   get('/api/overview').then(function (o) {
     state.overview = o;
     var range = o.firstAt && o.lastAt ? dayOf(o.firstAt) + ' → ' + dayOf(o.lastAt) : '';

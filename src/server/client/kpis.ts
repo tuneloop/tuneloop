@@ -13,7 +13,7 @@ import { renderOps } from './metrics/ops'
 // The top-level window selector + caption. Sets the window every headline tile
 // AND every expansion's charts are computed over. Lives where the caption used
 // to, so "Last N days" is now an adjustable control, not just a label.
-var WINDOWS = [['7', '7d'], ['30', '30d'], ['90', '90d'], ['all', 'All']];
+var WINDOWS = [['7', '7d'], ['14', '14d'], ['30', '30d'], ['90', '90d'], ['all', 'All']];
 export function renderWindow() {
   var cap = $('#kpi-caption');
   if (!cap) return;
