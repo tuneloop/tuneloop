@@ -17,14 +17,17 @@
   <span class="meta" id="meta"></span>
 </header>
 <nav class="tabnav"><div class="inner">
-  <button class="tab on" data-view="dashboard">Dashboard</button>
+  <button class="tab on" data-view="highlights">Highlights</button>
+  <button class="tab" data-view="dashboard">Dashboard</button>
   <button class="tab" data-view="artifacts">Artifacts</button>
   <button class="tab" data-view="sessions">Sessions</button>
 </div></nav>
 <main>
-  <section id="view-dashboard" class="view on">
+  <section id="view-highlights" class="view on"><div id="highlights"></div></section>
+  <section id="view-dashboard" class="view">
     <div class="kpi-caption" id="kpi-caption"></div>
     <section id="kpis" class="tiles"></section>
+    <div class="ask-slot" id="ask-dashboard"></div>
     <section id="metric-detail"></section>
     <!-- Breakdown explorer commented out for now:
     <section class="panel">
@@ -36,6 +39,7 @@
     -->
   </section>
   <section id="view-artifacts" class="view">
+    <div class="ask-slot" id="ask-artifacts"></div>
     <section class="panel">
       <div class="seg" id="artKindSeg" style="margin-bottom:16px"></div>
       <div id="artifacts"></div>
@@ -43,6 +47,7 @@
     </section>
   </section>
   <section id="view-sessions" class="view">
+    <div class="ask-slot" id="ask-sessions"></div>
     <section class="panel">
       <div class="panel-head"><h2>Sessions</h2></div>
       <div id="filters" class="filters"></div>
