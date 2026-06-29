@@ -107,4 +107,20 @@ export const INTRINSIC_FACETS: FacetSpec[] = [
     multi: true,
     roles: ['chart', 'filter', 'detail'],
   },
+  {
+    // Fingerprinted category of a FAILED tool call (set at ingest by classifyError;
+    // NULL when ok). Tool-call grain → splits error_count by category in the Ops
+    // "Errors by category" widget. `filter`/`detail` only (no `chart`): a session
+    // hits MANY categories, so a per-session split explodes into noisy combos, so
+    // it is deliberately NOT offered as a success-rate breakdown dimension. Base
+    // scopes to errored rows via the column itself (not `is_error = 1`) so the
+    // facet stays consistent even if an adapter ever diverges ok from is_error.
+    key: 'error_category',
+    label: 'Error category',
+    type: 'enum',
+    source: 'tool-call',
+    column: 'error_category',
+    base: 'error_category IS NOT NULL',
+    roles: ['filter', 'detail'],
+  },
 ]

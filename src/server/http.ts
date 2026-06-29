@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
+import { ERROR_CATEGORIES } from '../core/error-category'
 
 /** Read-only JSON API + dashboard SPA over the analyzed store. */
 export function createDashboardServer(store: Store, dbPath: string): Server {
@@ -47,12 +48,40 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     await serveClientAsset(res, path)
     return
   }
+  if (path === '/api/highlights') {
+    const daysRaw = url.searchParams.get('days')
+    const days = daysRaw === 'all' ? null : parseInt(daysRaw ?? '7', 10)
+    // The store windows on a half-open [from, to) range — both bounds required.
+    const windowed = !!(days && days > 0)
+    const to = windowed ? new Date().toISOString() : undefined
+    const from = windowed ? new Date(Date.now() - days! * 86400000).toISOString() : undefined
+    sendJson(res, 200, { days: daysRaw ?? '7', highlights: store.highlights(from, to), dbPath })
+    return
+  }
+
   if (path === '/api/overview') {
     sendJson(res, 200, { ...store.summary(), dbPath })
     return
   }
   if (path === '/api/facets') {
     sendJson(res, 200, store.facetList())
+    return
+  }
+  if (path === '/api/error-categories') {
+    // Taxonomy metadata (labels + tooltip descriptions) for the error-category widget.
+    sendJson(res, 200, ERROR_CATEGORIES)
+    return
+  }
+  if (path === '/api/error-occurrences') {
+    // Drill-down: every failed tool call of one category, windowed, for the widget.
+    const category = url.searchParams.get('category')
+    if (!category) {
+      sendJson(res, 400, { error: 'missing category' })
+      return
+    }
+    const window = { from: url.searchParams.get('from') ?? undefined, to: url.searchParams.get('to') ?? undefined }
+    const toolNames = url.searchParams.getAll('tool_name').filter(Boolean)
+    sendJson(res, 200, store.errorOccurrences(category, window, toolNames))
     return
   }
   if (path === '/api/distribution') {
@@ -75,12 +104,14 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       sendJson(res, 400, { error: 'missing measure' })
       return
     }
-    const reserved = new Set(['measure', 'by'])
+    const reserved = new Set(['measure', 'by', 'from', 'to', 'tool_name'])
     const filters: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) filters[k] = v
     }
-    sendJson(res, 200, store.breakdown(measure, q.get('by') ?? undefined, filters))
+    const window = { from: q.get('from') ?? undefined, to: q.get('to') ?? undefined }
+    const toolNames = q.getAll('tool_name').filter(Boolean)
+    sendJson(res, 200, store.breakdown(measure, q.get('by') ?? undefined, filters, window, toolNames))
     return
   }
   if (path === '/api/kpis') {
@@ -120,17 +151,22 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
   if (path === '/api/ops-over-time') {
     // Operational tool-call metrics over time. view = tool_calls | error_rate |
-    // skill_usage; by=name splits by tool/skill name; bucket day|week|month.
+    // skill_usage; by=name|error_category splits the series; bucket day|week|month.
+    // tool_name / error_category are repeatable ROW-level scopes for the error-rate
+    // chart (which calls count; which errors count); any other param is a generic
+    // session-level facet filter.
     const q = url.searchParams
     const rawView = q.get('view')
     const view: 'tool_calls' | 'error_rate' | 'skill_usage' =
       rawView === 'tool_calls' || rawView === 'skill_usage' ? rawView : 'error_rate'
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    const rawBy = q.get('by')
+    const by = rawBy === 'name' || rawBy === 'error_category' ? rawBy : undefined
+    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to', 'topK', 'tool_name', 'error_category'])
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const opsTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
@@ -139,13 +175,20 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       store.opsOverTime({
         view,
         bucket,
-        by: q.get('by') === 'name' ? 'name' : undefined,
+        by,
         from: q.get('from') ?? undefined,
         to: q.get('to') ?? undefined,
         filters,
+        toolNames: q.getAll('tool_name').filter(Boolean),
+        errorCategories: q.getAll('error_category').filter(Boolean),
         topK: Number.isFinite(opsTopK) && opsTopK > 0 ? opsTopK : undefined,
       }),
     )
+    return
+  }
+  if (path === '/api/tool-names') {
+    // Distinct tool names (busiest first) for the Ops error-rate tool filter.
+    sendJson(res, 200, store.toolNames())
     return
   }
   if (path === '/api/sessions-over-time') {
@@ -154,9 +197,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
     const reserved = new Set(['bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    // Repeated params (?model=a&model=b) collect into one OR'd filter per facet.
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const sessTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
@@ -181,9 +225,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
     const reserved = new Set(['bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    // Repeated params (?model=a&model=b) collect into one OR'd filter per facet.
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const spendTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(
@@ -271,9 +316,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
     const reserved = new Set(['outcomes', 'bucket', 'by', 'from', 'to', 'topK'])
-    const filters: Record<string, string> = {}
+    // Repeated params (?model=a&model=b) collect into one OR'd filter per facet.
+    const filters: Record<string, string[]> = {}
     for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) filters[k] = v
+      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
     }
     const srTopK = parseInt(q.get('topK') ?? '', 10)
     sendJson(

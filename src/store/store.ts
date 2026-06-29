@@ -3,7 +3,9 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import type { CanonicalAction, Session, ToolCall } from '../core/model'
 import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
+import { parseApplyPatch } from './apply-patch'
 import { deterministicBlocks } from '../core/blocks'
+import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
@@ -14,6 +16,20 @@ import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, UsageFactInp
 export interface Dist {
   value: string
   count: number
+}
+
+/** One failed tool call in the "Errors by category" drill-down (see errorOccurrences). */
+export interface ErrorOccurrence {
+  sessionId: string
+  title: string | null
+  idx: number
+  name: string
+  action: string
+  command: string | null
+  targetPath: string | null
+  message: string | null
+  ts: string | null
+  startedAt: string | null
 }
 
 export interface Summary {
@@ -33,6 +49,13 @@ export interface Summary {
   complexity: Dist[]
   autonomy: Dist[]
   features: { total: number; derived: number; linked: number }
+}
+
+/** One computed insight for the Highlights digest. The client maps `kind` to the
+ *  display sentence + its drill-in; the payload carries the data. */
+export interface Highlight {
+  kind: string
+  [field: string]: unknown
 }
 
 export class Store {
@@ -119,10 +142,15 @@ export class Store {
       this.db.prepare('DELETE FROM tool_calls WHERE session_id = ?').run(session.id)
       const insTool = this.db.prepare(
         `INSERT INTO tool_calls
-           (session_id, idx, name, action, ok, is_error, target_path, command, is_sidechain, ts, duration_ms)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+           (session_id, idx, name, action, ok, is_error, error_category, error_message, target_path, command, is_sidechain, ts, duration_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       session.toolCalls.forEach((t, idx) => {
+        // For failed calls, fingerprint a cross-harness category + keep a one-line
+        // error snippet (both NULL when ok), computed at ingest. Clip before classify.
+        const errText = t.result.ok ? null : resultText(t.result.raw)
+        const category = errText == null ? null : classifyError(t.action, errText.slice(0, 8000))
+        const message = errText == null ? null : errText.replace(/\s+/g, ' ').trim().slice(0, 200) || null
         insTool.run(
           session.id,
           idx,
@@ -130,6 +158,8 @@ export class Store {
           t.action,
           t.result.ok ? 1 : 0,
           t.result.isError ? 1 : 0,
+          category,
+          message,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,
@@ -583,6 +613,255 @@ export class Store {
       autonomy: this.scalarDist('autonomy'),
       features,
     }
+  }
+
+  /** The single most significant week-over-week move to lead the digest with:
+   *  compares this window's headline KPIs (spend, success rate, session count) to
+   *  the prior equal-length window and returns the biggest mover — normalized to
+   *  how many times over its own "notable" bar each one is, so one metric type
+   *  can't dominate just because its natural swings run larger. Null when nothing
+   *  clears its bar, or the prior window's base is too thin to trust the delta.
+   *  Only called for a bounded [from, to). */
+  private trendHeadline(from: string, to: string): Highlight | null {
+    const span = new Date(to).getTime() - new Date(from).getTime()
+    const prevFrom = new Date(new Date(from).getTime() - span).toISOString()
+    const cur = this.kpis(from, to)
+    const prev = this.kpis(prevFrom, from)
+    const cands: Array<{ score: number; h: Highlight }> = []
+    // Spend: relative change; needs a non-trivial prior base so a $1→$3 blip
+    // doesn't read as "+200%".
+    if (prev.totalSpend >= 5) {
+      const pct = ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
+      if (Math.abs(pct) >= 20)
+        cands.push({ score: Math.abs(pct) / 20, h: { kind: 'trend', metric: 'spend', cur: cur.totalSpend, prev: prev.totalSpend, pct: Math.round(pct) } })
+    }
+    // Success rate: percentage-point change; needs enough sessions both sides for
+    // the rate to mean anything.
+    if (cur.successRate != null && prev.successRate != null && cur.sessions >= 3 && prev.sessions >= 3) {
+      const pp = (cur.successRate - prev.successRate) * 100
+      if (Math.abs(pp) >= 10)
+        cands.push({ score: Math.abs(pp) / 10, h: { kind: 'trend', metric: 'rate', cur: cur.successRate, prev: prev.successRate, pp: Math.round(pp) } })
+    }
+    // Session count: relative change; needs a non-trivial prior base.
+    if (prev.sessions >= 3) {
+      const pct = ((cur.sessions - prev.sessions) / prev.sessions) * 100
+      if (Math.abs(pct) >= 25)
+        cands.push({ score: Math.abs(pct) / 25, h: { kind: 'trend', metric: 'sessions', cur: cur.sessions, prev: prev.sessions, pct: Math.round(pct) } })
+    }
+    if (!cands.length) return null
+    cands.sort((a, b) => b.score - a.score)
+    return cands[0]!.h
+  }
+
+  /** The windowed "reliable facts" behind the Highlights digest — most-spend
+   *  shipped artifact, its stalled (not-yet-shipped) counterpart, converted spend,
+   *  and the busiest source file — all scoped to [from, to) (omit for all-time) so
+   *  the whole digest honors the dashboard window. */
+  private windowedFacts(from?: string, to?: string) {
+    const w = from && to ? ' AND s.started_at >= ? AND s.started_at < ?' : ''
+    const wp: string[] = from && to ? [from, to] : []
+    const scalar = (sql: string) => (this.db.prepare(sql).get(...wp) as { v: number }).v
+
+    const total = scalar(`SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s WHERE 1=1${w}`)
+    // "Shipped" spend is production spend: a session whose cost counts here must have
+    // a NON-reviewed link to a completed artifact. A session that only reviewed a
+    // merged PR (a teammate's) is total spend, not shipped spend — excluding it keeps
+    // converted_spend honest. (Reviewed role exists on PRs only; harmless for features.)
+    const shipped = scalar(
+      `SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s
+       WHERE EXISTS (SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+                     WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL
+                       AND COALESCE(sa.role,'') <> 'reviewed')${w}`,
+    )
+
+    // Busiest source file — most distinct sessions, skipping generated noise. We
+    // fetch the top two so the digest can require a CLEAR leader (a lone winner,
+    // not one of a big pack tied at the same low count — that tie is what made the
+    // old "more than any other" claim misleading).
+    const topFiles = this.db
+      .prepare(
+        `SELECT fi.path AS path, COUNT(DISTINCT fi.session_id) AS sessions
+         FROM files_index fi JOIN sessions s ON s.id = fi.session_id
+         WHERE 1=1${w}
+           AND fi.path NOT LIKE '%.lock' AND fi.path NOT LIKE '%lock.json'
+           AND fi.path NOT LIKE '%lock.yaml' AND fi.path NOT LIKE '%/go.sum'
+         GROUP BY fi.repo, fi.path ORDER BY sessions DESC, fi.path LIMIT 2`,
+      )
+      .all(...wp) as Array<{ path: string; sessions: number }>
+    const topFile = topFiles[0]
+      ? { path: topFiles[0].path, sessions: topFiles[0].sessions, clearLead: !topFiles[1] || topFiles[0].sessions > topFiles[1].sessions }
+      : undefined
+
+    // Biggest shipped: shipped feature → merged PR → wip feature, among artifacts
+    // active in the window, ranked by block-attributed cost (matches the Artifacts table).
+    // Reviewed links are excluded from both arms so a teammate's PR you reviewed
+    // never has its review cost counted as production cost (mirrors costPerArtifact).
+    const blockCost = `COALESCE((SELECT SUM(cost_usd) FROM (
+        SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
+        JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+        JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+        WHERE ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
+        UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
+        JOIN usage_facts u ON u.session_id = sa2.session_id
+        WHERE sa2.artifact_id = a.id AND COALESCE(sa2.role,'') <> 'reviewed'
+        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed'))), 0)`
+    // An artifact is "in window" (and a candidate at all) only via a NON-reviewed
+    // session link — this doubles as the "produced by this store" guard, so a PR you
+    // only reviewed is never picked as the biggest-shipped or stalled spotlight.
+    const inWindow =
+      from && to
+        ? `EXISTS (SELECT 1 FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
+                   WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
+                     AND s.started_at >= ? AND s.started_at < ?)`
+        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed')`
+    const pickWin = (kind: string, completion: 'shipped' | 'unshipped') =>
+      this.db
+        .prepare(
+          `SELECT a.title AS title, a.repo AS repo, a.ident AS ident, ${blockCost} AS cost
+           FROM artifacts a
+           WHERE a.kind = ? AND a.completed_at IS ${completion === 'shipped' ? 'NOT NULL' : 'NULL'} AND ${inWindow}
+           ORDER BY cost DESC LIMIT 1`,
+        )
+        .get(...(from && to ? [kind, from, to] : [kind])) as
+        | { title: string; repo: string | null; ident: string | null; cost: number }
+        | undefined
+
+    type Pick = { kind: 'feature' | 'pr'; title: string; repo: string | null; ident: string | null; cost: number }
+    // Most AI spend on SHIPPED work: a shipped feature if the user marks any
+    // shipped, else the costliest merged PR. No unshipped fallback — that's what
+    // `stalled` is for.
+    const shippedFeat = pickWin('feature', 'shipped')
+    let spotlight: Pick | null = null
+    if (shippedFeat) spotlight = { kind: 'feature', ...shippedFeat }
+    else {
+      const pr = pickWin('pr', 'shipped')
+      if (pr) spotlight = { kind: 'pr', ...pr }
+    }
+
+    // Most AI spend NOT yet shipped (stalled): an unshipped feature, but only when
+    // the user actually marks features shipped (otherwise every feature is
+    // trivially "unshipped" and it's noise) — else fall back to the costliest
+    // open/unmerged PR, a reliable git-derived signal that works for new users.
+    let stalled: Pick | null = null
+    if (shippedFeat) {
+      const uf = pickWin('feature', 'unshipped')
+      if (uf) stalled = { kind: 'feature', ...uf }
+    } else {
+      const up = pickWin('pr', 'unshipped')
+      if (up) stalled = { kind: 'pr', ...up }
+    }
+
+    return { total, shipped, topFile, spotlight, stalled }
+  }
+
+  /** The Highlights digest: a few reliably-interesting facts plus facet-WALKED
+   *  comparisons (spend concentration, outcome-rate spread) — for each, we go down
+   *  an ordered facet list and keep the FIRST facet whose breakdown clears an
+   *  interestingness threshold, so nothing is hardcoded to `repo` and a dominated
+   *  split (e.g. one harness at 99%) is skipped. Each insight is a typed payload;
+   *  the client renders the sentence + drill-in. `from`/`to` window everything;
+   *  omit for all-time. */
+  highlights(from?: string, to?: string): Highlight[] {
+    const out: Highlight[] = []
+    // A stalled-spend insight only fires when the costliest unshipped artifact is a
+    // meaningful slice of the window's spend (so a tiny unshipped feature is quiet).
+    const STALLED_MIN_SHARE = 0.15
+    const f = this.windowedFacts(from, to)
+
+    // --- Week-over-week trend headline (only over a bounded window, where a
+    // "previous window" exists to compare against) ---
+    if (from && to) {
+      const trend = this.trendHeadline(from, to)
+      if (trend) out.push(trend)
+    }
+
+    // --- Reliable facts, windowed (show when the data exists) ---
+    if (f.spotlight) {
+      const sp = f.spotlight
+      out.push({ kind: 'biggest_shipped', artifactKind: sp.kind, title: sp.title, repo: sp.repo, ident: sp.ident, cost: sp.cost })
+    }
+    // The stalled counterpart to biggest_shipped — kept adjacent so they read as a
+    // shipped/not-yet-shipped pair.
+    if (f.stalled && f.total > 0 && f.stalled.cost / f.total >= STALLED_MIN_SHARE)
+      out.push({ kind: 'stalled_spend', artifactKind: f.stalled.kind, title: f.stalled.title, repo: f.stalled.repo, ident: f.stalled.ident, cost: f.stalled.cost })
+    if (f.total > 0 && f.shipped > 0)
+      out.push({ kind: 'converted_spend', shipped: f.shipped, total: f.total, pct: Math.round((100 * f.shipped) / f.total) })
+    // Busiest file — only with a CLEAR leader and real repetition (≥3 sessions), so
+    // we never surface an arbitrary file from a big low-count tie.
+    if (f.topFile && f.topFile.sessions >= 3 && f.topFile.clearLead)
+      out.push({ kind: 'active_file', path: f.topFile.path, sessions: f.topFile.sessions })
+
+    // --- Facet-walked: spend concentration (one value leads, but doesn't own it
+    // all). use_case is excluded: `implement` dominates almost everyone's spend, so
+    // it always won the walk with an uninteresting result. ---
+    for (const facet of ['repo', 'model', 'harness']) {
+      const r = this.spendOverTime({ bucket: 'month', by: facet, from, to })
+      if ('error' in r || !r.series || r.series.length < 2) continue
+      const total = (r.overall?.points ?? []).reduce((a, p) => a + p.spend, 0)
+      if (total <= 0) continue
+      const top = r.series.slice().sort((a, b) => b.total - a.total)[0]
+      if (!top || !top.key || top.key === 'Other') continue
+      const share = top.total / total
+      if (share >= 0.5 && share <= 0.9) {
+        out.push({ kind: 'spend_concentration', facet, value: top.key, spend: top.total, total, pct: Math.round(share * 100) })
+        break
+      }
+    }
+
+    // --- Facet-walked: outcome-rate spread (a real gap between best and worst value) ---
+    // use_case is intentionally excluded: it's multi-valued (a session counts under
+    // several work types), so per-value rates mix overlapping populations.
+    for (const facet of ['repo', 'complexity', 'model', 'autonomy']) {
+      const r = this.successRate({ outcomes: ['session_success'], bucket: 'month', by: facet, from, to })
+      const vals = (r.series ?? []).filter((s) => s.denom >= 3 && s.rate != null && s.key && s.key !== 'Other')
+      if (vals.length < 2) continue
+      const sorted = vals.slice().sort((a, b) => (b.rate as number) - (a.rate as number))
+      const best = sorted[0]
+      const worst = sorted[sorted.length - 1]
+      if (!best || !worst) continue
+      if ((best.rate as number) - (worst.rate as number) >= 0.2) {
+        out.push({
+          kind: 'success_spread',
+          facet,
+          best: { value: best.key, rate: best.rate, n: best.denom },
+          worst: { value: worst.key, rate: worst.rate, n: worst.denom },
+        })
+        break
+      }
+    }
+
+    // --- Autonomy on complex tasks: a count (enrichment-gated), with a guarded
+    // delta. Only shows when enrichment has run AND there are ≥2 such sessions; the
+    // "vs. prior window" delta is appended ONLY when the prior window has a real
+    // base (≥3), so a 1→2 jump never reads as "+100%". ---
+    if (this.db.prepare(`SELECT 1 FROM annotations WHERE key='autonomy' LIMIT 1`).get()) {
+      const countAC = (a?: string, b?: string) =>
+        (
+          this.db
+            .prepare(
+              // "complex" = the two hardest complexity tiers in the enricher's taxonomy.
+              `SELECT COUNT(*) AS n FROM sessions s
+               WHERE EXISTS (SELECT 1 FROM annotations an WHERE an.session_id = s.id AND an.key = 'autonomy'
+                             AND json_extract(an.value,'$') = 'autonomous')
+                 AND EXISTS (SELECT 1 FROM annotations an WHERE an.session_id = s.id AND an.key = 'complexity'
+                             AND json_extract(an.value,'$') IN ('substantial','open-ended'))${a && b ? ' AND s.started_at >= ? AND s.started_at < ?' : ''}`,
+            )
+            .get(...(a && b ? [a, b] : [])) as { n: number }
+        ).n
+      const cur = countAC(from, to)
+      if (cur >= 2) {
+        let delta: number | null = null
+        if (from && to) {
+          const span = new Date(to).getTime() - new Date(from).getTime()
+          const prevFrom = new Date(new Date(from).getTime() - span).toISOString()
+          const prev = countAC(prevFrom, from)
+          if (prev >= 3) delta = Math.round(((cur - prev) / prev) * 100)
+        }
+        out.push({ kind: 'autonomy_complex', count: cur, delta })
+      }
+    }
+
+    return out
   }
 
   /** Distribution of a scalar annotation value across sessions. */
@@ -1045,13 +1324,28 @@ export class Store {
       where.push(p.sql)
       params.push(...p.params)
     }
+    // Row-level tool-name scope: restrict which calls are aggregated, so the rate
+    // becomes that tool's own (denominator + numerator both shrink to these tools).
+    const toolVals = (q.toolNames ?? []).filter(Boolean)
+    if (toolVals.length) {
+      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      params.push(...toolVals)
+    }
     const fromSql = 'FROM tool_calls t JOIN sessions s ON s.id = t.session_id'
     const whereSql = 'WHERE ' + where.join(' AND ')
+    // Row-level error-category scope: redefine the numerator (which errors count)
+    // without touching the denominator — "rate of <these categories> among all
+    // in-scope calls". These params bind in the SELECT list, AHEAD of WHERE params.
+    const catVals = (q.errorCategories ?? []).filter(Boolean)
+    const errPh = catVals.map(() => '?').join(', ')
+    const errExpr = catVals.length
+      ? `COALESCE(SUM(CASE WHEN t.error_category IN (${errPh}) THEN 1 ELSE 0 END), 0)`
+      : 'COALESCE(SUM(t.is_error), 0)'
     const val = (cnt: number, errs: number) => (isRate ? (cnt ? errs / cnt : null) : cnt)
 
     const overallRows = this.db
-      .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt, COALESCE(SUM(t.is_error),0) AS errs ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
-      .all(...params) as Array<{ tb: string; cnt: number; errs: number }>
+      .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt, ${errExpr} AS errs ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
+      .all(...catVals, ...params) as Array<{ tb: string; cnt: number; errs: number }>
     const overallPoints: OpsPoint[] = overallRows.map((r) => ({
       bucket: r.tb,
       value: val(r.cnt, r.errs),
@@ -1066,8 +1360,8 @@ export class Store {
     let truncated: { shown: number; total: number } | undefined
     if (q.by === 'name') {
       const rows = this.db
-        .prepare(`SELECT ${time} AS tb, t.name AS nm, COUNT(*) AS cnt, COALESCE(SUM(t.is_error),0) AS errs ${fromSql} ${whereSql} GROUP BY tb, nm`)
-        .all(...params) as Array<{ tb: string; nm: string | null; cnt: number; errs: number }>
+        .prepare(`SELECT ${time} AS tb, t.name AS nm, COUNT(*) AS cnt, ${errExpr} AS errs ${fromSql} ${whereSql} GROUP BY tb, nm`)
+        .all(...catVals, ...params) as Array<{ tb: string; nm: string | null; cnt: number; errs: number }>
       const byVal = new Map<string, { points: OpsPoint[]; cnt: number; errs: number }>()
       for (const r of rows) {
         if (r.nm == null) continue
@@ -1089,9 +1383,52 @@ export class Store {
         all = all.slice(0, topK)
       }
       series = all
+    } else if (q.by === 'error_category') {
+      // Decompose the error rate by category: each line is a category's errored
+      // calls over ALL in-scope calls that bucket, so the lines sum to the overall
+      // rate. (A per-category denominator would be a flat 100% — the category
+      // column only exists on errored rows.) Honest only for the rate view.
+      const totalByBucket = new Map(overallRows.map((r) => [r.tb, r.cnt]))
+      const catWhere =
+        whereSql + ' AND t.error_category IS NOT NULL' + (catVals.length ? ` AND t.error_category IN (${errPh})` : '')
+      const rows = this.db
+        .prepare(`SELECT ${time} AS tb, t.error_category AS cat, COUNT(*) AS errs ${fromSql} ${catWhere} GROUP BY tb, cat`)
+        .all(...params, ...catVals) as Array<{ tb: string; cat: string | null; errs: number }>
+      const catLabel = new Map(ERROR_CATEGORIES.map((c) => [c.key, c.label]))
+      const byCat = new Map<string, { points: OpsPoint[]; errs: number }>()
+      for (const r of rows) {
+        if (r.cat == null) continue
+        const denom = totalByBucket.get(r.tb) ?? 0
+        const e = byCat.get(r.cat) ?? { points: [], errs: 0 }
+        e.points.push({ bucket: r.tb, value: denom ? r.errs / denom : null, calls: denom, errors: r.errs })
+        e.errs += r.errs
+        byCat.set(r.cat, e)
+      }
+      let all: OpsSeries[] = Array.from(byCat.entries()).map(([key, e]) => ({
+        key,
+        label: catLabel.get(key) ?? key,
+        points: e.points,
+        total: tCnt ? e.errs / tCnt : null,
+        calls: e.errs, // rank categories by error volume
+      }))
+      all.sort((a, b) => b.calls - a.calls)
+      if (all.length > topK) {
+        truncated = { shown: topK, total: all.length }
+        all = all.slice(0, topK)
+      }
+      series = all
     }
 
-    return { view: q.view, bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, format: isRate ? 'pct' : 'int' }
+    return { view: q.view, bucket, by: q.by, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, format: isRate ? 'pct' : 'int' }
+  }
+
+  /** Distinct tool-call names, busiest first — feeds the Ops error-rate tool filter. */
+  toolNames(): string[] {
+    return (
+      this.db
+        .prepare('SELECT name FROM tool_calls WHERE name IS NOT NULL GROUP BY name ORDER BY COUNT(*) DESC')
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name)
   }
 
   /**
@@ -1319,39 +1656,45 @@ export class Store {
    * One compiler, reused by session filters today and cohort splits later. Column
    * identifiers and `base` are registry-defined (trusted); the value is a bound param.
    */
-  private facetPredicate(f: FacetSpec, value: string): { sql: string; params: unknown[] } {
+  private facetPredicate(f: FacetSpec, value: string | string[]): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
+    const vals = (Array.isArray(value) ? value : [value]).filter((v) => v != null && v !== '')
+    if (vals.length === 0) return { sql: '1=1', params: [] } // empty selection ⇒ no constraint
+    // One value keeps today's `= ?` (byte-identical SQL); several become an OR via
+    // `IN (?, ?, …)`. `cmp` wraps whichever column/JSON expression each source needs.
+    const ph = vals.map(() => '?').join(', ')
+    const cmp = (expr: string) => (vals.length === 1 ? `${expr} = ?` : `${expr} IN (${ph})`)
     if (f.source === 'session') {
       return f.multi
-        ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE je.value = ?)`, params: [value] }
-        : { sql: `s.${col} = ?`, params: [value] }
+        ? { sql: `EXISTS (SELECT 1 FROM json_each(s.${col}) je WHERE ${cmp('je.value')})`, params: vals }
+        : { sql: cmp(`s.${col}`), params: vals }
     }
     if (f.source === 'annotation') {
       return f.multi
         ? {
             sql: `EXISTS (SELECT 1 FROM annotations a, json_each(a.value) je
-                  WHERE a.session_id = s.id AND a.key = ? AND je.value = ?)`,
-            params: [f.key, value],
+                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp('je.value')})`,
+            params: [f.key, ...vals],
           }
         : {
             sql: `EXISTS (SELECT 1 FROM annotations a
-                  WHERE a.session_id = s.id AND a.key = ? AND json_extract(a.value,'$') = ?)`,
-            params: [f.key, value],
+                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp("json_extract(a.value,'$')")})`,
+            params: [f.key, ...vals],
           }
     }
     if (f.source === 'block') {
-      // "sessions with a block labeled value" — session-scoped EXISTS, like model/skill.
+      // "sessions with a block labeled <any selected value>" — session-scoped EXISTS, like model/skill.
       return {
         sql: `EXISTS (SELECT 1 FROM block_annotations ba
-              WHERE ba.session_id = s.id AND ba.key = ? AND json_extract(ba.value,'$') = ?)`,
-        params: [f.key, value],
+              WHERE ba.session_id = s.id AND ba.key = ? AND ${cmp("json_extract(ba.value,'$')")})`,
+        params: [f.key, ...vals],
       }
     }
     const table = f.source === 'usage' ? 'usage_facts' : 'tool_calls'
     const base = f.base ? `${f.base} AND ` : ''
     return {
-      sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}c.${col} = ?)`,
-      params: [value],
+      sql: `EXISTS (SELECT 1 FROM ${table} c WHERE c.session_id = s.id AND ${base}${cmp(`c.${col}`)})`,
+      params: vals,
     }
   }
 
@@ -1423,6 +1766,8 @@ export class Store {
     measureKey: string,
     byFacetKey?: string,
     filters?: Record<string, string>,
+    window?: { from?: string; to?: string },
+    toolNames?: string[],
   ): { rows: Array<{ bucket: string | null; value: number }>; total: number } | { error: string } {
     const m = this.measure(measureKey)
     if (!m) return { error: 'unknown measure' }
@@ -1438,6 +1783,20 @@ export class Store {
     const where: string[] = []
     const params: unknown[] = []
     if (m.base) where.push(m.base)
+    // Window the population to the dashboard's selected range (both bounds or
+    // neither); every grain's FROM joins sessions s, so s.started_at is in scope.
+    if (window?.from && window?.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(window.from, window.to)
+    }
+    // Row-level tool-name scope — only sound for tool-call-grain measures (the FROM
+    // is `tool_calls t`). Lets the Ops "Errors by category" widget show one tool's
+    // errors, matching the error-rate chart's tool filter.
+    const toolVals = (toolNames ?? []).filter(Boolean)
+    if (toolVals.length && gm !== 'session' && gm !== 'usage') {
+      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      params.push(...toolVals)
+    }
     for (const [k, v] of Object.entries(filters ?? {})) {
       if (!v) continue
       const spec = this.facet(k)
@@ -1472,6 +1831,37 @@ export class Store {
     const sql = `SELECT ${agg} AS value ${from} ${whereSql}`
     const r = this.db.prepare(sql).get(...params) as { value: number } | undefined
     return { rows: [{ bucket: null, value: r?.value ?? 0 }], total: r?.value ?? 0 }
+  }
+
+  /**
+   * Every failed tool call of one error category — the occurrence list behind the
+   * "Errors by category" drill-down. Newest session first; `idx` is the tool call's
+   * position in its session, which the transcript anchors as `txerr-<idx>` so a row
+   * deep-links to that exact error block. Windowed like breakdown. Capped at 50; the
+   * widget shows the true total (the bar count) with a "+N more" note past the cap.
+   */
+  errorOccurrences(category: string, window?: { from?: string; to?: string }, toolNames?: string[]): ErrorOccurrence[] {
+    const where = ['t.error_category = ?']
+    const params: unknown[] = [category]
+    if (window?.from && window?.to) {
+      where.push('s.started_at >= ? AND s.started_at < ?')
+      params.push(window.from, window.to)
+    }
+    // Row-level tool scope, mirroring the widget's tool filter (Bash's timeouts, …).
+    const toolVals = (toolNames ?? []).filter(Boolean)
+    if (toolVals.length) {
+      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      params.push(...toolVals)
+    }
+    const sql = `SELECT t.session_id AS sessionId, s.title AS title, t.idx AS idx,
+                        t.name AS name, t.action AS action, t.command AS command,
+                        t.target_path AS targetPath, t.error_message AS message,
+                        t.ts AS ts, s.started_at AS startedAt
+                 FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+                 WHERE ${where.join(' AND ')}
+                 ORDER BY s.started_at DESC, t.idx ASC
+                 LIMIT 50`
+    return this.db.prepare(sql).all(...params) as ErrorOccurrence[]
   }
 
   /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
@@ -1746,10 +2136,19 @@ export class Store {
     const out: FileEdit[] = []
     for (const tc of session.toolCalls) {
       if (tc.action !== 'file_write' || !tc.result.ok) continue
+      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
+      // Codex's `apply_patch` stores the raw V4A patch TEXT (a string) and can touch
+      // several files in one call. Expand it to one FileEdit per file; the object-shaped
+      // path below (Claude Code, OpenCode) handles `{content}` / `{old_string,…}` inputs.
+      if (typeof tc.input === 'string') {
+        for (const fe of parseApplyPatch(tc.input)) {
+          out.push({ ...fe, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
+        }
+        continue
+      }
       const path = tc.target.paths?.[0]
       if (!path) continue
       const input = (tc.input ?? {}) as Record<string, unknown>
-      const ref = toolTurn.get(tc.id) ?? { turn: -1, userTurn: -1 }
       let op: FileEdit['op']
       let hunks: Array<{ del: string; ins: string }>
       // Distinguish write/multiedit/edit by input shape, not the raw tool name —
@@ -2181,8 +2580,9 @@ export interface SuccessRateQuery {
   by?: string
   from?: string
   to?: string
-  /** Session-level facet filters, applied to numerator and denominator alike. */
-  filters?: Record<string, string>
+  /** Session-level facet filters (multi-value OR within a facet), applied to
+   *  numerator and denominator alike. */
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2209,6 +2609,8 @@ export interface OpsPoint {
 
 export interface OpsSeries {
   key: string
+  /** Display label when the key isn't already human-readable (error categories). */
+  label?: string
   points: OpsPoint[]
   /** Total count, or overall error rate, depending on the view. */
   total: number | null
@@ -2220,17 +2622,24 @@ export interface OpsOverTimeQuery {
   /** tool_calls = count all; error_rate = AVG(is_error); skill_usage = count where action='skill'. */
   view: 'tool_calls' | 'error_rate' | 'skill_usage'
   bucket: Bucket
-  /** 'name' splits by tool_calls.name (tool name, or skill name when skills-only). */
+  /** 'name' splits by tool name; 'error_category' decomposes the rate by category. */
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  /** Generic session-level facet filters (harness/repo/model); unused by the Ops UI today. */
+  filters?: Record<string, string[]>
+  /** Row-level scope: only count calls of these tool names (denominator + numerator). */
+  toolNames?: string[]
+  /** Row-level scope: only these categories count as errors (numerator only). */
+  errorCategories?: string[]
   topK?: number
 }
 
 export interface OpsOverTimeResult {
   view: string
   bucket: Bucket
+  /** The active breakdown dimension, echoed back so the client can label series. */
+  by?: string
   buckets: string[]
   overall: { points: OpsPoint[]; total: number | null }
   series?: OpsSeries[]
@@ -2255,7 +2664,7 @@ export interface SessionsOverTimeQuery {
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2286,7 +2695,7 @@ export interface SpendOverTimeQuery {
   by?: string
   from?: string
   to?: string
-  filters?: Record<string, string>
+  filters?: Record<string, string[]>
   topK?: number
 }
 
@@ -2342,6 +2751,8 @@ export interface TranscriptTool {
   name: string
   action: string
   ok: boolean
+  /** This call's index in session.toolCalls — the transcript anchors a failed call as `txerr-<idx>`. */
+  idx?: number
   target?: string
   /** Full tool input rendered as displayable text (key field or JSON). */
   command?: string
@@ -2565,6 +2976,7 @@ function buildTranscriptCore(session: Session): {
   toolTurn: Map<string, { turn: number; userTurn: number }>
 } {
   const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
+  const idxById = new Map(session.toolCalls.map((t, i) => [t.id, i]))
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -2590,7 +3002,7 @@ function buildTranscriptCore(session: Session): {
           const ok = res ? res.ok : true
           const command = toolCommandText(tc, input)
           const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
-          const tool: TranscriptTool = { name: b.name, action: '', ok, target: clip(target, 1500) }
+          const tool: TranscriptTool = { name: b.name, action: '', ok, idx: idxById.get(b.id), target: clip(target, 1500) }
           if (command) tool.command = command
           if (output) tool.output = output
           // file_write → inline diff. The before/after strings aren't in the

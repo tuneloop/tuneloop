@@ -33,7 +33,11 @@ export async function serve(opts: ServeOptions): Promise<void> {
     process.exitCode = 1
   })
 
-  server.listen(port, () => {
+  // Bind to loopback only. The dashboard serves session transcripts (which can
+  // contain proprietary code and secrets) over an unauthenticated API; without an
+  // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. aivue is a
+  // local single-developer tool, so 127.0.0.1 is the correct surface.
+  server.listen(port, '127.0.0.1', () => {
     const url = `http://localhost:${port}`
     process.stdout.write(`\n  aivue dashboard  ${url}\n  store: ${config.dbPath}\n  Ctrl+C to stop\n\n`)
     if (opts.open !== false) tryOpen(url)

@@ -21,14 +21,22 @@ export interface SessionFilters {
 // Sessions-list time window. `preset` drives from/to; 'custom' reads the date
 // inputs; 'all' means no bound. Independent of the dashboard KPI window.
 export interface SessTime {
-  preset: 7 | 30 | 90 | 'all' | 'custom'
+  preset: 7 | 14 | 30 | 90 | 'all' | 'custom'
   from: string // ISO date (yyyy-mm-dd) for custom range
   to: string
 }
 
 export interface ClientState {
+  // The top-level tab the app is showing. Mirrored into the URL hash by the
+  // router; setView() keeps it in step with the DOM.
+  view: 'highlights' | 'dashboard' | 'artifacts' | 'sessions'
+  // The session whose detail drawer is open (null = drawer closed). Mirrored into
+  // the URL as `?session=<id>` so a session is shareable / reload-survivable.
+  open: string | null
   artKind: string
   overview: any
+  home: any // Explore (question-led) stats; null until fetched
+  asked: any // the question the user clicked through from, for the grounding banner (null = none)
   filters: Partial<SessionFilters> // starts {}, filled in by applyFilters()
   facets: any[]
   dist: Record<string, any[]>
@@ -36,7 +44,7 @@ export interface ClientState {
   metric: string | null // which headline KPI's detail view is open (null = overview)
   outcomeTypes: any[]
   days: number | 'all' // top-level KPI window (drives the whole headline row + cost-artifact curves)
-  sr: { outcomes: string[]; bucket: string; by: string } // success-rate detail controls
+  sr: { outcomes: string[]; bucket: string; by: string; filters: Record<string, string[]> } // success-rate detail controls
   // cost-per-artifact detail controls. `kind` follows defaultKind until the user
   // toggles it (userPicked), after which it sticks and the headline tile mirrors
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
@@ -44,29 +52,36 @@ export interface ClientState {
   // `kind` (feature|pr) scopes only the AI-spend burn graph; `flow` (shipped|reviewed)
   // toggles the bottom PR throughput graph.
   ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; flow: string }
-  spend: { bucket: string; by: string } // total-spend detail controls
-  sm: { bucket: string; by: string } // sessions detail controls
-  // operational detail: one shared bucket, plus a per-graph "break down by name"
-  // flag (the three graphs — tool calls, error rate, skill usage — each toggle independently)
-  ops: { bucket: string; by: Record<string, boolean> }
+  spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
+  sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
+  // operational detail: one shared bucket, a per-graph "break down by" choice
+  // ('' | 'name' | 'error_category'), and row-level scopes for the error-rate
+  // chart (tool names + error categories — ops-specific, not the shared facets).
+  ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
+  // Artifacts tab list controls (PRs/Features table): free-text search + the PR
+  // table's column sort. Mirrored into the URL so a filtered/sorted table is a
+  // shareable, reload-survivable link. Reset when switching kind (feature ↔ pr).
+  art: { q: string; sort: string; dir: string }
 }
 
 export var state: ClientState = {
-  artKind: 'feature', overview: null, filters: {}, facets: [], dist: {}, measures: [],
+  view: 'dashboard', open: null,
+  artKind: 'feature', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 7,
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
-  sr: { outcomes: ['session_success'], bucket: '', by: '' },
+  sr: { outcomes: ['session_success'], bucket: '', by: '', filters: {} },
   ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', flow: 'shipped' },
-  spend: { bucket: '', by: '' },
-  sm: { bucket: '', by: '' },
-  ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },
+  spend: { bucket: '', by: '', filters: {} },
+  sm: { bucket: '', by: '', filters: {} },
+  ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
   ac: { items: [], sel: -1 },
-  sessTime: { preset: 30, from: '', to: '' }
+  sessTime: { preset: 30, from: '', to: '' },
+  art: { q: '', sort: 'created', dir: 'desc' }
 };
 
 // The success-rate detail controls persist across reloads: the user's "what

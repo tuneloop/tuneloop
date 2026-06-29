@@ -2,7 +2,7 @@
 // an optional split into one usage/session-grain cohort line per facet value.
 import { state, $, esc, usd, SR_PALETTE, get, autoBucket, windowQs } from '../core'
 import { valueLineChart, stackChart, stackedBarChart } from '../charts'
-import { spendBreakdownFacets } from '../facets'
+import { spendBreakdownFacets, filterRowHtml, wireFacetFilters, facetFilterQs } from '../facets'
 
 export function renderTotalSpend() {
   $('#metric-detail').innerHTML =
@@ -30,9 +30,12 @@ export function renderSpendControls() {
     byOpts += '<option value="' + esc(f.key) + '"' + (f.key === sp.by ? ' selected' : '') + '>' + esc(f.label || f.key) + '</option>';
   });
   $('#sp-controls').innerHTML =
-    '<div class="sr-ctrl-row"><span class="sr-lbl">Bucket</span><span class="seg" id="sp-bucket">' + bucketBtns + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Break down by</span>' +
-      '<select class="sr-by" id="sp-by">' + byOpts + '</select></div>';
+    '<div class="sr-ctrl-row">' +
+      '<span class="sr-by-ctrl"><span class="sr-lbl">Bucket</span><span class="seg" id="sp-bucket">' + bucketBtns + '</span></span>' +
+      filterRowHtml('sp', state.spend.filters) +
+      '<span class="sr-by-ctrl" style="margin-left:18px"><span class="sr-lbl">Break down by</span>' +
+      '<select class="sr-by" id="sp-by">' + byOpts + '</select></span></div>';
+  wireFacetFilters('sp', $('#sp-controls'), state.spend.filters, renderSpendControls, loadTotalSpend);
   Array.prototype.forEach.call($('#sp-bucket').children, function (btn) {
     btn.onclick = function () { state.spend.bucket = btn.getAttribute('data-b'); renderSpendControls(); loadTotalSpend(); };
   });
@@ -44,7 +47,7 @@ export function loadTotalSpend(topK?) {
   var qs = ['bucket=' + encodeURIComponent(autoBucket(sp.bucket))];
   if (sp.by) qs.push('by=' + encodeURIComponent(sp.by));
   if (topK) qs.push('topK=' + topK);
-  get('/api/spend-over-time?' + qs.join('&') + windowQs()).then(function (d) {
+  get('/api/spend-over-time?' + qs.join('&') + windowQs() + facetFilterQs(sp.filters)).then(function (d) {
     if (!d || d.error) { $('#sp-chart').innerHTML = '<div class="empty">' + esc(d && d.error ? d.error : 'No data.') + '</div>'; return; }
     renderSpend(d);
   });
@@ -92,7 +95,7 @@ export function renderSpend(d) {
   } else {
     var barPts = (ov.points || []).map(function (p) { return { bucket: p.bucket, total: p.spend, filled: p.spend }; });
     $('#sp-chart').innerHTML = stackChart(d.buckets || [], barPts, 'usd');
-    $('#sp-legend').innerHTML = '';
+    $('#sp-legend').innerHTML = '<span class="leg-overall">Total ' + esc(usd(ov.total)) + '</span>';
     $('#sp-note').innerHTML = esc('Spend per ' + autoBucket(state.spend.bucket) + ', dated at session start. Break down by a dimension to split it.');
   }
 }

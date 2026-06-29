@@ -3,6 +3,7 @@
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
 import { state, $, esc, renderMd, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
+import { syncHash } from './router'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
@@ -30,7 +31,7 @@ document.addEventListener('mousedown', function (e) {
 });
 
 var TIME_PRESETS = [
-  { d: 7, l: '7d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
+  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
 ];
 
 // Filter facets shown inline (in this order); every other filter-role facet —
@@ -93,6 +94,20 @@ export function buildFilters() {
     (more ? '<div class="flt-row flt-more" id="f-more" hidden>' + more + '</div>' : '') +
     '<div class="flt-active" id="filter-active"></div>';
 
+  // Reflect current filter state into the freshly-built controls, so a restored or
+  // URL-driven filter shows in the bar (not just in the request). Time + dates are
+  // already rendered from state.sessTime above; do the rest here.
+  var ff = state.filters || {};
+  var ffacets = ff.facets || {};
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) {
+    var v = ffacets[s.getAttribute('data-key')];
+    if (v != null) s.value = v; // a value absent from the options list leaves it at "all"
+  });
+  if ($('#f-q')) $('#f-q').value = ff.q || '';
+  var afEl0 = $('#f-artifact');
+  if (afEl0) { afEl0.value = ff.artifact || ''; afEl0.dataset.kind = ff.artifactKind || ''; }
+  updateOutcomeCount((ff.outcomes || []).length);
+
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter'), function (s) { s.onchange = applyFilters; });
 
   // Time segmented control (presets + custom range).
@@ -140,7 +155,52 @@ function updateMoreCount() {
 // chip row (so the "Clear all" button itself disappears — nothing left to clear).
 export function clearAllFilters() {
   state.sessTime = { preset: 'all', from: '', to: '' };
+  // buildFilters() now reflects state.filters into the controls, so clearing the
+  // bar means clearing the state too (not just rebuilding empty DOM).
+  state.filters = { facets: {}, q: '', artifact: '', artifactKind: '', outcomes: [], from: '', to: '' };
   buildFilters();
+}
+
+// ---- URL <-> sessions-filter bridge (used by the router) ---------------------
+
+// The current sessions filter as URL query params: window (win / from+to), free
+// text (q), artifact (+kind), outcomes (csv), and each facet as `f.<key>`.
+// Defaults (the 30-day window) are omitted so an unfiltered list stays `#/sessions`.
+export function getSessionParams(): Record<string, string> {
+  var q: Record<string, string> = {};
+  var st = state.sessTime;
+  if (st.preset === 'custom') { if (st.from) q.from = st.from; if (st.to) q.to = st.to; }
+  else if (st.preset === 'all') q.win = 'all';
+  else if (st.preset !== 30) q.win = String(st.preset); // 30d is the default
+  var f = state.filters || {};
+  if (f.q) q.q = f.q;
+  if (f.artifact) { q.artifact = f.artifact; if (f.artifactKind) q.artifactKind = f.artifactKind; }
+  if (f.outcomes && f.outcomes.length) q.outcomes = f.outcomes.join(',');
+  var facets = f.facets || {};
+  Object.keys(facets).forEach(function (k) { if (facets[k]) q['f.' + k] = facets[k]; });
+  return q;
+}
+
+// Restore the sessions filter from URL query params, then rebuild the bar (which
+// reflects the state into the controls and reloads the list). Inverse of
+// getSessionParams; unknown/absent params fall back to defaults.
+export function applySessionParams(query: Record<string, string>) {
+  state.view = 'sessions';
+  if (query.from || query.to) state.sessTime = { preset: 'custom', from: query.from || '', to: query.to || '' };
+  else if (query.win === 'all') state.sessTime = { preset: 'all', from: '', to: '' };
+  else if (query.win === '7' || query.win === '14' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 14 | 90, from: '', to: '' };
+  else state.sessTime = { preset: 30, from: '', to: '' }; // default (win=30 or absent)
+  var facets: Record<string, string> = {};
+  Object.keys(query).forEach(function (k) { if (k.indexOf('f.') === 0 && query[k]) facets[k.slice(2)] = query[k]; });
+  state.filters = {
+    facets: facets,
+    q: query.q || '',
+    artifact: query.artifact || '',
+    artifactKind: query.artifactKind || '',
+    outcomes: query.outcomes ? query.outcomes.split(',').filter(Boolean) : [],
+    from: '', to: '', // resolved by applyFilters() → sessWindow()
+  };
+  buildFilters(); // renders the bar from state.* and calls applyFilters() → loadSessions
 }
 
 // Resolve the sessions-list window to ISO {from,to} for the request. Empty
@@ -190,6 +250,9 @@ function buildOutcomeMenu() {
   }).join('');
   menu.setAttribute('data-built', '1');
   Array.prototype.forEach.call(menu.querySelectorAll('input'), function (cb) { cb.onchange = applyFilters; });
+  // Reflect the current (possibly URL-restored) selection now that the boxes exist.
+  var selO = (state.filters && state.filters.outcomes) || [];
+  Array.prototype.forEach.call(menu.querySelectorAll('input'), function (cb) { cb.checked = selO.indexOf(cb.value) >= 0; });
 }
 
 function updateOutcomeCount(n) {
@@ -321,7 +384,11 @@ export function applyFilters() {
   });
   var af = $('#f-artifact');
   var win = sessWindow();
-  var outcomes = selectedOutcomes();
+  // The outcome popover is built lazily on first open, so before that the DOM has
+  // no checkboxes to read — fall back to the state (which a URL restore populated)
+  // rather than wiping it. Once built, the DOM is the source of truth.
+  var menu = $('#f-outcome-menu');
+  var outcomes = menu && menu.getAttribute('data-built') ? selectedOutcomes() : ((state.filters && state.filters.outcomes) || []);
   updateOutcomeCount(outcomes.length);
   state.filters = {
     facets: facets,
@@ -335,6 +402,7 @@ export function applyFilters() {
   updateMoreCount();
   renderActiveChips();
   loadSessions();
+  syncHash({ replace: true }); // mirror the filter into the URL, in place (no history spam)
 }
 
 export function renderSessions(rows) {
@@ -408,6 +476,26 @@ function flashEl(el) {
   el.classList.remove('flash');
   void el.offsetWidth;
   el.classList.add('flash');
+}
+
+// Flash when the element ARRIVES in view (center reaches the viewport's central
+// band), not after the smooth-scroll's easing tail. Falls back to scroll-stopped /
+// a frame cap so it always fires.
+function flashOnSettle(el) {
+  if (!el) return;
+  var last = null, stable = 0, frames = 0;
+  function tick() {
+    frames++;
+    var r = el.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight || 800;
+    var center = r.top + r.height / 2;
+    var inView = center > vh * 0.25 && center < vh * 0.75;
+    if (last !== null && Math.abs(r.top - last) < 0.5) stable++; else stable = 0;
+    last = r.top;
+    if (inView || stable >= 2 || frames > 90) { flashEl(el); return; }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
 }
 
 // ---- Files-changed view -----------------------------------------------------
@@ -587,8 +675,15 @@ function filesHtml(edits, transcript) {
 }
 
 export function openDetail(id, focus?: any) {
+  // Reflect the open session in the URL immediately (a shareable, Back-closable
+  // entry) — before the async fetch. A stale/deleted id reverts below.
+  state.open = id;
+  syncHash();
   get('/api/session?id=' + encodeURIComponent(id)).then(function (d) {
-    if (!d || d.error) return;
+    if (!d || d.error) {
+      if (state.open === id) { state.open = null; syncHash({ replace: true }); }
+      return;
+    }
     var s = d.session, a = d.annotations || {};
 
     // Sticky-header pieces (title+close, tab subnav, transcript nav) are assembled
@@ -817,9 +912,10 @@ export function openDetail(id, focus?: any) {
       // Error panel for failed calls (stepper jump target)
       var errPanel = '';
       if (!tl.ok && tl.error) {
-        var id = errSeq++;
-        if (errSink) errSink.push(id);
-        errPanel = '<div class="tx-error" id="txerr-' + id + '">' +
+        errSeq++;                                            // count total errors (errCount)
+        var anchor = tl.idx != null ? tl.idx : 's' + errSeq;  // stable per-call anchor for deep-links
+        if (errSink) errSink.push(anchor);
+        errPanel = '<div class="tx-error" id="txerr-' + anchor + '">' +
           '<div class="tx-error-h">⚠ ' + esc(tl.name) + '</div>' +
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
@@ -1258,14 +1354,28 @@ export function openDetail(id, focus?: any) {
 
     // Error stepper: ‹ / › cycle through the ACTIVE scope's error panels (errIds
     // are global panel ids, so the anchors resolve even with all scopes in the DOM).
+    // Scroll to an error panel, FIRST revealing it: a call beyond the per-turn cap
+    // sits in a collapsed ".tool-rest" group (display:none), where scrollIntoView is
+    // a no-op. Expand that group (and hide its "+N more" button), then scroll+flash.
+    function revealErr(anchor) {
+      var el = document.getElementById('txerr-' + anchor);
+      if (!el) return;
+      var rest = el.closest && el.closest('.tool-rest');
+      if (rest && !rest.classList.contains('on')) {
+        rest.classList.add('on');
+        var mb = rest.nextElementSibling as any;
+        if (mb && mb.classList.contains('tool-more')) mb.style.display = 'none';
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      flashOnSettle(el);
+    }
     var errIdx = -1;
     function gotoErr(next) {
       if (!errIds.length) return;
       errIdx = ((next % errIds.length) + errIds.length) % errIds.length;
       var pos = $('#drawerBody .tx-err-pos');
       if (pos) pos.textContent = String(errIdx + 1);
-      var el = document.getElementById('txerr-' + errIds[errIdx]);
-      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); flashEl(el); }
+      revealErr(errIds[errIdx]);
     }
     var ep = $('#drawerBody .tx-err-prev'), en = $('#drawerBody .tx-err-next');
     if (ep) ep.onclick = function () { gotoErr(errIdx - 1); };
@@ -1541,28 +1651,108 @@ export function openDetail(id, focus?: any) {
     showTab(hasTx ? 'transcript' : 'summary');
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
+
+    // Reveal a failed tool call inside THIS drawer: switch to its scope if needed,
+    // then revealErr. Published to activeReveal so the pager reuses it same-session.
+    function revealErrorTarget(target) {
+      var sc = 'main';
+      scopeOrder.forEach(function (k) { if (scopeByKey[k].errIds.indexOf(target) >= 0) sc = k; });
+      if (sc !== activeScope) switchScope(sc);
+      requestAnimationFrame(function () { revealErr(target); });
+    }
+    activeReveal = revealErrorTarget;
+    if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
   });
 }
 
-export function filterByArtifact(text, kind) {
+export function filterByArtifact(text, kind, preset?) {
   closeDrawer();
   setView('sessions');
   var af = $('#f-artifact');
   if (af) { af.value = text || ''; af.dataset.kind = kind || ''; } // kind rides along on the input (no visible kind dropdown)
-  // Drilling into one artifact should show its FULL history, not just the default
-  // window — widen to all-time. setTimePreset() re-applies the filters.
-  setTimePreset('all');
+  // Drilling into one artifact defaults to its FULL history (all-time). A caller
+  // can pin a window instead — e.g. a Highlights drill passes its window (14d) so
+  // the session count the user lands on matches the headline. setTimePreset()
+  // re-applies (the matching preset chip must exist, else it shows none selected).
+  setTimePreset(preset == null ? 'all' : preset);
 }
 
-export function closeDrawer() { $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on'); }
+// Drill-in from the dashboard's "Errors by category" widget: jump to the Sessions
+// list filtered to one error category, over the SAME window the user clicked from
+export function filterByErrorCategory(category) {
+  setView('sessions');
+  buildFilters();
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter[data-key="error_category"]'), function (s) {
+    s.value = category || '';
+  });
+  setTimePreset(state.days === 'all' ? 'all' : state.days);
+}
+
+export function closeDrawer() {
+  $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on');
+  activeReveal = null;
+  errWalk = null; renderErrWalkBar(); // closing the drawer ends any error walk
+  if (state.open) { state.open = null; syncHash({ replace: true }); } // drop ?session= without adding history
+}
+
+// The open drawer publishes its error-reveal fn here so the pager can reveal the
+// next error in place without re-opening the session. Null when no drawer is open.
+var activeReveal: ((idx: number) => void) | null = null;
+
+// ---- Cross-session error walk -------------------------------------------------
+// "Step through every occurrence of one error category." The dashboard widget
+// hands us the occurrence list; we open each occurrence's transcript at its exact
+// error block (txerr-<idx>) and show a floating pager that walks ACROSS sessions.
+// The pager lives outside #drawerBody so it survives the drawer re-rendering as we
+// move between sessions.
+var errWalk = null; // { label, occ:[{sessionId,idx,name,title,...}], i, openId }
+
+export function startErrorWalk(label, occ, i) {
+  if (!occ || !occ.length) return;
+  errWalk = { label: label, occ: occ, i: 0, openId: null };
+  openWalkOcc(i || 0);
+}
+
+function openWalkOcc(i) {
+  if (!errWalk) return;
+  var n = errWalk.occ.length;
+  errWalk.i = ((i % n) + n) % n; // wrap
+  var o = errWalk.occ[errWalk.i];
+  if (o.sessionId === errWalk.openId && activeReveal) {
+    activeReveal(o.idx); // same session open → reveal in place
+  } else {
+    errWalk.openId = o.sessionId;
+    openDetail(o.sessionId, { errTarget: o.idx });
+  }
+  renderErrWalkBar();
+}
+
+function renderErrWalkBar() {
+  var bar = document.getElementById('errwalk');
+  if (!errWalk) { if (bar) bar.parentNode.removeChild(bar); return; }
+  if (!bar) { bar = document.createElement('div'); bar.id = 'errwalk'; document.body.appendChild(bar); }
+  var o = errWalk.occ[errWalk.i];
+  bar.innerHTML =
+    '<span class="ew-cat">⚠ ' + esc(errWalk.label) + '</span>' +
+    '<button class="ew-btn" id="ew-prev" type="button">‹</button>' +
+    '<span class="ew-pos">' + (errWalk.i + 1) + ' / ' + errWalk.occ.length + '</span>' +
+    '<button class="ew-btn" id="ew-next" type="button">›</button>' +
+    '<span class="ew-cur" title="' + esc(o.title || '') + '">' + esc(o.name) + '</span>' +
+    '<button class="ew-btn ew-x" id="ew-close" type="button">✕</button>';
+  $('#ew-prev').onclick = function () { openWalkOcc(errWalk.i - 1); };
+  $('#ew-next').onclick = function () { openWalkOcc(errWalk.i + 1); };
+  $('#ew-close').onclick = function () { errWalk = null; renderErrWalkBar(); };
+}
 
 export function setView(name) {
-  ['dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     b.classList.toggle('on', b.getAttribute('data-view') === name);
   });
+  state.view = name;
+  syncHash(); // mirror the active tab into the URL (no-op while a route is applying)
 }
 
 export function loadSessions() {
