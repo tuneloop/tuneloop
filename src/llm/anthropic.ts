@@ -8,7 +8,7 @@ export function createAnthropicClient(apiKey: string, model: string, opts?: Clie
   return {
     provider: opts?.provider ?? 'anthropic',
     model,
-    async completeStructured<T>(req: StructuredRequest): Promise<LlmResult<T>> {
+    async completeStructured(req: StructuredRequest): Promise<LlmResult> {
       const { system, user, schema, toolName, maxTokens = 1024 } = req
       const resp = await client.messages.create({
         model,
@@ -20,9 +20,9 @@ export function createAnthropicClient(apiKey: string, model: string, opts?: Clie
       })
       // The forced tool's input IS the structured result; salvage any text if absent.
       for (const b of resp.content) {
-        if (b.type === 'tool_use' && b.name === toolName) return { data: b.input as T, usage: usageOf(resp.usage) }
+        if (b.type === 'tool_use' && b.name === toolName) return { data: b.input as Record<string, unknown>, usage: usageOf(resp.usage) }
       }
-      return { data: (parseJsonObject(textOf(resp.content)) ?? {}) as T, usage: usageOf(resp.usage) }
+      return { data: parseJsonObject(textOf(resp.content)) ?? {}, usage: usageOf(resp.usage) }
     },
   }
 }

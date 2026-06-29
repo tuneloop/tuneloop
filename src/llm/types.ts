@@ -13,8 +13,9 @@ export interface StructuredRequest {
   maxTokens?: number
 }
 
-export interface LlmResult<T> {
-  data: T
+export interface LlmResult {
+  /** The model's structured output (the forced tool's input), normalized by the caller. */
+  data: Record<string, unknown>
   usage: TokenUsage
 }
 
@@ -36,5 +37,5 @@ export interface ClientOpts {
 export interface LlmClient {
   provider: string
   model: string
-  completeStructured<T = Record<string, unknown>>(req: StructuredRequest): Promise<LlmResult<T>>
+  completeStructured(req: StructuredRequest): Promise<LlmResult>
 }

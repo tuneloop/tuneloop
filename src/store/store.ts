@@ -51,6 +51,13 @@ export interface Summary {
   features: { total: number; derived: number; linked: number }
 }
 
+/** One computed insight for the Highlights digest. The client maps `kind` to the
+ *  display sentence + its drill-in; the payload carries the data. */
+export interface Highlight {
+  kind: string
+  [field: string]: unknown
+}
+
 export class Store {
   constructor(private db: DB) {}
 
@@ -303,12 +310,35 @@ export class Store {
             .run(a.id, a.repo ?? null, a.source ?? null, a.title ?? null, a.createdAt ?? null, a.parentArtifactId ?? null, processor)
           continue
         }
+        // Field-merging upsert (NOT INSERT OR REPLACE): the same PR can be written
+        // by several sessions (its creator, then any session that reviewed it), and
+        // an offline run may only have a stub (no title/state). COALESCE keeps a
+        // value a richer write already stored rather than blanking it. `status` gets
+        // a guard so a stub's optimistic 'open' can't overwrite a terminal merged/closed.
         this.db
           .prepare(
-            `INSERT OR REPLACE INTO artifacts
+            `INSERT INTO artifacts
                (id, kind, repo, ident, external_id, source, title, owner, complexity,
                 complexity_basis, status, created_at, completed_at, parent_artifact_id, json, producer)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT(id) DO UPDATE SET
+               repo = COALESCE(excluded.repo, artifacts.repo),
+               ident = COALESCE(excluded.ident, artifacts.ident),
+               external_id = COALESCE(excluded.external_id, artifacts.external_id),
+               source = COALESCE(excluded.source, artifacts.source),
+               title = COALESCE(excluded.title, artifacts.title),
+               owner = COALESCE(excluded.owner, artifacts.owner),
+               complexity = COALESCE(excluded.complexity, artifacts.complexity),
+               complexity_basis = COALESCE(excluded.complexity_basis, artifacts.complexity_basis),
+               status = CASE
+                 WHEN artifacts.status IN ('merged', 'closed') AND COALESCE(excluded.status, '') = 'open'
+                   THEN artifacts.status
+                 ELSE COALESCE(excluded.status, artifacts.status) END,
+               created_at = COALESCE(excluded.created_at, artifacts.created_at),
+               completed_at = COALESCE(excluded.completed_at, artifacts.completed_at),
+               parent_artifact_id = COALESCE(excluded.parent_artifact_id, artifacts.parent_artifact_id),
+               json = COALESCE(excluded.json, artifacts.json),
+               producer = excluded.producer`,
           )
           .run(
             a.id, a.kind, a.repo ?? null, a.ident ?? null, a.externalId ?? null, a.source ?? null,
@@ -585,6 +615,255 @@ export class Store {
     }
   }
 
+  /** The single most significant week-over-week move to lead the digest with:
+   *  compares this window's headline KPIs (spend, success rate, session count) to
+   *  the prior equal-length window and returns the biggest mover — normalized to
+   *  how many times over its own "notable" bar each one is, so one metric type
+   *  can't dominate just because its natural swings run larger. Null when nothing
+   *  clears its bar, or the prior window's base is too thin to trust the delta.
+   *  Only called for a bounded [from, to). */
+  private trendHeadline(from: string, to: string): Highlight | null {
+    const span = new Date(to).getTime() - new Date(from).getTime()
+    const prevFrom = new Date(new Date(from).getTime() - span).toISOString()
+    const cur = this.kpis(from, to)
+    const prev = this.kpis(prevFrom, from)
+    const cands: Array<{ score: number; h: Highlight }> = []
+    // Spend: relative change; needs a non-trivial prior base so a $1→$3 blip
+    // doesn't read as "+200%".
+    if (prev.totalSpend >= 5) {
+      const pct = ((cur.totalSpend - prev.totalSpend) / prev.totalSpend) * 100
+      if (Math.abs(pct) >= 20)
+        cands.push({ score: Math.abs(pct) / 20, h: { kind: 'trend', metric: 'spend', cur: cur.totalSpend, prev: prev.totalSpend, pct: Math.round(pct) } })
+    }
+    // Success rate: percentage-point change; needs enough sessions both sides for
+    // the rate to mean anything.
+    if (cur.successRate != null && prev.successRate != null && cur.sessions >= 3 && prev.sessions >= 3) {
+      const pp = (cur.successRate - prev.successRate) * 100
+      if (Math.abs(pp) >= 10)
+        cands.push({ score: Math.abs(pp) / 10, h: { kind: 'trend', metric: 'rate', cur: cur.successRate, prev: prev.successRate, pp: Math.round(pp) } })
+    }
+    // Session count: relative change; needs a non-trivial prior base.
+    if (prev.sessions >= 3) {
+      const pct = ((cur.sessions - prev.sessions) / prev.sessions) * 100
+      if (Math.abs(pct) >= 25)
+        cands.push({ score: Math.abs(pct) / 25, h: { kind: 'trend', metric: 'sessions', cur: cur.sessions, prev: prev.sessions, pct: Math.round(pct) } })
+    }
+    if (!cands.length) return null
+    cands.sort((a, b) => b.score - a.score)
+    return cands[0]!.h
+  }
+
+  /** The windowed "reliable facts" behind the Highlights digest — most-spend
+   *  shipped artifact, its stalled (not-yet-shipped) counterpart, converted spend,
+   *  and the busiest source file — all scoped to [from, to) (omit for all-time) so
+   *  the whole digest honors the dashboard window. */
+  private windowedFacts(from?: string, to?: string) {
+    const w = from && to ? ' AND s.started_at >= ? AND s.started_at < ?' : ''
+    const wp: string[] = from && to ? [from, to] : []
+    const scalar = (sql: string) => (this.db.prepare(sql).get(...wp) as { v: number }).v
+
+    const total = scalar(`SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s WHERE 1=1${w}`)
+    // "Shipped" spend is production spend: a session whose cost counts here must have
+    // a NON-reviewed link to a completed artifact. A session that only reviewed a
+    // merged PR (a teammate's) is total spend, not shipped spend — excluding it keeps
+    // converted_spend honest. (Reviewed role exists on PRs only; harmless for features.)
+    const shipped = scalar(
+      `SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s
+       WHERE EXISTS (SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
+                     WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL
+                       AND COALESCE(sa.role,'') <> 'reviewed')${w}`,
+    )
+
+    // Busiest source file — most distinct sessions, skipping generated noise. We
+    // fetch the top two so the digest can require a CLEAR leader (a lone winner,
+    // not one of a big pack tied at the same low count — that tie is what made the
+    // old "more than any other" claim misleading).
+    const topFiles = this.db
+      .prepare(
+        `SELECT fi.path AS path, COUNT(DISTINCT fi.session_id) AS sessions
+         FROM files_index fi JOIN sessions s ON s.id = fi.session_id
+         WHERE 1=1${w}
+           AND fi.path NOT LIKE '%.lock' AND fi.path NOT LIKE '%lock.json'
+           AND fi.path NOT LIKE '%lock.yaml' AND fi.path NOT LIKE '%/go.sum'
+         GROUP BY fi.repo, fi.path ORDER BY sessions DESC, fi.path LIMIT 2`,
+      )
+      .all(...wp) as Array<{ path: string; sessions: number }>
+    const topFile = topFiles[0]
+      ? { path: topFiles[0].path, sessions: topFiles[0].sessions, clearLead: !topFiles[1] || topFiles[0].sessions > topFiles[1].sessions }
+      : undefined
+
+    // Biggest shipped: shipped feature → merged PR → wip feature, among artifacts
+    // active in the window, ranked by block-attributed cost (matches the Artifacts table).
+    // Reviewed links are excluded from both arms so a teammate's PR you reviewed
+    // never has its review cost counted as production cost (mirrors costPerArtifact).
+    const blockCost = `COALESCE((SELECT SUM(cost_usd) FROM (
+        SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
+        JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+        JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+        WHERE ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
+        UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
+        JOIN usage_facts u ON u.session_id = sa2.session_id
+        WHERE sa2.artifact_id = a.id AND COALESCE(sa2.role,'') <> 'reviewed'
+        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed'))), 0)`
+    // An artifact is "in window" (and a candidate at all) only via a NON-reviewed
+    // session link — this doubles as the "produced by this store" guard, so a PR you
+    // only reviewed is never picked as the biggest-shipped or stalled spotlight.
+    const inWindow =
+      from && to
+        ? `EXISTS (SELECT 1 FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
+                   WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
+                     AND s.started_at >= ? AND s.started_at < ?)`
+        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed')`
+    const pickWin = (kind: string, completion: 'shipped' | 'unshipped') =>
+      this.db
+        .prepare(
+          `SELECT a.title AS title, a.repo AS repo, a.ident AS ident, ${blockCost} AS cost
+           FROM artifacts a
+           WHERE a.kind = ? AND a.completed_at IS ${completion === 'shipped' ? 'NOT NULL' : 'NULL'} AND ${inWindow}
+           ORDER BY cost DESC LIMIT 1`,
+        )
+        .get(...(from && to ? [kind, from, to] : [kind])) as
+        | { title: string; repo: string | null; ident: string | null; cost: number }
+        | undefined
+
+    type Pick = { kind: 'feature' | 'pr'; title: string; repo: string | null; ident: string | null; cost: number }
+    // Most AI spend on SHIPPED work: a shipped feature if the user marks any
+    // shipped, else the costliest merged PR. No unshipped fallback — that's what
+    // `stalled` is for.
+    const shippedFeat = pickWin('feature', 'shipped')
+    let spotlight: Pick | null = null
+    if (shippedFeat) spotlight = { kind: 'feature', ...shippedFeat }
+    else {
+      const pr = pickWin('pr', 'shipped')
+      if (pr) spotlight = { kind: 'pr', ...pr }
+    }
+
+    // Most AI spend NOT yet shipped (stalled): an unshipped feature, but only when
+    // the user actually marks features shipped (otherwise every feature is
+    // trivially "unshipped" and it's noise) — else fall back to the costliest
+    // open/unmerged PR, a reliable git-derived signal that works for new users.
+    let stalled: Pick | null = null
+    if (shippedFeat) {
+      const uf = pickWin('feature', 'unshipped')
+      if (uf) stalled = { kind: 'feature', ...uf }
+    } else {
+      const up = pickWin('pr', 'unshipped')
+      if (up) stalled = { kind: 'pr', ...up }
+    }
+
+    return { total, shipped, topFile, spotlight, stalled }
+  }
+
+  /** The Highlights digest: a few reliably-interesting facts plus facet-WALKED
+   *  comparisons (spend concentration, outcome-rate spread) — for each, we go down
+   *  an ordered facet list and keep the FIRST facet whose breakdown clears an
+   *  interestingness threshold, so nothing is hardcoded to `repo` and a dominated
+   *  split (e.g. one harness at 99%) is skipped. Each insight is a typed payload;
+   *  the client renders the sentence + drill-in. `from`/`to` window everything;
+   *  omit for all-time. */
+  highlights(from?: string, to?: string): Highlight[] {
+    const out: Highlight[] = []
+    // A stalled-spend insight only fires when the costliest unshipped artifact is a
+    // meaningful slice of the window's spend (so a tiny unshipped feature is quiet).
+    const STALLED_MIN_SHARE = 0.15
+    const f = this.windowedFacts(from, to)
+
+    // --- Week-over-week trend headline (only over a bounded window, where a
+    // "previous window" exists to compare against) ---
+    if (from && to) {
+      const trend = this.trendHeadline(from, to)
+      if (trend) out.push(trend)
+    }
+
+    // --- Reliable facts, windowed (show when the data exists) ---
+    if (f.spotlight) {
+      const sp = f.spotlight
+      out.push({ kind: 'biggest_shipped', artifactKind: sp.kind, title: sp.title, repo: sp.repo, ident: sp.ident, cost: sp.cost })
+    }
+    // The stalled counterpart to biggest_shipped — kept adjacent so they read as a
+    // shipped/not-yet-shipped pair.
+    if (f.stalled && f.total > 0 && f.stalled.cost / f.total >= STALLED_MIN_SHARE)
+      out.push({ kind: 'stalled_spend', artifactKind: f.stalled.kind, title: f.stalled.title, repo: f.stalled.repo, ident: f.stalled.ident, cost: f.stalled.cost })
+    if (f.total > 0 && f.shipped > 0)
+      out.push({ kind: 'converted_spend', shipped: f.shipped, total: f.total, pct: Math.round((100 * f.shipped) / f.total) })
+    // Busiest file — only with a CLEAR leader and real repetition (≥3 sessions), so
+    // we never surface an arbitrary file from a big low-count tie.
+    if (f.topFile && f.topFile.sessions >= 3 && f.topFile.clearLead)
+      out.push({ kind: 'active_file', path: f.topFile.path, sessions: f.topFile.sessions })
+
+    // --- Facet-walked: spend concentration (one value leads, but doesn't own it
+    // all). use_case is excluded: `implement` dominates almost everyone's spend, so
+    // it always won the walk with an uninteresting result. ---
+    for (const facet of ['repo', 'model', 'harness']) {
+      const r = this.spendOverTime({ bucket: 'month', by: facet, from, to })
+      if ('error' in r || !r.series || r.series.length < 2) continue
+      const total = (r.overall?.points ?? []).reduce((a, p) => a + p.spend, 0)
+      if (total <= 0) continue
+      const top = r.series.slice().sort((a, b) => b.total - a.total)[0]
+      if (!top || !top.key || top.key === 'Other') continue
+      const share = top.total / total
+      if (share >= 0.5 && share <= 0.9) {
+        out.push({ kind: 'spend_concentration', facet, value: top.key, spend: top.total, total, pct: Math.round(share * 100) })
+        break
+      }
+    }
+
+    // --- Facet-walked: outcome-rate spread (a real gap between best and worst value) ---
+    // use_case is intentionally excluded: it's multi-valued (a session counts under
+    // several work types), so per-value rates mix overlapping populations.
+    for (const facet of ['repo', 'complexity', 'model', 'autonomy']) {
+      const r = this.successRate({ outcomes: ['session_success'], bucket: 'month', by: facet, from, to })
+      const vals = (r.series ?? []).filter((s) => s.denom >= 3 && s.rate != null && s.key && s.key !== 'Other')
+      if (vals.length < 2) continue
+      const sorted = vals.slice().sort((a, b) => (b.rate as number) - (a.rate as number))
+      const best = sorted[0]
+      const worst = sorted[sorted.length - 1]
+      if (!best || !worst) continue
+      if ((best.rate as number) - (worst.rate as number) >= 0.2) {
+        out.push({
+          kind: 'success_spread',
+          facet,
+          best: { value: best.key, rate: best.rate, n: best.denom },
+          worst: { value: worst.key, rate: worst.rate, n: worst.denom },
+        })
+        break
+      }
+    }
+
+    // --- Autonomy on complex tasks: a count (enrichment-gated), with a guarded
+    // delta. Only shows when enrichment has run AND there are ≥2 such sessions; the
+    // "vs. prior window" delta is appended ONLY when the prior window has a real
+    // base (≥3), so a 1→2 jump never reads as "+100%". ---
+    if (this.db.prepare(`SELECT 1 FROM annotations WHERE key='autonomy' LIMIT 1`).get()) {
+      const countAC = (a?: string, b?: string) =>
+        (
+          this.db
+            .prepare(
+              // "complex" = the two hardest complexity tiers in the enricher's taxonomy.
+              `SELECT COUNT(*) AS n FROM sessions s
+               WHERE EXISTS (SELECT 1 FROM annotations an WHERE an.session_id = s.id AND an.key = 'autonomy'
+                             AND json_extract(an.value,'$') = 'autonomous')
+                 AND EXISTS (SELECT 1 FROM annotations an WHERE an.session_id = s.id AND an.key = 'complexity'
+                             AND json_extract(an.value,'$') IN ('substantial','open-ended'))${a && b ? ' AND s.started_at >= ? AND s.started_at < ?' : ''}`,
+            )
+            .get(...(a && b ? [a, b] : [])) as { n: number }
+        ).n
+      const cur = countAC(from, to)
+      if (cur >= 2) {
+        let delta: number | null = null
+        if (from && to) {
+          const span = new Date(to).getTime() - new Date(from).getTime()
+          const prevFrom = new Date(new Date(from).getTime() - span).toISOString()
+          const prev = countAC(prevFrom, from)
+          if (prev >= 3) delta = Math.round(((cur - prev) / prev) * 100)
+        }
+        out.push({ kind: 'autonomy_complex', count: cur, delta })
+      }
+    }
+
+    return out
+  }
+
   /** Distribution of a scalar annotation value across sessions. */
   private scalarDist(key: string): Dist[] {
     return this.db
@@ -607,9 +886,16 @@ export class Store {
   costPerArtifact(kind: string, from?: string, to?: string): { count: number; costPerUnit: number | null } {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
     const params = from && to ? [kind, from, to] : [kind]
+    // "Shipped" means a PR THIS store produced — a PR whose only link is `reviewed`
+    // (a teammate's PR you reviewed) is not yours to count or cost here; it belongs
+    // to the separate "PRs reviewed" view. Harmless for features (no reviewed role).
+    const produced =
+      kind === 'pr'
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = a.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        : ''
     const count = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}`)
         .get(...params) as { n: number }
     ).n
     if (count === 0) return { count: 0, costPerUnit: null }
@@ -617,21 +903,22 @@ export class Store {
       this.db
         .prepare(
           `SELECT COALESCE(SUM(cost_usd),0) AS s FROM (
-             -- block-attributed: usage rows in blocks linked to an in-window completed artifact
+             -- block-attributed: usage rows in blocks linked to an in-window completed artifact.
+             -- Reviewed block links are excluded so review cost never inflates production cost.
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
-             JOIN block_artifacts ba ON ba.artifact_id = a.id
+             JOIN block_artifacts ba ON ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
              UNION
-             -- fallback: whole sessions of in-window artifacts that have NO block links
+             -- fallback: whole sessions of in-window artifacts that have NO production block links
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
-             JOIN session_artifacts sa ON sa.artifact_id = a.id
+             JOIN session_artifacts sa ON sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
              JOIN usage_facts u ON u.session_id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range}
-               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
+               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed')
            )`,
         )
         .get(...params, ...params) as { s: number }
@@ -700,12 +987,22 @@ export class Store {
   ): {
     burn: Array<{ bucket: string; spend: number; shippedSpend: number }>
     throughput: Array<{ bucket: string; count: number }>
+    /** PRs reviewed per bucket, dated at REVIEW time (the pr_reviewed outcome ts). PRs only. */
+    reviewed: Array<{ bucket: string; count: number }>
     buckets: string[]
   } {
     // Anchored on usage_facts and dated at message time (COALESCE u.ts → session
     // start), so spend buckets at block-level time granularity (P5), and the
     // converted sub-band greens only the BLOCKS that produced a shipped artifact —
     // not the whole session. kind binds first (in the CASE subquery), then window.
+    // "Produced by this store" guard (PRs only): a PR whose only link is `reviewed`
+    // is a teammate's PR you reviewed — not something you shipped — so it's excluded
+    // from the shipped throughput and the green "shipped spend" sub-band. Its review
+    // spend lives in the separate "PRs reviewed" view.
+    const produced =
+      kind === 'pr'
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        : ''
     const burnRange = from && to ? 'AND COALESCE(u.ts, s.started_at) >= ? AND COALESCE(u.ts, s.started_at) < ?' : ''
     const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
@@ -715,6 +1012,7 @@ export class Store {
                 COALESCE(SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM block_usage bu
                     JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
+                                            AND COALESCE(ba.role,'') <> 'reviewed'
                     JOIN artifacts a ON a.id = ba.artifact_id
                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
                       AND a.kind = ? AND a.completed_at IS NOT NULL
@@ -729,9 +1027,24 @@ export class Store {
     const throughput = this.db
       .prepare(
         `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
-         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} GROUP BY bucket ORDER BY bucket`,
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} GROUP BY bucket ORDER BY bucket`,
       )
       .all(...thParams) as Array<{ bucket: string; count: number }>
+    // PRs reviewed per bucket, dated at REVIEW time (when you reviewed, not when the
+    // PR merged) — sourced from the pr_reviewed outcome. Distinct PRs, so two review
+    // sessions on the same PR count once. Features have no review signal → empty.
+    const revRange = from && to ? 'AND o.ts >= ? AND o.ts < ?' : ''
+    const reviewed =
+      kind === 'pr'
+        ? (this.db
+            .prepare(
+              `SELECT ${bucketExpr('o.ts', bucket)} AS bucket, COUNT(DISTINCT o.artifact_id) AS count
+               FROM outcomes o
+               WHERE o.type = 'pr_reviewed' AND o.ts IS NOT NULL ${revRange}
+               GROUP BY bucket ORDER BY bucket`,
+            )
+            .all(...(from && to ? [from, to] : [])) as Array<{ bucket: string; count: number }>)
+        : []
     // The x-axis: over a window, every bucket from `from` to `to` (so empty
     // periods show as gaps and the chart spans the whole window, not just the
     // periods that happen to have data); all-time falls back to the data's own
@@ -741,7 +1054,8 @@ export class Store {
     if (from && to) this.bucketAxis(from, to, bucket).forEach((b) => set.add(b))
     burn.forEach((r) => set.add(r.bucket))
     throughput.forEach((r) => set.add(r.bucket))
-    return { burn, throughput, buckets: Array.from(set).sort() }
+    reviewed.forEach((r) => set.add(r.bucket))
+    return { burn, throughput, reviewed, buckets: Array.from(set).sort() }
   }
 
   /**
@@ -795,9 +1109,15 @@ export class Store {
     ).s
     const thRange = from && to ? 'AND completed_at >= ? AND completed_at < ?' : ''
     const thParams = from && to ? [kind, from, to] : [kind]
+    // Same "produced by this store" guard as costPerArtifact, so this throughput
+    // (the KPI denominator) matches the cost-per-shipped count exactly (PRs only).
+    const produced =
+      kind === 'pr'
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        : ''
     const throughput = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced}`)
         .get(...thParams) as { n: number }
     ).n
     return { burn, throughput, efficiency: throughput ? burn / throughput : null }

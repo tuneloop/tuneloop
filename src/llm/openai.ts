@@ -20,7 +20,7 @@ export function createOpenAiClient(apiKey: string, model: string, opts?: ClientO
   return {
     provider: opts?.provider ?? 'openai',
     model,
-    async completeStructured<T>(req: StructuredRequest): Promise<LlmResult<T>> {
+    async completeStructured(req: StructuredRequest): Promise<LlmResult> {
       const { system, user, schema, toolName, maxTokens = 1024 } = req
       const resp = await client.chat.completions.create({
         model,
@@ -34,9 +34,9 @@ export function createOpenAiClient(apiKey: string, model: string, opts?: ClientO
       })
       const msg = resp.choices[0]?.message
       const call = msg?.tool_calls?.find((c) => c.type === 'function' && c.function.name === toolName)
-      if (call?.type === 'function') return { data: (parseJsonObject(call.function.arguments) ?? {}) as T, usage: usageOf(resp.usage) }
+      if (call?.type === 'function') return { data: parseJsonObject(call.function.arguments) ?? {}, usage: usageOf(resp.usage) }
       // No tool call came back; salvage any plain-text JSON.
-      return { data: (parseJsonObject(msg?.content ?? '') ?? {}) as T, usage: usageOf(resp.usage) }
+      return { data: parseJsonObject(msg?.content ?? '') ?? {}, usage: usageOf(resp.usage) }
     },
   }
 }

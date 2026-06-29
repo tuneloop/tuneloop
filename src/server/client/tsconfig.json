@@ -17,5 +17,9 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["."]
+  // Test files import vitest (Node globals) and run under vitest, not the browser
+  // build — keep them out of the DOM-targeted typecheck so they can't pull Node's
+  // `setTimeout` typing (etc.) into the client sources.
+  "include": ["."],
+  "exclude": ["**/*.test.ts"]
 }

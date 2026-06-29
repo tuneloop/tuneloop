@@ -48,6 +48,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     await serveClientAsset(res, path)
     return
   }
+  if (path === '/api/highlights') {
+    const daysRaw = url.searchParams.get('days')
+    const days = daysRaw === 'all' ? null : parseInt(daysRaw ?? '7', 10)
+    // The store windows on a half-open [from, to) range — both bounds required.
+    const windowed = !!(days && days > 0)
+    const to = windowed ? new Date().toISOString() : undefined
+    const from = windowed ? new Date(Date.now() - days! * 86400000).toISOString() : undefined
+    sendJson(res, 200, { days: daysRaw ?? '7', highlights: store.highlights(from, to), dbPath })
+    return
+  }
+
   if (path === '/api/overview') {
     sendJson(res, 200, { ...store.summary(), dbPath })
     return
@@ -255,6 +266,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         period: store.costPeriod(kind),
         burn: curves.burn,
         throughput: curves.throughput,
+        reviewed: curves.reviewed,
         buckets: curves.buckets,
       })
       return
@@ -276,6 +288,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       period: store.costPeriod(kind, from, to),
       burn: curves.burn,
       throughput: curves.throughput,
+      reviewed: curves.reviewed,
       buckets: curves.buckets,
     })
     return
