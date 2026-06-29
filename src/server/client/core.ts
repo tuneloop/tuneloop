@@ -41,7 +41,9 @@ export interface ClientState {
   // toggles it (userPicked), after which it sticks and the headline tile mirrors
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
   // a manual pick overrides until the window changes.
-  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string }
+  // `kind` (feature|pr) scopes only the AI-spend burn graph; `flow` (shipped|reviewed)
+  // toggles the bottom PR throughput graph.
+  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; flow: string }
   spend: { bucket: string; by: string } // total-spend detail controls
   sm: { bucket: string; by: string } // sessions detail controls
   // operational detail: one shared bucket, plus a per-graph "break down by name"
@@ -59,7 +61,7 @@ export var state: ClientState = {
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
   sr: { outcomes: ['session_success'], bucket: '', by: '' },
-  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '' },
+  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', flow: 'shipped' },
   spend: { bucket: '', by: '' },
   sm: { bucket: '', by: '' },
   ops: { bucket: '', by: { tool_calls: true, error_rate: true, skill_usage: true } },

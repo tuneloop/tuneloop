@@ -248,6 +248,13 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     })
     return
   }
+  if (path === '/api/feature-costs') {
+    // Hierarchical cost-per-feature for the cost-artifact section's breakdown
+    // charts (icicle / treemap): every feature with its own (direct) cost and the
+    // subtree rollup over parent_artifact_id. All-time (total invested per feature).
+    sendJson(res, 200, { nodes: store.featureCostTree() })
+    return
+  }
   if (path === '/api/outcome-types') {
     sendJson(res, 200, store.outcomeTypes())
     return

@@ -1885,6 +1885,83 @@ export class Store {
   }
 
   /**
+   * Per-feature cost rolled up over the feature hierarchy, for the hierarchical
+   * cost-breakdown charts. `ownCost` is the spend attributed DIRECTLY to a feature
+   * (the same block-attributed-with-whole-session-fallback cost as the artifactList
+   * column); `subtreeCost` adds every descendant's own cost, so a parent epic
+   * reflects the total invested beneath it (subtreeCost − Σ children.subtreeCost =
+   * ownCost). All-time, not windowed: total investment per feature, matching the
+   * artifactList cost semantics. Cycle-safe + memoized, mirroring featureLastSession.
+   * parentId is normalized to null when it doesn't point at another feature, so the
+   * client can treat such rows as roots.
+   */
+  featureCostTree(): Array<{
+    id: string
+    title: string | null
+    parentId: string | null
+    ownCost: number
+    subtreeCost: number
+  }> {
+    const rows = this.db
+      .prepare("SELECT id, title, parent_artifact_id AS parentId FROM artifacts WHERE kind = 'feature'")
+      .all() as Array<{ id: string; title: string | null; parentId: string | null }>
+    if (!rows.length) return []
+    // Own (direct) cost per feature — identical attribution to artifactList's cost
+    // column: block-attributed where the session was block-linked, whole-session
+    // fallback otherwise, UNION-deduped so a shared usage row counts once.
+    const costRows = this.db
+      .prepare(
+        `SELECT a.id AS id, COALESCE((
+           SELECT SUM(cost_usd) FROM (
+             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             FROM block_artifacts ba
+             JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+             JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+             WHERE ba.artifact_id = a.id
+             UNION
+             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
+             WHERE sa2.artifact_id = a.id
+               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
+           )
+         ), 0) AS ownCost
+         FROM artifacts a WHERE a.kind = 'feature'`,
+      )
+      .all() as Array<{ id: string; ownCost: number }>
+    const own = new Map<string, number>()
+    for (const r of costRows) own.set(r.id, r.ownCost || 0)
+
+    const children = new Map<string, string[]>()
+    for (const r of rows) {
+      if (!r.parentId || !own.has(r.parentId)) continue
+      const arr = children.get(r.parentId)
+      if (arr) arr.push(r.id)
+      else children.set(r.parentId, [r.id])
+    }
+    const memo = new Map<string, number>()
+    const onStack = new Set<string>()
+    const subtreeCost = (id: string): number => {
+      const cached = memo.get(id)
+      if (cached !== undefined) return cached
+      let sum = own.get(id) ?? 0
+      if (!onStack.has(id)) {
+        onStack.add(id)
+        for (const c of children.get(id) ?? []) sum += subtreeCost(c)
+        onStack.delete(id)
+      }
+      memo.set(id, sum)
+      return sum
+    }
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      parentId: r.parentId && own.has(r.parentId) ? r.parentId : null,
+      ownCost: own.get(r.id) ?? 0,
+      subtreeCost: subtreeCost(r.id),
+    }))
+  }
+
+  /**
    * Build a SQL condition + params for artifact text search that handles plain
    * terms, `#N` (PR number with hash prefix), and `repo#N` (repo + number).
    */
