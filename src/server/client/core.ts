@@ -21,7 +21,7 @@ export interface SessionFilters {
 // Sessions-list time window. `preset` drives from/to; 'custom' reads the date
 // inputs; 'all' means no bound. Independent of the dashboard KPI window.
 export interface SessTime {
-  preset: 7 | 30 | 90 | 'all' | 'custom'
+  preset: 7 | 14 | 30 | 90 | 'all' | 'custom'
   from: string // ISO date (yyyy-mm-dd) for custom range
   to: string
 }

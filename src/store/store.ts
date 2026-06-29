@@ -663,10 +663,15 @@ export class Store {
     const scalar = (sql: string) => (this.db.prepare(sql).get(...wp) as { v: number }).v
 
     const total = scalar(`SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s WHERE 1=1${w}`)
+    // "Shipped" spend is production spend: a session whose cost counts here must have
+    // a NON-reviewed link to a completed artifact. A session that only reviewed a
+    // merged PR (a teammate's) is total spend, not shipped spend — excluding it keeps
+    // converted_spend honest. (Reviewed role exists on PRs only; harmless for features.)
     const shipped = scalar(
       `SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s
        WHERE EXISTS (SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
-                     WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL)${w}`,
+                     WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL
+                       AND COALESCE(sa.role,'') <> 'reviewed')${w}`,
     )
 
     // Busiest source file — most distinct sessions, skipping generated noise. We
@@ -689,18 +694,26 @@ export class Store {
 
     // Biggest shipped: shipped feature → merged PR → wip feature, among artifacts
     // active in the window, ranked by block-attributed cost (matches the Artifacts table).
+    // Reviewed links are excluded from both arms so a teammate's PR you reviewed
+    // never has its review cost counted as production cost (mirrors costPerArtifact).
     const blockCost = `COALESCE((SELECT SUM(cost_usd) FROM (
         SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
         JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
-        JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx WHERE ba.artifact_id = a.id
+        JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+        WHERE ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
         UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
-        JOIN usage_facts u ON u.session_id = sa2.session_id WHERE sa2.artifact_id = a.id
-        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id))), 0)`
+        JOIN usage_facts u ON u.session_id = sa2.session_id
+        WHERE sa2.artifact_id = a.id AND COALESCE(sa2.role,'') <> 'reviewed'
+        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed'))), 0)`
+    // An artifact is "in window" (and a candidate at all) only via a NON-reviewed
+    // session link — this doubles as the "produced by this store" guard, so a PR you
+    // only reviewed is never picked as the biggest-shipped or stalled spotlight.
     const inWindow =
       from && to
         ? `EXISTS (SELECT 1 FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
-                   WHERE sa.artifact_id = a.id AND s.started_at >= ? AND s.started_at < ?)`
-        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id)`
+                   WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
+                     AND s.started_at >= ? AND s.started_at < ?)`
+        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed')`
     const pickWin = (kind: string, completion: 'shipped' | 'unshipped') =>
       this.db
         .prepare(

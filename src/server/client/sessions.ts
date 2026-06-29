@@ -188,7 +188,7 @@ export function applySessionParams(query: Record<string, string>) {
   state.view = 'sessions';
   if (query.from || query.to) state.sessTime = { preset: 'custom', from: query.from || '', to: query.to || '' };
   else if (query.win === 'all') state.sessTime = { preset: 'all', from: '', to: '' };
-  else if (query.win === '7' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 90, from: '', to: '' };
+  else if (query.win === '7' || query.win === '14' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 14 | 90, from: '', to: '' };
   else state.sessTime = { preset: 30, from: '', to: '' }; // default (win=30 or absent)
   var facets: Record<string, string> = {};
   Object.keys(query).forEach(function (k) { if (k.indexOf('f.') === 0 && query[k]) facets[k.slice(2)] = query[k]; });
