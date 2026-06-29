@@ -1,5 +1,6 @@
 import { basename } from 'node:path'
 import { loadConfig } from '../config'
+import type { LlmOverrides } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
 import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
@@ -10,6 +11,7 @@ import { getAdapters, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
 import { createLlmClient } from '../llm'
 import { computeSessionCost, PRICE_TABLE_VERSION } from '../pricing/pricing'
+import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import type { Summary } from '../store/store'
@@ -25,6 +27,8 @@ export interface AnalyzeOptions {
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
   limit?: number
+  /** Non-secret LLM flag overrides (provider/model/base-url); the key stays env-only. */
+  llm?: LlmOverrides
 }
 
 /**
@@ -34,10 +38,15 @@ export interface AnalyzeOptions {
  */
 export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const log = createLogger(opts.verbose ? 'debug' : 'info')
-  const config = loadConfig({ db: opts.db })
+  const config = loadConfig({ db: opts.db, llm: opts.llm })
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const sh = makeSh()
+
+  // Load the OpenRouter price backfill every run (cache-first) so models missing
+  // from the static table are priced consistently for both session and self-cost.
+  // Best-effort, no session data; AIVUE_NO_PRICE_FETCH keeps static runs offline.
+  if (!process.env.AIVUE_NO_PRICE_FETCH) await loadOpenRouterPrices(config.dataDir, log)
 
   const processors = getProcessors()
   store.registerFacets('intrinsic', INTRINSIC_FACETS)
@@ -58,7 +67,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   if (llmEnabled) {
     log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
   } else {
-    log.info('LLM enrichment off (set AIVUE_LLM_PROVIDER + key to enable). Static analysis only.')
+    printEnrichmentHint(log)
   }
 
   let discovered = 0
@@ -275,6 +284,31 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   )
   printSummary(store.summary())
   store.close()
+}
+
+/**
+ * First-run notice when no enrichment provider is configured. Discoverability,
+ * not a gate — it never blocks. The multi-line form prints only on an interactive
+ * terminal (CI/pipes get one line); AIVUE_NO_HINT silences it.
+ */
+function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
+  if (process.env.AIVUE_NO_HINT || !process.stdout.isTTY) {
+    log.info('LLM enrichment off (set AIVUE_LLM_PROVIDER + key to enable). Static analysis only.')
+    return
+  }
+  process.stdout.write(
+    [
+      '',
+      'ℹ LLM enrichment is off — you still get tokens, cost, tools, files, and git/PR',
+      '  outcomes, but not use-case / complexity / autonomy / success signals.',
+      '  Enable it with your own key, e.g.:',
+      '      export AIVUE_LLM_PROVIDER=openrouter',
+      '      export OPENROUTER_API_KEY=sk-or-...',
+      '  Presets: anthropic · openai · openrouter · groq · deepseek · gemini · ollama (see README).',
+      '  Continuing with static analysis only…',
+      '',
+    ].join('\n') + '\n',
+  )
 }
 
 /** Resolve a --source name to a registered adapter id, tolerant of a short alias (`claude` → `claude-code`). */

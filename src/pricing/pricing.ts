@@ -1,5 +1,6 @@
 import type { Session, TokenUsage } from '../core/model'
 import models from './models.json'
+import { backfillPrice } from './openrouter'
 
 export interface ModelPrice {
   input: number
@@ -30,7 +31,9 @@ export function priceFor(provider: string, model: string): ModelPrice | undefine
   for (const key of Object.keys(byProvider).sort((a, b) => b.length - a.length)) {
     if (model.startsWith(key)) return byProvider[key]
   }
-  return undefined
+  // Static table missed — try the OpenRouter backfill (loaded once per run in
+  // analyze.ts). Empty → undefined → $0 when opted out or offline with no cache.
+  return backfillPrice(provider, model)
 }
 
 /** Cost of a single usage record at a given model's rates (0 if unpriced). */
