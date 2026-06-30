@@ -80,11 +80,14 @@ export const enrichSession: Processor = {
     if (!llm) return {}
 
     const blocks = deterministicBlocks(session)
-    const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks, ctx.rejectedFeatureTitles)
+    const userLinkedPrs = ctx.userLinkedArtifacts.filter((a) => a.kind === 'pr')
+    const userLinkedFeatures = ctx.userLinkedArtifacts.filter((a) => a.kind === 'feature')
+    const prContext: PrPromptContext = { userLinkedPrs, prBlockAttributions: ctx.prBlockAttributions }
+    const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks, ctx.rejectedFeatureTitles, prContext, userLinkedFeatures)
     const { data: parsed, usage } = await llm.completeStructured({
       system,
       user,
-      schema: outputSchema(blocks.length),
+      schema: outputSchema(blocks.length, userLinkedPrs.length > 0),
       toolName: TOOL_NAME,
       // Headroom for the full structured output on large sessions
       maxTokens: 4096,
@@ -176,6 +179,22 @@ export const enrichSession: Processor = {
       }
     }
 
+    // PR block attribution from LLM: assign user-linked PRs to blocks not already
+    // claimed by deterministic PR attribution (outcomes-git).
+    if (userLinkedPrs.length > 0 && blocks.length > 0) {
+      const prTaken = new Set(ctx.prBlockAttributions.map((a) => a.blockIdx))
+      const prAssigned = new Set<number>()
+      for (const run of prRuns(parsed.pr_runs)) {
+        const pr = userLinkedPrs[run.pr]
+        if (!pr) continue
+        for (let i = Math.max(0, run.from); i <= Math.min(blocks.length - 1, run.to); i++) {
+          if (prTaken.has(i) || prAssigned.has(i)) continue
+          prAssigned.add(i)
+          blockArtifacts.push({ blockIdx: i, artifactId: pr.artifactId, role: 'contributed', source: 'derived', confidence: 0.6 })
+        }
+      }
+    }
+
     // Session → feature links + new-feature creation, DERIVED from the block union:
     // only features with block coverage are linked/created, so the Summary and the
     // transcript's View-by features always agree.
@@ -186,7 +205,12 @@ export const enrichSession: Processor = {
       if (!slot.id || !linked.has(slot.id) || emitted.has(slot.id)) continue
       emitted.add(slot.id)
       if (slot.create) artifacts.push(slot.create)
-      sessionArtifacts.push({ artifactId: slot.id, role: 'contributed', source: 'derived', confidence: 0.6 })
+      // User-created features (artifacts.source='user') already have a session_artifact
+      // row with source='user', producer='dashboard'. Don't re-emit — INSERT OR REPLACE
+      // would clobber that provenance. The isLocked() check uses the same signal.
+      if (!isLocked(slot.id)) {
+        sessionArtifacts.push({ artifactId: slot.id, role: 'contributed', source: 'derived', confidence: 0.6 })
+      }
     }
 
     // Taxonomy upkeep: REPARENT only, and only for a feature this session advanced
@@ -265,7 +289,14 @@ registerProcessor(enrichSession)
 
 // ---- prompt -----------------------------------------------------------------
 
-function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], rejectedTitles?: string[]): { system: string; user: string } {
+import type { UserLinkedArtifact, PrBlockAttribution } from '../core/processor'
+
+interface PrPromptContext {
+  userLinkedPrs: UserLinkedArtifact[]
+  prBlockAttributions: PrBlockAttribution[]
+}
+
+function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], rejectedTitles?: string[], prContext?: PrPromptContext, userLinkedFeatures?: UserLinkedArtifact[]): { system: string; user: string } {
   const system =
     'You analyze a single AI coding session, classify it, and maintain a hierarchical product-feature map. ' +
     `Report your analysis by calling the ${TOOL_NAME} tool; its parameters define every field and its allowed values.`
@@ -294,6 +325,14 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], 
           '',
         ]
       : []),
+    ...(userLinkedFeatures?.length
+      ? [
+          'The user has EXPLICITLY linked the following features to this session. You MUST match them in your "features" list (via matched_feature_id) and assign at least one block to each in feature_runs:',
+          ...userLinkedFeatures.map((f) => `- [${f.artifactId}] "${f.title ?? f.artifactId}"`),
+          '',
+        ]
+      : []),
+    ...buildPrPromptSection(prContext, blocks.length),
     `Fill the ${TOOL_NAME} tool. Field shapes and allowed values are defined by the tool schema; the guidance below`,
     'explains how to choose each value.',
     'How to write the title — name the OVERALL intent of the WHOLE session in a short Title-Case noun phrase',
@@ -363,6 +402,15 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], 
     '- SPARSE: emit a run ONLY for blocks that substantially advanced a feature; chores/research/fixups belong to no feature — leave them out.',
     '- "feature" is the 0-based index into the "features" array above. Runs must not overlap. Most sessions need 0–2 feature_runs.',
     '- The session is credited a feature ONLY through feature_runs, so give every feature you list in "features" at least one feature_run; a feature with no run is dropped.',
+    ...(prContext?.userLinkedPrs.length
+      ? [
+          'Rules for pr_runs (which blocks contributed to which user-linked PR):',
+          '- SPARSE: assign only blocks whose work clearly fed into the PR. Runs must not overlap with each other.',
+          '- "pr" is the 0-based index into the user-linked PRs list above.',
+          '- Do NOT assign blocks that are already attributed to other PRs (listed as "FIXED" above).',
+          '- Every user-linked PR should get at least one block run if possible — the user explicitly linked it.',
+        ]
+      : []),
   ].join('\n')
 
   return { system, user }
@@ -377,68 +425,115 @@ const TOOL_NAME = 'record_analysis'
  * parsers below still normalize defensively, so this is a strong hint, not a
  * guarantee (providers vary in how strictly they honor it).
  */
-function outputSchema(nBlocks: number): JsonSchema {
+function outputSchema(nBlocks: number, hasUserLinkedPrs: boolean): JsonSchema {
   const lastBlock = Math.max(0, nBlocks - 1)
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: ['title', 'complexity', 'autonomy', 'intent_summary', 'decisions', 'success', 'features', 'feature_revisions', 'use_case_runs', 'feature_runs'],
-    properties: {
-      title: { type: 'string', description: 'Short Title-Case phrase naming the OVERALL intent of the session (see guidance).' },
-      complexity: { type: 'string', enum: COMPLEXITY, description: 'Difficulty of what the session set out to do.' },
-      autonomy: { type: 'string', enum: AUTONOMY, description: 'How much the agent ran on its own.' },
-      intent_summary: { type: 'string', description: 'One sentence: what the user set out to accomplish (the goal, not the decisions).' },
-      decisions: { type: 'array', items: { type: 'string' }, description: 'The KEY decisions made during the session, newest insight last; [] if none.' },
-      success: { type: 'string', enum: SUCCESS, description: 'Whether the session accomplished its task(s).' },
-      features: {
-        type: 'array',
-        description: 'Features this session advanced — ideally exactly one; list the primary feature first.',
-        items: {
-          type: 'object',
-          properties: {
-            matched_feature_id: { type: 'string', description: 'Id of the most specific existing feature this session advanced, or empty.' },
-            new_title: { type: 'string', description: 'Title for a NEW feature when none fit, else empty.' },
-            parent_id: { type: 'string', description: 'Existing feature id to nest the new feature under, or empty for top-level.' },
-          },
+  const required = ['title', 'complexity', 'autonomy', 'intent_summary', 'decisions', 'success', 'features', 'feature_revisions', 'use_case_runs', 'feature_runs']
+  const properties: Record<string, unknown> = {
+    title: { type: 'string', description: 'Short Title-Case phrase naming the OVERALL intent of the session (see guidance).' },
+    complexity: { type: 'string', enum: COMPLEXITY, description: 'Difficulty of what the session set out to do.' },
+    autonomy: { type: 'string', enum: AUTONOMY, description: 'How much the agent ran on its own.' },
+    intent_summary: { type: 'string', description: 'One sentence: what the user set out to accomplish (the goal, not the decisions).' },
+    decisions: { type: 'array', items: { type: 'string' }, description: 'The KEY decisions made during the session, newest insight last; [] if none.' },
+    success: { type: 'string', enum: SUCCESS, description: 'Whether the session accomplished its task(s).' },
+    features: {
+      type: 'array',
+      description: 'Features this session advanced — ideally exactly one; list the primary feature first.',
+      items: {
+        type: 'object',
+        properties: {
+          matched_feature_id: { type: 'string', description: 'Id of the most specific existing feature this session advanced, or empty.' },
+          new_title: { type: 'string', description: 'Title for a NEW feature when none fit, else empty.' },
+          parent_id: { type: 'string', description: 'Existing feature id to nest the new feature under, or empty for top-level.' },
         },
       },
-      feature_revisions: {
-        type: 'array',
-        description: 'Reparent a feature THIS session advanced under a better parent; [] otherwise.',
-        items: {
-          type: 'object',
-          properties: {
-            feature_id: { type: 'string', description: 'A feature this session advances, from the features above.' },
-            new_parent_id: { type: 'string', description: 'Existing feature id to reparent under, "root" for top-level, or empty to keep.' },
-          },
+    },
+    feature_revisions: {
+      type: 'array',
+      description: 'Reparent a feature THIS session advanced under a better parent; [] otherwise.',
+      items: {
+        type: 'object',
+        properties: {
+          feature_id: { type: 'string', description: 'A feature this session advances, from the features above.' },
+          new_parent_id: { type: 'string', description: 'Existing feature id to reparent under, "root" for top-level, or empty to keep.' },
         },
       },
-      use_case_runs: {
-        type: 'array',
-        description: `Partition blocks 0..${lastBlock} into contiguous, non-overlapping runs, each with one use_case.`,
-        items: {
-          type: 'object',
-          properties: {
-            from: { type: 'integer', description: 'First block index in the run.' },
-            to: { type: 'integer', description: 'Last block index in the run.' },
-            use_case: { type: 'string', enum: USE_CASES },
-          },
+    },
+    use_case_runs: {
+      type: 'array',
+      description: `Partition blocks 0..${lastBlock} into contiguous, non-overlapping runs, each with one use_case.`,
+      items: {
+        type: 'object',
+        properties: {
+          from: { type: 'integer', description: 'First block index in the run.' },
+          to: { type: 'integer', description: 'Last block index in the run.' },
+          use_case: { type: 'string', enum: USE_CASES },
         },
       },
-      feature_runs: {
-        type: 'array',
-        description: 'Sparse: which block ranges advanced which feature.',
-        items: {
-          type: 'object',
-          properties: {
-            from: { type: 'integer', description: 'First block index in the run.' },
-            to: { type: 'integer', description: 'Last block index in the run.' },
-            feature: { type: 'integer', description: '0-based index into the features array.' },
-          },
+    },
+    feature_runs: {
+      type: 'array',
+      description: 'Sparse: which block ranges advanced which feature.',
+      items: {
+        type: 'object',
+        properties: {
+          from: { type: 'integer', description: 'First block index in the run.' },
+          to: { type: 'integer', description: 'Last block index in the run.' },
+          feature: { type: 'integer', description: '0-based index into the features array.' },
         },
       },
     },
   }
+  if (hasUserLinkedPrs) {
+    required.push('pr_runs')
+    properties.pr_runs = {
+      type: 'array',
+      description: 'Sparse: which block ranges contributed to which user-linked PR.',
+      items: {
+        type: 'object',
+        properties: {
+          from: { type: 'integer', description: 'First block index in the run.' },
+          to: { type: 'integer', description: 'Last block index in the run.' },
+          pr: { type: 'integer', description: '0-based index into the user-linked PRs list.' },
+        },
+      },
+    }
+  }
+  return { type: 'object', additionalProperties: false, required, properties }
+}
+
+function buildPrPromptSection(prContext: PrPromptContext | undefined, nBlocks: number): string[] {
+  if (!prContext?.userLinkedPrs.length) return []
+  const lines: string[] = []
+  // Show blocks already claimed by deterministic PR attribution
+  const takenBlocks = new Map<number, string>()
+  for (const a of prContext.prBlockAttributions) {
+    takenBlocks.set(a.blockIdx, a.title ?? a.artifactId)
+  }
+  if (takenBlocks.size > 0) {
+    lines.push('Blocks already attributed to PRs (FIXED — do NOT assign these to another PR in pr_runs):')
+    const grouped = new Map<string, number[]>()
+    for (const [idx, label] of takenBlocks) {
+      const arr = grouped.get(label) ?? []
+      arr.push(idx)
+      grouped.set(label, arr)
+    }
+    for (const [label, idxs] of grouped) {
+      lines.push(`- Blocks ${idxs.sort((a, b) => a - b).join(', ')} → "${label}"`)
+    }
+    lines.push('')
+  }
+  // List unattributed blocks available for assignment
+  const available: number[] = []
+  for (let i = 0; i < nBlocks; i++) {
+    if (!takenBlocks.has(i)) available.push(i)
+  }
+  lines.push(`User-linked PRs needing block attribution (assign from available blocks: ${available.join(', ')}):`)
+  prContext.userLinkedPrs.forEach((pr, idx) => {
+    const label = pr.title ?? pr.ident ?? pr.artifactId
+    lines.push(`- (index ${idx}) ${label}`)
+  })
+  lines.push('')
+  return lines
 }
 
 /** Render the feature list as an indented tree (parent → child) for the prompt. */
@@ -661,6 +756,20 @@ function featureRuns(v: unknown): Array<{ from: number; to: number; feature: num
     const feature = intOf(r?.feature)
     if (from == null || to == null || feature == null) continue
     out.push({ from: Math.min(from, to), to: Math.max(from, to), feature })
+  }
+  return out
+}
+
+/** Normalize pr_runs into clamped {from,to,pr} entries. */
+function prRuns(v: unknown): Array<{ from: number; to: number; pr: number }> {
+  if (!Array.isArray(v)) return []
+  const out: Array<{ from: number; to: number; pr: number }> = []
+  for (const r of v) {
+    const from = intOf(r?.from)
+    const to = intOf(r?.to)
+    const pr = intOf(r?.pr)
+    if (from == null || to == null || pr == null) continue
+    out.push({ from: Math.min(from, to), to: Math.max(from, to), pr })
   }
   return out
 }

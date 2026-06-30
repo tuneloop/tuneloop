@@ -52,8 +52,18 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   // linkage inside the processor, not by hiding other repos' features.
   const existingFeatures: FeatureRef[] = store.listFeatures()
   const rejectedFeatureTitles = store.rejectedFeatureTitles(session.id)
-  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, rejectedFeatureTitles, sh }
-  const inputHash = session.raw.contentHash
+  const userLinkedArtifacts = store.userLinkedArtifacts(session.id)
+  const prBlockAttributions = store.prBlockAttributions(session.id)
+  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, rejectedFeatureTitles, userLinkedArtifacts, prBlockAttributions, sh }
+  // The hash incorporates the stable set of ALL user-linked artifact IDs (not
+  // the filtered userLinkedArtifacts). This only changes when the user adds or
+  // removes a link — never oscillates due to block attribution state.
+  let inputHash = session.raw.contentHash
+  const userIds = store.userLinkedArtifactIds(session.id)
+  if (userIds.length > 0) {
+    const suffix = userIds.sort().join(',')
+    inputHash = `${inputHash}+${suffix}`
+  }
   let costUsd = 0
 
   for (const p of orderProcessors(opts.processors)) {
