@@ -121,14 +121,21 @@ export const outcomesGit: Processor = {
 
     for (const art of stale) {
       if (art.kind !== 'pr' || !art.externalId) continue
-      const res = await sh('gh', ['pr', 'view', art.externalId, '--json', 'state,mergedAt'], {})
+      const res = await sh('gh', ['pr', 'view', art.externalId, '--json', 'state,mergedAt,additions,deletions'], {})
       if (!res || res.code !== 0) continue
       try {
-        const j = JSON.parse(res.stdout) as { state?: string; mergedAt?: string | null }
+        const j = JSON.parse(res.stdout) as { state?: string; mergedAt?: string | null; additions?: number; deletions?: number }
         const status = j.state?.toLowerCase()
-        if (!status || status === art.status) continue
+        const churn = (j.additions ?? 0) + (j.deletions ?? 0)
+        const needsComplexity = !art.complexity && churn > 0
+        if (!needsComplexity && (!status || status === art.status)) continue
         log.debug(`refresh: ${art.externalId} ${art.status} → ${status}`)
-        updated.push({ ...art, status, completedAt: j.mergedAt ?? art.completedAt })
+        const patch: ArtifactInput = { ...art, status: status ?? art.status, completedAt: j.mergedAt ?? art.completedAt }
+        if (needsComplexity) {
+          patch.complexity = churn
+          patch.complexityBasis = 'diff_size'
+        }
+        updated.push(patch)
         if (status === 'merged' && j.mergedAt) {
           outcomes.push({ type: 'pr_merged', artifactId: art.id, ts: j.mergedAt })
         }
