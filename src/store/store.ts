@@ -11,7 +11,7 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
+import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
 
 export interface Dist {
   value: string
@@ -355,7 +355,14 @@ export class Store {
           )
           .run(l.fromId, l.toId, l.relation, l.source, l.confidence ?? null, processor)
       }
+      const rejected = new Set(
+        (this.db
+          .prepare("SELECT artifact_id FROM user_link_overrides WHERE session_id = ? AND action = 'reject'")
+          .all(sessionId) as Array<{ artifact_id: string }>)
+          .map((r) => r.artifact_id),
+      )
       for (const sa of result.sessionArtifacts ?? []) {
+        if (sa.source === 'derived' && rejected.has(sa.artifactId)) continue
         this.db
           .prepare(
             'INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?)',
@@ -395,6 +402,7 @@ export class Store {
           .run(sessionId, ba.blockIdx, processor, ba.key, JSON.stringify(ba.value))
       }
       for (const x of result.blockArtifacts ?? []) {
+        if (x.source === 'derived' && rejected.has(x.artifactId)) continue
         this.db
           .prepare(
             'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
@@ -2008,7 +2016,7 @@ export class Store {
 
     const artifacts = this.db
       .prepare(
-        `SELECT a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
+        `SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
          FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?`,
       )
       .all(id) as Array<Record<string, any>>
@@ -2430,6 +2438,136 @@ export class Store {
       )
       .run()
     return r.changes
+  }
+
+  // ---- session-link management (dashboard writes) ----------------------------
+
+  /** Link an existing artifact to a session (user-authored, never overwritten by processors). Clears any prior rejection tombstone. */
+  addSessionLink(sessionId: string, artifactId: string, role: SessionArtifactRole = 'contributed'): boolean {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    const artifact = this.db.prepare('SELECT 1 FROM artifacts WHERE id = ?').get(artifactId)
+    if (!session || !artifact) return false
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
+         VALUES (?, ?, ?, 'user', 1.0, 'dashboard')`,
+      )
+      .run(sessionId, artifactId, role)
+    this.db.prepare('DELETE FROM user_link_overrides WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+    return true
+  }
+
+  /** Reject a session→artifact link: delete existing rows and insert a tombstone so re-enrichment won't recreate it. */
+  rejectSessionLink(sessionId: string, artifactId: string): boolean {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    if (!session) return false
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM session_artifacts WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+      this.db.prepare('DELETE FROM block_artifacts WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO user_link_overrides (session_id, artifact_id, action, created_at)
+           VALUES (?, ?, 'reject', ?)`,
+        )
+        .run(sessionId, artifactId, new Date().toISOString())
+    })()
+    return true
+  }
+
+
+  /** Titles of features the user rejected for this session (for LLM prompt context). */
+  rejectedFeatureTitles(sessionId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT a.title FROM user_link_overrides o
+         JOIN artifacts a ON a.id = o.artifact_id
+         WHERE o.session_id = ? AND o.action = 'reject' AND a.kind = 'feature' AND a.title IS NOT NULL`,
+      )
+      .all(sessionId) as Array<{ title: string }>
+    return rows.map((r) => r.title)
+  }
+
+  /** Create a new feature and link it to a session in one transaction. */
+  createAndLinkFeature(sessionId: string, title: string, parentId?: string): { id: string } | null {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    if (!session) return null
+    let id: string | undefined
+    this.db.transaction(() => {
+      id = this.createFeature(title, parentId).id
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
+           VALUES (?, ?, 'contributed', 'user', 1.0, 'dashboard')`,
+        )
+        .run(sessionId, id)
+    })()
+    return { id: id! }
+  }
+
+  /** Upsert a PR artifact and link it to a session. */
+  upsertAndLinkPr(
+    sessionId: string,
+    repo: string,
+    prNumber: string,
+    meta?: { title?: string; status?: string; externalId?: string },
+  ): { id: string } | null {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    if (!session) return null
+    const id = `pr:${repo}:${prNumber}`
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO artifacts (id, kind, repo, ident, external_id, source, title, status, producer)
+           VALUES (?, 'pr', ?, ?, ?, 'user', ?, ?, 'dashboard')
+           ON CONFLICT(id) DO UPDATE SET
+             title = COALESCE(excluded.title, artifacts.title),
+             status = COALESCE(excluded.status, artifacts.status),
+             external_id = COALESCE(excluded.external_id, artifacts.external_id)`,
+        )
+        .run(id, repo, prNumber, meta?.externalId ?? null, meta?.title ?? null, meta?.status ?? null)
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
+           VALUES (?, ?, 'contributed', 'user', 1.0, 'dashboard')`,
+        )
+        .run(sessionId, id)
+    })()
+    return { id }
+  }
+
+  /** Typeahead for linkable artifacts (excludes those already linked to the session). */
+  suggestLinkableArtifacts(
+    sessionId: string,
+    q: string,
+    kind?: string,
+    limit = 10,
+  ): Array<{ id: string; kind: string; label: string }> {
+    const term = q.trim()
+    if (!term) return []
+    const { sql: searchSql, params } = this.artifactSearchCond(term, 'a')
+    if (kind) params.push(kind)
+    params.push(sessionId)
+    params.push(limit)
+    const rows = this.db
+      .prepare(
+        `SELECT a.id, a.kind, a.ident, a.title, a.repo, a.status
+         FROM artifacts a
+         WHERE ${searchSql}
+           ${kind ? 'AND a.kind = ?' : ''}
+           AND a.id NOT IN (SELECT artifact_id FROM session_artifacts WHERE session_id = ?)
+         ORDER BY CASE a.kind WHEN 'feature' THEN 0 WHEN 'pr' THEN 1 WHEN 'commit' THEN 2 ELSE 3 END,
+                  COALESCE(a.title, a.ident)
+         LIMIT ?`,
+      )
+      .all(...params) as Array<Record<string, any>>
+    return rows.map((r) => ({
+      id: r.id as string,
+      kind: r.kind as string,
+      label:
+        r.kind === 'pr'
+          ? `${r.repo || ''} #${r.ident || ''}${r.title ? ' — ' + r.title : ''}${r.status ? ' (' + r.status + ')' : ''}`
+          : String(r.title || r.ident || r.id),
+    }))
   }
 
   close() {

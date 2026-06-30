@@ -38,7 +38,7 @@ const ghSh = async (cmd: string, args: string[]): Promise<ShResult | null> => {
 
 const noopLog = { debug() {}, info() {}, warn() {}, error() {} }
 function ctx(session: Session): ProcessorContext {
-  return { session, log: noopLog, llmEnabled: false, llm: null, existingFeatures: [], sh: ghSh }
+  return { session, log: noopLog, llmEnabled: false, llm: null, existingFeatures: [], rejectedFeatureTitles: [], sh: ghSh }
 }
 
 describe('outcomes-git Layer 1 explicit reviews', () => {
