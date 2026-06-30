@@ -229,7 +229,7 @@ export class Store {
                 created_at AS createdAt, completed_at AS completedAt,
                 parent_artifact_id AS parentArtifactId
          FROM artifacts
-         WHERE producer = ? AND status IS NOT NULL AND status NOT IN ('merged', 'closed', 'shipped')`,
+         WHERE producer IN (?, 'dashboard') AND status IS NOT NULL AND status NOT IN ('merged', 'closed', 'shipped')`,
       )
       .all(producer) as ArtifactInput[]
     return rows
@@ -240,9 +240,12 @@ export class Store {
       for (const a of result.artifacts ?? []) {
         this.db
           .prepare(
-            `UPDATE artifacts SET status = ?, completed_at = ? WHERE id = ? AND producer = ?`,
+            `UPDATE artifacts SET status = ?, completed_at = ?,
+                    complexity = COALESCE(?, complexity),
+                    complexity_basis = COALESCE(?, complexity_basis)
+             WHERE id = ? AND producer IN (?, 'dashboard')`,
           )
-          .run(a.status ?? null, a.completedAt ?? null, a.id, producer)
+          .run(a.status ?? null, a.completedAt ?? null, a.complexity ?? null, a.complexityBasis ?? null, a.id, producer)
       }
       for (const o of result.outcomes ?? []) {
         const sessionId = (
