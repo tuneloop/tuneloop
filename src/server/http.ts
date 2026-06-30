@@ -4,16 +4,19 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
+import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
 
+export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
+
 /** Read-only JSON API + dashboard SPA over the analyzed store. */
-export function createDashboardServer(store: Store, dbPath: string): Server {
+export function createDashboardServer(store: Store, dbPath: string, sh?: ShFn): Server {
   return createServer((req, res) => {
-    route(req, res, store, dbPath).catch((err) => sendJson(res, 500, { error: (err as Error).message }))
+    route(req, res, store, dbPath, sh ?? null).catch((err) => sendJson(res, 500, { error: (err as Error).message }))
   })
 }
 
-async function route(req: IncomingMessage, res: ServerResponse, store: Store, dbPath: string): Promise<void> {
+async function route(req: IncomingMessage, res: ServerResponse, store: Store, dbPath: string, sh: ShFn | null): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost')
   const path = url.pathname
 
@@ -34,6 +37,69 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     }
     if (path === '/api/features/delete') {
       sendJson(res, 200, { ok: store.deleteFeature(String(body.id)) })
+      return
+    }
+    if (path === '/api/session-links/add') {
+      const { sessionId, artifactId, role } = body
+      if (!sessionId || !artifactId) {
+        sendJson(res, 400, { error: 'sessionId and artifactId required' })
+        return
+      }
+      const ok = store.addSessionLink(sessionId, artifactId, role || 'contributed')
+      sendJson(res, ok ? 200 : 404, { ok })
+      return
+    }
+    if (path === '/api/session-links/create-feature') {
+      const { sessionId, title, parentId } = body
+      if (!sessionId || !String(title ?? '').trim()) {
+        sendJson(res, 400, { error: 'sessionId and title required' })
+        return
+      }
+      const result = store.createAndLinkFeature(sessionId, String(title).trim(), parentId || undefined)
+      sendJson(res, result ? 200 : 404, result ?? { error: 'session not found' })
+      return
+    }
+    if (path === '/api/session-links/add-pr') {
+      const { sessionId, repo, prNumber } = body
+      if (!sessionId || !repo || !prNumber || !/^\d+$/.test(String(prNumber))) {
+        sendJson(res, 400, { error: 'sessionId, repo, and a numeric prNumber required' })
+        return
+      }
+      const prRef = `${repo}#${prNumber}`
+      let title: string | undefined
+      let status: string | undefined
+      let externalId: string | undefined
+      let warning: string | undefined
+      if (sh) {
+        const ghRes = await sh('gh', ['pr', 'view', String(prNumber), '--repo', repo, '--json', 'title,state,url'])
+        if (ghRes === null) {
+          warning = 'gh CLI not available — PR not validated'
+        } else if (ghRes.code !== 0) {
+          const detail = ghRes.stdout.trim().split('\n')[0] || 'not found'
+          sendJson(res, 404, { error: `PR ${prRef}: ${detail}` })
+          return
+        } else {
+          try {
+            const pr = JSON.parse(ghRes.stdout) as { title?: string; state?: string; url?: string }
+            title = pr.title ?? undefined
+            status = pr.state?.toLowerCase() ?? undefined
+            externalId = pr.url ?? undefined
+          } catch { /* parse failed — proceed without metadata */ }
+        }
+      }
+      const result = store.upsertAndLinkPr(sessionId, repo, String(prNumber), { title, status, externalId })
+      if (!result) { sendJson(res, 404, { error: 'session not found' }); return }
+      sendJson(res, 200, { ...result, warning })
+      return
+    }
+    if (path === '/api/session-links/remove') {
+      const { sessionId, artifactId } = body
+      if (!sessionId || !artifactId) {
+        sendJson(res, 400, { error: 'sessionId and artifactId required' })
+        return
+      }
+      const ok = store.rejectSessionLink(sessionId, artifactId)
+      sendJson(res, ok ? 200 : 404, { ok })
       return
     }
     sendJson(res, 404, { error: 'not found' })
@@ -337,6 +403,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const lim = parseInt(url.searchParams.get('limit') ?? '', 10)
     const limit = Number.isFinite(lim) && lim > 0 ? Math.min(lim, 25) : 10
     sendJson(res, 200, store.suggestArtifacts(q, kind, limit))
+    return
+  }
+  if (path === '/api/session-links/suggest') {
+    const sessionId = url.searchParams.get('sessionId')
+    const q = url.searchParams.get('q') ?? ''
+    const kind = url.searchParams.get('kind') || undefined
+    if (!sessionId) {
+      sendJson(res, 400, { error: 'sessionId required' })
+      return
+    }
+    sendJson(res, 200, store.suggestLinkableArtifacts(sessionId, q, kind))
     return
   }
   if (path === '/api/artifacts') {

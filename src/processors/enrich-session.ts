@@ -79,7 +79,7 @@ export const enrichSession: Processor = {
     if (!llm) return {}
 
     const blocks = deterministicBlocks(session)
-    const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks)
+    const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks, ctx.rejectedFeatureTitles)
     const completion = await llm.complete({ system, user, maxTokens: 2200 })
     const selfCost = { tokens: completion.usage, usd: costOfUsage(llm.provider, llm.model, completion.usage) }
 
@@ -258,7 +258,7 @@ registerProcessor(enrichSession)
 
 // ---- prompt -----------------------------------------------------------------
 
-function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]): { system: string; user: string } {
+function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], rejectedTitles?: string[]): { system: string; user: string } {
   const system =
     'You analyze a single AI coding session, classify it, and maintain a hierarchical product-feature map. ' +
     'Respond with ONLY a single JSON object — no markdown fences, no commentary.'
@@ -280,6 +280,13 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[]):
     '{...} = the repos that feature spans, "{any repo}" = unscoped/global):',
     featureTree,
     '',
+    ...(rejectedTitles?.length
+      ? [
+          'The user has REJECTED the following feature associations for this session. Do NOT propose them or semantically similar features:',
+          ...rejectedTitles.map((t) => `- "${t}"`),
+          '',
+        ]
+      : []),
     'Return a JSON object with EXACTLY these fields:',
     '{',
     '  "title": a short Title-Case phrase naming the OVERALL intent of the session,',

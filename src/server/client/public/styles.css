@@ -533,6 +533,24 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-search.on .tx-search-results { display: inline-flex; }
 .tx-hl { background: #fde68a !important; border-radius: 2px; padding: 0 1px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 .tx-hl.active { background: #f97316 !important; color: #fff !important; outline: 2px solid #f97316; }
+/* ---- Session link-add UI ---- */
+.link-add-btn { border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 4px; width: 20px; height: 20px; font-size: 14px; line-height: 1; cursor: pointer; vertical-align: middle; margin-left: 6px; padding: 0; }
+.link-add-btn:hover { background: #dfe9e0; }
+.link-add-area { display: none; margin: 6px 0; }
+.link-add-area.on { display: block; }
+.link-ac { position: relative; }
+.link-ac-input { width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; background: var(--paper); color: var(--ink); }
+.link-ac-input:focus { border-color: var(--emerald); outline: none; }
+.link-ac-input::placeholder { color: var(--muted); }
+.link-ac-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 100; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; margin-top: 2px; max-height: 180px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+.link-ac-menu:empty { display: none; }
+.link-ac-item { padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.link-ac-item:hover { background: #dfe9e0; color: var(--emerald); }
+.link-ac-create { font-style: italic; color: var(--emerald); }
+.link-remove-btn { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 0 0 4px; vertical-align: middle; }
+.link-remove-btn:hover { color: var(--red); }
+.link-ac-error { color: var(--red); font-size: 11px; margin-top: 4px; }
+.link-ac-spinner { color: var(--muted); font-size: 11px; margin-top: 4px; font-style: italic; }
 
 /* Highlights digest — the Dashboard's default view: computed insights about your
    recent AI work, set as editorial sentences with the real numbers as emerald

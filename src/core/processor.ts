@@ -63,6 +63,8 @@ export interface ProcessorContext {
   llm: LlmClient | null
   /** Existing features in the store, to bias derived feature linkage toward. */
   existingFeatures: FeatureRef[]
+  /** Titles of features the user has rejected for this session (tombstoned). */
+  rejectedFeatureTitles: string[]
   /** Run a local binary (git, gh). Resolves null if the binary is missing. */
   sh: (cmd: string, args: string[], opts?: { cwd?: string }) => Promise<ShResult | null>
 }
