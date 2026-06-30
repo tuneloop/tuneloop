@@ -71,6 +71,10 @@ function yAxisLabel(text, padT, plotH) {
 // The rate reads off as the green fraction; the bar's height shows volume.
 export function barChart(buckets, points, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
+  // fullAxis() fills every bucket in a windowed range even when nothing landed in
+  // it, so a non-empty `buckets` doesn't imply data — guard on real points too, or
+  // an empty window (e.g. no sessions in the last 7 days) draws a bare axis frame.
+  if (!points || !points.some(function (p) { return p && p.denom > 0; })) return '<div class="empty">No sessions in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   var byBucket = {};
@@ -111,6 +115,8 @@ export function barChart(buckets, points, yLabel?) {
 // series = [{label,color,points:[{bucket,num,denom,rate}]}].
 export function groupedBarChart(buckets, series, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
+  // See barChart: a windowed axis is always full, so check for real points.
+  if (!series || !series.some(function (s) { return (s.points || []).some(function (p) { return p && p.denom > 0; }); })) return '<div class="empty">No sessions in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   var idx = series.map(function (s) {
@@ -160,6 +166,8 @@ export function groupedBarChart(buckets, series, yLabel?) {
 // this percent axis.
 export function lineChart(buckets, lines, opts?, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No sessions in range.</div>';
+  // See barChart: a windowed axis is always full, so check for real plottable points.
+  if (!lines || !lines.some(function (l) { return (l.points || []).some(function (p) { return p && p.rate != null && p.denom > 0; }); })) return '<div class="empty">No sessions in range.</div>';
   // A rotated y-axis caption needs a wider left margin so it clears the % ticks.
   var W = 920, H = 240, padL = yLabel ? 48 : 36, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
@@ -219,6 +227,8 @@ export function lineChart(buckets, lines, opts?, yLabel?) {
 // so the bar is fully emerald.
 export function stackChart(buckets, points, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
+  // See barChart: a windowed axis is always full, so check for real points.
+  if (!points || !points.some(function (p) { return p && p.total > 0; })) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 200, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   var byB = {};
@@ -261,6 +271,8 @@ export function stackChart(buckets, points, format, yLabel?) {
 // hover tooltip. Series should be pre-sorted (biggest first → stacked at the bottom).
 export function stackedBarChart(buckets, series, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
+  // See barChart: a windowed axis is always full, so check for real points.
+  if (!series || !series.some(function (s) { return (s.points || []).some(function (p) { return (p.y || 0) > 0; }); })) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   var idx = series.map(function (s) {
@@ -308,6 +320,9 @@ export function stackedBarChart(buckets, series, format, yLabel?) {
 // a gap), so lines connect through quiet periods. Used by spend and sessions.
 export function valueLineChart(buckets, lines, format, yLabel?) {
   if (!buckets || !buckets.length) return '<div class="empty">No data in range.</div>';
+  // See barChart: a windowed axis is always full and this chart 0-fills gaps, so a
+  // bare frame would otherwise draw as a flat zero line — guard on a non-zero point.
+  if (!lines || !lines.some(function (l) { return (l.points || []).some(function (p) { return (p.y || 0) !== 0; }); })) return '<div class="empty">No data in range.</div>';
   var W = 920, H = 240, padL = 48, padR = 12, padT = 16, padB = 28;
   var plotW = W - padL - padR, plotH = H - padT - padB, n = buckets.length;
   var xOf = function (i) { return padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW); };

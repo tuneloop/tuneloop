@@ -71,3 +71,33 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(row.complexity).toBe(120) // the earlier non-null churn is preserved, not blanked
   })
 })
+
+describe('summary.enrichmentRan', () => {
+  it('is true only once an LLM-backed processor run is recorded', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+
+    // Sessions analyzed but nothing enriched yet → false.
+    expect(store.summary().enrichmentRan).toBe(false)
+
+    // A non-LLM processor run (model = null) is not enrichment.
+    store.persistResult('s1', 'outcomes-git', 1, 'h1', null, {})
+    expect(store.summary().enrichmentRan).toBe(false)
+
+    // An LLM-backed run records its model — the durable "enrichment ran" signal,
+    // independent of which annotation dimensions the enricher happens to emit.
+    store.persistResult('s1', 'enrich-session', 1, 'h1', 'some-llm', {})
+    expect(store.summary().enrichmentRan).toBe(true)
+  })
+})
+
+describe('summary.lastAnalyzedAt', () => {
+  it('is null until recorded, then round-trips the stamped timestamp', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    expect(store.summary().lastAnalyzedAt).toBe(null)
+    store.setMeta('last_analyze_at', '2026-06-30T12:00:00.000Z')
+    expect(store.summary().lastAnalyzedAt).toBe('2026-06-30T12:00:00.000Z')
+  })
+})

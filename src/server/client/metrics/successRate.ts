@@ -55,7 +55,7 @@ export function renderSrControls() {
   });
   $('#sr-controls').innerHTML =
     '<div class="sr-ctrl-row"><span class="sr-lbl">Count as success</span>' +
-      '<span class="sr-checks">' + (checks || '<span class="empty">no outcomes yet</span>') + '</span></div>' +
+      '<span class="sr-checks">' + (checks || '<span class="empty">No outcomes recorded yet — run analysis with a provider key to add LLM-judged outcomes.</span>') + '</span></div>' +
     '<div class="sr-ctrl-row">' +
       '<span class="sr-by-ctrl"><span class="sr-lbl">Bucket</span><span class="seg" id="sr-bucket">' + bucketBtns + '</span></span>' +
       filterRowHtml('sr', state.sr.filters) +
