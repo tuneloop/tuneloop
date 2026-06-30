@@ -10,7 +10,7 @@ import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
 import { createLlmClient } from '../llm'
-import { computeSessionCost, PRICE_TABLE_VERSION } from '../pricing/pricing'
+import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
@@ -43,10 +43,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const store = new Store(db)
   const sh = makeSh()
 
-  // Load the OpenRouter price backfill every run (cache-first) so models missing
-  // from the static table are priced consistently for both session and self-cost.
-  // Best-effort, no session data; AIVUE_NO_PRICE_FETCH keeps static runs offline.
-  if (!process.env.AIVUE_NO_PRICE_FETCH) await loadOpenRouterPrices(config.dataDir, log)
+  // Fetch the OpenRouter price backfill only to price an enrichment model the
+  // static table lacks; static-only runs stay offline.
+  if (config.llm && !priceFor(config.llm.provider, config.llm.model)) await loadOpenRouterPrices(config.dataDir, log)
 
   const processors = getProcessors()
   store.registerFacets('intrinsic', INTRINSIC_FACETS)
@@ -288,11 +287,10 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
 
 /**
  * First-run notice when no enrichment provider is configured. Discoverability,
- * not a gate — it never blocks. The multi-line form prints only on an interactive
- * terminal (CI/pipes get one line); AIVUE_NO_HINT silences it.
+ * not a gate; the multi-line form prints only on an interactive terminal.
  */
 function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
-  if (process.env.AIVUE_NO_HINT || !process.stdout.isTTY) {
+  if (!process.stdout.isTTY) {
     log.info('LLM enrichment off (set AIVUE_LLM_PROVIDER + key to enable). Static analysis only.')
     return
   }

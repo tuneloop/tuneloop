@@ -11,7 +11,7 @@ export interface ModelPrice {
 }
 
 /** Bump when models.json rates change so stored costs can be recomputed. */
-export const PRICE_TABLE_VERSION = '2026-06-25'
+export const PRICE_TABLE_VERSION = '2026-06-30'
 
 type Table = Record<string, Record<string, ModelPrice>>
 const TABLE = models as unknown as Table
@@ -31,8 +31,8 @@ export function priceFor(provider: string, model: string): ModelPrice | undefine
   for (const key of Object.keys(byProvider).sort((a, b) => b.length - a.length)) {
     if (model.startsWith(key)) return byProvider[key]
   }
-  // Static table missed — try the OpenRouter backfill (loaded once per run in
-  // analyze.ts). Empty → undefined → $0 when opted out or offline with no cache.
+  // Static table missed — try the OpenRouter backfill (loaded by analyze.ts only
+  // for an unpriced enrichment model). Empty → undefined → $0.
   return backfillPrice(provider, model)
 }
 

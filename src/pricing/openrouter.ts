@@ -4,11 +4,10 @@ import type { ModelPrice } from './pricing'
 
 /**
  * OpenRouter price backfill: a cache-first loader for OpenRouter's free, no-auth
- * model catalog (~400 models across every vendor), used to price models the
- * static `models.json` doesn't list — both analyzed-session cost and enrichment
- * self-cost. Loaded once per run regardless of provider (see analyze.ts), so
- * pricing is consistent across runs. Best-effort and never blocking: a
- * failed/offline fetch falls back to a stale cache or an empty table → $0.
+ * model catalog (~400 models across every vendor), used to price an enrichment
+ * model the static `models.json` doesn't list (loaded only then; see analyze.ts).
+ * Best-effort and never blocking: a failed/offline fetch falls back to a stale
+ * cache or an empty table → $0.
  *
  * `priceFor` (pricing.ts) consults this AFTER the static table, so the static
  * rates always win and this only fills genuine gaps.

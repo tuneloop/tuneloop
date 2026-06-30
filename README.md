@@ -95,10 +95,10 @@ The cost of enrichment itself (one cheap call per session) is reported as
 **Analysis spend** in the summary. Native and common models are priced from a
 built-in table; for other models aivue fills the gap from OpenRouter's public,
 no-auth price list (cached under `~/.aivue/`, refreshed daily) — unknown models
-just read `$0`. Nothing here blocks a run
+just read `$0`. It's best-effort and never blocks a run.
 
 If no provider is configured, `analyze` runs static-only and prints a one-time
-hint on how to turn enrichment on (silence it with `AIVUE_NO_HINT=1`).
+hint on how to turn enrichment on.
 
 ## What it captures (out of the box)
 
@@ -112,12 +112,11 @@ hint on how to turn enrichment on (silence it with `AIVUE_NO_HINT=1`).
 
 Transcripts are processed locally and results are written to a local SQLite
 store (`~/.aivue/` by default). Your **session data** is sent nowhere unless you
-enable LLM enrichment, and then only to the provider whose key you supply. (aivue
-does fetch a public, no-auth model **price list** from OpenRouter once a day to
-cost models its built-in table lacks — that request carries no session data;
-disable it with `AIVUE_NO_PRICE_FETCH=1`.) To keep everything on your machine,
-run enrichment against a local model (`--llm-provider ollama`) — no key, no
-session data leaves the host.
+enable LLM enrichment, and then only to the provider whose key you supply. (When
+enrichment uses a model its built-in table can't price, aivue fetches a public,
+no-auth **price list** from OpenRouter — no session data; static-only runs make
+no network calls.) To keep everything on your machine, run enrichment against a
+local model (`--llm-provider ollama`) — no key, no session data leaves the host.
 
 ## Run from source
 

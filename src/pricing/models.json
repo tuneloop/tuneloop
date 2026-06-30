@@ -11,6 +11,7 @@
   "openai": {
     "gpt-5.5":            { "input": 5.0,  "output": 30.0, "cache_write_5m": 5.0,  "cache_write_1h": 5.0,  "cache_read": 0.5 },
     "gpt-5.4":            { "input": 2.5,  "output": 15.0, "cache_write_5m": 2.5,  "cache_write_1h": 2.5,  "cache_read": 0.25 },
+    "gpt-5.4-mini":       { "input": 0.75, "output": 4.5,  "cache_write_5m": 0.75, "cache_write_1h": 0.75, "cache_read": 0.075 },
     "gpt-5.2":            { "input": 2.5,  "output": 15.0, "cache_write_5m": 2.5,  "cache_write_1h": 2.5,  "cache_read": 0.25 },
     "gpt-5.3-codex":      { "input": 1.75, "output": 14.0, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175 },
     "gpt-5.2-codex":      { "input": 1.75, "output": 14.0, "cache_write_5m": 1.75, "cache_write_1h": 1.75, "cache_read": 0.175 },
