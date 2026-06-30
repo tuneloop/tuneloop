@@ -99,7 +99,7 @@ Status: **planned, no code written.** Branch: `pr-review-linkage` (off `main`).
 
 ## Goal
 
-aivue today links a PR to the session that **created/merged** it. We want to also
+tuneloop today links a PR to the session that **created/merged** it. We want to also
 link a PR to the session(s) that **reviewed** it — a new `reviewed` relationship —
 so the dashboard can answer "who reviewed PR X" and "what did reviewing cost."
 

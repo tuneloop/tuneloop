@@ -3,19 +3,20 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>aivue</title>
+<title>tuneloop</title>
+<link rel="icon" href="/client/favicon.svg" type="image/svg+xml" />
 <link rel="stylesheet" href="/client/styles.css" />
 </head>
 <body>
-<header class="top">
-  <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
-    <path d="M 23.5 11 A 8.5 8.5 0 1 0 24.5 16" fill="none" stroke="#10b981" stroke-width="3.2" stroke-linecap="round"/>
-    <path d="M 24.5 8.5 L 24.5 12.5 L 20.5 12.5" fill="none" stroke="#10b981" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+<header class="top"><div class="inner">
+  <svg class="logo" width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+    <path d="M 23.5 11 A 8.5 8.5 0 1 0 24.5 16" fill="none" stroke="#0f7a55" stroke-width="3.2" stroke-linecap="round"/>
+    <path d="M 24.5 8.5 L 24.5 12.5 L 20.5 12.5" fill="none" stroke="#0f7a55" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
-  <span class="brand">aivue</span>
-  <span class="tag">outcomes, not tokens</span>
+  <span class="brand">tuneloop</span>
+  <span class="masthead-tag">Count outcomes, not tokens</span>
   <span class="meta" id="meta"></span>
-</header>
+</div></header>
 <nav class="tabnav"><div class="inner">
   <button class="tab on" data-view="highlights">Highlights</button>
   <button class="tab" data-view="dashboard">Dashboard</button>
@@ -55,6 +56,13 @@
     </section>
   </section>
 </main>
+<footer class="site-footer">
+  <span>Built by the team at <a href="https://tuneloop.io" target="_blank" rel="noopener">Tuneloop</a></span>
+  <span class="dot">·</span>
+  <a href="https://github.com/Relvy-AI/tuneloop" target="_blank" rel="noopener">★ Star on GitHub</a>
+  <span class="dot">·</span>
+  <a href="mailto:founders@tuneloop.io?subject=tuneloop%20feedback">Send feedback</a>
+</footer>
 <div class="overlay" id="overlay"></div>
 <div class="drawer" id="drawer"><div class="drawer-inner"><div id="drawerBody"></div></div></div>
 <script src="/client/app.js"></script>

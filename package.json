@@ -1,11 +1,20 @@
 {
-  "name": "aivue",
-  "version": "0.0.1",
+  "name": "tuneloop",
+  "version": "0.1.0",
   "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens.",
   "license": "MIT",
+  "author": "Tuneloop (https://tuneloop.io)",
+  "homepage": "https://github.com/Relvy-AI/tuneloop#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Relvy-AI/tuneloop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Relvy-AI/tuneloop/issues"
+  },
   "type": "module",
   "bin": {
-    "aivue": "./dist/cli.js"
+    "tuneloop": "./dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,6 +26,9 @@
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prebuild": "node scripts/clean.mjs",
     "build": "tsup",
@@ -24,14 +36,18 @@
     "watch": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "typecheck:client": "tsc -p src/server/client --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "claude-code",
+    "codex",
     "ai",
+    "ai-agents",
     "analytics",
     "llm",
     "observability",
+    "developer-tools",
     "tuneloop"
   ],
   "dependencies": {

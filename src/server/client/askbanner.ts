@@ -18,7 +18,7 @@ var SECTION_SLOT = {
 };
 var ALL_SLOTS = ['ask-dashboard', 'ask-artifacts', 'ask-sessions'];
 
-function seenKey(section) { return 'aivue.seen.' + section; }
+function seenKey(section) { return 'tuneloop.seen.' + section; }
 function seen(section) { try { return !!localStorage.getItem(seenKey(section)); } catch (e) { return false; } }
 function markSeen(section) { try { localStorage.setItem(seenKey(section), '1'); } catch (e) { /* private mode */ } }
 

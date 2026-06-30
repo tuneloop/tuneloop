@@ -292,14 +292,14 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
  */
 function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
   if (!process.stdout.isTTY) {
-    log.info('LLM enrichment off (set AIVUE_LLM_PROVIDER + key to enable). Static analysis only.')
+    log.info('LLM enrichment off (set TUNELOOP_LLM_PROVIDER + key to enable). Static analysis only.')
     return
   }
   process.stdout.write(
     [
       '',
       'LLM enrichment is off — static analysis only. Enable it with your own key, e.g.:',
-      '    export AIVUE_LLM_PROVIDER=openrouter',
+      '    export TUNELOOP_LLM_PROVIDER=openrouter',
       '    export OPENROUTER_API_KEY=sk-or-...',
       '  Providers: anthropic, openai, openrouter, groq, deepseek, gemini, ollama (see README).',
       '',

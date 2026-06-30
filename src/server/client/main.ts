@@ -55,7 +55,11 @@ function init() {
   get('/api/overview').then(function (o) {
     state.overview = o;
     var range = o.firstAt && o.lastAt ? dayOf(o.firstAt) + ' → ' + dayOf(o.lastAt) : '';
-    $('#meta').innerHTML = (range ? esc(range) + '<br>' : '') + esc(o.dbPath || '');
+    // Tilde the home dir so screenshots don't leak the username.
+    var dbPath = (o.dbPath || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/');
+    $('#meta').innerHTML =
+      (range ? '<span class="meta-range">' + esc(range) + '</span>' : '') +
+      (dbPath ? '<span class="meta-path">' + esc(dbPath) + '</span>' : '');
     loadFacets().then(function () {
       // Build the sessions filter bar. If we landed on the sessions view, restore
       // its filter from the URL (facets are needed to populate the selects, so this

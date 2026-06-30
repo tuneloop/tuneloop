@@ -11,13 +11,22 @@ body {
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; font-weight: 600; }
 a { color: var(--emerald); }
-.top {
-  background: var(--ink); color: #f3efe6; padding: 14px 28px;
-  display: flex; align-items: center; gap: 14px;
+.top { background: var(--paper); color: var(--ink); border-bottom: 1px solid var(--line); }
+.top .inner {
+  max-width: 1180px; margin: 0 auto; padding: 19px 28px;
+  display: flex; align-items: center; gap: 12px;
 }
-.top .brand { font-family: Georgia, serif; font-size: 22px; font-weight: 600; letter-spacing: .2px; }
-.top .tag { color: #b8b2a4; font-size: 13px; font-style: italic; }
-.top .meta { margin-left: auto; text-align: right; color: #b8b2a4; font-size: 12px; }
+.top .logo { flex: none; display: block; }
+.top .brand { font-family: Georgia, "Times New Roman", serif; font-size: 23px; font-weight: 600; letter-spacing: -.01em; color: var(--ink); }
+.top .masthead-tag {
+  padding: 3px 0 3px 13px; border-left: 1px solid var(--line);
+  color: var(--muted); font-size: 14px;
+}
+.top .meta {
+  margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  color: var(--muted); font-size: 12px;
+}
+.top .meta .meta-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--gray); }
 .tabnav { border-bottom: 1px solid var(--line); background: var(--paper); }
 .tabnav .inner { max-width: 1180px; margin: 0 auto; padding: 0 28px; display: flex; gap: 2px; }
 .tab { border: 0; background: transparent; padding: 14px 18px; font-family: Georgia, serif; font-size: 15px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -601,3 +610,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .ask-about { color: var(--muted); flex: 1; }
 .ask-x { flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 4px; }
 .ask-x:hover { color: var(--ink); }
+
+/* Site footer — Tuneloop awareness funnel (attribution + GitHub + feedback). */
+.site-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; padding: 30px 28px 38px; margin-top: 36px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.site-footer a { color: var(--emerald); text-decoration: none; }
+.site-footer a:hover { text-decoration: underline; }
+.site-footer .dot { color: var(--line); }
