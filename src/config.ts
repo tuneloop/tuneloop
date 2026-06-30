@@ -1,6 +1,6 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { PROVIDERS, PROVIDER_NAMES } from './llm/providers'
+import { PROVIDERS } from './llm/providers'
 
 /** Resolved runtime configuration for a single invocation. */
 export interface AivueConfig {
@@ -22,21 +22,19 @@ function resolveLlm(o?: LlmOverrides): AivueConfig['llm'] {
   const provider = (o?.provider ?? process.env.AIVUE_LLM_PROVIDER)?.toLowerCase()
   if (!provider) return null
   const preset = PROVIDERS[provider]
-  if (!preset) throw new Error(`unknown LLM provider: ${provider} (supported: ${PROVIDER_NAMES.join(', ')})`)
 
   // Key is env-only: AIVUE_LLM_API_KEY wins, else the preset's conventional env.
   // Keyless local endpoints (Ollama) get a placeholder the SDK accepts.
-  const apiKey = process.env.AIVUE_LLM_API_KEY ?? process.env[preset.keyEnv] ?? (preset.requiresKey === false ? 'local' : '')
-  if (preset.requiresKey !== false && !apiKey) return null
+  const apiKey =
+    process.env.AIVUE_LLM_API_KEY ?? (preset ? process.env[preset.keyEnv] : undefined) ?? (preset?.requiresKey === false ? 'local' : '')
+  // Needs-a-key but none → stay static-only (the analyze hint covers it). resolveLlm
+  // never throws: unknown provider / missing base-URL / empty model are recoverable
+  // misconfig that createLlmClient validates inside analyze's graceful try/catch, so a
+  // typo can't abort the run — nor the read-only `serve`, which builds no client.
+  if (preset && preset.requiresKey !== false && !apiKey) return null
 
-  const model = o?.model ?? process.env.AIVUE_LLM_MODEL ?? preset.defaultModel
-  const baseURL = o?.baseURL ?? process.env.AIVUE_LLM_BASE_URL ?? preset.baseURL
-  if (preset.shape === 'openai-compatible' && !baseURL) {
-    throw new Error(`provider "${provider}" needs a base URL — set AIVUE_LLM_BASE_URL or --llm-base-url`)
-  }
-  if (!model) {
-    throw new Error(`provider "${provider}" needs a model — set AIVUE_LLM_MODEL or --llm-model`)
-  }
+  const model = o?.model ?? process.env.AIVUE_LLM_MODEL ?? preset?.defaultModel ?? ''
+  const baseURL = o?.baseURL ?? process.env.AIVUE_LLM_BASE_URL ?? preset?.baseURL
   return { provider, model, apiKey, baseURL }
 }
 

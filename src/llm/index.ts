@@ -10,8 +10,14 @@ export { PROVIDERS, PROVIDER_NAMES } from './providers'
 /** Build an LLM client from config, or null if enrichment isn't configured. */
 export function createLlmClient(llm: AivueConfig['llm']): LlmClient | null {
   if (!llm) return null
+  // Sole validator for recoverable enrichment misconfig: these throws land in
+  // analyze's try/catch and degrade to static-only, instead of aborting the command.
   const preset = PROVIDERS[llm.provider]
   if (!preset) throw new Error(`unknown LLM provider: ${llm.provider} (supported: ${Object.keys(PROVIDERS).join(', ')})`)
+  if (!llm.model) throw new Error(`provider "${llm.provider}" needs a model — set AIVUE_LLM_MODEL or --llm-model`)
+  if (preset.shape === 'openai-compatible' && !llm.baseURL) {
+    throw new Error(`provider "${llm.provider}" needs a base URL — set AIVUE_LLM_BASE_URL or --llm-base-url`)
+  }
   const opts: ClientOpts = { provider: llm.provider, baseURL: llm.baseURL }
   switch (preset.shape) {
     case 'anthropic':
