@@ -286,8 +286,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
 }
 
 /**
- * First-run notice when no enrichment provider is configured. Discoverability,
- * not a gate; the multi-line form prints only on an interactive terminal.
+ * Notice when no enrichment provider is configured — prints whenever enrichment
+ * is off (not just the first run). Discoverability, not a gate; the multi-line
+ * form with setup hints prints only on an interactive terminal.
  */
 function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
   if (!process.stdout.isTTY) {
@@ -297,13 +298,10 @@ function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
   process.stdout.write(
     [
       '',
-      'ℹ LLM enrichment is off — you still get tokens, cost, tools, files, and git/PR',
-      '  outcomes, but not use-case / complexity / autonomy / success signals.',
-      '  Enable it with your own key, e.g.:',
-      '      export AIVUE_LLM_PROVIDER=openrouter',
-      '      export OPENROUTER_API_KEY=sk-or-...',
-      '  Presets: anthropic · openai · openrouter · groq · deepseek · gemini · ollama (see README).',
-      '  Continuing with static analysis only…',
+      'LLM enrichment is off — static analysis only. Enable it with your own key, e.g.:',
+      '    export AIVUE_LLM_PROVIDER=openrouter',
+      '    export OPENROUTER_API_KEY=sk-or-...',
+      '  Providers: anthropic, openai, openrouter, groq, deepseek, gemini, ollama (see README).',
       '',
     ].join('\n') + '\n',
   )

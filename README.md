@@ -86,10 +86,18 @@ AIVUE_LLM_API_KEY=… npx aivue analyze --llm-model my-model
 ```
 
 Enrichment uses a single structured **tool call** per session, so pick a
-**tool-call-capable model** (all the hosted defaults above qualify; for local
-`ollama`, prefer `qwen2.5` / `llama3.1` over tiny non-tool models). Flags
+**tool-call-capable model** (all the hosted defaults above qualify). Flags
 `--llm-provider` / `--llm-model` / `--llm-base-url` override the env for one run;
 the API key is always env-only.
+
+**Local Ollama** needs two things 
+(1) A bigger context window — the enrichment prompt is ~4–6k tokens, but Ollama's default
+(~2k) silently truncates it, dropping the tool schema. Start the server with
+`OLLAMA_CONTEXT_LENGTH=8192 ollama serve` (or a Modelfile `PARAMETER num_ctx
+8192`)
+(2) A capable model — use a tool-strong ≥7B like `qwen2.5:7b` or
+`llama3.1`; tiny models (e.g. `qwen2.5:3b`) and reasoning-heavy ones tool-call
+unreliably.
 
 The cost of enrichment itself (one cheap call per session) is reported as
 **Analysis spend** in the summary. Native and common models are priced from a
