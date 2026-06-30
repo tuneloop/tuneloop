@@ -6,6 +6,7 @@ import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '.
 import type { Session } from '../core/model'
 import { isSyntheticUser, stripReminders } from '../core/turns'
 import { costOfUsage } from '../pricing/pricing'
+import type { JsonSchema } from '../llm/types'
 import type {
   AnnotationInput,
   ArtifactInput,
@@ -80,12 +81,18 @@ export const enrichSession: Processor = {
 
     const blocks = deterministicBlocks(session)
     const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks, ctx.rejectedFeatureTitles)
-    const completion = await llm.complete({ system, user, maxTokens: 2200 })
-    const selfCost = { tokens: completion.usage, usd: costOfUsage(llm.provider, llm.model, completion.usage) }
+    const { data: parsed, usage } = await llm.completeStructured({
+      system,
+      user,
+      schema: outputSchema(blocks.length),
+      toolName: TOOL_NAME,
+      // Headroom for the full structured output on large sessions
+      maxTokens: 4096,
+    })
+    const selfCost = { tokens: usage, usd: costOfUsage(llm.provider, llm.model, usage) }
 
-    const parsed = parseJson(completion.text)
-    if (!parsed) {
-      ctx.log.warn(`enrich-session: unparseable LLM output for ${session.id}`)
+    if (Object.keys(parsed).length === 0) {
+      ctx.log.warn(`enrich-session: empty LLM output for ${session.id}`)
       return { selfCost } // record the spend; don't re-charge on every run
     }
 
@@ -261,7 +268,7 @@ registerProcessor(enrichSession)
 function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], rejectedTitles?: string[]): { system: string; user: string } {
   const system =
     'You analyze a single AI coding session, classify it, and maintain a hierarchical product-feature map. ' +
-    'Respond with ONLY a single JSON object — no markdown fences, no commentary.'
+    `Report your analysis by calling the ${TOOL_NAME} tool; its parameters define every field and its allowed values.`
 
   const featureTree = features.length
     ? renderFeatureTree(features)
@@ -287,19 +294,8 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], 
           '',
         ]
       : []),
-    'Return a JSON object with EXACTLY these fields:',
-    '{',
-    '  "title": a short Title-Case phrase naming the OVERALL intent of the session,',
-    `  "complexity": one of [${COMPLEXITY.join(', ')}],`,
-    `  "autonomy": one of [${AUTONOMY.join(', ')}],`,
-    '  "intent_summary": one sentence stating what the user set out to accomplish (the goal, not the decisions),',
-    '  "decisions": string[] — the KEY decisions made during the session, newest insight last; [] if none,',
-    `  "success": one of [${SUCCESS.join(', ')}],`,
-    '  "features": [ { "matched_feature_id": "<id of the most specific existing feature this session advanced, or empty>", "new_title": "<title for a NEW feature when none fit, else empty>", "parent_id": "<existing feature id to nest the new feature under, or empty for top-level>" } ],',
-    '  "feature_revisions": [ { "feature_id": "<a feature THIS session advances, from the features above>", "new_parent_id": "<existing feature id to reparent it under, \\"root\\" for top-level, or empty to keep>" } ],',
-    `  "use_case_runs": [ { "from": <block idx>, "to": <block idx>, "use_case": one of [${USE_CASES.join(', ')}] } ],`,
-    '  "feature_runs": [ { "from": <block idx>, "to": <block idx>, "feature": <0-based index into the "features" array above> } ]',
-    '}',
+    `Fill the ${TOOL_NAME} tool. Field shapes and allowed values are defined by the tool schema; the guidance below`,
+    'explains how to choose each value.',
     'How to write the title — name the OVERALL intent of the WHOLE session in a short Title-Case noun phrase',
     '(about 3–7 words). It should read like a PR title or a changelog heading: what the session set out to',
     'accomplish, taken as a whole — not its first message, not a play-by-play, not a full sentence.',
@@ -367,10 +363,82 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], 
     '- SPARSE: emit a run ONLY for blocks that substantially advanced a feature; chores/research/fixups belong to no feature — leave them out.',
     '- "feature" is the 0-based index into the "features" array above. Runs must not overlap. Most sessions need 0–2 feature_runs.',
     '- The session is credited a feature ONLY through feature_runs, so give every feature you list in "features" at least one feature_run; a feature with no run is dropped.',
-    'Output ONLY the JSON object.',
   ].join('\n')
 
   return { system, user }
+}
+
+const TOOL_NAME = 'record_analysis'
+
+/**
+ * The structured-output contract: the single source of truth for the SHAPE of
+ * enrichment output (field names, types, allowed values), exposed as the forced
+ * tool's input schema; the prompt carries only the classification guidance. The
+ * parsers below still normalize defensively, so this is a strong hint, not a
+ * guarantee (providers vary in how strictly they honor it).
+ */
+function outputSchema(nBlocks: number): JsonSchema {
+  const lastBlock = Math.max(0, nBlocks - 1)
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['title', 'complexity', 'autonomy', 'intent_summary', 'decisions', 'success', 'features', 'feature_revisions', 'use_case_runs', 'feature_runs'],
+    properties: {
+      title: { type: 'string', description: 'Short Title-Case phrase naming the OVERALL intent of the session (see guidance).' },
+      complexity: { type: 'string', enum: COMPLEXITY, description: 'Difficulty of what the session set out to do.' },
+      autonomy: { type: 'string', enum: AUTONOMY, description: 'How much the agent ran on its own.' },
+      intent_summary: { type: 'string', description: 'One sentence: what the user set out to accomplish (the goal, not the decisions).' },
+      decisions: { type: 'array', items: { type: 'string' }, description: 'The KEY decisions made during the session, newest insight last; [] if none.' },
+      success: { type: 'string', enum: SUCCESS, description: 'Whether the session accomplished its task(s).' },
+      features: {
+        type: 'array',
+        description: 'Features this session advanced — ideally exactly one; list the primary feature first.',
+        items: {
+          type: 'object',
+          properties: {
+            matched_feature_id: { type: 'string', description: 'Id of the most specific existing feature this session advanced, or empty.' },
+            new_title: { type: 'string', description: 'Title for a NEW feature when none fit, else empty.' },
+            parent_id: { type: 'string', description: 'Existing feature id to nest the new feature under, or empty for top-level.' },
+          },
+        },
+      },
+      feature_revisions: {
+        type: 'array',
+        description: 'Reparent a feature THIS session advanced under a better parent; [] otherwise.',
+        items: {
+          type: 'object',
+          properties: {
+            feature_id: { type: 'string', description: 'A feature this session advances, from the features above.' },
+            new_parent_id: { type: 'string', description: 'Existing feature id to reparent under, "root" for top-level, or empty to keep.' },
+          },
+        },
+      },
+      use_case_runs: {
+        type: 'array',
+        description: `Partition blocks 0..${lastBlock} into contiguous, non-overlapping runs, each with one use_case.`,
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'integer', description: 'First block index in the run.' },
+            to: { type: 'integer', description: 'Last block index in the run.' },
+            use_case: { type: 'string', enum: USE_CASES },
+          },
+        },
+      },
+      feature_runs: {
+        type: 'array',
+        description: 'Sparse: which block ranges advanced which feature.',
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'integer', description: 'First block index in the run.' },
+            to: { type: 'integer', description: 'Last block index in the run.' },
+            feature: { type: 'integer', description: '0-based index into the features array.' },
+          },
+        },
+      },
+    },
+  }
 }
 
 /** Render the feature list as an indented tree (parent → child) for the prompt. */
@@ -513,21 +581,6 @@ function assistantTail(s: Session): string {
 }
 
 // ---- parsing / sanitizing ---------------------------------------------------
-
-function parseJson(text: string): Record<string, any> | null {
-  const tryParse = (s: string): Record<string, any> | null => {
-    try {
-      const v = JSON.parse(s)
-      return v && typeof v === 'object' ? v : null
-    } catch {
-      return null
-    }
-  }
-  const direct = tryParse(text.trim())
-  if (direct) return direct
-  const match = text.match(/\{[\s\S]*\}/)
-  return match ? tryParse(match[0]) : null
-}
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v.trim() : ''

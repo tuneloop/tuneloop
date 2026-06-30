@@ -1,5 +1,6 @@
 import type { Session, TokenUsage } from '../core/model'
 import models from './models.json'
+import { backfillPrice } from './openrouter'
 
 export interface ModelPrice {
   input: number
@@ -10,7 +11,7 @@ export interface ModelPrice {
 }
 
 /** Bump when models.json rates change so stored costs can be recomputed. */
-export const PRICE_TABLE_VERSION = '2026-06-25'
+export const PRICE_TABLE_VERSION = '2026-06-30'
 
 type Table = Record<string, Record<string, ModelPrice>>
 const TABLE = models as unknown as Table
@@ -19,23 +20,26 @@ const TABLE = models as unknown as Table
  * Look up a price, tolerant of model-id drift: exact match, then strip a
  * trailing date snapshot (`-20251001` or `@20251001`), then prefix match.
  */
-export function priceFor(provider: string, model: string): ModelPrice | undefined {
+export function priceFor(provider: string, model: string, opts?: { backfill?: boolean }): ModelPrice | undefined {
   const byProvider = TABLE[provider]
-  if (!byProvider) return undefined
-  if (byProvider[model]) return byProvider[model]
-  const stripped = model.replace(/[-@]\d{8}$/, '')
-  if (byProvider[stripped]) return byProvider[stripped]
-  // Longest key first so a specific variant wins over a shorter prefix of it
-  // (e.g. `gpt-5.2-codex-*` matches `gpt-5.2-codex`, not the pricier `gpt-5.2`).
-  for (const key of Object.keys(byProvider).sort((a, b) => b.length - a.length)) {
-    if (model.startsWith(key)) return byProvider[key]
+  if (byProvider) {
+    if (byProvider[model]) return byProvider[model]
+    const stripped = model.replace(/[-@]\d{8}$/, '')
+    if (byProvider[stripped]) return byProvider[stripped]
+    // Longest key first so a specific variant wins over a shorter prefix of it
+    // (e.g. `gpt-5.2-codex-*` matches `gpt-5.2-codex`, not the pricier `gpt-5.2`).
+    for (const key of Object.keys(byProvider).sort((a, b) => b.length - a.length)) {
+      if (model.startsWith(key)) return byProvider[key]
+    }
   }
-  return undefined
+  // Backfill is opt-in (enrichment self-cost only, never session analytics)
+  return opts?.backfill ? backfillPrice(provider, model) : undefined
 }
 
 /** Cost of a single usage record at a given model's rates (0 if unpriced). */
 export function costOfUsage(provider: string, model: string, u: TokenUsage): number {
-  const p = priceFor(provider, model)
+  // Enrichment self-cost: opt into the backfill to price non-table providers
+  const p = priceFor(provider, model, { backfill: true })
   if (!p) return 0
   return (
     (u.input * p.input + u.output * p.output + u.cacheCreate * p.cache_write_5m + u.cacheRead * p.cache_read) /
@@ -79,21 +83,24 @@ export function computeSessionCost(session: Session): CostResult {
     if (ev.kind !== 'assistant') continue
     const model = ev.model ?? session.models[0] ?? '<unknown>'
     const u = ev.usage
-    const price = priceFor(session.provider, model)
     let cost = 0
-    if (price) {
-      cost =
-        (u.input * price.input +
-          u.output * price.output +
-          u.cacheCreate * price.cache_write_5m +
-          u.cacheRead * price.cache_read) /
-        1_000_000
-    } else if (ev.costUsd != null) {
-      // No rate-table entry, but the source computed its own per-message cost
-      // (e.g. OpenCode across providers aivue doesn't price). Trust it.
+    if (ev.costUsd != null) {
+      // The source billed its own cost (e.g. OpenCode) — the actual spend, which is
+      // authoritative over our rate-table reconstruction even if the table has the model.
       cost = ev.costUsd
     } else {
-      unpriced.add(model)
+      // Token-priced sources (Claude Code, Codex); static table only, no backfill.
+      const price = priceFor(session.provider, model)
+      if (price) {
+        cost =
+          (u.input * price.input +
+            u.output * price.output +
+            u.cacheCreate * price.cache_write_5m +
+            u.cacheRead * price.cache_read) /
+          1_000_000
+      } else {
+        unpriced.add(model)
+      }
     }
     usd += cost
     facts.push({ idx, model, isSidechain: ev.isSidechain, ts: ev.ts, tokens: u, usd: cost })
