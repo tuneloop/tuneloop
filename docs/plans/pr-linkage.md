@@ -132,13 +132,13 @@ only because of a content match, so no other processor refreshes them), mirrorin
 
 ## Evaluation
 
-Corpora from three repos driven with Claude + Codex (`Relvy-AI/aivue`,
-`Relvy-AI/agentlens`, `Sicarius07/telemetry-sandbox`): 11 sessions · 71 PRs · truth set of
-16 auto-labels (sessions with a transcript create/merge signal, held out and stripped from
-the matcher's input) + 3 hand-labeled human-pushed edges. Only 20 of 71 PRs were the user's;
-the other 51 teammates' PRs served as true negatives.
+The bake-off ran on real corpora from three repositories actively driven with Claude and
+Codex: 11 sessions · 71 PRs · a truth set of 16 auto-labels (sessions that left a transcript
+create/merge signal, held out and stripped from the matcher's input) + 3 hand-labeled
+human-pushed edges. Only 20 of the 71 PRs were the developer's own; the other 51 (teammates')
+served as true negatives.
 
-Scoped to the user's own PRs the matcher was perfect — precision 1.00 and recall 1.00 at
+Scoped to the developer's own PRs the matcher was perfect — precision 1.00 and recall 1.00 at
 t=0.05, precision 1.00 through t=0.30. On the full unscoped corpus best F1 was ~0.94–0.97,
 with every low-threshold false positive a teammate's PR sharing foundational code — the
 class author-scoping removes.
