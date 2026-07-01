@@ -281,6 +281,11 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   log.info(
     `Scanned ${discovered} file(s), parsed ${parsed} session(s) into ${groups.size} unique session(s), ${reingested} new/changed.`,
   )
+  // Stamp completion at the very end so a run that crashed partway can't claim the
+  // store is fresh. Drives the dashboard's "last analyzed" line + the stale-store
+  // nudge; per-session analyzed_at / processor ran_at only move when work is done,
+  // so they can't answer "when did analyze last finish" (e.g. for a no-op re-run).
+  store.setMeta('last_analyze_at', new Date().toISOString())
   printSummary(store.summary())
   store.close()
 }
