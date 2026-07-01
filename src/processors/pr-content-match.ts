@@ -135,7 +135,7 @@ export const prContentMatch: Processor = {
           const bi = toolToBlock[idx]
           if (bi == null || seen.has(bi)) continue
           seen.add(bi)
-          blockArtifacts.push({ blockIdx: bi, artifactId: pr.id, role: 'edited', source: 'derived' })
+          blockArtifacts.push({ blockIdx: bi, artifactId: pr.id, role: 'contributed', source: 'derived' })
         }
       }
     }
@@ -183,10 +183,10 @@ function shippedBeforeSession(pr: CandidatePr, sessionStart: string | undefined)
 async function candidatePrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[]> {
   const cached = prCacheByRepo.get(ownerRepo)
   if (cached) return cached
-  // fetchPrs returns null on an INFRASTRUCTURE failure (gh missing/errored/unparseable)
+  // fetchMyPrs returns null on an INFRASTRUCTURE failure (gh missing/errored/unparseable)
   // vs [] for a repo that genuinely has no candidate PRs. Only cache the latter — a
   // transient gh failure must not poison every later session in the same repo/process.
-  const p = fetchPrs(sh, ownerRepo).then((res) => {
+  const p = fetchMyPrs(sh, ownerRepo).then((res) => {
     if (res === null) prCacheByRepo.delete(ownerRepo)
     return res ?? []
   })
@@ -205,7 +205,7 @@ interface PrMeta {
   deletions?: number
 }
 
-async function fetchPrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | null> {
+async function fetchMyPrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | null> {
   const list = await sh('gh', [
     'pr', 'list', '--repo', ownerRepo, '--author', '@me', '--state', 'all', '--limit', '200',
     '--json', 'number,title,author,state,createdAt,mergedAt,additions,deletions',

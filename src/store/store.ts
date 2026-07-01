@@ -2051,9 +2051,6 @@ export class Store {
       .prepare(
         `SELECT id, kind, title, ident, status, repo, externalId, role, source, confidence FROM (
            SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source,
-             -- AI-attribution % is specifically pr-content-match's confidence (other producers
-             -- write confidence too, e.g. review links); surface it even when a different
-             -- producer's row (e.g. outcomes-git 'created') wins rn=1 for this PR.
              MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) OVER (PARTITION BY a.id) AS confidence,
              ROW_NUMBER() OVER (PARTITION BY a.id ORDER BY
                CASE sa.role WHEN 'created' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'edited' THEN 2 ELSE 3 END,

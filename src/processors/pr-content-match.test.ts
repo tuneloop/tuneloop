@@ -75,7 +75,7 @@ describe('pr-content-match', () => {
     expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', role: 'edited', source: 'derived', confidence: 1 }))
     expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:5', kind: 'pr', title: 'PR 5', json: { addedLines: 7 } }))
     expect(res.outcomes).toContainEqual(expect.objectContaining({ type: 'pr_contributed', artifactId: 'pr:o/r:5' }))
-    expect(res.blockArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', role: 'edited', source: 'derived' }))
+    expect(res.blockArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', role: 'contributed', source: 'derived' }))
   })
 
   it('still measures attribution for a self-created PR, but defers its cost/outcome to outcomes-git', async () => {
