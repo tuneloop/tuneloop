@@ -58,14 +58,11 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
     .map(({ hasNonEnrichBlocks: _, ...rest }) => rest)
   const prBlockAttributions = store.prBlockAttributions(session.id)
   const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, rejectedFeatureTitles, userLinkedArtifacts, prBlockAttributions, sh }
-  // The hash incorporates the stable set of ALL user-linked artifact IDs.
-  // This only changes when the user adds or removes a link — never oscillates
-  // due to block attribution state.
-  let inputHash = session.raw.contentHash
-  if (allUserLinked.length > 0) {
-    const suffix = allUserLinked.map((a) => a.artifactId).sort().join(',')
-    inputHash = `${inputHash}+${suffix}`
-  }
+  // The cache key is the session's content hash alone. Link/unlink no longer
+  // perturbs the hash — those actions invalidate the affected processor_runs
+  // rows directly (Store.invalidateSessionProcessors), so a re-linked artifact
+  // can never collide with a stale cached run the way a reversible hash suffix could.
+  const inputHash = session.raw.contentHash
   let costUsd = 0
 
   for (const p of orderProcessors(opts.processors)) {
@@ -79,7 +76,7 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
     ctx.prBlockAttributions = store.prBlockAttributions(session.id)
 
     const prior = store.processorRun(session.id, p.name)
-    if (prior && prior.version === p.version && prior.inputHash === inputHash && prior.model === model) {
+    if (prior && !prior.invalidated && prior.version === p.version && prior.inputHash === inputHash && prior.model === model) {
       log.debug(`cached ${p.name} for ${session.id}`)
       continue
     }

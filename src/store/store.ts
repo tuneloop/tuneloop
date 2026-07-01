@@ -215,10 +215,10 @@ export class Store {
   processorRun(sessionId: string, processor: string): ProcessorRunRow | undefined {
     const row = this.db
       .prepare(
-        'SELECT version, input_hash AS inputHash, model FROM processor_runs WHERE session_id = ? AND processor = ?',
+        'SELECT version, input_hash AS inputHash, model, invalidated FROM processor_runs WHERE session_id = ? AND processor = ?',
       )
-      .get(sessionId, processor) as ProcessorRunRow | undefined
-    return row
+      .get(sessionId, processor) as (Omit<ProcessorRunRow, 'invalidated'> & { invalidated: number }) | undefined
+    return row ? { ...row, invalidated: row.invalidated === 1 } : undefined
   }
 
   unresolvedArtifacts(producer: string): ArtifactInput[] {
@@ -2450,14 +2450,10 @@ export class Store {
     const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
     const artifact = this.db.prepare('SELECT 1 FROM artifacts WHERE id = ?').get(artifactId)
     if (!session || !artifact) return false
-    this.db
-      .prepare(
-        `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
-         VALUES (?, ?, ?, 'user', 1.0, 'dashboard')`,
-      )
-      .run(sessionId, artifactId, role)
-    this.db.prepare('DELETE FROM user_link_overrides WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
-    this.invalidateEnrichCache(sessionId)
+    this.db.transaction(() => {
+      this.linkUserArtifact(sessionId, artifactId, role)
+      this.db.prepare('DELETE FROM user_link_overrides WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+    })()
     return true
   }
 
@@ -2474,23 +2470,40 @@ export class Store {
            VALUES (?, ?, 'reject', ?)`,
         )
         .run(sessionId, artifactId, new Date().toISOString())
+      this.invalidateSessionProcessors(sessionId)
     })()
-    this.invalidateEnrichCache(sessionId)
     return true
   }
 
   /**
-   * Clear the enrich-session cache so the next analyze re-runs the LLM.
+   * Mark every processor run for a session stale so the next analyze re-runs them.
    *
-   * Why: the cache hash includes the sorted set of user-linked artifact IDs.
-   * After unlink→re-link the hash can revert to a previously cached value,
-   * causing a false cache hit that skips enrichment — leaving stale or missing
-   * block attributions. Invalidating on every link/unlink guarantees the LLM
-   * always sees the current linked set. Cost: at most one extra LLM call per
-   * explicit user action (not on every analyze).
+   * Called on any user link/unlink. The user-linked set feeds enrichment, and
+   * unlink deletes block_artifacts across producers, so the deterministic
+   * processors (outcomes-git) must re-derive too — enrich-only invalidation
+   * would leave their wiped rows unregenerated. We flag rather than delete so
+   * the row's cost_usd/tokens survive; persistResult resets the flag on the
+   * next successful run. Cost: at most one extra analyze per explicit user
+   * action (not on every analyze).
    */
-  private invalidateEnrichCache(sessionId: string): void {
-    this.db.prepare('DELETE FROM processor_runs WHERE session_id = ? AND processor = ?').run(sessionId, 'enrich-session')
+  private invalidateSessionProcessors(sessionId: string): void {
+    this.db.prepare('UPDATE processor_runs SET invalidated = 1 WHERE session_id = ?').run(sessionId)
+  }
+
+  /**
+   * The single writer for user-created session links. Every dashboard link path
+   * funnels through here so the write and its cache invalidation can never drift
+   * apart (that drift is how add-pr/create-feature previously skipped it). Call
+   * within the caller's own transaction so the link and invalidation commit atomically.
+   */
+  private linkUserArtifact(sessionId: string, artifactId: string, role: SessionArtifactRole = 'contributed'): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
+         VALUES (?, ?, ?, 'user', 1.0, 'dashboard')`,
+      )
+      .run(sessionId, artifactId, role)
+    this.invalidateSessionProcessors(sessionId)
   }
 
   /** Titles of features the user rejected for this session (for LLM prompt context). */
@@ -2541,12 +2554,7 @@ export class Store {
     let id: string | undefined
     this.db.transaction(() => {
       id = this.createFeature(title, parentId).id
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
-           VALUES (?, ?, 'contributed', 'user', 1.0, 'dashboard')`,
-        )
-        .run(sessionId, id)
+      this.linkUserArtifact(sessionId, id)
     })()
     return { id: id! }
   }
@@ -2572,12 +2580,7 @@ export class Store {
              external_id = COALESCE(excluded.external_id, artifacts.external_id)`,
         )
         .run(id, repo, prNumber, meta?.externalId ?? null, meta?.title ?? null, meta?.status ?? null)
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
-           VALUES (?, ?, 'contributed', 'user', 1.0, 'dashboard')`,
-        )
-        .run(sessionId, id)
+      this.linkUserArtifact(sessionId, id)
     })()
     return { id }
   }

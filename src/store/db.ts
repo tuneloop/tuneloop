@@ -175,6 +175,9 @@ CREATE TABLE IF NOT EXISTS processor_runs (
   out_tokens INTEGER,
   cost_usd   REAL,
   ran_at     TEXT,
+  -- Set to 1 by a user link/unlink to force the next analyze to re-run this
+  -- processor; reset to 0 (the default) whenever persistResult rewrites the row.
+  invalidated INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, processor)
 );
 

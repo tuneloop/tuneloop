@@ -152,4 +152,5 @@ export interface ProcessorRunRow {
   version: number
   inputHash: string
   model: string | null
+  invalidated: boolean
 }
