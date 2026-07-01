@@ -4,6 +4,7 @@
 import { state, $, esc, usd, num, get, fmtVal, kpiDelta } from './core'
 import { syncHash } from './router'
 import { clearAsked } from './askbanner'
+import { successDefinable } from './notice'
 import { renderSuccessRate } from './metrics/successRate'
 import { renderCostArtifact } from './metrics/costArtifact'
 import { renderTotalSpend } from './metrics/totalSpend'
@@ -51,50 +52,71 @@ export function renderOpenMetric() {
   else if (m === 'ops') renderOps();
 }
 
+// The most recent /api/kpis payload, kept so the tile row can repaint without a
+// refetch when the overview lands (which decides whether any outcomes exist at
+// all — see paintKpis' Session Outcome Rate handling).
+var lastKpis: any = null;
+
 export function loadKpis() {
   // The headline success-rate tile counts success the same way the detail view
   // does (outcomes), and the whole row honors the top-level window (days).
   var outcomes = (state.sr.outcomes || []).join(',');
   var qs = 'outcomes=' + encodeURIComponent(outcomes) + '&days=' + encodeURIComponent(String(state.days));
   get('/api/kpis?' + qs).then(function (k) {
-    if (!k || k.error) { $('#kpis').innerHTML = ''; return; }
-    var cur = k.current || {}, prev = k.previous || {};
-    var cpf = cur.costPerFeature || {}, ppf = prev.costPerFeature || {};
-    var cpr = cur.costPerPr || {}, ppr = prev.costPerPr || {};
-    var defaultKind = (cpf.count === 0 && (cpr.count || 0) > 0) ? 'pr' : 'feature';
-    state.ca.defaultKind = defaultKind;
-    // The tile mirrors the kind the user picked in the detail; until then, the
-    // smart default. Keep state.ca.kind synced so the detail opens on it too.
-    if (!state.ca.userPicked) state.ca.kind = defaultKind;
-    var caData = state.ca.kind === 'pr'
-      ? { cur: cpr, prev: ppr, label: 'per merged PR', noun: 'PR', nounPl: 'PRs', verb: 'merged' }
-      : { cur: cpf, prev: ppf, label: 'per shipped feature', noun: 'feature', nounPl: 'features', verb: 'shipped' };
-    var cnt = caData.cur.count || 0;
-    var caSub = caData.label + ' · ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' ' + caData.verb;
-    var tiles = [
-      { label: 'Session Outcome Rate', value: fmtVal(cur.successRate, 'pct'),
-        delta: kpiDelta(cur.successRate, prev.successRate, 'points', 'up'), sub: 'of sessions in window',
-        metric: 'success_rate' },
-      { label: 'Cost per shipped artifact', value: caData.cur.costPerUnit != null ? usd(caData.cur.costPerUnit) : '—',
-        delta: kpiDelta(caData.cur.costPerUnit, caData.prev.costPerUnit, 'rel', 'down'), sub: caSub,
-        metric: 'cost_artifact' },
-      { label: 'Total spend', value: usd(cur.totalSpend),
-        delta: kpiDelta(cur.totalSpend, prev.totalSpend, 'rel', null), sub: '', metric: 'total_spend' },
-      { label: 'Sessions', value: num(cur.sessions),
-        delta: kpiDelta(cur.sessions, prev.sessions, 'rel', null), sub: '', metric: 'sessions' },
-      { label: 'Tool error rate', value: fmtVal(cur.errorRate, 'pct'),
-        delta: kpiDelta(cur.errorRate, prev.errorRate, 'points', 'down'), sub: 'of tool calls', metric: 'ops' }
-    ];
-    $('#kpis').innerHTML = tiles.map(function (t) {
-      // Tiles with a metric key are clickable nav into that metric's detail view.
-      var cls = 'tile' + (t.metric ? ' clickable' : '') + (t.metric && t.metric === state.metric ? ' on' : '');
-      var attr = t.metric ? ' data-metric="' + t.metric + '"' : '';
-      return '<div class="' + cls + '"' + attr + '><div class="label">' + esc(t.label) + '</div><div class="value"><span class="num">' +
-        esc(t.value) + '</span>' + (t.delta || '') + '</div><div class="sub">' + esc(t.sub) + '</div></div>';
-    }).join('');
-    Array.prototype.forEach.call(document.querySelectorAll('#kpis .tile[data-metric]'), function (el) {
-      el.onclick = function () { clearAsked(); openMetric(el.getAttribute('data-metric')); };
-    });
+    lastKpis = k;
+    paintKpis();
+  });
+}
+
+// Render the headline tile row from the last fetched payload + current store
+// state. Separated from the fetch so an overview load can trigger a repaint (the
+// "any outcomes recorded?" check below depends on it).
+export function paintKpis() {
+  var k = lastKpis;
+  if (!k || k.error) { $('#kpis').innerHTML = ''; return; }
+  var cur = k.current || {}, prev = k.previous || {};
+  var cpf = cur.costPerFeature || {}, ppf = prev.costPerFeature || {};
+  var cpr = cur.costPerPr || {}, ppr = prev.costPerPr || {};
+  var defaultKind = (cpf.count === 0 && (cpr.count || 0) > 0) ? 'pr' : 'feature';
+  state.ca.defaultKind = defaultKind;
+  // The tile mirrors the kind the user picked in the detail; until then, the
+  // smart default. Keep state.ca.kind synced so the detail opens on it too.
+  if (!state.ca.userPicked) state.ca.kind = defaultKind;
+  var caData = state.ca.kind === 'pr'
+    ? { cur: cpr, prev: ppr, label: 'per merged PR', noun: 'PR', nounPl: 'PRs', verb: 'merged' }
+    : { cur: cpf, prev: ppf, label: 'per shipped feature', noun: 'feature', nounPl: 'features', verb: 'shipped' };
+  var cnt = caData.cur.count || 0;
+  var caSub = caData.label + ' · ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' ' + caData.verb;
+  // A "0%" outcome rate only means something once the selected success definition
+  // can actually be satisfied; when none of its outcome types exist (e.g. the
+  // default `session_success` before LLM enrichment has run), the rate is a
+  // structural 0, so show "—" (and no delta) rather than a misleadingly bad number.
+  // successDefinable reads the overview, so this corrects once that lands (see the
+  // paintKpis callers in main.ts) and the enrichment nudge explains why.
+  var srKnown = successDefinable();
+  var tiles = [
+    { label: 'Session Outcome Rate', value: srKnown ? fmtVal(cur.successRate, 'pct') : '—',
+      delta: srKnown ? kpiDelta(cur.successRate, prev.successRate, 'points', 'up') : '',
+      sub: srKnown ? 'of sessions in window' : 'no matching outcomes yet', metric: 'success_rate' },
+    { label: 'Cost per shipped artifact', value: caData.cur.costPerUnit != null ? usd(caData.cur.costPerUnit) : '—',
+      delta: kpiDelta(caData.cur.costPerUnit, caData.prev.costPerUnit, 'rel', 'down'), sub: caSub,
+      metric: 'cost_artifact' },
+    { label: 'Total spend', value: usd(cur.totalSpend),
+      delta: kpiDelta(cur.totalSpend, prev.totalSpend, 'rel', null), sub: '', metric: 'total_spend' },
+    { label: 'Sessions', value: num(cur.sessions),
+      delta: kpiDelta(cur.sessions, prev.sessions, 'rel', null), sub: '', metric: 'sessions' },
+    { label: 'Tool error rate', value: fmtVal(cur.errorRate, 'pct'),
+      delta: kpiDelta(cur.errorRate, prev.errorRate, 'points', 'down'), sub: 'of tool calls', metric: 'ops' }
+  ];
+  $('#kpis').innerHTML = tiles.map(function (t) {
+    // Tiles with a metric key are clickable nav into that metric's detail view.
+    var cls = 'tile' + (t.metric ? ' clickable' : '') + (t.metric && t.metric === state.metric ? ' on' : '');
+    var attr = t.metric ? ' data-metric="' + t.metric + '"' : '';
+    return '<div class="' + cls + '"' + attr + '><div class="label">' + esc(t.label) + '</div><div class="value"><span class="num">' +
+      esc(t.value) + '</span>' + (t.delta || '') + '</div><div class="sub">' + esc(t.sub) + '</div></div>';
+  }).join('');
+  Array.prototype.forEach.call(document.querySelectorAll('#kpis .tile[data-metric]'), function (el) {
+    el.onclick = function () { clearAsked(); openMetric(el.getAttribute('data-metric')); };
   });
 }
 

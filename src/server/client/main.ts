@@ -6,9 +6,10 @@
 import { state, $, esc, get, dayOf } from './core'
 import { initRouter, withoutSync, buildHash } from './router'
 import { loadFacets } from './facets'
-import { loadKpis, renderWindow, renderOpenMetric } from './kpis'
+import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
-import { renderHighlights, goHighlights } from './home'
+import { renderHighlights, paintHighlights, goHighlights } from './home'
+import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
@@ -55,11 +56,20 @@ function init() {
   get('/api/overview').then(function (o) {
     state.overview = o;
     var range = o.firstAt && o.lastAt ? dayOf(o.firstAt) + ' → ' + dayOf(o.lastAt) : '';
+    // Date range + "analyzed" share the range line; the db path drops below.
+    var analyzed = o.lastAnalyzedAt ? 'analyzed ' + dayOf(o.lastAnalyzedAt) : '';
+    var metaLine = [range, analyzed].filter(Boolean).join(' · ');
     // Tilde the home dir so screenshots don't leak the username.
     var dbPath = (o.dbPath || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/');
     $('#meta').innerHTML =
-      (range ? '<span class="meta-range">' + esc(range) + '</span>' : '') +
+      (metaLine ? '<span class="meta-range">' + esc(metaLine) + '</span>' : '') +
       (dbPath ? '<span class="meta-path">' + esc(dbPath) + '</span>' : '');
+    // The overview is what classifies the store (empty / un-enriched / ok) and
+    // whether any outcomes exist, so surface the nudges + correct the outcome-rate
+    // tile now that it's known (these paint from cached payloads — no refetch).
+    renderNotices();
+    paintKpis();
+    paintHighlights();
     loadFacets().then(function () {
       // Build the sessions filter bar. If we landed on the sessions view, restore
       // its filter from the URL (facets are needed to populate the selects, so this
