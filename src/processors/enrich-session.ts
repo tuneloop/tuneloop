@@ -143,12 +143,17 @@ export const enrichSession: Processor = {
     // NAMES the candidates that feature_runs reference by index — a palette entry
     // never tied to a block is dropped, so session-level and block-level features
     // can never diverge. We never link across repos.
+    // Features the user explicitly linked to THIS session (session_artifacts.source='user').
+    // Used two ways: an explicit link overrides the inRepo auto-link guard below (so a
+    // cross-repo linked feature resolves to itself instead of spawning a duplicate), and it
+    // guards the session-link re-emit further down from clobbering the user's row.
+    const userLinkedIds = new Set(ctx.userLinkedArtifacts.map((a) => a.artifactId))
     const features = Array.isArray(parsed.features) ? parsed.features : []
     const palette: Array<{ id: string; create?: ArtifactInput }> = []
     for (const f of features) {
       const matched = str(f?.matched_feature_id)
       const mf = matched ? existing.get(matched) : undefined
-      if (mf && inRepo(mf)) { palette.push({ id: mf.id }); continue } // existing same-repo/global feature
+      if (mf && (inRepo(mf) || userLinkedIds.has(mf.id))) { palette.push({ id: mf.id }); continue } // same-repo/global, or an explicit user link (overrides repo isolation)
       // No usable match → propose a repo-scoped derived feature (created only if used).
       const title = featureTitle(f?.new_title ?? f?.title) ?? (mf ? featureTitle(mf.title) : null)
       if (!title) { palette.push({ id: '' }); continue }
@@ -203,11 +208,10 @@ export const enrichSession: Processor = {
     const artifacts: ArtifactInput[] = []
     const sessionArtifacts: SessionArtifactInput[] = []
     const emitted = new Set<string>()
-    // Any artifact the user explicitly linked to THIS session (session_artifacts.source='user')
-    // must not be re-emitted — INSERT OR REPLACE would clobber source/producer/confidence.
-    // This covers both user-created features (artifacts.source='user') AND derived features
-    // the user linked via the dashboard (artifacts.source='derived' but sa.source='user').
-    const userLinkedIds = new Set(ctx.userLinkedArtifacts.map((a) => a.artifactId))
+    // userLinkedIds (hoisted above): an artifact the user explicitly linked to THIS session
+    // must not be re-emitted — INSERT OR REPLACE would clobber its source/producer/confidence.
+    // Covers user-created features (artifacts.source='user') AND derived features the user
+    // linked via the dashboard (artifacts.source='derived' but sa.source='user').
     for (const slot of palette) {
       if (!slot.id || !linked.has(slot.id) || emitted.has(slot.id)) continue
       emitted.add(slot.id)
