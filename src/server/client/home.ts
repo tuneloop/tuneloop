@@ -211,7 +211,7 @@ export function paintHighlights() {
       '<button type="button" class="hrow-to" data-i="' + i + '">See the data <i>→</i></button></div>';
   }).join('');
   if (!rows) rows = '<div class="empty">Nothing notable in ' + esc(winLabel) + ' yet — widen the window, or run more sessions.</div>';
-  var dbPath = (lastHl && lastHl.dbPath) || (state.overview && state.overview.dbPath) || '~/.aivue/aivue.sqlite';
+  var dbPath = (lastHl && lastHl.dbPath) || (state.overview && state.overview.dbPath) || '~/.tuneloop/tuneloop.sqlite';
   $('#highlights').innerHTML =
     '<div class="hl">' +
     noticeHtml() + // enrichment nudge when un-enriched; '' once enrichment has run

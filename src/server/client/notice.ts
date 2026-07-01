@@ -73,21 +73,21 @@ export function noticeHtml(): string {
     // directory / --source) — not that analyze was never run. Word it accordingly.
     return notice('first-run',
       'No sessions found',
-      '<code>aivue analyze</code> scanned your Claude Code, Codex, and opencode history but found nothing. ' +
-        'Point it at a directory — <code>aivue analyze &lt;dir&gt;</code> — or check <code>--source</code>.');
+      '<code>tuneloop analyze</code> scanned your Claude Code, Codex, and opencode history but found nothing. ' +
+        'Point it at a directory — <code>tuneloop analyze &lt;dir&gt;</code> — or check <code>--source</code>.');
   }
   if (st === 'unenriched') {
     return notice('enrich',
       'LLM enrichment hasn’t run',
       'Outcomes, complexity, work type, and the Session Outcome Rate all need it. Re-run analysis with a provider key — e.g. ' +
-        '<code>export AIVUE_LLM_PROVIDER=openrouter</code> and <code>export OPENROUTER_API_KEY=…</code>, then <code>aivue analyze</code>.');
+        '<code>export TUNELOOP_LLM_PROVIDER=openrouter</code> and <code>export OPENROUTER_API_KEY=…</code>, then <code>tuneloop analyze</code>.');
   }
   if (st === 'stale') {
     var d = daysSinceAnalyze();
     var ago = d != null ? d + ' day' + (d === 1 ? '' : 's') + ' ago' : 'a while ago';
     return notice('stale',
       'Your dashboard may be out of date',
-      'Last analyzed ' + ago + '. Run <code>aivue analyze</code> to pull in sessions since then.');
+      'Last analyzed ' + ago + '. Run <code>tuneloop analyze</code> to pull in sessions since then.');
   }
   return '';
 }

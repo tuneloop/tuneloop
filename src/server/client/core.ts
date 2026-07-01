@@ -87,7 +87,7 @@ export var state: ClientState = {
 // it again. Stored client-side, so the windowed KPI passes the same outcomes to
 // the server to stay consistent (see loadKpis). Bucket is intentionally NOT
 // persisted — it auto-derives from the window.
-var SR_PREFS_KEY = 'aivue.sr';
+var SR_PREFS_KEY = 'tuneloop.sr';
 function loadSrPrefs() {
   try {
     var saved = JSON.parse(localStorage.getItem(SR_PREFS_KEY) || 'null');

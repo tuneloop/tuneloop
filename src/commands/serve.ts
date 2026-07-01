@@ -27,7 +27,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const log = createLogger('info')
   const config = loadConfig({ db: opts.db })
   if (!existsSync(config.dbPath)) {
-    log.error(`no store at ${config.dbPath} — run \`aivue analyze\` first`)
+    log.error(`no store at ${config.dbPath} — run \`tuneloop analyze\` first`)
     process.exitCode = 1
     return
   }
@@ -45,11 +45,11 @@ export async function serve(opts: ServeOptions): Promise<void> {
 
   // Bind to loopback only. The dashboard serves session transcripts (which can
   // contain proprietary code and secrets) over an unauthenticated API; without an
-  // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. aivue is a
+  // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. tuneloop is a
   // local single-developer tool, so 127.0.0.1 is the correct surface.
   server.listen(port, '127.0.0.1', () => {
     const url = `http://localhost:${port}`
-    process.stdout.write(`\n  aivue dashboard  ${url}\n  store: ${config.dbPath}\n  Ctrl+C to stop\n\n`)
+    process.stdout.write(`\n  tuneloop dashboard  ${url}\n  store: ${config.dbPath}\n  Ctrl+C to stop\n\n`)
     if (opts.open !== false) tryOpen(url)
   })
 

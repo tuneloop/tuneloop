@@ -21,13 +21,13 @@ describe('parseHash', () => {
   })
 
   it('exposes the full decoded query map (filtered-list state)', () => {
-    const r = parseHash('#/sessions?win=all&q=retry&outcomes=pr_merged,pr_reviewed&f.use_case=review&f.repo=aivue')
+    const r = parseHash('#/sessions?win=all&q=retry&outcomes=pr_merged,pr_reviewed&f.use_case=review&f.repo=tuneloop')
     expect(r.query).toEqual({
       win: 'all',
       q: 'retry',
       outcomes: 'pr_merged,pr_reviewed',
       'f.use_case': 'review',
-      'f.repo': 'aivue',
+      'f.repo': 'tuneloop',
     })
   })
 

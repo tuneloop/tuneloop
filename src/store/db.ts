@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS processor_runs (
   PRIMARY KEY (session_id, processor)
 );
 
--- file -> session index for \`aivue search <repo:file>\`.
+-- file -> session index for \`tuneloop search <repo:file>\`.
 CREATE TABLE IF NOT EXISTS files_index (
   repo       TEXT,
   path       TEXT,

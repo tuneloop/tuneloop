@@ -36,7 +36,7 @@ describe('computeSessionCost precedence', () => {
 
 describe('priceFor backfill gating', () => {
   beforeAll(async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'aivue-or-'))
+    const dir = await mkdtemp(join(tmpdir(), 'tuneloop-or-'))
     await writeFile(
       join(dir, 'openrouter-prices.json'),
       JSON.stringify({

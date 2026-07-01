@@ -56,10 +56,14 @@ function init() {
   get('/api/overview').then(function (o) {
     state.overview = o;
     var range = o.firstAt && o.lastAt ? dayOf(o.firstAt) + ' → ' + dayOf(o.lastAt) : '';
+    // Date range + "analyzed" share the range line; the db path drops below.
     var analyzed = o.lastAnalyzedAt ? 'analyzed ' + dayOf(o.lastAnalyzedAt) : '';
-    // Date range + "analyzed" share one line; the db path drops to the next.
     var metaLine = [range, analyzed].filter(Boolean).join(' · ');
-    $('#meta').innerHTML = (metaLine ? esc(metaLine) + '<br>' : '') + esc(o.dbPath || '');
+    // Tilde the home dir so screenshots don't leak the username.
+    var dbPath = (o.dbPath || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/');
+    $('#meta').innerHTML =
+      (metaLine ? '<span class="meta-range">' + esc(metaLine) + '</span>' : '') +
+      (dbPath ? '<span class="meta-path">' + esc(dbPath) + '</span>' : '');
     // The overview is what classifies the store (empty / un-enriched / ok) and
     // whether any outcomes exist, so surface the nudges + correct the outcome-rate
     // tile now that it's known (these paint from cached payloads — no refetch).

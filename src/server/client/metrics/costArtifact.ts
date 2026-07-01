@@ -98,6 +98,10 @@ export function renderCa(d) {
   }
   var note = 'Unit cost includes every session that built these ' + caNoun() +
     ', even spend from before the window — so it will not equal spend within the window.';
+  if (state.ca.kind === 'pr') {
+    note += ' Only PRs a session created or merged (via gh or a GitHub MCP tool) are linked' +
+      ' — PRs opened or merged outside a captured session aren\'t counted (yet).';
+  }
   if (d.period && d.period.throughput > 0) {
     note += ' Burn efficiency, a different question (spend in window ÷ ' + caNoun() + ' shipped in window) = ' +
       usd(d.period.efficiency) + '.';

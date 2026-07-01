@@ -184,7 +184,7 @@ CREATE INDEX IF NOT EXISTS ix_block_artifacts_artifact ON block_artifacts(artifa
 
 - **Bump `PARSE_VERSION` (currently `4`, `src/adapters/claude-code/parse.ts:21`)** — `seq` is now part of the
   normalized output persisted in the blob, so the parse-version-aware gate must re-ingest to backfill it.
-- **Verify:** on a WAL-safe copy of `~/.aivue/aivue.sqlite`, schema migrates; tables exist and are empty.
+- **Verify:** on a WAL-safe copy of `~/.tuneloop/tuneloop.sqlite`, schema migrates; tables exist and are empty.
 
 ### Phase 2 — `segment-blocks` processor + block→PR/commit links (deterministic, no LLM)
 
@@ -298,14 +298,14 @@ CREATE INDEX IF NOT EXISTS ix_block_artifacts_artifact ON block_artifacts(artifa
   content-deterministic ordinal today; keep it so.
 - **Cascade-wipe:** `ingestSession` already UPSERTs `sessions` (no `ON DELETE CASCADE` fire), so processor
   block tables survive an unchanged-hash re-ingest. Don't reintroduce `INSERT OR REPLACE` on `sessions`.
-- **WAL when copying the live store for tests:** copy `aivue.sqlite` + `-wal` + `-shm` together, or the copy
+- **WAL when copying the live store for tests:** copy `tuneloop.sqlite` + `-wal` + `-shm` together, or the copy
   is "database disk image is malformed".
 
 ## Verification harness
 
 - The master Σ invariant + exhaustiveness (Phase 2) is the foundation — assert after every phase.
 - Per read number, a reconciliation test (Phase 5 verify bullets).
-- Run end-to-end on a throwaway copy of `~/.aivue/aivue.sqlite` (real store untouched); `npm run typecheck` +
+- Run end-to-end on a throwaway copy of `~/.tuneloop/tuneloop.sqlite` (real store untouched); `npm run typecheck` +
   client `node --check` clean; eyeball the dashboard (the user verifies UI in-browser).
 
 ## Explicitly deferred (write down so they aren't relitigated)
