@@ -743,7 +743,9 @@ export function openDetail(id, focus?: any) {
       sum += chipList(prs, 8, function (p) {
         var xBtn = p.source === 'user' ? '<button class="link-remove-btn" type="button" data-artifact-id="' + esc(p.id) + '" data-session-id="' + esc(sessionId) + '" title="Unlink">&times;</button>' : '';
         var label = (p.repo ? esc(p.repo) + ' ' : '') + '#' + esc(p.ident) + (p.status ? ' (' + esc(p.status) + ')' : '');
-        return '<span class="tag click" data-art="' + esc(p.externalId || p.ident) + '" data-kind="pr">' + label + xBtn + '</span>';
+        // Content-match attribution as a subtle inline suffix (share of the PR authored by the agent).
+        var ai = p.confidence != null ? '<span class="ai-note" title="Share of this PR authored by the agent (content-matched)"> · ' + Math.round(p.confidence * 100) + '% AI</span>' : '';
+        return '<span class="tag click" data-art="' + esc(p.externalId || p.ident) + '" data-kind="pr">' + label + ai + xBtn + '</span>';
       });
     }
     sum += '<div class="link-add-area" data-link-kind="pr" data-session-id="' + esc(sessionId) + '"></div>';

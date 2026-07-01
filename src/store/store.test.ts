@@ -72,6 +72,18 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(db.prepare('SELECT json FROM artifacts WHERE id=?').get('pr:o/r:5')).toMatchObject({ json: '{"addedLines":7}' })
     expect(db.prepare("SELECT COUNT(*) c FROM block_artifacts WHERE artifact_id='pr:o/r:5' AND role='edited'").get()).toMatchObject({ c: 1 })
     expect(db.prepare("SELECT COUNT(*) c FROM outcomes WHERE type='pr_contributed'").get()).toMatchObject({ c: 1 })
+
+    // A DIFFERENT producer also links this PR with its own (higher) confidence — a review
+    // link at confidence 1. AI-attribution must stay pr-content-match's 0.85, not the review's 1.
+    store.persistResult('s1', 'outcomes-git', 3, 'h2', null, {
+      sessionArtifacts: [{ artifactId: 'pr:o/r:5', role: 'reviewed', source: 'explicit', confidence: 1 }],
+    })
+
+    // The AI-attribution fraction surfaces to both UI reads: PR table (aiPct) + drawer chip (confidence).
+    const prRow = store.artifactList('pr').find((r) => r.id === 'pr:o/r:5')
+    expect(prRow?.aiPct).toBeCloseTo(0.85) // not 1 (the review link's confidence)
+    const chip = store.sessionDetail('s1')?.artifacts.find((a) => a.id === 'pr:o/r:5') as { confidence?: number } | undefined
+    expect(chip?.confidence).toBeCloseTo(0.85)
   })
 
   it('a genuine status transition (open -> merged) still applies', () => {

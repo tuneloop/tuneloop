@@ -2049,8 +2049,12 @@ export class Store {
     // attribution %), so pick the strongest/most-explicit link for display.
     const artifacts = this.db
       .prepare(
-        `SELECT id, kind, title, ident, status, repo, externalId, role, source FROM (
+        `SELECT id, kind, title, ident, status, repo, externalId, role, source, confidence FROM (
            SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source,
+             -- AI-attribution % is specifically pr-content-match's confidence (other producers
+             -- write confidence too, e.g. review links); surface it even when a different
+             -- producer's row (e.g. outcomes-git 'created') wins rn=1 for this PR.
+             MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) OVER (PARTITION BY a.id) AS confidence,
              ROW_NUMBER() OVER (PARTITION BY a.id ORDER BY
                CASE sa.role WHEN 'created' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'edited' THEN 2 ELSE 3 END,
                CASE COALESCE(sa.source,'') WHEN 'explicit' THEN 0 WHEN 'user' THEN 1 ELSE 2 END) AS rn
@@ -2240,6 +2244,9 @@ export class Store {
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
                 a.external_id AS externalId, a.created_at AS createdAt, a.completed_at AS completedAt,
                 a.parent_artifact_id AS parentId,
+                -- AI-attribution % = pr-content-match's confidence only (other producers write
+                -- confidence on session_artifacts too, e.g. review links).
+                MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) AS aiPct,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
                   SELECT SUM(cost_usd) FROM (
@@ -2632,6 +2639,9 @@ export interface ArtifactListItem {
   parentId: string | null
   sessions: number
   costUsd: number
+  /** Max content-match AI-attribution fraction across the artifact's session links (0–1);
+   * null when no content-match link exists (e.g. an explicit-only PR). PRs only. */
+  aiPct: number | null
 }
 
 /** One window's worth of headline KPIs (see Store.kpis). */

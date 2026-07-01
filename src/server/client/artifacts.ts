@@ -74,7 +74,7 @@ var PR_COLS = [['pr', 'Pull request', 0], ['status', 'Status', 0], ['sessions', 
 function renderPrTab(rows) {
   prRows = rows;
   if (!rows.length) {
-    $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>';
+    $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A PR appears here once it\'s linked to a session — from the transcript (gh pr create / merge) or by matching code you pushed yourself.</div>';
     return;
   }
   $('#artifacts').innerHTML =
@@ -121,9 +121,11 @@ function renderPrTable() {
     var idHtml = r.externalId
       ? '<a class="pr-link" href="' + esc(r.externalId) + '" target="_blank" rel="noopener">' + idLabel + '</a>'
       : idLabel;
+    // Inline AI-attribution tag beside the PR id (alternative to the AI-written column).
+    var aiTag = r.aiPct != null ? ' <span class="pr-ai-tag" title="Share of this PR authored by the agent (content-matched)">' + Math.round(r.aiPct * 100) + '% AI</span>' : '';
     var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : '';
     return '<tr class="arow" data-art="' + esc(key) + '" data-kind="pr">' +
-      '<td>' + idHtml + titleHtml + '</td>' +
+      '<td>' + idHtml + aiTag + titleHtml + '</td>' +
       '<td>' + (r.status ? esc(r.status) : '—') + '</td>' +
       '<td class="num">' + r.sessions + '</td>' +
       '<td class="num">' + usd(r.costUsd) + '</td>' +
