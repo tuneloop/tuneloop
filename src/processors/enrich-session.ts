@@ -169,8 +169,8 @@ export const enrichSession: Processor = {
     if (blocks.length > 0) {
       useCases.forEach((uc, idx) => blockAnnotations.push({ blockIdx: idx, key: 'use_case', value: uc }))
       const assigned = new Set<number>()
-      for (const run of featureRuns(parsed.feature_runs)) {
-        const id = palette[run.feature]?.id || ''
+      for (const run of parseRuns(parsed.feature_runs, 'feature')) {
+        const id = palette[run.idx]?.id || ''
         if (!id) continue
         linked.add(id)
         for (let i = Math.max(0, run.from); i <= Math.min(blocks.length - 1, run.to); i++) {
@@ -186,8 +186,8 @@ export const enrichSession: Processor = {
     if (userLinkedPrs.length > 0 && blocks.length > 0) {
       const prTaken = new Set(ctx.prBlockAttributions.map((a) => a.blockIdx))
       const prAssigned = new Set<number>()
-      for (const run of prRuns(parsed.pr_runs)) {
-        const pr = userLinkedPrs[run.pr]
+      for (const run of parseRuns(parsed.pr_runs, 'pr')) {
+        const pr = userLinkedPrs[run.idx]
         if (!pr) continue
         for (let i = Math.max(0, run.from); i <= Math.min(blocks.length - 1, run.to); i++) {
           if (prTaken.has(i) || prAssigned.has(i)) continue
@@ -750,29 +750,15 @@ function expandUseCaseRuns(v: unknown, n: number): string[] {
 }
 
 /** Normalize feature_runs into clamped {from,to,feature} entries (caller resolves the palette index). */
-function featureRuns(v: unknown): Array<{ from: number; to: number; feature: number }> {
+function parseRuns(v: unknown, key: string): Array<{ from: number; to: number; idx: number }> {
   if (!Array.isArray(v)) return []
-  const out: Array<{ from: number; to: number; feature: number }> = []
+  const out: Array<{ from: number; to: number; idx: number }> = []
   for (const r of v) {
     const from = intOf(r?.from)
     const to = intOf(r?.to)
-    const feature = intOf(r?.feature)
-    if (from == null || to == null || feature == null) continue
-    out.push({ from: Math.min(from, to), to: Math.max(from, to), feature })
-  }
-  return out
-}
-
-/** Normalize pr_runs into clamped {from,to,pr} entries. */
-function prRuns(v: unknown): Array<{ from: number; to: number; pr: number }> {
-  if (!Array.isArray(v)) return []
-  const out: Array<{ from: number; to: number; pr: number }> = []
-  for (const r of v) {
-    const from = intOf(r?.from)
-    const to = intOf(r?.to)
-    const pr = intOf(r?.pr)
-    if (from == null || to == null || pr == null) continue
-    out.push({ from: Math.min(from, to), to: Math.max(from, to), pr })
+    const idx = intOf(r?.[key])
+    if (from == null || to == null || idx == null) continue
+    out.push({ from: Math.min(from, to), to: Math.max(from, to), idx })
   }
   return out
 }

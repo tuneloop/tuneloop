@@ -2502,28 +2502,21 @@ export class Store {
       .all(sessionId) as Array<{ blockIdx: number; artifactId: string; title: string | null }>
   }
 
-  /** User-linked PRs/features for a session that have no block-level attribution yet. */
-  userLinkedArtifactIds(sessionId: string): string[] {
+  /** All user-linked PRs/features for a session, with a flag indicating deterministic block ownership. */
+  userLinkedArtifactsAll(sessionId: string): Array<{ artifactId: string; kind: 'pr' | 'feature'; title: string | null; ident: string | null; hasNonEnrichBlocks: boolean }> {
     return (this.db
       .prepare(
-        `SELECT sa.artifact_id AS id
+        `SELECT a.id AS artifactId, a.kind, a.title, a.ident,
+                EXISTS(SELECT 1 FROM block_artifacts ba
+                       WHERE ba.session_id = sa.session_id
+                         AND ba.artifact_id = sa.artifact_id
+                         AND ba.producer <> 'enrich-session') AS hasNonEnrichBlocks
          FROM session_artifacts sa
          JOIN artifacts a ON a.id = sa.artifact_id
          WHERE sa.session_id = ? AND sa.source = 'user' AND a.kind IN ('pr', 'feature')`,
       )
-      .all(sessionId) as Array<{ id: string }>).map((r) => r.id)
-  }
-
-  userLinkedArtifacts(sessionId: string): Array<{ artifactId: string; kind: 'pr' | 'feature'; title: string | null; ident: string | null }> {
-    return this.db
-      .prepare(
-        `SELECT a.id AS artifactId, a.kind, a.title, a.ident
-         FROM session_artifacts sa
-         JOIN artifacts a ON a.id = sa.artifact_id
-         WHERE sa.session_id = ? AND sa.source = 'user' AND a.kind IN ('pr', 'feature')
-           AND (a.kind = 'feature' OR NOT EXISTS (SELECT 1 FROM block_artifacts ba WHERE ba.session_id = sa.session_id AND ba.artifact_id = sa.artifact_id AND ba.producer <> 'enrich-session'))`,
-      )
-      .all(sessionId) as Array<{ artifactId: string; kind: 'pr' | 'feature'; title: string | null; ident: string | null }>
+      .all(sessionId) as Array<{ artifactId: string; kind: 'pr' | 'feature'; title: string | null; ident: string | null; hasNonEnrichBlocks: number }>)
+      .map((r) => ({ ...r, hasNonEnrichBlocks: r.hasNonEnrichBlocks === 1 }))
   }
 
   /** Create a new feature and link it to a session in one transaction. */
