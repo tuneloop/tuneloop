@@ -5,7 +5,7 @@ Status: **shipped** — `src/processors/pr-content-match.ts` (registered in
 
 ## Problem
 
-aivue links a session to a PR only when the session left an explicit transcript signal —
+tuneloop links a session to a PR only when the session left an explicit transcript signal —
 `gh pr create`, `gh pr merge`, or a pasted PR URL (handled by `outcomes-git.ts` /
 `github-pr.ts`). The common workflow leaves no such signal: the user asks the agent to
 implement something, then commits and pushes it themselves, outside the session. The
