@@ -91,6 +91,9 @@ export const prContentMatch: Processor = {
     const outcomes: OutcomeInput[] = []
 
     for (const pr of candidates) {
+      // A PR that merged before the session started cannot contain the session's code.
+      // Only excludes on a valid, strictly-earlier merge time (open/unmerged PRs stay).
+      if (shippedBeforeSession(pr, session.startedAt)) continue
       const inferred = !explicit.has(pr.id.toLowerCase())
       let total = 0
       let matched = 0
@@ -163,6 +166,16 @@ export const prContentMatch: Processor = {
     }
     return { artifacts: updated, outcomes }
   },
+}
+
+/** True only when the PR merged strictly before the session started — the one case where
+ * the session provably cannot have authored any of its shipped code. Open/unmerged PRs
+ * (no `completedAt`) and unknown/unparseable times are kept, so the guard never over-excludes. */
+function shippedBeforeSession(pr: CandidatePr, sessionStart: string | undefined): boolean {
+  if (!sessionStart || !pr.art.completedAt) return false
+  const merged = Date.parse(pr.art.completedAt)
+  const start = Date.parse(sessionStart)
+  return Number.isFinite(merged) && Number.isFinite(start) && merged < start
 }
 
 // ---- candidate PRs (author-scoped, memoized per repo) ----------------------

@@ -99,10 +99,18 @@ committed to.
   only. A created PR that clears the evidence floor keeps its attribution even at a low
   fraction, since its contribution is already certain.
 
+A **merge-time guard** drops any candidate PR that merged strictly before the session
+started — the session provably cannot have authored code that shipped before it ran. It
+excludes only on a valid, strictly-earlier merge time; open/unmerged PRs and unknown times
+are kept, so it never over-excludes.
+
 ## What it writes
 
 The processor is `static` + `needs.network`, requires `segment-blocks`, and fetches
 candidate PRs once per repo per process (memoized; a transient `gh` failure is not cached).
+The candidate set is the author's 200 most-recent PRs in the repo, any state
+(`gh pr list --author @me --state all --limit 200`); the per-session merge-time guard then
+trims those that shipped before the session ran.
 
 - `artifacts` (kind `pr`): the PR, with `json.addedLines` = total PR-added lines, which
   makes `matched` (and per-PR attribution summed across sessions) recoverable from

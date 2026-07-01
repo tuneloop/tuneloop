@@ -165,6 +165,19 @@ describe('pr-content-match', () => {
     expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', role: 'edited', confidence: 1 }))
   })
 
+  it('skips a PR that merged before the session started (cannot contain its code)', async () => {
+    // pr(5) merged 2026-06-02; session started 2026-06-10 → provably not this session's work.
+    const s = { ...session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), startedAt: '2026-06-10T00:00:00Z' }
+    const res = await prContentMatch.run(ctx(s, sh([pr(5)], { 5: FULL_DIFF })))
+    expect(res.sessionArtifacts ?? []).toEqual([])
+  })
+
+  it('keeps a PR that merged after the session started', async () => {
+    const s = { ...session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), startedAt: '2026-06-01T00:00:00Z' }
+    const res = await prContentMatch.run(ctx(s, sh([pr(5)], { 5: FULL_DIFF }))) // pr(5) merged 2026-06-02
+    expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', confidence: 1 }))
+  })
+
   it('does not cache a transient gh failure (later sessions in the repo still match)', async () => {
     // First `gh pr list` fails (code 1); a second attempt succeeds. The failure must not
     // poison the per-repo cache — otherwise every later session sees zero candidate PRs.
