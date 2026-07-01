@@ -2457,6 +2457,7 @@ export class Store {
       )
       .run(sessionId, artifactId, role)
     this.db.prepare('DELETE FROM user_link_overrides WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+    this.invalidateEnrichCache(sessionId)
     return true
   }
 
@@ -2474,9 +2475,23 @@ export class Store {
         )
         .run(sessionId, artifactId, new Date().toISOString())
     })()
+    this.invalidateEnrichCache(sessionId)
     return true
   }
 
+  /**
+   * Clear the enrich-session cache so the next analyze re-runs the LLM.
+   *
+   * Why: the cache hash includes the sorted set of user-linked artifact IDs.
+   * After unlink→re-link the hash can revert to a previously cached value,
+   * causing a false cache hit that skips enrichment — leaving stale or missing
+   * block attributions. Invalidating on every link/unlink guarantees the LLM
+   * always sees the current linked set. Cost: at most one extra LLM call per
+   * explicit user action (not on every analyze).
+   */
+  private invalidateEnrichCache(sessionId: string): void {
+    this.db.prepare('DELETE FROM processor_runs WHERE session_id = ? AND processor = ?').run(sessionId, 'enrich-session')
+  }
 
   /** Titles of features the user rejected for this session (for LLM prompt context). */
   rejectedFeatureTitles(sessionId: string): string[] {
