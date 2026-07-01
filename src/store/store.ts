@@ -2017,10 +2017,18 @@ export class Store {
       .prepare('SELECT type, artifact_id AS artifactId FROM outcomes WHERE session_id = ?')
       .all(id) as Array<{ type: string; artifactId: string | null }>
 
+    // One row per artifact: a session can link the same PR under multiple roles
+    // (e.g. `created` by outcomes-git + `edited` by pr-content-match for its
+    // attribution %), so pick the strongest/most-explicit link for display.
     const artifacts = this.db
       .prepare(
-        `SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
-         FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?`,
+        `SELECT id, kind, title, ident, status, repo, externalId, role, source FROM (
+           SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source,
+             ROW_NUMBER() OVER (PARTITION BY a.id ORDER BY
+               CASE sa.role WHEN 'created' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'edited' THEN 2 ELSE 3 END,
+               CASE COALESCE(sa.source,'') WHEN 'explicit' THEN 0 WHEN 'user' THEN 1 ELSE 2 END) AS rn
+           FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?
+         ) WHERE rn = 1`,
       )
       .all(id) as Array<Record<string, any>>
 

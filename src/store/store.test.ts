@@ -55,6 +55,25 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(row.complexity).toBe(120)
   })
 
+  it('persists a content-match link (role=edited, source=derived) + PR json + block link + outcome', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+
+    store.persistResult('s1', 'pr-content-match', 1, 'h1', null, {
+      artifacts: [{ ...stubPr, json: { addedLines: 7 } }],
+      sessionArtifacts: [{ artifactId: 'pr:o/r:5', role: 'edited', source: 'derived', confidence: 0.85 }],
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:5', role: 'edited', source: 'derived', confidence: 0.85 }],
+      outcomes: [{ type: 'pr_contributed', artifactId: 'pr:o/r:5', ts: '2026-06-30T00:00:00Z' }],
+    })
+
+    const sa = db.prepare('SELECT role, source, confidence, producer FROM session_artifacts WHERE session_id=? AND artifact_id=?').get('s1', 'pr:o/r:5') as Record<string, unknown>
+    expect(sa).toMatchObject({ role: 'edited', source: 'derived', confidence: 0.85, producer: 'pr-content-match' })
+    expect(db.prepare('SELECT json FROM artifacts WHERE id=?').get('pr:o/r:5')).toMatchObject({ json: '{"addedLines":7}' })
+    expect(db.prepare("SELECT COUNT(*) c FROM block_artifacts WHERE artifact_id='pr:o/r:5' AND role='edited'").get()).toMatchObject({ c: 1 })
+    expect(db.prepare("SELECT COUNT(*) c FROM outcomes WHERE type='pr_contributed'").get()).toMatchObject({ c: 1 })
+  })
+
   it('a genuine status transition (open -> merged) still applies', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
