@@ -1,15 +1,23 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
+import { readFileSync } from 'node:fs'
 import './register'
 import { analyze } from './commands/analyze'
 import { serve } from './commands/serve'
 
+// Read once from package.json so the CLI version never drifts from the package.
+// Resolves the same in dev (src/), in the bundle (dist/), and when installed
+// (npm always ships package.json alongside dist/).
+const { version } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { version: string }
+
 const program = new Command()
 
 program
-  .name('aivue')
+  .name('tuneloop')
   .description('Local analytics for your AI coding sessions. Count outcomes, not tokens.')
-  .version('0.0.1')
+  .version(version)
 
 const appendValue = (val: string, acc: string[]): string[] => (acc.push(val), acc)
 
@@ -23,7 +31,7 @@ program
     appendValue,
     [],
   )
-  .option('--db <path>', 'path to the aivue SQLite store')
+  .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
   .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
@@ -67,7 +75,7 @@ program
 program
   .command('serve')
   .description('Serve the local dashboard over the analyzed store.')
-  .option('--db <path>', 'path to the aivue SQLite store')
+  .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--port <n>', 'port to listen on (default 4319)', (v) => parseInt(v, 10))
   .option('--no-open', 'do not open the browser automatically')
   .action(async (options: { db?: string; port?: number; open?: boolean }) => {

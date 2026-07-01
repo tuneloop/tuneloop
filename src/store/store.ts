@@ -44,6 +44,10 @@ export interface Summary {
   costPerMergedPr: { count: number; costPerUnit: number | null }
   /** Spend on enrichment (the "cost of running the analysis itself"). */
   analysisCostUsd: number
+  /** Whether LLM enrichment has run (any processor recorded an LLM model). */
+  enrichmentRan: boolean
+  /** ISO timestamp of the most recent `analyze` run (null if never recorded). */
+  lastAnalyzedAt: string | null
   /** Enrichment dimension distributions, empty when enrichment hasn't run. */
   useCases: Dist[]
   complexity: Dist[]
@@ -60,6 +64,17 @@ export interface Highlight {
 
 export class Store {
   constructor(private db: DB) {}
+
+  /** Read a value from the key-value `meta` table (undefined when absent). */
+  getMeta(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined
+    return row?.value
+  }
+
+  /** Upsert a value into the key-value `meta` table. */
+  setMeta(key: string, value: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(key, value)
+  }
 
   /**
    * Content hash + parse version for a session, if already ingested. Both feed
@@ -603,6 +618,16 @@ export class Store {
       this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }
     ).s
 
+    // Whether LLM enrichment has ever run. LLM-backed processors record their model
+    // in processor_runs (non-LLM ones store NULL), so a single non-null model is a
+    // durable "enrichment ran" signal — independent of which annotation dimensions
+    // the enricher currently emits (those can be renamed/removed; this won't). Note
+    // a row is only written on success, which is exactly what we want here: "did
+    // enrichment actually produce anything", not "was a key merely configured".
+    const enrichmentRan =
+      (this.db.prepare('SELECT EXISTS(SELECT 1 FROM processor_runs WHERE model IS NOT NULL) AS r').get() as { r: number })
+        .r === 1
+
     const features = this.db
       .prepare(
         `SELECT
@@ -619,6 +644,8 @@ export class Store {
       topTools,
       costPerMergedPr: this.costPerArtifact('pr'),
       analysisCostUsd,
+      enrichmentRan,
+      lastAnalyzedAt: this.getMeta('last_analyze_at') ?? null,
       useCases: this.facetDistribution('use_case'),
       complexity: this.scalarDist('complexity'),
       autonomy: this.scalarDist('autonomy'),

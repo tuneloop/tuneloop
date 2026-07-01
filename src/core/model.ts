@@ -79,7 +79,7 @@ export interface AssistantMessage extends BaseEvent {
   usage: TokenUsage
   /**
    * Native cost (USD) for this message as reported by the source, when the source
-   * computes its own cost (e.g. OpenCode, which routes to many providers aivue's
+   * computes its own cost (e.g. OpenCode, which routes to many providers tuneloop's
    * rate table doesn't cover). Used by computeSessionCost as a fallback when the
    * model has no entry in models.json. Absent for sources priced from tokens.
    */

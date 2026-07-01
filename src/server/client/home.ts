@@ -8,6 +8,7 @@ import { openMetric, renderWindow, loadKpis } from './kpis'
 import { filterByArtifact, setView } from './sessions'
 import { openArtifactSearch } from './artifacts'
 import { renderAskBanner, clearAsked } from './askbanner'
+import { storeStatus, noticeHtml } from './notice'
 
 // Highlights runs over a fixed window — wider than the Dashboard's 7d default so
 // short-lived signals still surface, but capped at 14 so the prior-period
@@ -178,48 +179,67 @@ function present(h) {
   }
 }
 
+// The most recent /api/highlights payload, kept so the tab can repaint (e.g. to
+// add the store-state nudge) once the overview lands, without a refetch.
+var lastHl: any = null;
+
 // Highlights is its own tab, fixed to HL_DAYS (no window selector).
 export function renderHighlights() {
-  var winLabel = HL_WIN;
   get('/api/highlights?days=' + HL_DAYS).then(function (d) {
-    var items = (d && d.highlights) || [];
-    var rows = items.map(function (h, i) {
+    lastHl = d;
+    paintHighlights();
+  });
+}
+
+// Paint the digest from the last fetched payload. Separated from the fetch so the
+// overview load can trigger a repaint that folds in the store-state nudge (a fresh
+// store replaces the digest with a first-run prompt; an un-enriched one prepends
+// the enrichment nudge). No-op until the first fetch resolves.
+export function paintHighlights() {
+  if (!lastHl) return;
+  var winLabel = HL_WIN;
+  // Fresh store (nothing analyzed): the digest would just say "nothing notable",
+  // which reads as recent inactivity rather than an empty store — show the
+  // first-run nudge alone instead.
+  if (storeStatus() === 'empty') { $('#highlights').innerHTML = noticeHtml(); return; }
+  var items = (lastHl && lastHl.highlights) || [];
+  var rows = items.map(function (h, i) {
+    var p = present(h);
+    if (!p) return '';
+    return '<div class="hrow">' +
+      '<span class="hrow-q">' + p.html + '</span>' +
+      '<button type="button" class="hrow-to" data-i="' + i + '">See the data <i>→</i></button></div>';
+  }).join('');
+  if (!rows) rows = '<div class="empty">Nothing notable in ' + esc(winLabel) + ' yet — widen the window, or run more sessions.</div>';
+  var dbPath = (lastHl && lastHl.dbPath) || (state.overview && state.overview.dbPath) || '~/.tuneloop/tuneloop.sqlite';
+  $('#highlights').innerHTML =
+    '<div class="hl">' +
+    noticeHtml() + // enrichment nudge when un-enriched; '' once enrichment has run
+    '<div class="hl-head">Notable in ' + esc(winLabel) + '</div>' +
+    '<div class="hlist">' + rows + '</div>' +
+    // Order mirrors the top tabs (Dashboard, Artifacts, Sessions).
+    '<div class="see-tx-wrap">' +
+      '<button class="see-tx" type="button" data-view="dashboard">Headline metrics →</button>' +
+      '<button class="see-tx" type="button" data-view="artifacts">Artifacts →</button>' +
+      '<button class="see-tx" type="button" data-view="sessions">Your sessions →</button>' +
+    '</div>' +
+    '<div class="home-ask">Want to do a deep dive into the data? Everything lives in a local SQLite store at ' +
+    '<code>' + esc(dbPath) + '</code> — point your coding agent at it. ' +
+    '<span class="muted">(Guided agent querying coming soon.)</span></div></div>';
+  Array.prototype.forEach.call(document.querySelectorAll('#highlights .see-tx[data-view]'), function (b) {
+    b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); window.scrollTo(0, 0); };
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('#highlights .hrow-to'), function (el) {
+    el.onclick = function () {
+      var h = items[parseInt(el.getAttribute('data-i'), 10)];
       var p = present(h);
-      if (!p) return '';
-      return '<div class="hrow">' +
-        '<span class="hrow-q">' + p.html + '</span>' +
-        '<button type="button" class="hrow-to" data-i="' + i + '">See the data <i>→</i></button></div>';
-    }).join('');
-    if (!rows) rows = '<div class="empty">Nothing notable in ' + esc(winLabel) + ' yet — widen the window, or run more sessions.</div>';
-    var dbPath = (state.overview && state.overview.dbPath) || '~/.aivue/aivue.sqlite';
-    $('#highlights').innerHTML =
-      '<div class="hl">' +
-      '<div class="hl-head">Notable in ' + esc(winLabel) + '</div>' +
-      '<div class="hlist">' + rows + '</div>' +
-      // Order mirrors the top tabs (Dashboard, Artifacts, Sessions).
-      '<div class="see-tx-wrap">' +
-        '<button class="see-tx" type="button" data-view="dashboard">Headline metrics →</button>' +
-        '<button class="see-tx" type="button" data-view="artifacts">Artifacts →</button>' +
-        '<button class="see-tx" type="button" data-view="sessions">Your sessions →</button>' +
-      '</div>' +
-      '<div class="home-ask">Want to do a deep dive into the data? Everything lives in a local SQLite store at ' +
-      '<code>' + esc(dbPath) + '</code> — point your coding agent at it. ' +
-      '<span class="muted">(Guided agent querying coming soon.)</span></div></div>';
-    Array.prototype.forEach.call(document.querySelectorAll('#highlights .see-tx[data-view]'), function (b) {
-      b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); window.scrollTo(0, 0); };
-    });
-    Array.prototype.forEach.call(document.querySelectorAll('#highlights .hrow-to'), function (el) {
-      el.onclick = function () {
-        var h = items[parseInt(el.getAttribute('data-i'), 10)];
-        var p = present(h);
-        if (!p) return;
-        // Reuse the grounding banner: the insight IS the answer, so only the
-        // orientation (`about`) shows — once per destination section.
-        state.asked = { q: stripTags(p.html), answer: '', about: p.about, section: p.section };
-        p.run();
-        renderAskBanner(true); // renders the message in the slot above the chart + scrolls there
-      };
-    });
+      if (!p) return;
+      // Reuse the grounding banner: the insight IS the answer, so only the
+      // orientation (`about`) shows — once per destination section.
+      state.asked = { q: stripTags(p.html), answer: '', about: p.about, section: p.section };
+      p.run();
+      renderAskBanner(true); // renders the message in the slot above the chart + scrolls there
+    };
   });
 }
 

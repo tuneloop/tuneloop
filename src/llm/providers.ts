@@ -1,5 +1,5 @@
 /**
- * Provider presets — the single source of truth for which LLM endpoints aivue
+ * Provider presets — the single source of truth for which LLM endpoints tuneloop
  * can drive. Almost every provider speaks the OpenAI Chat Completions wire
  * format, so they all share ONE `openai-compatible` shape that differs only by
  * `baseURL`; a preset is sugar that bakes in the URL, the default key env, and a
@@ -13,7 +13,7 @@ export interface ProviderPreset {
   shape: ProviderShape
   /** Required for openai-compatible; omitted for the native SDK defaults. */
   baseURL?: string
-  /** Default env var the API key is read from when AIVUE_LLM_API_KEY is unset. */
+  /** Default env var the API key is read from when TUNELOOP_LLM_API_KEY is unset. */
   keyEnv: string
   defaultModel: string
   /** false for local endpoints that need no key (Ollama). */
@@ -34,8 +34,8 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
   // Local: no key. Enrichment uses forced tool calls, so pick a tool-capable
   ollama: { shape: 'openai-compatible', baseURL: 'http://localhost:11434/v1', keyEnv: 'OLLAMA_API_KEY', defaultModel: 'qwen2.5', requiresKey: false },
 
-  // Escape hatch for anything unlisted; requires AIVUE_LLM_BASE_URL.
-  'openai-compatible': { shape: 'openai-compatible', keyEnv: 'AIVUE_LLM_API_KEY', defaultModel: '' },
+  // Escape hatch for anything unlisted; requires TUNELOOP_LLM_BASE_URL.
+  'openai-compatible': { shape: 'openai-compatible', keyEnv: 'TUNELOOP_LLM_API_KEY', defaultModel: '' },
 }
 
 export const PROVIDER_NAMES = Object.keys(PROVIDERS)
