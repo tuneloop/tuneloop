@@ -80,7 +80,9 @@ export const enrichSession: Processor = {
     if (!llm) return {}
 
     const blocks = deterministicBlocks(session)
-    const userLinkedPrs = ctx.userLinkedArtifacts.filter((a) => a.kind === 'pr')
+    const refs = parsePrRefs(session)
+    const deterministicPrs = new Set(refs.filter((r) => r.kind === 'create' || r.kind === 'merge').map((r) => r.id))
+    const userLinkedPrs = ctx.userLinkedArtifacts.filter((a) => a.kind === 'pr' && !deterministicPrs.has(a.artifactId))
     const userLinkedFeatures = ctx.userLinkedArtifacts.filter((a) => a.kind === 'feature')
     const prContext: PrPromptContext = { userLinkedPrs, prBlockAttributions: ctx.prBlockAttributions }
     const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks, ctx.rejectedFeatureTitles, prContext, userLinkedFeatures)
@@ -201,14 +203,16 @@ export const enrichSession: Processor = {
     const artifacts: ArtifactInput[] = []
     const sessionArtifacts: SessionArtifactInput[] = []
     const emitted = new Set<string>()
+    // Any artifact the user explicitly linked to THIS session (session_artifacts.source='user')
+    // must not be re-emitted — INSERT OR REPLACE would clobber source/producer/confidence.
+    // This covers both user-created features (artifacts.source='user') AND derived features
+    // the user linked via the dashboard (artifacts.source='derived' but sa.source='user').
+    const userLinkedIds = new Set(ctx.userLinkedArtifacts.map((a) => a.artifactId))
     for (const slot of palette) {
       if (!slot.id || !linked.has(slot.id) || emitted.has(slot.id)) continue
       emitted.add(slot.id)
       if (slot.create) artifacts.push(slot.create)
-      // User-created features (artifacts.source='user') already have a session_artifact
-      // row with source='user', producer='dashboard'. Don't re-emit — INSERT OR REPLACE
-      // would clobber that provenance. The isLocked() check uses the same signal.
-      if (!isLocked(slot.id)) {
+      if (!userLinkedIds.has(slot.id)) {
         sessionArtifacts.push({ artifactId: slot.id, role: 'contributed', source: 'derived', confidence: 0.6 })
       }
     }
@@ -234,8 +238,7 @@ export const enrichSession: Processor = {
     // same session created/merged (you don't "review" your own PR here). Confidence
     // is modest (0.6) — the signal is an LLM use-case plus a read, not an explicit
     // `gh pr review`. Gated on the LLM run, so disabled when no provider is set.
-    const refs = parsePrRefs(session)
-    const selfCreated = new Set(refs.filter((r) => r.kind === 'create' || r.kind === 'merge').map((r) => r.id))
+    const selfCreated = deterministicPrs
     // PRs this session EXPLICITLY reviewed (gh pr review / MCP review tool) are
     // owned by outcomes-git's Layer 1 (deterministic, confidence 1.0). Skip them
     // here so the soft derived link never clobbers the explicit one.

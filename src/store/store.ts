@@ -2497,7 +2497,7 @@ export class Store {
         `SELECT ba.block_idx AS blockIdx, ba.artifact_id AS artifactId, a.title
          FROM block_artifacts ba
          JOIN artifacts a ON a.id = ba.artifact_id
-         WHERE ba.session_id = ? AND a.kind = 'pr' AND COALESCE(ba.role,'') <> 'reviewed'`,
+         WHERE ba.session_id = ? AND a.kind = 'pr' AND COALESCE(ba.role,'') <> 'reviewed' AND ba.producer <> 'enrich-session'`,
       )
       .all(sessionId) as Array<{ blockIdx: number; artifactId: string; title: string | null }>
   }
