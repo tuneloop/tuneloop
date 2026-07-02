@@ -472,12 +472,17 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
    dropdown), an Error stepper, and a live "you are here" line. */
 /* Scope bar (Main thread + one tab per subagent) + transcript nav both live in
    the sticky .drawer-head and show only on the Transcript tab. */
-.tx-scopes { display: none; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.tx-scopes { display: none; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
 .tx-scopes.on { display: flex; }
+/* Collapsed: keep the list to one line by hiding the overflow pills behind the toggle. */
+.tx-scopes.collapsed { flex-wrap: nowrap; }
+.tx-scopes.collapsed .tx-scope-extra { display: none; }
 .tx-scope-btn { max-width: 280px; border: 1px solid var(--line); background: var(--paper); color: var(--muted); border-radius: 999px; padding: 3px 12px; font-size: 12.5px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tx-scope-btn:hover { color: var(--ink); border-color: var(--gray); }
 .tx-scope-btn.on { color: var(--ink); border-color: var(--emerald); background: #eaf3ec; }
 .tx-scope-err { margin-left: 6px; color: var(--red); font-size: 11px; }
+.tx-scope-more { flex: none; border: 1px dashed var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.tx-scope-more:hover { color: var(--ink); border-color: var(--gray); }
 /* Only the active scope's turns render. */
 .tx-scope-pane { display: none; }
 .tx-scope-pane.on { display: block; }
@@ -515,6 +520,11 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-ol-btn:hover, .tx-ol-btn.on { border-color: var(--emerald); color: var(--emerald); }
 .tx-outline { position: absolute; top: 100%; left: 0; z-index: 20; margin-top: 4px; width: min(460px, 84vw); max-height: 46vh; overflow-y: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(20,18,15,.14); display: none; }
 .tx-outline.on { display: block; }
+/* Filter box pinned to the top of a long outline; the list scrolls beneath it. */
+.tx-ol-search { position: sticky; top: 0; z-index: 1; padding: 8px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.tx-ol-search-input { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-size: 12.5px; color: var(--ink); background: var(--paper); }
+.tx-ol-search-input:focus { outline: none; border-color: var(--emerald); }
+.tx-ol-list .tx-ol-hide { display: none; }
 .tx-ol-item { display: flex; align-items: baseline; gap: 9px; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 7px 11px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
 .tx-ol-item:last-child { border-bottom: 0; }
 .tx-ol-item:hover { background: #fbf8f1; }
