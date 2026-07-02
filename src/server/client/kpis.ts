@@ -1,7 +1,7 @@
 // The headline KPI tile row + the tile-as-nav behaviour: clicking a tile opens
 // that metric's full-width detail section, and exactly one section is always
 // expanded (default success_rate, set in main.ts).
-import { state, $, esc, usd, num, get, fmtVal, kpiDelta } from './core'
+import { state, $, esc, usd, num, get, fmtVal, kpiDelta, cxLabelList } from './core'
 import { syncHash } from './router'
 import { clearAsked } from './askbanner'
 import { successDefinable } from './notice'
@@ -57,6 +57,12 @@ export function renderOpenMetric() {
 // all — see paintKpis' Session Outcome Rate handling).
 var lastKpis: any = null;
 
+// The complexity-filtered cost-per-artifact figure, published by the Cost-by-
+// Artifact detail (renderCa) so the headline tile can mirror the active filter.
+// Tagged with its kind/window/complexity so a stale filter never paints.
+var caKpiOverride: any = null;
+export function setCaKpiOverride(o: any) { caKpiOverride = o; }
+
 export function loadKpis() {
   // The headline success-rate tile counts success the same way the detail view
   // does (outcomes), and the whole row honors the top-level window (days).
@@ -85,8 +91,20 @@ export function paintKpis() {
   var caData = state.ca.kind === 'pr'
     ? { cur: cpr, prev: ppr, label: 'per merged PR', noun: 'PR', nounPl: 'PRs', verb: 'merged' }
     : { cur: cpf, prev: ppf, label: 'per shipped feature', noun: 'feature', nounPl: 'features', verb: 'shipped' };
+  // When a complexity filter is active, the tile mirrors the filtered figure the
+  // Cost-by-Artifact endpoint computed — but only if the override still matches the
+  // current kind/window/complexity (guards against a stale filter after a switch).
+  var caCx = state.ca.complexity;
+  var useCaFilter = !!caCx && caKpiOverride && caKpiOverride.kind === state.ca.kind &&
+    caKpiOverride.days === state.days && caKpiOverride.complexity === caCx;
+  if (useCaFilter) {
+    caData.cur = caKpiOverride.kpi.current || {};
+    caData.prev = caKpiOverride.kpi.previous || {};
+  }
   var cnt = caData.cur.count || 0;
-  var caSub = caData.label + ' · ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' ' + caData.verb;
+  var caSub = useCaFilter
+    ? caData.label + ' · counting ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' of complexity: ' + cxLabelList(caCx)
+    : caData.label + ' · ' + cnt + ' ' + (cnt === 1 ? caData.noun : caData.nounPl) + ' ' + caData.verb;
   // A "0%" outcome rate only means something once the selected success definition
   // can actually be satisfied; when none of its outcome types exist (e.g. the
   // default `session_success` before LLM enrichment has run), the rate is a
