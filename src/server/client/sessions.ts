@@ -1052,7 +1052,7 @@ export function openDetail(id, focus?: any) {
     var userTurns = scopeByKey.main.userTurns;
     var errIds = scopeByKey.main.errIds;
 
-    function scopeBtnHtml(sc) {
+    function scopeBtnHtml(sc, extra) {
       var lbl, ico = '', title = '';
       if (sc.key === 'main') lbl = 'Main thread';
       else {
@@ -1061,20 +1061,53 @@ export function openDetail(id, focus?: any) {
         title = (sc.agentType || 'subagent') + (sc.description ? ': ' + sc.description : '');
       }
       var err = sc.errIds.length ? '<span class="tx-scope-err">⚠' + sc.errIds.length + '</span>' : '';
-      return '<button class="tx-scope-btn' + (sc.key === 'main' ? ' on' : '') + '" type="button" data-scope="' +
-        esc(sc.key) + '" title="' + esc(title) + '">' + ico + esc(lbl) + err + '</button>';
+      return '<button class="tx-scope-btn' + (sc.key === 'main' ? ' on' : '') + (extra ? ' tx-scope-extra' : '') +
+        '" type="button" data-scope="' + esc(sc.key) + '" title="' + esc(title) + '">' + ico + esc(lbl) + err + '</button>';
     }
+    // Collapse a long scope list to one line: show the first few, tuck the rest
+    // behind a toggle. Main thread always leads, so the visible count stays small.
+    var SCOPE_SHOWN = 3;
+    var scopeExtra = scopes.length - SCOPE_SHOWN;
+    var moreBtn = scopeExtra > 0
+      ? '<button class="tx-scope-more" type="button" data-more="+' + scopeExtra + ' more">+' + scopeExtra + ' more</button>'
+      : '';
     var scopeBar = hasSub
-      ? '<div class="tx-scopes">' + scopes.map(scopeBtnHtml).join('') + '</div>'
+      ? '<div class="tx-scopes' + (scopeExtra > 0 ? ' collapsed' : '') + '">' +
+          scopes.map(function (sc, i) { return scopeBtnHtml(sc, i >= SCOPE_SHOWN); }).join('') + moreBtn + '</div>'
       : '';
 
-    function outlineHtml(uts) {
+    function outlineListHtml(uts) {
       return uts.length
         ? uts.map(function (u, k) {
-            return '<button class="tx-ol-item" type="button" data-k="' + k + '" data-goto="txt-' + u.i + '">' +
+            return '<button class="tx-ol-item" type="button" data-k="' + k + '" data-goto="txt-' + u.i + '"' +
+              ' data-s="' + esc(clipLine(u.text, 300).toLowerCase()) + '">' +
               '<span class="tx-ol-n">' + (k + 1) + '</span><span class="tx-ol-tx">' + esc(clipLine(u.text, 90)) + '</span></button>';
           }).join('')
         : '<div class="empty">No turns.</div>';
+    }
+    // Long turn lists get a filter box so you don't have to scroll to scan them.
+    var OUTLINE_SEARCH_MIN = 10;
+    function outlineHtml(uts) {
+      var search = uts.length > OUTLINE_SEARCH_MIN
+        ? '<div class="tx-ol-search"><input class="tx-ol-search-input" type="text" placeholder="Filter turns…" /></div>'
+        : '';
+      return search + '<div class="tx-ol-list">' + outlineListHtml(uts) + '</div>';
+    }
+    // Show only the outline items whose text contains the query; note when none do.
+    function filterOutline(q) {
+      var list = $('#drawerBody .tx-ol-list'); if (!list) return;
+      q = (q || '').trim().toLowerCase();
+      var any = false;
+      Array.prototype.forEach.call(list.querySelectorAll('.tx-ol-item'), function (it) {
+        var hit = !q || (it.getAttribute('data-s') || '').indexOf(q) >= 0;
+        it.classList.toggle('tx-ol-hide', !hit);
+        if (hit) any = true;
+      });
+      var none = list.querySelector('.tx-ol-none') as HTMLElement;
+      if (!any && q) {
+        if (!none) { none = document.createElement('div'); none.className = 'empty tx-ol-none'; none.textContent = 'No matching turns.'; list.appendChild(none); }
+        none.style.display = '';
+      } else if (none) none.style.display = 'none';
     }
     var nav = '<div class="tx-nav">' +
       '<div class="tx-filter-wrap"></div>' +
@@ -1393,9 +1426,12 @@ export function openDetail(id, focus?: any) {
 
     // Outline dropdown: open/close + jump to a specific turn (highlights current).
     var olBtn = $('#drawerBody .tx-ol-btn'), olPanel = $('#tx-outline');
-    if (olBtn) olBtn.onclick = function () { olPanel.classList.toggle('on'); olBtn.classList.toggle('on'); };
-    // (Re)wire the outline items to jump within the active scope. Called on open
-    // and whenever switchScope swaps the outline's contents.
+    if (olBtn) olBtn.onclick = function () {
+      var open = olPanel.classList.toggle('on'); olBtn.classList.toggle('on');
+      if (open) { var si = $('#drawerBody .tx-ol-search-input'); if (si) si.focus(); }
+    };
+    // (Re)wire the outline items to jump within the active scope, plus the filter
+    // box. Called on open and whenever the outline's contents are swapped.
     function wireOutline() {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-ol-item'), function (it) {
         it.onclick = function () {
@@ -1404,6 +1440,14 @@ export function openDetail(id, focus?: any) {
           jumpToTurn(parseInt(it.getAttribute('data-k'), 10));
         };
       });
+      var si = $('#drawerBody .tx-ol-search-input');
+      if (si) {
+        si.oninput = function () { filterOutline(si.value); };
+        // Enter jumps to the first match (and closes the dropdown via the click).
+        si.onkeydown = function (e) {
+          if (e.key === 'Enter') { var first = $('#drawerBody .tx-ol-item:not(.tx-ol-hide)'); if (first) first.click(); }
+        };
+      }
     }
     wireOutline();
     if (userTurns.length) updateIndicator(0);
@@ -1666,6 +1710,13 @@ export function openDetail(id, focus?: any) {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
         b.classList.toggle('on', b.getAttribute('data-scope') === key);
       });
+      // If the newly active scope is tucked away, reveal the collapsed list so its pill shows.
+      var sb = $('#drawerBody .tx-scopes');
+      var activeBtn = $('#drawerBody .tx-scope-btn.on');
+      if (sb && sb.classList.contains('collapsed') && activeBtn && activeBtn.classList.contains('tx-scope-extra')) {
+        sb.classList.remove('collapsed');
+        var mb = $('#drawerBody .tx-scope-more'); if (mb) mb.textContent = 'show less';
+      }
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-pane'), function (p) {
         p.classList.toggle('on', p.getAttribute('data-scope') === key);
       });
@@ -1688,6 +1739,14 @@ export function openDetail(id, focus?: any) {
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
       b.onclick = function () { switchScope(b.getAttribute('data-scope')); };
     });
+    // The "+N more" pill expands/collapses the overflow scopes.
+    var scopeMoreEl = $('#drawerBody .tx-scope-more');
+    if (scopeMoreEl) scopeMoreEl.onclick = function () {
+      var sb = $('#drawerBody .tx-scopes');
+      var collapsed = sb.classList.toggle('collapsed');
+      scopeMoreEl.textContent = collapsed ? scopeMoreEl.getAttribute('data-more') : 'show less';
+      syncHeadH();
+    };
     // A spawning call (banner or chip) opens its subagent's scope.
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-block.agent .tool-block-row'), function (b) {
       b.onclick = function (e) { e.stopPropagation(); switchScope(b.getAttribute('data-agent')); };

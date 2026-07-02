@@ -922,8 +922,9 @@ export class Store {
    * the model never block-linked, or pre-block data). Both paths are at usage grain
    * and UNION-deduped, so a usage row shared across in-window artifacts counts once.
    */
-  costPerArtifact(kind: string, from?: string, to?: string): { count: number; costPerUnit: number | null } {
+  costPerArtifact(kind: string, from?: string, to?: string, complexity?: string): { count: number; costPerUnit: number | null } {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const cxFilter = complexityWhere(complexity, 'a', kind)
     const params = from && to ? [kind, from, to] : [kind]
     // "Shipped" means a PR THIS store produced — a PR whose only link is `reviewed`
     // (a teammate's PR you reviewed) is not yours to count or cost here; it belongs
@@ -934,7 +935,7 @@ export class Store {
         : ''
     const count = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}`)
         .get(...params) as { n: number }
     ).n
     if (count === 0) return { count: 0, costPerUnit: null }
@@ -950,7 +951,7 @@ export class Store {
                                      AND ${blockNotSuperseded('ba')}
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}
              UNION
              -- fallback: whole sessions of in-window artifacts that have NO production block links
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
@@ -958,7 +959,7 @@ export class Store {
              JOIN session_artifacts sa ON sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
                                        AND ${saNoContentMatchFallback('sa')}
              JOIN usage_facts u ON u.session_id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}
                AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed')
            )`,
         )
@@ -1025,6 +1026,7 @@ export class Store {
     bucket: Bucket,
     from?: string,
     to?: string,
+    complexity?: string,
   ): {
     burn: Array<{ bucket: string; spend: number; shippedSpend: number }>
     throughput: Array<{ bucket: string; count: number }>
@@ -1044,6 +1046,8 @@ export class Store {
       kind === 'pr'
         ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
         : ''
+    const cxFilter = complexityWhere(complexity, 'a', kind) // for burn subquery (alias `a`)
+    const cxFilterBare = complexityWhere(complexity, 'artifacts', kind) // for throughput (bare table name)
     const burnRange = from && to ? 'AND COALESCE(u.ts, s.started_at) >= ? AND COALESCE(u.ts, s.started_at) < ?' : ''
     const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
@@ -1057,7 +1061,7 @@ export class Store {
                                             AND ${blockNotSuperseded('ba')}
                     JOIN artifacts a ON a.id = ba.artifact_id
                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
-                      AND a.kind = ? AND a.completed_at IS NOT NULL
+                      AND a.kind = ? AND a.completed_at IS NOT NULL ${cxFilter}
                   ) THEN u.cost_usd ELSE 0 END),0) AS shippedSpend
          FROM usage_facts u JOIN sessions s ON s.id = u.session_id
          WHERE COALESCE(u.ts, s.started_at) IS NOT NULL ${burnRange}
@@ -1069,20 +1073,22 @@ export class Store {
     const throughput = this.db
       .prepare(
         `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
-         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} GROUP BY bucket ORDER BY bucket`,
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilterBare} GROUP BY bucket ORDER BY bucket`,
       )
       .all(...thParams) as Array<{ bucket: string; count: number }>
     // PRs reviewed per bucket, dated at REVIEW time (when you reviewed, not when the
     // PR merged) — sourced from the pr_reviewed outcome. Distinct PRs, so two review
     // sessions on the same PR count once. Features have no review signal → empty.
     const revRange = from && to ? 'AND o.ts >= ? AND o.ts < ?' : ''
+    const cxFilterRev = complexityWhere(complexity, 'a', kind)
     const reviewed =
       kind === 'pr'
         ? (this.db
             .prepare(
               `SELECT ${bucketExpr('o.ts', bucket)} AS bucket, COUNT(DISTINCT o.artifact_id) AS count
                FROM outcomes o
-               WHERE o.type = 'pr_reviewed' AND o.ts IS NOT NULL ${revRange}
+               ${cxFilterRev ? 'JOIN artifacts a ON a.id = o.artifact_id' : ''}
+               WHERE o.type = 'pr_reviewed' AND o.ts IS NOT NULL ${revRange} ${cxFilterRev}
                GROUP BY bucket ORDER BY bucket`,
             )
             .all(...(from && to ? [from, to] : [])) as Array<{ bucket: string; count: number }>)
@@ -1141,7 +1147,7 @@ export class Store {
    * insists both be shown so dividing the curves doesn't read as a contradiction.
    * `throughput` here equals the KPI denominator exactly. No window = all time.
    */
-  costPeriod(kind: string, from?: string, to?: string): { burn: number; throughput: number; efficiency: number | null } {
+  costPeriod(kind: string, from?: string, to?: string, complexity?: string): { burn: number; throughput: number; efficiency: number | null } {
     const burnRange = from && to ? 'WHERE started_at >= ? AND started_at < ?' : 'WHERE started_at IS NOT NULL'
     const burnParams = from && to ? [from, to] : []
     const burn = (
@@ -1157,9 +1163,10 @@ export class Store {
       kind === 'pr'
         ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
         : ''
+    const cxFilter = complexityWhere(complexity, 'artifacts', kind)
     const throughput = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilter}`)
         .get(...thParams) as { n: number }
     ).n
     return { burn, throughput, efficiency: throughput ? burn / throughput : null }
@@ -2244,7 +2251,7 @@ export class Store {
       .prepare(
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
                 a.external_id AS externalId, a.created_at AS createdAt, a.completed_at AS completedAt,
-                a.parent_artifact_id AS parentId,
+                a.parent_artifact_id AS parentId, a.complexity, a.complexity_basis AS complexityBasis,
                 -- AI-attribution % = pr-content-match's confidence only (other producers write
                 -- confidence on session_artifacts too, e.g. review links).
                 MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) AS aiPct,
@@ -2407,19 +2414,19 @@ export class Store {
   // ---- feature management (dashboard writes) --------------------------------
 
   /** Create a user-authored feature (source='user' — never clobbered by analyze). */
-  createFeature(title: string, parentId?: string): { id: string } {
+  createFeature(title: string, parentId?: string, complexity?: number): { id: string } {
     const id = `feature:user:${randomUUID().slice(0, 8)}`
     this.db
       .prepare(
-        `INSERT INTO artifacts (id, kind, title, source, created_at, parent_artifact_id)
-         VALUES (?, 'feature', ?, 'user', ?, ?)`,
+        `INSERT INTO artifacts (id, kind, title, source, created_at, parent_artifact_id, complexity, complexity_basis)
+         VALUES (?, 'feature', ?, 'user', ?, ?, ?, ?)`,
       )
-      .run(id, title, new Date().toISOString(), parentId ?? null)
+      .run(id, title, new Date().toISOString(), parentId ?? null, complexity ?? null, complexity != null ? 'user_tagged' : null)
     return { id }
   }
 
-  /** Mark complete/reopen, rename, or reparent a feature. */
-  updateFeature(id: string, patch: { completed?: boolean; parentId?: string | null; title?: string }): boolean {
+  /** Mark complete/reopen, rename, reparent, or set complexity of a feature. */
+  updateFeature(id: string, patch: { completed?: boolean; parentId?: string | null; title?: string; complexity?: number | null }): boolean {
     const exists = this.db.prepare("SELECT 1 FROM artifacts WHERE id = ? AND kind = 'feature'").get(id)
     if (!exists) return false
     if (patch.completed !== undefined) {
@@ -2434,6 +2441,11 @@ export class Store {
     }
     if (patch.title !== undefined && patch.title.trim()) {
       this.db.prepare('UPDATE artifacts SET title = ? WHERE id = ?').run(patch.title.trim(), id)
+    }
+    if (patch.complexity !== undefined) {
+      this.db.prepare('UPDATE artifacts SET complexity = ?, complexity_basis = ? WHERE id = ?').run(
+        patch.complexity, patch.complexity !== null ? 'user_tagged' : null, id,
+      )
     }
     return true
   }
@@ -2685,6 +2697,8 @@ export interface ArtifactListItem {
   createdAt: string | null
   completedAt: string | null
   parentId: string | null
+  complexity: number | null
+  complexityBasis: string | null
   sessions: number
   costUsd: number
   /** Max content-match AI-attribution fraction across the artifact's session links (0–1);
@@ -3026,6 +3040,42 @@ function blockNotSuperseded(ba: string): string {
  */
 function saNoContentMatchFallback(sa: string): string {
   return `NOT (COALESCE(${sa}.source,'') = 'derived' AND ${sa}.producer = 'pr-content-match')`
+}
+
+export type ComplexityBucket = 'trivial' | 'small' | 'medium' | 'large' | 'xl'
+
+const COMPLEXITY_RANGES: Record<ComplexityBucket, [number, number]> = {
+  trivial: [0, 10],
+  small: [11, 100],
+  medium: [101, 500],
+  large: [501, 1500],
+  xl: [1501, 999999999],
+}
+
+const FEATURE_COMPLEXITY: Record<string, number> = {
+  trivial: 1, small: 2, medium: 3, large: 4, xl: 5,
+}
+
+function complexityWhere(bucket: string | undefined, alias: string, kind?: string): string {
+  if (!bucket) return ''
+  const buckets = bucket.split(',').filter(Boolean)
+  if (!buckets.length) return ''
+  if (kind !== 'feature' && kind !== 'pr') return ''
+  const clauses: string[] = []
+  let hasNone = false
+  for (const b of buckets) {
+    if (b === 'none') { hasNone = true; continue }
+    if (kind === 'feature') {
+      const val = FEATURE_COMPLEXITY[b]
+      if (val) clauses.push(`${alias}.complexity = ${val}`)
+    } else {
+      const range = COMPLEXITY_RANGES[b as ComplexityBucket]
+      if (range) clauses.push(`(${alias}.complexity >= ${range[0]} AND ${alias}.complexity <= ${range[1]})`)
+    }
+  }
+  if (hasNone) clauses.push(`${alias}.complexity IS NULL`)
+  if (!clauses.length) return ''
+  return `AND (${clauses.join(' OR ')})`
 }
 
 // Display title: the enrichment-derived `title` annotation, else the native adapter title
