@@ -58,7 +58,7 @@ function diffRw(removed: string[], added: string[]): string {
 
 const noopLog = { debug() {}, info() {}, warn() {}, error() {} }
 function ctx(s: Session, sh: ProcessorContext['sh']): ProcessorContext {
-  return { session: s, log: noopLog, llmEnabled: false, llm: null, existingFeatures: [], rejectedFeatureTitles: [], sh }
+  return { session: s, log: noopLog, llmEnabled: false, llm: null, existingFeatures: [], rejectedFeatureTitles: [], userLinkedArtifacts: [], prBlockAttributions: [], sh }
 }
 
 // gh/git stub: toplevel /repo, origin o/r, a configurable PR list + per-number diffs.
