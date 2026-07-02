@@ -54,6 +54,21 @@ export interface FeatureRef {
   repos?: string[]
 }
 
+/** A user-linked artifact that needs block-level attribution. */
+export interface UserLinkedArtifact {
+  artifactId: string
+  kind: 'pr' | 'feature'
+  title: string | null
+  ident: string | null
+}
+
+/** Block indices already attributed to a PR by deterministic processors. */
+export interface PrBlockAttribution {
+  blockIdx: number
+  artifactId: string
+  title: string | null
+}
+
 export interface ProcessorContext {
   session: Session
   log: Logger
@@ -63,6 +78,12 @@ export interface ProcessorContext {
   llm: LlmClient | null
   /** Existing features in the store, to bias derived feature linkage toward. */
   existingFeatures: FeatureRef[]
+  /** Titles of features the user has rejected for this session (tombstoned). */
+  rejectedFeatureTitles: string[]
+  /** User-linked PRs/features for this session that have no block-level attribution yet. */
+  userLinkedArtifacts: UserLinkedArtifact[]
+  /** Blocks already attributed to PRs by deterministic processors (outcomes-git). */
+  prBlockAttributions: PrBlockAttribution[]
   /** Run a local binary (git, gh). Resolves null if the binary is missing. */
   sh: (cmd: string, args: string[], opts?: { cwd?: string }) => Promise<ShResult | null>
 }

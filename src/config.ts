@@ -1,32 +1,45 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { PROVIDERS } from './llm/providers'
 
 /** Resolved runtime configuration for a single invocation. */
-export interface AivueConfig {
+export interface TuneloopConfig {
   /** Directory holding the SQLite store and other local state. */
   dataDir: string
   dbPath: string
   /** LLM provider for enrichment (BYO key), or null when not configured. */
-  llm: { provider: string; model: string; apiKey: string } | null
+  llm: { provider: string; model: string; apiKey: string; baseURL?: string } | null
 }
 
-const DEFAULT_MODELS: Record<string, string> = {
-  anthropic: 'claude-haiku-4-5',
-  openai: 'gpt-5-mini',
+/** Non-secret LLM knobs settable via CLI flags; they override env. The API key is env-only. */
+export interface LlmOverrides {
+  provider?: string
+  model?: string
+  baseURL?: string
 }
 
-function resolveLlm(): AivueConfig['llm'] {
-  const provider = process.env.AIVUE_LLM_PROVIDER?.toLowerCase()
+function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
+  const provider = (o?.provider ?? process.env.TUNELOOP_LLM_PROVIDER)?.toLowerCase()
   if (!provider) return null
-  const keyEnv = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY'
-  const apiKey = process.env.AIVUE_LLM_API_KEY ?? process.env[keyEnv]
-  if (!apiKey) return null
-  const model = process.env.AIVUE_LLM_MODEL ?? DEFAULT_MODELS[provider] ?? ''
-  return { provider, model, apiKey }
+  const preset = PROVIDERS[provider]
+
+  // Key is env-only: TUNELOOP_LLM_API_KEY wins, else the preset's conventional env.
+  // Keyless local endpoints (Ollama) get a placeholder the SDK accepts.
+  const apiKey =
+    process.env.TUNELOOP_LLM_API_KEY ?? (preset ? process.env[preset.keyEnv] : undefined) ?? (preset?.requiresKey === false ? 'local' : '')
+  // Needs-a-key but none → stay static-only (the analyze hint covers it). resolveLlm
+  // never throws: unknown provider / missing base-URL / empty model are recoverable
+  // misconfig that createLlmClient validates inside analyze's graceful try/catch, so a
+  // typo can't abort the run — nor the read-only `serve`, which builds no client.
+  if (preset && preset.requiresKey !== false && !apiKey) return null
+
+  const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
+  const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL
+  return { provider, model, apiKey, baseURL }
 }
 
-export function loadConfig(opts?: { dataDir?: string; db?: string }): AivueConfig {
-  const dataDir = resolve(opts?.dataDir ?? process.env.AIVUE_DATA_DIR ?? join(homedir(), '.aivue'))
-  const dbPath = resolve(opts?.db ?? join(dataDir, 'aivue.sqlite'))
-  return { dataDir, dbPath, llm: resolveLlm() }
+export function loadConfig(opts?: { dataDir?: string; db?: string; llm?: LlmOverrides }): TuneloopConfig {
+  const dataDir = resolve(opts?.dataDir ?? process.env.TUNELOOP_DATA_DIR ?? join(homedir(), '.tuneloop'))
+  const dbPath = resolve(opts?.db ?? join(dataDir, 'tuneloop.sqlite'))
+  return { dataDir, dbPath, llm: resolveLlm(opts?.llm) }
 }

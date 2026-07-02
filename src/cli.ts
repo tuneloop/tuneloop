@@ -1,15 +1,24 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
+import { readFileSync } from 'node:fs'
 import './register'
 import { analyze } from './commands/analyze'
 import { serve } from './commands/serve'
+import { queryCommand } from './commands/query'
+
+// Read once from package.json so the CLI version never drifts from the package.
+// Resolves the same in dev (src/), in the bundle (dist/), and when installed
+// (npm always ships package.json alongside dist/).
+const { version } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+) as { version: string }
 
 const program = new Command()
 
 program
-  .name('aivue')
+  .name('tuneloop')
   .description('Local analytics for your AI coding sessions. Count outcomes, not tokens.')
-  .version('0.0.1')
+  .version(version)
 
 const appendValue = (val: string, acc: string[]): string[] => (acc.push(val), acc)
 
@@ -23,20 +32,40 @@ program
     appendValue,
     [],
   )
-  .option('--db <path>', 'path to the aivue SQLite store')
+  .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
+  .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
+  .option('--llm-model <id>', 'enrichment model id; overrides env')
+  .option('--llm-base-url <url>', 'OpenAI-compatible endpoint URL (for openai-compatible / custom hosts); overrides env')
   .option('--no-serve', 'analyze only; do not serve the dashboard or open the browser')
   .option('-v, --verbose', 'verbose logging')
   .action(
     async (
       dirs: string | undefined,
-      options: { source: string[]; db?: string; limit?: number; port?: number; serve?: boolean; verbose?: boolean },
+      options: {
+        source: string[]
+        db?: string
+        limit?: number
+        port?: number
+        serve?: boolean
+        verbose?: boolean
+        llmProvider?: string
+        llmModel?: string
+        llmBaseUrl?: string
+      },
     ) => {
       const dirList = dirs
         ? dirs.split(',').map((s) => s.trim()).filter(Boolean)
         : undefined
-      await analyze({ dirs: dirList, sources: options.source, db: options.db, limit: options.limit, verbose: options.verbose })
+      await analyze({
+        dirs: dirList,
+        sources: options.source,
+        db: options.db,
+        limit: options.limit,
+        verbose: options.verbose,
+        llm: { provider: options.llmProvider, model: options.llmModel, baseURL: options.llmBaseUrl },
+      })
       // Serve + open the browser by default so results are visible immediately; --no-serve opts out.
       if (options.serve !== false) {
         await serve({ db: options.db, port: options.port })
@@ -47,11 +76,23 @@ program
 program
   .command('serve')
   .description('Serve the local dashboard over the analyzed store.')
-  .option('--db <path>', 'path to the aivue SQLite store')
+  .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--port <n>', 'port to listen on (default 4319)', (v) => parseInt(v, 10))
   .option('--no-open', 'do not open the browser automatically')
   .action(async (options: { db?: string; port?: number; open?: boolean }) => {
     await serve({ db: options.db, port: options.port, open: options.open })
+  })
+
+program
+  .command('query')
+  .description('Run a read-only SQL query (SELECT only) over the local store. --schema dumps the DDL + facets/measures for agents.')
+  .argument('[sql]', 'SQL SELECT to run; omit when using --schema')
+  .option('--db <path>', 'path to the tuneloop SQLite store')
+  .option('--schema', 'print the store schema (tables + facets + measures) instead of running a query')
+  .option('--json', 'output JSON instead of a text table')
+  .option('--limit <n>', 'max rows to return (default 1000)', (v) => parseInt(v, 10))
+  .action(async (sql: string | undefined, options: { db?: string; schema?: boolean; json?: boolean; limit?: number }) => {
+    await queryCommand(sql, options)
   })
 
 program.parseAsync(process.argv).catch((err) => {

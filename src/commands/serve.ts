@@ -1,10 +1,20 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { loadConfig } from '../config'
-import { createDashboardServer } from '../server/http'
+import { createDashboardServer, type ShFn } from '../server/http'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { createLogger } from '../util/log'
+
+function makeSh(): ShFn {
+  return (cmd, args) =>
+    new Promise((resolve) => {
+      execFile(cmd, args, { timeout: 10_000 }, (err, stdout, stderr) => {
+        if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') resolve(null)
+        else resolve({ code: err ? (err as any).status ?? 1 : 0, stdout: (stdout || stderr) ?? '' })
+      })
+    })
+}
 
 export interface ServeOptions {
   db?: string
@@ -17,7 +27,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const log = createLogger('info')
   const config = loadConfig({ db: opts.db })
   if (!existsSync(config.dbPath)) {
-    log.error(`no store at ${config.dbPath} — run \`aivue analyze\` first`)
+    log.error(`no store at ${config.dbPath} — run \`tuneloop analyze\` first`)
     process.exitCode = 1
     return
   }
@@ -25,7 +35,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const port = opts.port ?? 4319
-  const server = createDashboardServer(store, config.dbPath)
+  const server = createDashboardServer(store, config.dbPath, makeSh())
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') log.error(`port ${port} is in use — try --port <n>`)
@@ -35,11 +45,11 @@ export async function serve(opts: ServeOptions): Promise<void> {
 
   // Bind to loopback only. The dashboard serves session transcripts (which can
   // contain proprietary code and secrets) over an unauthenticated API; without an
-  // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. aivue is a
+  // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. tuneloop is a
   // local single-developer tool, so 127.0.0.1 is the correct surface.
   server.listen(port, '127.0.0.1', () => {
     const url = `http://localhost:${port}`
-    process.stdout.write(`\n  aivue dashboard  ${url}\n  store: ${config.dbPath}\n  Ctrl+C to stop\n\n`)
+    process.stdout.write(`\n  tuneloop dashboard  ${url}\n  store: ${config.dbPath}\n  Ctrl+C to stop\n\n`)
     if (opts.open !== false) tryOpen(url)
   })
 

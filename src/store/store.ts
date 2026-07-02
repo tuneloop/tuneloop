@@ -11,7 +11,7 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, UsageFactInput } from './types'
+import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
 
 export interface Dist {
   value: string
@@ -44,6 +44,12 @@ export interface Summary {
   costPerMergedPr: { count: number; costPerUnit: number | null }
   /** Spend on enrichment (the "cost of running the analysis itself"). */
   analysisCostUsd: number
+  /** Whether LLM enrichment has run (any processor recorded an LLM model). */
+  enrichmentRan: boolean
+  /** ISO timestamp of the most recent `analyze` run (null if never recorded). */
+  lastAnalyzedAt: string | null
+  /** Source directories scanned, each with its own last-analyzed time (empty until an analyze runs on this schema). */
+  analyzedRoots: Array<{ source: string | null; path: string; lastAnalyzedAt: string | null }>
   /** Enrichment dimension distributions, empty when enrichment hasn't run. */
   useCases: Dist[]
   complexity: Dist[]
@@ -60,6 +66,33 @@ export interface Highlight {
 
 export class Store {
   constructor(private db: DB) {}
+
+  /** Read a value from the key-value `meta` table (undefined when absent). */
+  getMeta(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined
+    return row?.value
+  }
+
+  /** Upsert a value into the key-value `meta` table. */
+  setMeta(key: string, value: string): void {
+    this.db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(key, value)
+  }
+
+  /**
+   * Stamp each source directory scanned this run with the run timestamp. Upsert,
+   * so roots a scoped re-run didn't touch keep their prior stamp — the table then
+   * answers "when was THIS directory last analyzed" per directory.
+   */
+  recordAnalyzedRoots(roots: Array<{ source: string; path: string }>, at: string): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO analyzed_roots (source, path, last_analyzed_at) VALUES (?, ?, ?)
+         ON CONFLICT(source, path) DO UPDATE SET last_analyzed_at = excluded.last_analyzed_at`,
+    )
+    const tx = this.db.transaction((rows: Array<{ source: string; path: string }>) => {
+      for (const r of rows) stmt.run(r.source, r.path, at)
+    })
+    tx(roots)
+  }
 
   /**
    * Content hash + parse version for a session, if already ingested. Both feed
@@ -215,10 +248,10 @@ export class Store {
   processorRun(sessionId: string, processor: string): ProcessorRunRow | undefined {
     const row = this.db
       .prepare(
-        'SELECT version, input_hash AS inputHash, model FROM processor_runs WHERE session_id = ? AND processor = ?',
+        'SELECT version, input_hash AS inputHash, model, invalidated FROM processor_runs WHERE session_id = ? AND processor = ?',
       )
-      .get(sessionId, processor) as ProcessorRunRow | undefined
-    return row
+      .get(sessionId, processor) as (Omit<ProcessorRunRow, 'invalidated'> & { invalidated: number }) | undefined
+    return row ? { ...row, invalidated: row.invalidated === 1 } : undefined
   }
 
   unresolvedArtifacts(producer: string): ArtifactInput[] {
@@ -229,7 +262,7 @@ export class Store {
                 created_at AS createdAt, completed_at AS completedAt,
                 parent_artifact_id AS parentArtifactId
          FROM artifacts
-         WHERE producer = ? AND status IS NOT NULL AND status NOT IN ('merged', 'closed', 'shipped')`,
+         WHERE producer IN (?, 'dashboard') AND status IS NOT NULL AND status NOT IN ('merged', 'closed', 'shipped')`,
       )
       .all(producer) as ArtifactInput[]
     return rows
@@ -240,9 +273,12 @@ export class Store {
       for (const a of result.artifacts ?? []) {
         this.db
           .prepare(
-            `UPDATE artifacts SET status = ?, completed_at = ? WHERE id = ? AND producer = ?`,
+            `UPDATE artifacts SET status = ?, completed_at = ?,
+                    complexity = COALESCE(?, complexity),
+                    complexity_basis = COALESCE(?, complexity_basis)
+             WHERE id = ? AND producer IN (?, 'dashboard')`,
           )
-          .run(a.status ?? null, a.completedAt ?? null, a.id, producer)
+          .run(a.status ?? null, a.completedAt ?? null, a.complexity ?? null, a.complexityBasis ?? null, a.id, producer)
       }
       for (const o of result.outcomes ?? []) {
         const sessionId = (
@@ -355,7 +391,14 @@ export class Store {
           )
           .run(l.fromId, l.toId, l.relation, l.source, l.confidence ?? null, processor)
       }
+      const rejected = new Set(
+        (this.db
+          .prepare("SELECT artifact_id FROM user_link_overrides WHERE session_id = ? AND action = 'reject'")
+          .all(sessionId) as Array<{ artifact_id: string }>)
+          .map((r) => r.artifact_id),
+      )
       for (const sa of result.sessionArtifacts ?? []) {
+        if (sa.source === 'derived' && rejected.has(sa.artifactId)) continue
         this.db
           .prepare(
             'INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?)',
@@ -395,6 +438,7 @@ export class Store {
           .run(sessionId, ba.blockIdx, processor, ba.key, JSON.stringify(ba.value))
       }
       for (const x of result.blockArtifacts ?? []) {
+        if (x.source === 'derived' && rejected.has(x.artifactId)) continue
         this.db
           .prepare(
             'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
@@ -592,6 +636,16 @@ export class Store {
       this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }
     ).s
 
+    // Whether LLM enrichment has ever run. LLM-backed processors record their model
+    // in processor_runs (non-LLM ones store NULL), so a single non-null model is a
+    // durable "enrichment ran" signal — independent of which annotation dimensions
+    // the enricher currently emits (those can be renamed/removed; this won't). Note
+    // a row is only written on success, which is exactly what we want here: "did
+    // enrichment actually produce anything", not "was a key merely configured".
+    const enrichmentRan =
+      (this.db.prepare('SELECT EXISTS(SELECT 1 FROM processor_runs WHERE model IS NOT NULL) AS r').get() as { r: number })
+        .r === 1
+
     const features = this.db
       .prepare(
         `SELECT
@@ -608,6 +662,11 @@ export class Store {
       topTools,
       costPerMergedPr: this.costPerArtifact('pr'),
       analysisCostUsd,
+      enrichmentRan,
+      lastAnalyzedAt: this.getMeta('last_analyze_at') ?? null,
+      analyzedRoots: this.db
+        .prepare('SELECT source, path, last_analyzed_at AS lastAnalyzedAt FROM analyzed_roots ORDER BY source, path')
+        .all() as Summary['analyzedRoots'],
       useCases: this.facetDistribution('use_case'),
       complexity: this.scalarDist('complexity'),
       autonomy: this.scalarDist('autonomy'),
@@ -883,8 +942,9 @@ export class Store {
    * the model never block-linked, or pre-block data). Both paths are at usage grain
    * and UNION-deduped, so a usage row shared across in-window artifacts counts once.
    */
-  costPerArtifact(kind: string, from?: string, to?: string): { count: number; costPerUnit: number | null } {
+  costPerArtifact(kind: string, from?: string, to?: string, complexity?: string): { count: number; costPerUnit: number | null } {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const cxFilter = complexityWhere(complexity, 'a', kind)
     const params = from && to ? [kind, from, to] : [kind]
     // "Shipped" means a PR THIS store produced — a PR whose only link is `reviewed`
     // (a teammate's PR you reviewed) is not yours to count or cost here; it belongs
@@ -895,7 +955,7 @@ export class Store {
         : ''
     const count = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}`)
         .get(...params) as { n: number }
     ).n
     if (count === 0) return { count: 0, costPerUnit: null }
@@ -910,14 +970,14 @@ export class Store {
              JOIN block_artifacts ba ON ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}
              UNION
              -- fallback: whole sessions of in-window artifacts that have NO production block links
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
              JOIN session_artifacts sa ON sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
              JOIN usage_facts u ON u.session_id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}
                AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed')
            )`,
         )
@@ -984,6 +1044,7 @@ export class Store {
     bucket: Bucket,
     from?: string,
     to?: string,
+    complexity?: string,
   ): {
     burn: Array<{ bucket: string; spend: number; shippedSpend: number }>
     throughput: Array<{ bucket: string; count: number }>
@@ -1003,6 +1064,8 @@ export class Store {
       kind === 'pr'
         ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
         : ''
+    const cxFilter = complexityWhere(complexity, 'a', kind) // for burn subquery (alias `a`)
+    const cxFilterBare = complexityWhere(complexity, 'artifacts', kind) // for throughput (bare table name)
     const burnRange = from && to ? 'AND COALESCE(u.ts, s.started_at) >= ? AND COALESCE(u.ts, s.started_at) < ?' : ''
     const burnParams = from && to ? [kind, from, to] : [kind]
     const burn = this.db
@@ -1015,7 +1078,7 @@ export class Store {
                                             AND COALESCE(ba.role,'') <> 'reviewed'
                     JOIN artifacts a ON a.id = ba.artifact_id
                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
-                      AND a.kind = ? AND a.completed_at IS NOT NULL
+                      AND a.kind = ? AND a.completed_at IS NOT NULL ${cxFilter}
                   ) THEN u.cost_usd ELSE 0 END),0) AS shippedSpend
          FROM usage_facts u JOIN sessions s ON s.id = u.session_id
          WHERE COALESCE(u.ts, s.started_at) IS NOT NULL ${burnRange}
@@ -1027,20 +1090,22 @@ export class Store {
     const throughput = this.db
       .prepare(
         `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
-         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} GROUP BY bucket ORDER BY bucket`,
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilterBare} GROUP BY bucket ORDER BY bucket`,
       )
       .all(...thParams) as Array<{ bucket: string; count: number }>
     // PRs reviewed per bucket, dated at REVIEW time (when you reviewed, not when the
     // PR merged) — sourced from the pr_reviewed outcome. Distinct PRs, so two review
     // sessions on the same PR count once. Features have no review signal → empty.
     const revRange = from && to ? 'AND o.ts >= ? AND o.ts < ?' : ''
+    const cxFilterRev = complexityWhere(complexity, 'a', kind)
     const reviewed =
       kind === 'pr'
         ? (this.db
             .prepare(
               `SELECT ${bucketExpr('o.ts', bucket)} AS bucket, COUNT(DISTINCT o.artifact_id) AS count
                FROM outcomes o
-               WHERE o.type = 'pr_reviewed' AND o.ts IS NOT NULL ${revRange}
+               ${cxFilterRev ? 'JOIN artifacts a ON a.id = o.artifact_id' : ''}
+               WHERE o.type = 'pr_reviewed' AND o.ts IS NOT NULL ${revRange} ${cxFilterRev}
                GROUP BY bucket ORDER BY bucket`,
             )
             .all(...(from && to ? [from, to] : [])) as Array<{ bucket: string; count: number }>)
@@ -1099,7 +1164,7 @@ export class Store {
    * insists both be shown so dividing the curves doesn't read as a contradiction.
    * `throughput` here equals the KPI denominator exactly. No window = all time.
    */
-  costPeriod(kind: string, from?: string, to?: string): { burn: number; throughput: number; efficiency: number | null } {
+  costPeriod(kind: string, from?: string, to?: string, complexity?: string): { burn: number; throughput: number; efficiency: number | null } {
     const burnRange = from && to ? 'WHERE started_at >= ? AND started_at < ?' : 'WHERE started_at IS NOT NULL'
     const burnParams = from && to ? [from, to] : []
     const burn = (
@@ -1115,9 +1180,10 @@ export class Store {
       kind === 'pr'
         ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
         : ''
+    const cxFilter = complexityWhere(complexity, 'artifacts', kind)
     const throughput = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilter}`)
         .get(...thParams) as { n: number }
     ).n
     return { burn, throughput, efficiency: throughput ? burn / throughput : null }
@@ -1853,7 +1919,7 @@ export class Store {
       where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
       params.push(...toolVals)
     }
-    const sql = `SELECT t.session_id AS sessionId, s.title AS title, t.idx AS idx,
+    const sql = `SELECT t.session_id AS sessionId, ${titleExpr('s')} AS title, t.idx AS idx,
                         t.name AS name, t.action AS action, t.command AS command,
                         t.target_path AS targetPath, t.error_message AS message,
                         t.ts AS ts, s.started_at AS startedAt
@@ -1885,10 +1951,10 @@ export class Store {
       // Search title + intent + the decisions list (matched against its raw JSON
       // text, which is enough to surface a decision by any word it contains).
       clauses.push(
-        `(s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
+        `(${scalar('title')} LIKE ? OR s.title LIKE ? OR ${scalar('intent_summary')} LIKE ?
           OR EXISTS (SELECT 1 FROM annotations WHERE session_id=s.id AND key='decisions' AND value LIKE ?))`,
       )
-      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
+      params.push(`%${f.q}%`, `%${f.q}%`, `%${f.q}%`, `%${f.q}%`)
     }
     if (f.artifact || f.artifactKind) {
       const conds: string[] = []
@@ -1930,7 +1996,7 @@ export class Store {
 
     const rows = this.db
       .prepare(
-        `SELECT s.id AS id, COALESCE(s.title,'(untitled)') AS title, s.started_at AS startedAt,
+        `SELECT s.id AS id, COALESCE(${titleExpr('s')}, '(untitled)') AS title, s.started_at AS startedAt,
                 s.cost_usd AS costUsd, s.models AS modelsJson,
                 ${scalar('complexity')} AS complexity,
                 (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
@@ -1987,7 +2053,7 @@ export class Store {
   sessionDetail(id: string): SessionDetail | null {
     const s = this.db
       .prepare(
-        `SELECT id, title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
+        `SELECT id, ${titleExpr('sessions')} AS title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
                 n_turns AS nTurns, n_tool_calls AS nToolCalls, models AS modelsJson, cost_usd AS costUsd,
                 tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create AS tokCacheCreate, tok_cache_read AS tokCacheRead
          FROM sessions WHERE id = ?`,
@@ -2008,7 +2074,7 @@ export class Store {
 
     const artifacts = this.db
       .prepare(
-        `SELECT a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
+        `SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
          FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?`,
       )
       .all(id) as Array<Record<string, any>>
@@ -2193,7 +2259,7 @@ export class Store {
       .prepare(
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
                 a.external_id AS externalId, a.created_at AS createdAt, a.completed_at AS completedAt,
-                a.parent_artifact_id AS parentId,
+                a.parent_artifact_id AS parentId, a.complexity, a.complexity_basis AS complexityBasis,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
                   SELECT SUM(cost_usd) FROM (
@@ -2430,19 +2496,19 @@ export class Store {
   // ---- feature management (dashboard writes) --------------------------------
 
   /** Create a user-authored feature (source='user' — never clobbered by analyze). */
-  createFeature(title: string, parentId?: string): { id: string } {
+  createFeature(title: string, parentId?: string, complexity?: number): { id: string } {
     const id = `feature:user:${randomUUID().slice(0, 8)}`
     this.db
       .prepare(
-        `INSERT INTO artifacts (id, kind, title, source, created_at, parent_artifact_id)
-         VALUES (?, 'feature', ?, 'user', ?, ?)`,
+        `INSERT INTO artifacts (id, kind, title, source, created_at, parent_artifact_id, complexity, complexity_basis)
+         VALUES (?, 'feature', ?, 'user', ?, ?, ?, ?)`,
       )
-      .run(id, title, new Date().toISOString(), parentId ?? null)
+      .run(id, title, new Date().toISOString(), parentId ?? null, complexity ?? null, complexity != null ? 'user_tagged' : null)
     return { id }
   }
 
-  /** Mark complete/reopen, rename, or reparent a feature. */
-  updateFeature(id: string, patch: { completed?: boolean; parentId?: string | null; title?: string }): boolean {
+  /** Mark complete/reopen, rename, reparent, or set complexity of a feature. */
+  updateFeature(id: string, patch: { completed?: boolean; parentId?: string | null; title?: string; complexity?: number | null }): boolean {
     const exists = this.db.prepare("SELECT 1 FROM artifacts WHERE id = ? AND kind = 'feature'").get(id)
     if (!exists) return false
     if (patch.completed !== undefined) {
@@ -2457,6 +2523,11 @@ export class Store {
     }
     if (patch.title !== undefined && patch.title.trim()) {
       this.db.prepare('UPDATE artifacts SET title = ? WHERE id = ?').run(patch.title.trim(), id)
+    }
+    if (patch.complexity !== undefined) {
+      this.db.prepare('UPDATE artifacts SET complexity = ?, complexity_basis = ? WHERE id = ?').run(
+        patch.complexity, patch.complexity !== null ? 'user_tagged' : null, id,
+      )
     }
     return true
   }
@@ -2509,6 +2580,183 @@ export class Store {
     return r.changes
   }
 
+  // ---- session-link management (dashboard writes) ----------------------------
+
+  /** Link an existing artifact to a session (user-authored, never overwritten by processors). Clears any prior rejection tombstone. */
+  addSessionLink(sessionId: string, artifactId: string, role: SessionArtifactRole = 'contributed'): boolean {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    const artifact = this.db.prepare('SELECT 1 FROM artifacts WHERE id = ?').get(artifactId)
+    if (!session || !artifact) return false
+    this.db.transaction(() => {
+      this.linkUserArtifact(sessionId, artifactId, role)
+      this.db.prepare('DELETE FROM user_link_overrides WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+    })()
+    return true
+  }
+
+  /** Reject a session→artifact link: delete existing rows and insert a tombstone so re-enrichment won't recreate it. */
+  rejectSessionLink(sessionId: string, artifactId: string): boolean {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    if (!session) return false
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM session_artifacts WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+      this.db.prepare('DELETE FROM block_artifacts WHERE session_id = ? AND artifact_id = ?').run(sessionId, artifactId)
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO user_link_overrides (session_id, artifact_id, action, created_at)
+           VALUES (?, ?, 'reject', ?)`,
+        )
+        .run(sessionId, artifactId, new Date().toISOString())
+      this.invalidateSessionProcessors(sessionId)
+    })()
+    return true
+  }
+
+  /**
+   * Mark every processor run for a session stale so the next analyze re-runs them.
+   *
+   * Called on any user link/unlink. The user-linked set feeds enrichment, and
+   * unlink deletes block_artifacts across producers, so the deterministic
+   * processors (outcomes-git) must re-derive too — enrich-only invalidation
+   * would leave their wiped rows unregenerated. We flag rather than delete so
+   * the row's cost_usd/tokens survive; persistResult resets the flag on the
+   * next successful run. Cost: at most one extra analyze per explicit user
+   * action (not on every analyze).
+   */
+  private invalidateSessionProcessors(sessionId: string): void {
+    this.db.prepare('UPDATE processor_runs SET invalidated = 1 WHERE session_id = ?').run(sessionId)
+  }
+
+  /**
+   * The single writer for user-created session links. Every dashboard link path
+   * funnels through here so the write and its cache invalidation can never drift
+   * apart (that drift is how add-pr/create-feature previously skipped it). Call
+   * within the caller's own transaction so the link and invalidation commit atomically.
+   */
+  private linkUserArtifact(sessionId: string, artifactId: string, role: SessionArtifactRole = 'contributed'): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer)
+         VALUES (?, ?, ?, 'user', 1.0, 'dashboard')`,
+      )
+      .run(sessionId, artifactId, role)
+    this.invalidateSessionProcessors(sessionId)
+  }
+
+  /** Titles of features the user rejected for this session (for LLM prompt context). */
+  rejectedFeatureTitles(sessionId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT a.title FROM user_link_overrides o
+         JOIN artifacts a ON a.id = o.artifact_id
+         WHERE o.session_id = ? AND o.action = 'reject' AND a.kind = 'feature' AND a.title IS NOT NULL`,
+      )
+      .all(sessionId) as Array<{ title: string }>
+    return rows.map((r) => r.title)
+  }
+
+  /** Blocks already attributed to PRs for a session (deterministic, from outcomes-git). */
+  prBlockAttributions(sessionId: string): Array<{ blockIdx: number; artifactId: string; title: string | null }> {
+    return this.db
+      .prepare(
+        `SELECT ba.block_idx AS blockIdx, ba.artifact_id AS artifactId, a.title
+         FROM block_artifacts ba
+         JOIN artifacts a ON a.id = ba.artifact_id
+         WHERE ba.session_id = ? AND a.kind = 'pr' AND COALESCE(ba.role,'') <> 'reviewed' AND ba.producer <> 'enrich-session'`,
+      )
+      .all(sessionId) as Array<{ blockIdx: number; artifactId: string; title: string | null }>
+  }
+
+  /** All user-linked PRs/features for a session, with a flag indicating deterministic block ownership. */
+  userLinkedArtifactsAll(sessionId: string): Array<{ artifactId: string; kind: 'pr' | 'feature'; title: string | null; ident: string | null; hasNonEnrichBlocks: boolean }> {
+    return (this.db
+      .prepare(
+        `SELECT a.id AS artifactId, a.kind, a.title, a.ident,
+                EXISTS(SELECT 1 FROM block_artifacts ba
+                       WHERE ba.session_id = sa.session_id
+                         AND ba.artifact_id = sa.artifact_id
+                         AND ba.producer <> 'enrich-session') AS hasNonEnrichBlocks
+         FROM session_artifacts sa
+         JOIN artifacts a ON a.id = sa.artifact_id
+         WHERE sa.session_id = ? AND sa.source = 'user' AND a.kind IN ('pr', 'feature')`,
+      )
+      .all(sessionId) as Array<{ artifactId: string; kind: 'pr' | 'feature'; title: string | null; ident: string | null; hasNonEnrichBlocks: number }>)
+      .map((r) => ({ ...r, hasNonEnrichBlocks: r.hasNonEnrichBlocks === 1 }))
+  }
+
+  /** Create a new feature and link it to a session in one transaction. */
+  createAndLinkFeature(sessionId: string, title: string, parentId?: string): { id: string } | null {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    if (!session) return null
+    let id: string | undefined
+    this.db.transaction(() => {
+      id = this.createFeature(title, parentId).id
+      this.linkUserArtifact(sessionId, id)
+    })()
+    return { id: id! }
+  }
+
+  /** Upsert a PR artifact and link it to a session. */
+  upsertAndLinkPr(
+    sessionId: string,
+    repo: string,
+    prNumber: string,
+    meta?: { title?: string; status?: string; externalId?: string },
+  ): { id: string } | null {
+    const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId)
+    if (!session) return null
+    const id = `pr:${repo}:${prNumber}`
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO artifacts (id, kind, repo, ident, external_id, source, title, status, producer)
+           VALUES (?, 'pr', ?, ?, ?, 'user', ?, ?, 'dashboard')
+           ON CONFLICT(id) DO UPDATE SET
+             title = COALESCE(excluded.title, artifacts.title),
+             status = COALESCE(excluded.status, artifacts.status),
+             external_id = COALESCE(excluded.external_id, artifacts.external_id)`,
+        )
+        .run(id, repo, prNumber, meta?.externalId ?? null, meta?.title ?? null, meta?.status ?? null)
+      this.linkUserArtifact(sessionId, id)
+    })()
+    return { id }
+  }
+
+  /** Typeahead for linkable artifacts (excludes those already linked to the session). */
+  suggestLinkableArtifacts(
+    sessionId: string,
+    q: string,
+    kind?: string,
+    limit = 10,
+  ): Array<{ id: string; kind: string; label: string }> {
+    const term = q.trim()
+    if (!term) return []
+    const { sql: searchSql, params } = this.artifactSearchCond(term, 'a')
+    if (kind) params.push(kind)
+    params.push(sessionId)
+    params.push(limit)
+    const rows = this.db
+      .prepare(
+        `SELECT a.id, a.kind, a.ident, a.title, a.repo, a.status
+         FROM artifacts a
+         WHERE ${searchSql}
+           ${kind ? 'AND a.kind = ?' : ''}
+           AND a.id NOT IN (SELECT artifact_id FROM session_artifacts WHERE session_id = ?)
+         ORDER BY CASE a.kind WHEN 'feature' THEN 0 WHEN 'pr' THEN 1 WHEN 'commit' THEN 2 ELSE 3 END,
+                  COALESCE(a.title, a.ident)
+         LIMIT ?`,
+      )
+      .all(...params) as Array<Record<string, any>>
+    return rows.map((r) => ({
+      id: r.id as string,
+      kind: r.kind as string,
+      label:
+        r.kind === 'pr'
+          ? `${r.repo || ''} #${r.ident || ''}${r.title ? ' — ' + r.title : ''}${r.status ? ' (' + r.status + ')' : ''}`
+          : String(r.title || r.ident || r.id),
+    }))
+  }
+
   close() {
     this.db.close()
   }
@@ -2531,6 +2779,8 @@ export interface ArtifactListItem {
   createdAt: string | null
   completedAt: string | null
   parentId: string | null
+  complexity: number | null
+  complexityBasis: string | null
   sessions: number
   costUsd: number
 }
@@ -2846,6 +3096,47 @@ function bucketExpr(col: string, bucket: Bucket): string {
   if (bucket === 'day') return `date(${col})`
   if (bucket === 'month') return `strftime('%Y-%m', ${col})`
   return `strftime('%Y-W%W', ${col})`
+}
+
+export type ComplexityBucket = 'trivial' | 'small' | 'medium' | 'large' | 'xl'
+
+const COMPLEXITY_RANGES: Record<ComplexityBucket, [number, number]> = {
+  trivial: [0, 10],
+  small: [11, 100],
+  medium: [101, 500],
+  large: [501, 1500],
+  xl: [1501, 999999999],
+}
+
+const FEATURE_COMPLEXITY: Record<string, number> = {
+  trivial: 1, small: 2, medium: 3, large: 4, xl: 5,
+}
+
+function complexityWhere(bucket: string | undefined, alias: string, kind?: string): string {
+  if (!bucket) return ''
+  const buckets = bucket.split(',').filter(Boolean)
+  if (!buckets.length) return ''
+  if (kind !== 'feature' && kind !== 'pr') return ''
+  const clauses: string[] = []
+  let hasNone = false
+  for (const b of buckets) {
+    if (b === 'none') { hasNone = true; continue }
+    if (kind === 'feature') {
+      const val = FEATURE_COMPLEXITY[b]
+      if (val) clauses.push(`${alias}.complexity = ${val}`)
+    } else {
+      const range = COMPLEXITY_RANGES[b as ComplexityBucket]
+      if (range) clauses.push(`(${alias}.complexity >= ${range[0]} AND ${alias}.complexity <= ${range[1]})`)
+    }
+  }
+  if (hasNone) clauses.push(`${alias}.complexity IS NULL`)
+  if (!clauses.length) return ''
+  return `AND (${clauses.join(' OR ')})`
+}
+
+// Display title: the enrichment-derived `title` annotation, else the native adapter title
+function titleExpr(alias: string): string {
+  return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), ${alias}.title)`
 }
 
 function safeJson<T>(s: unknown, fallback: T): T {

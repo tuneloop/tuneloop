@@ -48,9 +48,9 @@ function reviewingLlm(blocks: number): LlmClient {
   return {
     provider: 'anthropic',
     model: 'claude-haiku-4-5',
-    async complete() {
+    async completeStructured() {
       return {
-        text: JSON.stringify({
+        data: {
           complexity: 'routine',
           autonomy: 'autonomous',
           intent_summary: 'review a PR',
@@ -60,7 +60,7 @@ function reviewingLlm(blocks: number): LlmClient {
           feature_revisions: [],
           use_case_runs: [{ from: 0, to: Math.max(0, blocks - 1), use_case: 'review' }],
           feature_runs: [],
-        }),
+        },
         usage: emptyUsage(),
       }
     },
@@ -78,7 +78,7 @@ const ghSh = async (cmd: string, args: string[]): Promise<ShResult | null> => {
 }
 
 function ctx(session: Session, llm: LlmClient, sh = ghSh): ProcessorContext {
-  return { session, log: noopLog, llmEnabled: true, llm, existingFeatures: [], sh }
+  return { session, log: noopLog, llmEnabled: true, llm, existingFeatures: [], rejectedFeatureTitles: [], userLinkedArtifacts: [], prBlockAttributions: [], sh }
 }
 
 describe('enrich-session reviewed-PR linkage', () => {
@@ -116,13 +116,13 @@ describe('enrich-session reviewed-PR linkage', () => {
     const implementingLlm: LlmClient = {
       provider: 'anthropic',
       model: 'claude-haiku-4-5',
-      async complete() {
+      async completeStructured() {
         return {
-          text: JSON.stringify({
+          data: {
             complexity: 'routine', autonomy: 'autonomous', intent_summary: 'build', decisions: [],
             success: 'unknown', features: [], feature_revisions: [],
             use_case_runs: [{ from: 0, to: 0, use_case: 'implement' }], feature_runs: [],
-          }),
+          },
           usage: emptyUsage(),
         }
       },

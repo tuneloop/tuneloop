@@ -1,5 +1,7 @@
-import { basename } from 'node:path'
+import { existsSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
 import { loadConfig } from '../config'
+import type { LlmOverrides } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
 import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
@@ -9,7 +11,8 @@ import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
 import { createLlmClient } from '../llm'
-import { computeSessionCost, PRICE_TABLE_VERSION } from '../pricing/pricing'
+import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
+import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import type { Summary } from '../store/store'
@@ -25,6 +28,8 @@ export interface AnalyzeOptions {
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
   limit?: number
+  /** Non-secret LLM flag overrides (provider/model/base-url); the key stays env-only. */
+  llm?: LlmOverrides
 }
 
 /**
@@ -34,10 +39,14 @@ export interface AnalyzeOptions {
  */
 export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const log = createLogger(opts.verbose ? 'debug' : 'info')
-  const config = loadConfig({ db: opts.db })
+  const config = loadConfig({ db: opts.db, llm: opts.llm })
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const sh = makeSh()
+
+  // Fetch the OpenRouter price backfill only to price an enrichment model the
+  // static table lacks; static-only runs stay offline.
+  if (config.llm && !priceFor(config.llm.provider, config.llm.model)) await loadOpenRouterPrices(config.dataDir, log)
 
   const processors = getProcessors()
   store.registerFacets('intrinsic', INTRINSIC_FACETS)
@@ -58,7 +67,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   if (llmEnabled) {
     log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
   } else {
-    log.info('LLM enrichment off (set AIVUE_LLM_PROVIDER + key to enable). Static analysis only.')
+    printEnrichmentHint(log)
   }
 
   let discovered = 0
@@ -90,9 +99,18 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   }
   const activeAdapters = selected.size ? adapters.filter((a) => selected.has(a.id)) : adapters
 
+  // Ingest provenance: the (source, directory) roots actually scanned this run,
+  // recorded after the run completes so `--schema` / coverage can report what's
+  // covered. Only roots that exist on disk — a default root for an uninstalled
+  // harness was never really analyzed.
+  const scannedRoots: Array<{ source: string; path: string }> = []
   const parsedSessions: Session[] = []
   for (const adapter of activeAdapters) {
     const roots = sourceRoots.get(adapter.id) ?? (opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots())
+    for (const root of roots) {
+      const abs = resolve(root)
+      if (existsSync(abs)) scannedRoots.push({ source: adapter.id, path: abs })
+    }
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
     if (adapter.discoverSessions) {
       // Store-backed adapter (e.g. OpenCode): one DB yields many sessions.
@@ -273,8 +291,38 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   log.info(
     `Scanned ${discovered} file(s), parsed ${parsed} session(s) into ${groups.size} unique session(s), ${reingested} new/changed.`,
   )
+  // Stamp completion at the very end so a run that crashed partway can't claim the
+  // store is fresh. Drives the dashboard's "last analyzed" line + the stale-store
+  // nudge; per-session analyzed_at / processor ran_at only move when work is done,
+  // so they can't answer "when did analyze last finish" (e.g. for a no-op re-run).
+  const finishedAt = new Date().toISOString()
+  store.setMeta('last_analyze_at', finishedAt)
+  // Per-directory provenance, stamped with the same completion time.
+  store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
   store.close()
+}
+
+/**
+ * Notice when no enrichment provider is configured — prints whenever enrichment
+ * is off (not just the first run). Discoverability, not a gate; the multi-line
+ * form with setup hints prints only on an interactive terminal.
+ */
+function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
+  if (!process.stdout.isTTY) {
+    log.info('LLM enrichment off (set TUNELOOP_LLM_PROVIDER + key to enable). Static analysis only.')
+    return
+  }
+  process.stdout.write(
+    [
+      '',
+      'LLM enrichment is off — static analysis only. Enable it with your own key, e.g.:',
+      '    export TUNELOOP_LLM_PROVIDER=openrouter',
+      '    export OPENROUTER_API_KEY=sk-or-...',
+      '  Providers: anthropic, openai, openrouter, groq, deepseek, gemini, ollama (see README).',
+      '',
+    ].join('\n') + '\n',
+  )
 }
 
 /** Resolve a --source name to a registered adapter id, tolerant of a short alias (`claude` → `claude-code`). */

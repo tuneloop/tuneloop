@@ -51,7 +51,17 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   // The whole (cross-repo) hierarchy is sent; repo isolation is enforced on
   // linkage inside the processor, not by hiding other repos' features.
   const existingFeatures: FeatureRef[] = store.listFeatures()
-  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, sh }
+  const rejectedFeatureTitles = store.rejectedFeatureTitles(session.id)
+  const allUserLinked = store.userLinkedArtifactsAll(session.id)
+  const userLinkedArtifacts = allUserLinked
+    .filter((a) => a.kind === 'feature' || !a.hasNonEnrichBlocks)
+    .map(({ hasNonEnrichBlocks: _, ...rest }) => rest)
+  const prBlockAttributions = store.prBlockAttributions(session.id)
+  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, rejectedFeatureTitles, userLinkedArtifacts, prBlockAttributions, sh }
+  // The cache key is the session's content hash alone. Link/unlink no longer
+  // perturbs the hash — those actions invalidate the affected processor_runs
+  // rows directly (Store.invalidateSessionProcessors), so a re-linked artifact
+  // can never collide with a stale cached run the way a reversible hash suffix could.
   const inputHash = session.raw.contentHash
   let costUsd = 0
 
@@ -59,8 +69,14 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
     if (p.needs?.llm && !llmEnabled) continue
     const model = p.needs?.llm ? llmModel : null
 
+    // Re-read block attributions fresh so enrich-session sees blocks that
+    // outcomes-git persisted earlier in this same loop. Without this, the
+    // first analysis of a session sees an empty FIXED set and the LLM can
+    // double-attribute a block to both a deterministic PR and a linked PR.
+    ctx.prBlockAttributions = store.prBlockAttributions(session.id)
+
     const prior = store.processorRun(session.id, p.name)
-    if (prior && prior.version === p.version && prior.inputHash === inputHash && prior.model === model) {
+    if (prior && !prior.invalidated && prior.version === p.version && prior.inputHash === inputHash && prior.model === model) {
       log.debug(`cached ${p.name} for ${session.id}`)
       continue
     }

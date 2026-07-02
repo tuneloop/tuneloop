@@ -11,13 +11,39 @@ body {
 .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 h1, h2, h3 { font-family: Georgia, "Times New Roman", serif; font-weight: 600; }
 a { color: var(--emerald); }
-.top {
-  background: var(--ink); color: #f3efe6; padding: 14px 28px;
-  display: flex; align-items: center; gap: 14px;
+.top { background: var(--paper); color: var(--ink); border-bottom: 1px solid var(--line); }
+.top .inner {
+  max-width: 1180px; margin: 0 auto; padding: 19px 28px;
+  display: flex; align-items: center; gap: 12px;
 }
-.top .brand { font-family: Georgia, serif; font-size: 22px; font-weight: 600; letter-spacing: .2px; }
-.top .tag { color: #b8b2a4; font-size: 13px; font-style: italic; }
-.top .meta { margin-left: auto; text-align: right; color: #b8b2a4; font-size: 12px; }
+.top .logo { flex: none; display: block; }
+.top .brand { font-family: Georgia, "Times New Roman", serif; font-size: 23px; font-weight: 600; letter-spacing: -.01em; color: var(--ink); }
+.top .masthead-tag {
+  padding: 3px 0 3px 13px; border-left: 1px solid var(--line);
+  color: var(--muted); font-size: 14px;
+}
+.top .meta {
+  margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
+  color: var(--muted); font-size: 12px;
+}
+.top .meta .meta-top { display: flex; align-items: center; gap: 6px; }
+.top .meta .meta-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--gray); }
+/* Info popover: the per-directory scan history next to the range + store path. */
+.meta-info-wrap { position: relative; display: inline-flex; }
+.meta-info-btn { border: 0; background: transparent; color: var(--gray); cursor: pointer; font-size: 13px; line-height: 1; padding: 0; }
+.meta-info-btn:hover { color: var(--ink); }
+.meta-info-pop {
+  display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; text-align: left;
+  min-width: 240px; max-width: 440px; padding: 10px 12px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.12);
+}
+.meta-info-pop.on { display: block; }
+.meta-info-pop .mi-head { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.meta-info-pop .mi-title { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+.meta-info-pop .mi-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; font-size: 12px; }
+.meta-info-pop .mi-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--ink); word-break: break-all; }
+.meta-info-pop .mi-when { color: var(--gray); white-space: nowrap; }
+.meta-info-pop .mi-empty { font-size: 12px; color: var(--muted); }
 .tabnav { border-bottom: 1px solid var(--line); background: var(--paper); }
 .tabnav .inner { max-width: 1180px; margin: 0 auto; padding: 0 28px; display: flex; gap: 2px; }
 .tab { border: 0; background: transparent; padding: 14px 18px; font-family: Georgia, serif; font-size: 15px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -467,12 +493,17 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
    dropdown), an Error stepper, and a live "you are here" line. */
 /* Scope bar (Main thread + one tab per subagent) + transcript nav both live in
    the sticky .drawer-head and show only on the Transcript tab. */
-.tx-scopes { display: none; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.tx-scopes { display: none; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); flex-wrap: wrap; align-items: center; }
 .tx-scopes.on { display: flex; }
+/* Collapsed: keep the list to one line by hiding the overflow pills behind the toggle. */
+.tx-scopes.collapsed { flex-wrap: nowrap; }
+.tx-scopes.collapsed .tx-scope-extra { display: none; }
 .tx-scope-btn { max-width: 280px; border: 1px solid var(--line); background: var(--paper); color: var(--muted); border-radius: 999px; padding: 3px 12px; font-size: 12.5px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tx-scope-btn:hover { color: var(--ink); border-color: var(--gray); }
 .tx-scope-btn.on { color: var(--ink); border-color: var(--emerald); background: #eaf3ec; }
 .tx-scope-err { margin-left: 6px; color: var(--red); font-size: 11px; }
+.tx-scope-more { flex: none; border: 1px dashed var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.tx-scope-more:hover { color: var(--ink); border-color: var(--gray); }
 /* Only the active scope's turns render. */
 .tx-scope-pane { display: none; }
 .tx-scope-pane.on { display: block; }
@@ -510,6 +541,11 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-ol-btn:hover, .tx-ol-btn.on { border-color: var(--emerald); color: var(--emerald); }
 .tx-outline { position: absolute; top: 100%; left: 0; z-index: 20; margin-top: 4px; width: min(460px, 84vw); max-height: 46vh; overflow-y: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 20px rgba(20,18,15,.14); display: none; }
 .tx-outline.on { display: block; }
+/* Filter box pinned to the top of a long outline; the list scrolls beneath it. */
+.tx-ol-search { position: sticky; top: 0; z-index: 1; padding: 8px; background: var(--paper); border-bottom: 1px solid var(--line); }
+.tx-ol-search-input { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font-size: 12.5px; color: var(--ink); background: var(--paper); }
+.tx-ol-search-input:focus { outline: none; border-color: var(--emerald); }
+.tx-ol-list .tx-ol-hide { display: none; }
 .tx-ol-item { display: flex; align-items: baseline; gap: 9px; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line); background: transparent; padding: 7px 11px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
 .tx-ol-item:last-child { border-bottom: 0; }
 .tx-ol-item:hover { background: #fbf8f1; }
@@ -537,6 +573,24 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tx-search.on .tx-search-results { display: inline-flex; }
 .tx-hl { background: #fde68a !important; border-radius: 2px; padding: 0 1px; scroll-margin-top: calc(var(--head-h, 120px) + 10px); }
 .tx-hl.active { background: #f97316 !important; color: #fff !important; outline: 2px solid #f97316; }
+/* ---- Session link-add UI ---- */
+.link-add-btn { border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 4px; width: 20px; height: 20px; font-size: 14px; line-height: 1; cursor: pointer; vertical-align: middle; margin-left: 6px; padding: 0; }
+.link-add-btn:hover { background: #dfe9e0; }
+.link-add-area { display: none; margin: 6px 0; }
+.link-add-area.on { display: block; }
+.link-ac { position: relative; }
+.link-ac-input { width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; background: var(--paper); color: var(--ink); }
+.link-ac-input:focus { border-color: var(--emerald); outline: none; }
+.link-ac-input::placeholder { color: var(--muted); }
+.link-ac-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 100; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; margin-top: 2px; max-height: 180px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+.link-ac-menu:empty { display: none; }
+.link-ac-item { padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.link-ac-item:hover { background: #dfe9e0; color: var(--emerald); }
+.link-ac-create { font-style: italic; color: var(--emerald); }
+.link-remove-btn { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 0 0 4px; vertical-align: middle; }
+.link-remove-btn:hover { color: var(--red); }
+.link-ac-error { color: var(--red); font-size: 11px; margin-top: 4px; }
+.link-ac-spinner { color: var(--muted); font-size: 11px; margin-top: 4px; font-style: italic; }
 
 /* Interactive feature-cost treemap (featTreemap.ts): drill-down + breadcrumb +
    threshold slider + cursor tooltip. DOM divs (not SVG) so the polish is cheap. */
@@ -600,6 +654,16 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .home-ask .muted { color: var(--muted); }
 .home-back { display: inline-block; margin-top: 10px; cursor: pointer; }
 
+/* Store-state nudge (fresh / un-enriched store) — see notice.ts. Emerald-accented
+   like the grounding banner, but always-on rather than toggled. */
+.notice { max-width: 720px; margin: 0 0 16px; padding: 12px 16px; background: var(--paper); border: 1px solid var(--line); border-left: 3px solid var(--emerald); border-radius: 8px; }
+/* On the full-width tabs (Dashboard / Sessions / Artifacts) the notice spans the
+   content width; on Highlights it stays a 720px reading column. */
+#dash-notice .notice, #sessions-notice .notice, #art-notice .notice { max-width: none; }
+.notice .notice-h { font-size: 13px; font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+.notice .notice-b { font-size: 13px; color: var(--muted); line-height: 1.55; }
+.notice code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--track); color: var(--ink); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
+
 /* Grounding banner shown above a destination view when arriving from a question */
 /* Per-view slot the grounding message renders into (above the chart/table). Empty
    = no space; when active it carries the .ask-banner below. scroll-margin keeps the
@@ -617,3 +681,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .ask-about { color: var(--muted); flex: 1; }
 .ask-x { flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 4px; }
 .ask-x:hover { color: var(--ink); }
+
+/* Site footer — Tuneloop awareness funnel (attribution + GitHub + feedback). */
+.site-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; padding: 30px 28px 38px; margin-top: 36px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.site-footer a { color: var(--emerald); text-decoration: none; }
+.site-footer a:hover { text-decoration: underline; }
+.site-footer .dot { color: var(--line); }

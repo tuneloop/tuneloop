@@ -1,41 +1,59 @@
 import OpenAI from 'openai'
-import type { LlmClient, LlmCompletion } from './types'
+import { parseJsonObject } from './json'
+import type { ClientOpts, LlmClient, LlmResult, StructuredRequest } from './types'
 
 /**
- * OpenAI-backed client. Note: models.json has no OpenAI prices yet, so the
- * "cost of running the analysis itself" reads $0 for OpenAI until rates are added.
+ * OpenAI / OpenAI-compatible client over the Chat Completions API — the universal
+ * endpoint every compatible provider implements (OpenRouter, Groq, DeepSeek,
+ * Together, Fireworks, xAI, Gemini-compat, Ollama). `baseURL` selects the
+ * endpoint; `provider` is the name self-cost pricing keys on.
+ *
+ * Structured output is one forced function call whose arguments ARE the result,
+ * so the model must support tool calling. `strict` is NOT set: many compatible
+ * providers do function calling but not strict json-schema, and enrich-session
+ * normalizes defensively anyway. Token cap uses `max_completion_tokens` (native
+ * gpt-5/o-series require it; compatible endpoints accept it — verified on
+ * Ollama/Groq/Gemini).
+ *
+ * Model choice matters: pick one that doesn't burn the token budget on hidden
+ * reasoning before emitting the tool call. The default `gpt-5.4-mini` doesn't
+ * reason on this Chat-Completions+tools path (reasoning there is gated to the
+ * Responses API), so it never starves. An older reasoning-by-default model like
+ * `gpt-5-mini` can exhaust the budget reasoning and return empty output on large
+ * sessions — prefer the default.
  */
-export function createOpenAiClient(apiKey: string, model: string): LlmClient {
-  const client = new OpenAI({ apiKey })
+export function createOpenAiClient(apiKey: string, model: string, opts?: ClientOpts): LlmClient {
+  const client = new OpenAI({ apiKey, baseURL: opts?.baseURL })
   return {
-    provider: 'openai',
+    provider: opts?.provider ?? 'openai',
     model,
-    async complete({ system, user, maxTokens = 1024 }): Promise<LlmCompletion> {
+    async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+      const { system, user, schema, toolName, maxTokens = 1024 } = req
       const resp = await client.chat.completions.create({
         model,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
+        max_completion_tokens: maxTokens,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: user },
         ],
+        tools: [{ type: 'function', function: { name: toolName, description: 'Record the structured analysis.', parameters: schema } }],
+        tool_choice: { type: 'function', function: { name: toolName } },
       })
-      const text = resp.choices[0]?.message?.content ?? ''
-      const u = resp.usage as {
-        prompt_tokens?: number
-        completion_tokens?: number
-        prompt_tokens_details?: { cached_tokens?: number }
-      } | undefined
-      const cached = u?.prompt_tokens_details?.cached_tokens ?? 0
-      return {
-        text,
-        usage: {
-          input: Math.max(0, (u?.prompt_tokens ?? 0) - cached),
-          output: u?.completion_tokens ?? 0,
-          cacheCreate: 0,
-          cacheRead: cached,
-        },
-      }
+      const msg = resp.choices[0]?.message
+      const call = msg?.tool_calls?.find((c) => c.type === 'function' && c.function.name === toolName)
+      if (call?.type === 'function') return { data: parseJsonObject(call.function.arguments) ?? {}, usage: usageOf(resp.usage) }
+      // No tool call came back; salvage any plain-text JSON.
+      return { data: parseJsonObject(msg?.content ?? '') ?? {}, usage: usageOf(resp.usage) }
     },
+  }
+}
+
+function usageOf(u: OpenAI.Completions.CompletionUsage | undefined) {
+  const cached = u?.prompt_tokens_details?.cached_tokens ?? 0
+  return {
+    input: Math.max(0, (u?.prompt_tokens ?? 0) - cached),
+    output: u?.completion_tokens ?? 0,
+    cacheCreate: 0,
+    cacheRead: cached,
   }
 }

@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 7
+const SCHEMA_VERSION = 9
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -15,6 +15,17 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT
+);
+
+-- Ingest provenance: which source directories were scanned, and when each was
+-- last analyzed. Upserted per run; a root untouched by a scoped re-run (e.g.
+-- \`--source codex\`) keeps its prior timestamp, so this answers "when was THIS
+-- directory last analyzed" per directory, unlike the store-wide meta.last_analyze_at.
+CREATE TABLE IF NOT EXISTS analyzed_roots (
+  source           TEXT,
+  path             TEXT,
+  last_analyzed_at TEXT,
+  PRIMARY KEY (source, path)
 );
 
 -- Hot row per session. Aggregation queries live here; the blob is elsewhere.
@@ -175,10 +186,13 @@ CREATE TABLE IF NOT EXISTS processor_runs (
   out_tokens INTEGER,
   cost_usd   REAL,
   ran_at     TEXT,
+  -- Set to 1 by a user link/unlink to force the next analyze to re-run this
+  -- processor; reset to 0 (the default) whenever persistResult rewrites the row.
+  invalidated INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, processor)
 );
 
--- file -> session index for \`aivue search <repo:file>\`.
+-- file -> session index for \`tuneloop search <repo:file>\`.
 CREATE TABLE IF NOT EXISTS files_index (
   repo       TEXT,
   path       TEXT,
@@ -282,6 +296,17 @@ CREATE TABLE IF NOT EXISTS block_artifacts (
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_block_artifacts_artifact ON block_artifacts(artifact_id);
+
+-- User overrides for session→artifact links (e.g. rejecting a derived feature link).
+-- Processors check this before inserting derived links to respect user decisions.
+CREATE TABLE IF NOT EXISTS user_link_overrides (
+  session_id  TEXT,
+  artifact_id TEXT,
+  action      TEXT,              -- 'reject'
+  created_at  TEXT,
+  PRIMARY KEY (session_id, artifact_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 `
 
 export function openDb(path: string): DB {
@@ -309,11 +334,14 @@ function migrate(db: DB): void {
     const cols = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as Array<{ name: string }>
     return cols.length > 0 && cols.some((c) => c.name === col)
   }
-  const tableExists = (db.prepare(`SELECT name FROM pragma_table_info('tool_calls')`).all() as unknown[]).length > 0
-  if (tableExists && !has('tool_calls', 'error_category')) {
+  const tableExists = (table: string) => (db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as unknown[]).length > 0
+  if (tableExists('tool_calls') && !has('tool_calls', 'error_category')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_category TEXT')
   }
-  if (tableExists && !has('tool_calls', 'error_message')) {
+  if (tableExists('tool_calls') && !has('tool_calls', 'error_message')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_message TEXT')
+  }
+  if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
+    db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')
   }
 }

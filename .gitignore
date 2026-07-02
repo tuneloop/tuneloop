@@ -3,13 +3,23 @@ dist/
 *.tsbuildinfo
 coverage/
 
-# aivue's local data store (default location when run from a repo)
-.aivue/
+# tuneloop's local data store (default location when run from a repo)
+.tuneloop/
+
+# skill-creator eval workspaces (transient benchmark artifacts)
+skills/*-workspace/
 
 # Claude Code local (machine-specific) settings; shared .claude/settings.json is fine to commit
 .claude/settings.local.json
+
+# Local secrets / env
+.env
+.env.*
+.tuneloop.local.env
 
 # OS / editor
 .DS_Store
 *.swp
 *.log
+.cursorindexingignore
+.specstory/

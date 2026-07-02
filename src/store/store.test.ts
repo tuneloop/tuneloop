@@ -71,3 +71,54 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(row.complexity).toBe(120) // the earlier non-null churn is preserved, not blanked
   })
 })
+
+describe('recordAnalyzedRoots (ingest provenance)', () => {
+  it('upserts scanned roots; a root a scoped re-run skips keeps its prior stamp', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+
+    // First run scans both harnesses' roots.
+    store.recordAnalyzedRoots(
+      [{ source: 'claude-code', path: '/home/u/.claude/projects' }, { source: 'codex', path: '/home/u/.codex/sessions' }],
+      '2026-01-01T00:00:00Z',
+    )
+    // A scoped re-run (`--source claude`) touches only the claude-code root.
+    store.recordAnalyzedRoots([{ source: 'claude-code', path: '/home/u/.claude/projects' }], '2026-02-01T00:00:00Z')
+
+    const rows = db.prepare('SELECT source, path, last_analyzed_at FROM analyzed_roots ORDER BY path').all()
+    expect(rows).toEqual([
+      { source: 'claude-code', path: '/home/u/.claude/projects', last_analyzed_at: '2026-02-01T00:00:00Z' }, // re-stamped
+      { source: 'codex', path: '/home/u/.codex/sessions', last_analyzed_at: '2026-01-01T00:00:00Z' }, // untouched, prior stamp
+    ])
+  })
+})
+
+describe('summary.enrichmentRan', () => {
+  it('is true only once an LLM-backed processor run is recorded', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+
+    // Sessions analyzed but nothing enriched yet → false.
+    expect(store.summary().enrichmentRan).toBe(false)
+
+    // A non-LLM processor run (model = null) is not enrichment.
+    store.persistResult('s1', 'outcomes-git', 1, 'h1', null, {})
+    expect(store.summary().enrichmentRan).toBe(false)
+
+    // An LLM-backed run records its model — the durable "enrichment ran" signal,
+    // independent of which annotation dimensions the enricher happens to emit.
+    store.persistResult('s1', 'enrich-session', 1, 'h1', 'some-llm', {})
+    expect(store.summary().enrichmentRan).toBe(true)
+  })
+})
+
+describe('summary.lastAnalyzedAt', () => {
+  it('is null until recorded, then round-trips the stamped timestamp', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    expect(store.summary().lastAnalyzedAt).toBe(null)
+    store.setMeta('last_analyze_at', '2026-06-30T12:00:00.000Z')
+    expect(store.summary().lastAnalyzedAt).toBe('2026-06-30T12:00:00.000Z')
+  })
+})

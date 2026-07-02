@@ -1,4 +1,4 @@
-/* Minimal leveled logger. Quiet by default; -v / AIVUE_DEBUG raises verbosity. */
+/* Minimal leveled logger. Quiet by default; -v / TUNELOOP_DEBUG raises verbosity. */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 

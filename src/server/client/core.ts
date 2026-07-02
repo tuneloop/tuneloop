@@ -50,8 +50,8 @@ export interface ClientState {
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
   // a manual pick overrides until the window changes.
   // `kind` (feature|pr) scopes only the AI-spend burn graph; `flow` (shipped|reviewed)
-  // toggles the bottom PR throughput graph.
-  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; flow: string }
+  // toggles the bottom PR throughput graph. `complexity` scopes the cost-by-artifact view.
+  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; flow: string; complexity: string }
   spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
   sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
   // operational detail: one shared bucket, a per-graph "break down by" choice
@@ -75,7 +75,7 @@ export var state: ClientState = {
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
   sr: { outcomes: ['session_success'], bucket: '', by: '', filters: {} },
-  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', flow: 'shipped' },
+  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', flow: 'shipped', complexity: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
@@ -89,7 +89,7 @@ export var state: ClientState = {
 // it again. Stored client-side, so the windowed KPI passes the same outcomes to
 // the server to stay consistent (see loadKpis). Bucket is intentionally NOT
 // persisted — it auto-derives from the window.
-var SR_PREFS_KEY = 'aivue.sr';
+var SR_PREFS_KEY = 'tuneloop.sr';
 function loadSrPrefs() {
   try {
     var saved = JSON.parse(localStorage.getItem(SR_PREFS_KEY) || 'null');
@@ -229,6 +229,27 @@ export function comboLabel(key) {
 }
 
 export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', '#1b8a8a', '#a65c2e', '#6b8e23'];
+
+// Complexity bucket → display label. One source of truth shared by the Cost-by-
+// Artifact filter buttons and the headline KPI subtext, so they always agree.
+export var CX_LABELS: Record<string, string> = {
+  trivial: 'Trivial', small: 'Simple', medium: 'Moderate', large: 'Complex', xl: 'Highly Complex', none: 'Not tagged',
+};
+// Comma-joined bucket keys → "Trivial, Simple" (preserving selection order).
+export function cxLabelList(keys: string) {
+  return (keys || '').split(',').filter(Boolean).map(function (k) { return CX_LABELS[k] || k; }).join(', ');
+}
+// A single artifact's complexity → its bucket label. Features carry an ordinal
+// (1–5, user-tagged); PRs carry a diff-size churn (line count) bucketed by the
+// same ranges as the Cost-by-Artifact filter. Null/untagged → '' (no label).
+var CX_ORDINAL = ['', 'trivial', 'small', 'medium', 'large', 'xl'];
+export function complexityLabel(kind: string, complexity: number | null | undefined) {
+  if (complexity == null) return '';
+  if (kind === 'feature') return CX_LABELS[CX_ORDINAL[complexity]] || '';
+  var n = Number(complexity);
+  var key = n <= 10 ? 'trivial' : n <= 100 ? 'small' : n <= 500 ? 'medium' : n <= 1500 ? 'large' : 'xl';
+  return CX_LABELS[key];
+}
 
 // Canonical outcome display order: concrete shipped artifacts first, softening
 // down to the LLM-judged catch-all. Shared by the success-rate "Count as success"

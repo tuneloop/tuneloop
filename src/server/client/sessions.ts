@@ -2,7 +2,7 @@
 // free-text), the session table, the detail drawer, and view switching. The
 // typeahead helpers (ac*) are module-private; filterByArtifact/setView are
 // shared so the artifacts tab and drawer can jump into a filtered session list.
-import { state, $, esc, renderMd, usd, num, dayOf, badge, get, outcomeRank, outcomeLabel } from './core'
+import { state, $, esc, renderMd, usd, num, dayOf, badge, get, post, outcomeRank, outcomeLabel } from './core'
 import { syncHash } from './router'
 
 // Close the transcript outline dropdown on an outside click — it's a custom
@@ -674,6 +674,9 @@ function filesHtml(edits, transcript) {
     .map(function (g) { return fileCardHtml(g.key, g.items, promptSegmentsHtml(g.items, transcript)); }).join('');
 }
 
+var _activeTab = 'transcript';
+var _activeSessionId: string | null = null;
+
 export function openDetail(id, focus?: any) {
   // Reflect the open session in the URL immediately (a shareable, Back-closable
   // entry) — before the async fetch. A stale/deleted id reverts below.
@@ -723,22 +726,27 @@ export function openDetail(id, focus?: any) {
     }
 
     var arts = d.artifacts || [];
+    var sessionId = s.id;
     var feats = arts.filter(function (x) { return x.kind === 'feature'; });
+    sum += '<div class="sect-h">Features (' + feats.length + ') <button class="link-add-btn" type="button" data-link-kind="feature" data-session-id="' + esc(sessionId) + '" title="Link feature">+</button></div>';
     if (feats.length) {
-      sum += '<div class="sect-h">Features (' + feats.length + ')</div>';
       sum += chipList(feats, 6, function (f) {
+        var xBtn = '<button class="link-remove-btn" type="button" data-artifact-id="' + esc(f.id) + '" data-session-id="' + esc(sessionId) + '" title="Unlink">&times;</button>';
         return '<span class="tag click" data-art="' + esc(f.title) + '" data-kind="feature">' +
-          esc(f.title) + (f.source === 'derived' ? ' (proposed)' : '') + '</span>';
+          esc(f.title) + (f.source === 'derived' ? ' (proposed)' : '') + xBtn + '</span>';
       });
     }
+    sum += '<div class="link-add-area" data-link-kind="feature" data-session-id="' + esc(sessionId) + '"></div>';
     var prs = arts.filter(function (x) { return x.kind === 'pr'; });
+    sum += '<div class="sect-h">Pull requests (' + prs.length + ') <button class="link-add-btn" type="button" data-link-kind="pr" data-session-id="' + esc(sessionId) + '" title="Link PR">+</button></div>';
     if (prs.length) {
-      sum += '<div class="sect-h">Pull requests (' + prs.length + ')</div>';
       sum += chipList(prs, 8, function (p) {
+        var xBtn = p.source === 'user' ? '<button class="link-remove-btn" type="button" data-artifact-id="' + esc(p.id) + '" data-session-id="' + esc(sessionId) + '" title="Unlink">&times;</button>' : '';
         var label = (p.repo ? esc(p.repo) + ' ' : '') + '#' + esc(p.ident) + (p.status ? ' (' + esc(p.status) + ')' : '');
-        return '<span class="tag click" data-art="' + esc(p.externalId || p.ident) + '" data-kind="pr">' + label + '</span>';
+        return '<span class="tag click" data-art="' + esc(p.externalId || p.ident) + '" data-kind="pr">' + label + xBtn + '</span>';
       });
     }
+    sum += '<div class="link-add-area" data-link-kind="pr" data-session-id="' + esc(sessionId) + '"></div>';
     var files = arts.filter(function (x) { return x.kind === 'file'; });
     if (files.length) {
       sum += '<div class="sect-h">Files touched (' + files.length + ')</div>';
@@ -1042,7 +1050,7 @@ export function openDetail(id, focus?: any) {
     var userTurns = scopeByKey.main.userTurns;
     var errIds = scopeByKey.main.errIds;
 
-    function scopeBtnHtml(sc) {
+    function scopeBtnHtml(sc, extra) {
       var lbl, ico = '', title = '';
       if (sc.key === 'main') lbl = 'Main thread';
       else {
@@ -1051,20 +1059,53 @@ export function openDetail(id, focus?: any) {
         title = (sc.agentType || 'subagent') + (sc.description ? ': ' + sc.description : '');
       }
       var err = sc.errIds.length ? '<span class="tx-scope-err">⚠' + sc.errIds.length + '</span>' : '';
-      return '<button class="tx-scope-btn' + (sc.key === 'main' ? ' on' : '') + '" type="button" data-scope="' +
-        esc(sc.key) + '" title="' + esc(title) + '">' + ico + esc(lbl) + err + '</button>';
+      return '<button class="tx-scope-btn' + (sc.key === 'main' ? ' on' : '') + (extra ? ' tx-scope-extra' : '') +
+        '" type="button" data-scope="' + esc(sc.key) + '" title="' + esc(title) + '">' + ico + esc(lbl) + err + '</button>';
     }
+    // Collapse a long scope list to one line: show the first few, tuck the rest
+    // behind a toggle. Main thread always leads, so the visible count stays small.
+    var SCOPE_SHOWN = 3;
+    var scopeExtra = scopes.length - SCOPE_SHOWN;
+    var moreBtn = scopeExtra > 0
+      ? '<button class="tx-scope-more" type="button" data-more="+' + scopeExtra + ' more">+' + scopeExtra + ' more</button>'
+      : '';
     var scopeBar = hasSub
-      ? '<div class="tx-scopes">' + scopes.map(scopeBtnHtml).join('') + '</div>'
+      ? '<div class="tx-scopes' + (scopeExtra > 0 ? ' collapsed' : '') + '">' +
+          scopes.map(function (sc, i) { return scopeBtnHtml(sc, i >= SCOPE_SHOWN); }).join('') + moreBtn + '</div>'
       : '';
 
-    function outlineHtml(uts) {
+    function outlineListHtml(uts) {
       return uts.length
         ? uts.map(function (u, k) {
-            return '<button class="tx-ol-item" type="button" data-k="' + k + '" data-goto="txt-' + u.i + '">' +
+            return '<button class="tx-ol-item" type="button" data-k="' + k + '" data-goto="txt-' + u.i + '"' +
+              ' data-s="' + esc(clipLine(u.text, 300).toLowerCase()) + '">' +
               '<span class="tx-ol-n">' + (k + 1) + '</span><span class="tx-ol-tx">' + esc(clipLine(u.text, 90)) + '</span></button>';
           }).join('')
         : '<div class="empty">No turns.</div>';
+    }
+    // Long turn lists get a filter box so you don't have to scroll to scan them.
+    var OUTLINE_SEARCH_MIN = 10;
+    function outlineHtml(uts) {
+      var search = uts.length > OUTLINE_SEARCH_MIN
+        ? '<div class="tx-ol-search"><input class="tx-ol-search-input" type="text" placeholder="Filter turns…" /></div>'
+        : '';
+      return search + '<div class="tx-ol-list">' + outlineListHtml(uts) + '</div>';
+    }
+    // Show only the outline items whose text contains the query; note when none do.
+    function filterOutline(q) {
+      var list = $('#drawerBody .tx-ol-list'); if (!list) return;
+      q = (q || '').trim().toLowerCase();
+      var any = false;
+      Array.prototype.forEach.call(list.querySelectorAll('.tx-ol-item'), function (it) {
+        var hit = !q || (it.getAttribute('data-s') || '').indexOf(q) >= 0;
+        it.classList.toggle('tx-ol-hide', !hit);
+        if (hit) any = true;
+      });
+      var none = list.querySelector('.tx-ol-none') as HTMLElement;
+      if (!any && q) {
+        if (!none) { none = document.createElement('div'); none.className = 'empty tx-ol-none'; none.textContent = 'No matching turns.'; list.appendChild(none); }
+        none.style.display = '';
+      } else if (none) none.style.display = 'none';
     }
     var nav = '<div class="tx-nav">' +
       '<div class="tx-filter-wrap"></div>' +
@@ -1150,6 +1191,7 @@ export function openDetail(id, focus?: any) {
       if (filesRendered) { expandFile(path); pendingFile = null; }
     }
     function showTab(name) {
+      _activeTab = name;
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (x) {
         x.classList.toggle('on', x.getAttribute('data-dtab') === name);
       });
@@ -1280,6 +1322,51 @@ export function openDetail(id, focus?: any) {
       }
     });
 
+    // ----- Link-add buttons: "+" opens inline typeahead to link artifacts ------
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .link-add-btn'), function (btn) {
+      btn.onclick = function () {
+        var kind = btn.getAttribute('data-link-kind');
+        var sid = btn.getAttribute('data-session-id');
+        var area = document.querySelector('#drawerBody .link-add-area[data-link-kind="' + kind + '"][data-session-id="' + sid + '"]') as HTMLElement;
+        if (!area) return;
+        if (area.classList.contains('on')) { area.classList.remove('on'); area.innerHTML = ''; return; }
+        area.classList.add('on');
+        area.innerHTML =
+          '<div class="link-ac">' +
+            '<input class="link-ac-input" placeholder="' + (kind === 'feature' ? 'Search features or type a name to create…' : kind === 'pr' ? 'Paste URL or type owner/repo#123…' : 'Search…') + '" />' +
+            '<div class="link-ac-menu"></div>' +
+          '</div>';
+        var inp = area.querySelector('.link-ac-input') as HTMLInputElement;
+        var menu = area.querySelector('.link-ac-menu') as HTMLElement;
+        var debounce: any = null;
+        inp.focus();
+        inp.oninput = function () {
+          var err = area.querySelector('.link-ac-error');
+          if (err) err.remove();
+          clearTimeout(debounce);
+          debounce = setTimeout(function () { linkAcFetch(inp, menu, sid, kind); }, 200);
+        };
+        inp.onkeydown = function (e) {
+          if (e.key === 'Escape') { area.classList.remove('on'); area.innerHTML = ''; }
+          if (e.key === 'Enter') { linkAcSelect(inp, menu, sid, kind, -1); }
+        };
+      };
+    });
+
+    // ----- Link-remove buttons: "✕" on feature chips rejects the link ----------
+    Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .link-remove-btn'), function (btn) {
+      btn.onclick = function (e) {
+        e.stopPropagation();
+        var sid = btn.getAttribute('data-session-id');
+        var aid = btn.getAttribute('data-artifact-id');
+        if (!sid || !aid) return;
+        if (!confirm('Unlink this artifact from the session?')) return;
+        post('/api/session-links/remove', { sessionId: sid, artifactId: aid }).then(function (res) {
+          if (res && res.ok) openDetail(sid);
+        }).catch(function () {});
+      };
+    });
+
     // ----- Transcript navigation: turn stepper + scroll-spy + error stepper ----
     var curTurn = 0;
     // A programmatic jump sets the indicator explicitly AND triggers a smooth
@@ -1337,9 +1424,12 @@ export function openDetail(id, focus?: any) {
 
     // Outline dropdown: open/close + jump to a specific turn (highlights current).
     var olBtn = $('#drawerBody .tx-ol-btn'), olPanel = $('#tx-outline');
-    if (olBtn) olBtn.onclick = function () { olPanel.classList.toggle('on'); olBtn.classList.toggle('on'); };
-    // (Re)wire the outline items to jump within the active scope. Called on open
-    // and whenever switchScope swaps the outline's contents.
+    if (olBtn) olBtn.onclick = function () {
+      var open = olPanel.classList.toggle('on'); olBtn.classList.toggle('on');
+      if (open) { var si = $('#drawerBody .tx-ol-search-input'); if (si) si.focus(); }
+    };
+    // (Re)wire the outline items to jump within the active scope, plus the filter
+    // box. Called on open and whenever the outline's contents are swapped.
     function wireOutline() {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-ol-item'), function (it) {
         it.onclick = function () {
@@ -1348,6 +1438,14 @@ export function openDetail(id, focus?: any) {
           jumpToTurn(parseInt(it.getAttribute('data-k'), 10));
         };
       });
+      var si = $('#drawerBody .tx-ol-search-input');
+      if (si) {
+        si.oninput = function () { filterOutline(si.value); };
+        // Enter jumps to the first match (and closes the dropdown via the click).
+        si.onkeydown = function (e) {
+          if (e.key === 'Enter') { var first = $('#drawerBody .tx-ol-item:not(.tx-ol-hide)'); if (first) first.click(); }
+        };
+      }
     }
     wireOutline();
     if (userTurns.length) updateIndicator(0);
@@ -1610,6 +1708,13 @@ export function openDetail(id, focus?: any) {
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
         b.classList.toggle('on', b.getAttribute('data-scope') === key);
       });
+      // If the newly active scope is tucked away, reveal the collapsed list so its pill shows.
+      var sb = $('#drawerBody .tx-scopes');
+      var activeBtn = $('#drawerBody .tx-scope-btn.on');
+      if (sb && sb.classList.contains('collapsed') && activeBtn && activeBtn.classList.contains('tx-scope-extra')) {
+        sb.classList.remove('collapsed');
+        var mb = $('#drawerBody .tx-scope-more'); if (mb) mb.textContent = 'show less';
+      }
       Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-pane'), function (p) {
         p.classList.toggle('on', p.getAttribute('data-scope') === key);
       });
@@ -1632,6 +1737,14 @@ export function openDetail(id, focus?: any) {
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-scope-btn'), function (b) {
       b.onclick = function () { switchScope(b.getAttribute('data-scope')); };
     });
+    // The "+N more" pill expands/collapses the overflow scopes.
+    var scopeMoreEl = $('#drawerBody .tx-scope-more');
+    if (scopeMoreEl) scopeMoreEl.onclick = function () {
+      var sb = $('#drawerBody .tx-scopes');
+      var collapsed = sb.classList.toggle('collapsed');
+      scopeMoreEl.textContent = collapsed ? scopeMoreEl.getAttribute('data-more') : 'show less';
+      syncHeadH();
+    };
     // A spawning call (banner or chip) opens its subagent's scope.
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tx-spawn, #drawerBody .tool-block.agent .tool-block-row'), function (b) {
       b.onclick = function (e) { e.stopPropagation(); switchScope(b.getAttribute('data-agent')); };
@@ -1647,8 +1760,12 @@ export function openDetail(id, focus?: any) {
       };
     });
 
-    // Land on Transcript by default (global default); empty sessions fall to Summary.
-    showTab(hasTx ? 'transcript' : 'summary');
+    // Land on Transcript by default; restore previous tab only when re-opening the same session.
+    var restoreTab = (_activeSessionId === id ? _activeTab : null) || 'transcript';
+    if (restoreTab === 'files' && !fileCount) restoreTab = 'transcript';
+    if (restoreTab === 'transcript' && !hasTx) restoreTab = 'summary';
+    _activeSessionId = id;
+    showTab(restoreTab);
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
 
@@ -1742,6 +1859,78 @@ function renderErrWalkBar() {
   $('#ew-prev').onclick = function () { openWalkOcc(errWalk.i - 1); };
   $('#ew-next').onclick = function () { openWalkOcc(errWalk.i + 1); };
   $('#ew-close').onclick = function () { errWalk = null; renderErrWalkBar(); };
+}
+
+// ---- Link-add typeahead helpers (session detail) ----------------------------
+
+function linkAcFetch(inp: HTMLInputElement, menu: HTMLElement, sessionId: string, kind: string) {
+  var q = inp.value.trim();
+  if (!q) { menu.innerHTML = ''; return; }
+  var url = '/api/session-links/suggest?sessionId=' + encodeURIComponent(sessionId) +
+    '&q=' + encodeURIComponent(q) +
+    (kind ? '&kind=' + encodeURIComponent(kind) : '');
+  get(url).then(function (items) {
+    var html = '';
+    (items || []).forEach(function (it, i) {
+      html += '<div class="link-ac-item" data-idx="' + i + '" data-id="' + esc(it.id) + '">' + esc(it.label) + '</div>';
+    });
+    if (kind === 'feature') {
+      html += '<div class="link-ac-item link-ac-create" data-idx="-1">Create &ldquo;' + esc(q) + '&rdquo;</div>';
+    }
+    if (kind === 'pr' && (/^[^\s#]+#\d+$/.test(q) || /^(?:https?:\/\/)?github\.com\/[^/]+\/[^/]+\/pull\/\d+/.test(q))) {
+      html += '<div class="link-ac-item link-ac-create" data-idx="-2">Link PR ' + esc(q) + '</div>';
+    }
+    menu.innerHTML = html;
+    Array.prototype.forEach.call(menu.querySelectorAll('.link-ac-item'), function (el) {
+      el.onclick = function () { linkAcSelect(inp, menu, sessionId, kind, parseInt(el.getAttribute('data-idx'))); };
+    });
+  });
+}
+
+function linkAcSelect(inp: HTMLInputElement, menu: HTMLElement, sessionId: string, kind: string, idx: number) {
+  var q = inp.value.trim();
+  if (!q) return;
+  var item = idx >= 0 ? menu.querySelector('[data-idx="' + idx + '"]') : null;
+  var promise: Promise<any>;
+  if (item && item.getAttribute('data-id')) {
+    promise = post('/api/session-links/add', { sessionId: sessionId, artifactId: item.getAttribute('data-id') });
+  } else if (kind === 'feature') {
+    promise = post('/api/session-links/create-feature', { sessionId: sessionId, title: q });
+  } else if (kind === 'pr') {
+    var m = q.match(/^([^\s#]+)#(\d+)$/) || q.match(/^(?:https?:\/\/)?github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+    if (!m) return;
+    promise = post('/api/session-links/add-pr', { sessionId: sessionId, repo: m[1], prNumber: m[2] });
+  } else {
+    return;
+  }
+  var area = document.querySelector('#drawerBody .link-add-area[data-link-kind="' + kind + '"].on') as HTMLElement;
+  if (area) {
+    var existing = area.querySelector('.link-ac-error');
+    if (existing) existing.remove();
+    var spinner = document.createElement('div');
+    spinner.className = 'link-ac-spinner';
+    spinner.textContent = 'Validating…';
+    area.querySelector('.link-ac').appendChild(spinner);
+  }
+  promise.then(function (res) {
+    if (area) { var sp = area.querySelector('.link-ac-spinner'); if (sp) sp.remove(); }
+    if (res && (res.ok || res.id)) {
+      openDetail(sessionId);
+    } else if (res && res.error) {
+      if (area) {
+        var err = area.querySelector('.link-ac-error');
+        if (!err) { err = document.createElement('div'); err.className = 'link-ac-error'; area.querySelector('.link-ac').appendChild(err); }
+        err.textContent = res.error;
+      }
+    }
+  }).catch(function () {
+    if (area) {
+      var sp = area.querySelector('.link-ac-spinner'); if (sp) sp.remove();
+      var err = area.querySelector('.link-ac-error');
+      if (!err) { err = document.createElement('div'); err.className = 'link-ac-error'; area.querySelector('.link-ac').appendChild(err); }
+      err.textContent = 'Request failed — check your connection';
+    }
+  });
 }
 
 export function setView(name) {

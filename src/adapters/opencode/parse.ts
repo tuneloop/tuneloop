@@ -239,7 +239,7 @@ function appendHash(into: string[], messages: OcMessage[], parts: OcPart[]): voi
 
 /**
  * OpenCode tokens: { input, output, reasoning, cache: { read, write } }, where
- * reasoning is counted separately from output. aivue has no reasoning field, so
+ * reasoning is counted separately from output. tuneloop has no reasoning field, so
  * fold it into output to keep the rolled-up total whole.
  */
 function usageOf(t: Raw): TokenUsage {

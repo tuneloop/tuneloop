@@ -193,7 +193,7 @@ describe('opencode → store Files-changed view', () => {
     } finally {
       ocDb.close()
     }
-    const store = new Store(openDb(join(dir, 'aivue.db')))
+    const store = new Store(openDb(join(dir, 'tuneloop.db')))
     const cost = computeSessionCost(session)
     store.ingestSession(session, cost.usd, cost.facts, PRICE_TABLE_VERSION, 1)
     edits = store.fileChanges(session.id)
