@@ -6,6 +6,7 @@ import { state, $, esc, usd, get, autoBucket } from '../core'
 import { loadKpis } from '../kpis'
 import { stackChart } from '../charts'
 
+var caReqId = 0;
 function caNoun() { return state.ca.kind === 'pr' ? 'PRs' : 'features'; }
 function caTitle() { return state.ca.kind === 'pr' ? 'Cost per merged PR' : 'Cost per shipped feature'; }
 function caWinLabel() { return state.days === 'all' ? 'all time' : 'last ' + state.days + ' days'; }
@@ -56,13 +57,24 @@ export function renderCaControls() {
   var bk = ['day', 'week', 'month'].map(function (b) {
     return '<button class="' + (b === active ? 'on' : '') + '" data-b="' + b + '">' + b + '</button>';
   }).join('');
+  var cxOpts = state.ca.kind === 'pr'
+    ? [['', 'All', ''], ['trivial', 'Trivial', '1–10 lines'], ['small', 'Simple', '11–100'], ['medium', 'Moderate', '101–500'], ['large', 'Complex', '501–1.5k'], ['xl', 'Highly Complex', '1.5k+']]
+    : [['', 'All', ''], ['trivial', 'Trivial', ''], ['small', 'Simple', ''], ['medium', 'Moderate', ''], ['large', 'Complex', ''], ['xl', 'Highly Complex', ''], ['none', 'Not tagged', '']];
+  var cxSel = state.ca.complexity ? state.ca.complexity.split(',') : [];
+  var cx = cxOpts.map(function (o) {
+    var isOn = o[0] === '' ? !state.ca.complexity : cxSel.indexOf(o[0]) !== -1;
+    return '<button class="' + (isOn ? 'on' : '') + '" data-cx="' + o[0] + '"><span class="cx-label">' + o[1] + '</span>' + (o[2] ? '<span class="cx-sub">' + o[2] + '</span>' : '') + '</button>';
+  }).join('');
+  var cxRow = '<span class="sr-lbl" style="margin-left:18px">Complexity</span><span class="seg multi" id="ca-complexity">' + cx + '</span>';
   $('#ca-controls').innerHTML =
     '<div class="sr-ctrl-row"><span class="sr-lbl">Artifact</span><span class="seg" id="ca-type">' + type + '</span>' +
-      '<span class="sr-lbl" style="margin-left:18px">Bucket</span><span class="seg" id="ca-bucket">' + bk + '</span></div>';
+      '<span class="sr-lbl" style="margin-left:18px">Bucket</span><span class="seg" id="ca-bucket">' + bk + '</span>' +
+      cxRow + '</div>';
   Array.prototype.forEach.call($('#ca-type').children, function (btn) {
     btn.onclick = function () {
       state.ca.kind = btn.getAttribute('data-k');
       state.ca.userPicked = true; // stick to this choice; the headline tile mirrors it
+      state.ca.complexity = '';
       renderCostArtifact();
       loadKpis();
     };
@@ -70,11 +82,29 @@ export function renderCaControls() {
   Array.prototype.forEach.call($('#ca-bucket').children, function (btn) {
     btn.onclick = function () { state.ca.bucket = btn.getAttribute('data-b'); renderCaControls(); loadCostArtifact(); };
   });
+  var cxEl = $('#ca-complexity');
+  if (cxEl) Array.prototype.forEach.call(cxEl.children, function (btn) {
+    btn.onclick = function () {
+      var key = btn.getAttribute('data-cx');
+      if (key === '') {
+        state.ca.complexity = '';
+      } else {
+        var sel = state.ca.complexity ? state.ca.complexity.split(',') : [];
+        var idx = sel.indexOf(key);
+        if (idx === -1) sel.push(key); else sel.splice(idx, 1);
+        state.ca.complexity = sel.join(',');
+      }
+      renderCaControls(); loadCostArtifact();
+    };
+  });
 }
 
 export function loadCostArtifact() {
   var qs = ['kind=' + encodeURIComponent(state.ca.kind), 'days=' + encodeURIComponent(String(state.days)), 'bucket=' + encodeURIComponent(caBucket())];
+  if (state.ca.complexity) qs.push('complexity=' + encodeURIComponent(state.ca.complexity));
+  var myReq = ++caReqId;
   get('/api/cost-artifact?' + qs.join('&')).then(function (d) {
+    if (myReq !== caReqId) return;
     if (!d || d.error) { $('#ca-burn').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderCa(d);
   });

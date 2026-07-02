@@ -28,10 +28,15 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         sendJson(res, 400, { error: 'title required' })
         return
       }
-      sendJson(res, 200, store.createFeature(title, body.parentId || undefined))
+      const complexity = body.complexity != null ? Number(body.complexity) : undefined
+      sendJson(res, 200, store.createFeature(title, body.parentId || undefined, Number.isFinite(complexity) ? complexity : undefined))
       return
     }
     if (path === '/api/features/update') {
+      if (body.complexity !== undefined) {
+        body.complexity = body.complexity != null ? Number(body.complexity) : null
+        if (typeof body.complexity === 'number' && !Number.isFinite(body.complexity)) body.complexity = null
+      }
       sendJson(res, 200, { ok: store.updateFeature(String(body.id), body) })
       return
     }
@@ -321,15 +326,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const kind = q.get('kind') === 'pr' ? 'pr' : 'feature'
     const rawBucket = q.get('bucket')
     const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    const complexity = q.get('complexity') || undefined
     const daysRaw = q.get('days') ?? '7'
     if (daysRaw === 'all') {
-      const curves = store.costCurves(kind, bucket)
+      const curves = store.costCurves(kind, bucket, undefined, undefined, complexity)
       sendJson(res, 200, {
         kind,
         days: 'all',
+        complexity: complexity || null,
         window: null,
-        kpi: { current: store.costPerArtifact(kind), previous: null },
-        period: store.costPeriod(kind),
+        kpi: { current: store.costPerArtifact(kind, undefined, undefined, complexity), previous: null },
+        period: store.costPeriod(kind, undefined, undefined, complexity),
         burn: curves.burn,
         throughput: curves.throughput,
         reviewed: curves.reviewed,
@@ -345,13 +352,14 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const from = new Date(now - span).toISOString()
     const prevFrom = new Date(now - 2 * span).toISOString()
     // Curves share the KPI's window so the chart shows the same N days.
-    const curves = store.costCurves(kind, bucket, from, to)
+    const curves = store.costCurves(kind, bucket, from, to, complexity)
     sendJson(res, 200, {
       kind,
       days,
+      complexity: complexity || null,
       window: { from, to },
-      kpi: { current: store.costPerArtifact(kind, from, to), previous: store.costPerArtifact(kind, prevFrom, from) },
-      period: store.costPeriod(kind, from, to),
+      kpi: { current: store.costPerArtifact(kind, from, to, complexity), previous: store.costPerArtifact(kind, prevFrom, from, complexity) },
+      period: store.costPeriod(kind, from, to, complexity),
       burn: curves.burn,
       throughput: curves.throughput,
       reviewed: curves.reviewed,

@@ -2,6 +2,7 @@
 // (hierarchical list with ship-toggle, nest-under, move-to-top, delete). Feature
 // mutations POST to /api/features* and reload.
 import { state, $, esc, usd, dayOf, get, post } from './core'
+var CX_OPTS = [['', 'Not tagged'], ['1', 'Trivial'], ['2', 'Simple'], ['3', 'Moderate'], ['4', 'Complex'], ['5', 'Highly Complex']];
 import { syncHash } from './router'
 import { filterByArtifact, setView } from './sessions'
 
@@ -170,6 +171,10 @@ function renderFeatureManager(rows) {
       // into a per-row hamburger; only the indent shifts, so columns stay aligned.
       var nest = '<select class="feat-nest" data-id="' + esc(r.id) + '">' +
         nestUnderOptions(rows, r.id, descendantsOf(rows, r.id)) + '</select>';
+      var cxVal = r.complexity ? String(r.complexity) : '';
+      var cxSelect = '<select class="feat-cx" data-id="' + esc(r.id) + '">' +
+        CX_OPTS.map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === cxVal ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+        '</select>';
       var toTop = r.parentId
         ? '<button class="menu-item" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
         : '';
@@ -190,6 +195,7 @@ function renderFeatureManager(rows) {
               '<button class="menu-item" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
                 (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
               '<div class="menu-nest"><label>Nest under</label>' + nest + '</div>' +
+              '<div class="menu-nest"><label>Complexity</label>' + cxSelect + '</div>' +
               toTop +
               '<div class="menu-sep"></div>' +
               '<button class="menu-item danger" data-act="delete" data-id="' + esc(r.id) + '" data-title="' + esc(r.title || '') + '">Delete</button>' +
@@ -206,6 +212,8 @@ function renderFeatureManager(rows) {
     '<div class="feat-new" id="nf-form" hidden>' +
       '<input id="nf-title" placeholder="New feature title" />' +
       '<select id="nf-parent">' + featureParentOptions(rows, '', '', null) + '</select>' +
+      '<select id="nf-complexity"><option value="">Complexity (optional)</option>' +
+        CX_OPTS.slice(1).map(function (o) { return '<option value="' + o[0] + '">' + o[1] + '</option>'; }).join('') + '</select>' +
       '<button class="btn" id="nf-add">Add</button>' +
       '<button class="btn" id="nf-cancel">Cancel</button>' +
     '</div></div>';
@@ -286,7 +294,8 @@ function wireFeatureManager() {
   if (add) add.onclick = function () {
     var title = nfTitle.value.trim();
     if (!title) return;
-    post('/api/features', { title: title, parentId: $('#nf-parent').value || undefined }).then(loadArtifacts);
+    var cx = $('#nf-complexity').value || undefined;
+    post('/api/features', { title: title, parentId: $('#nf-parent').value || undefined, complexity: cx ? Number(cx) : undefined }).then(loadArtifacts);
   };
   if (nfTitle) nfTitle.onkeydown = function (ev) { if (ev.key === 'Enter' && add) add.onclick(); };
 
@@ -328,6 +337,12 @@ function wireFeatureManager() {
     sel.onchange = function () {
       if (!sel.value) return;
       post('/api/features/update', { id: sel.getAttribute('data-id'), parentId: sel.value }).then(loadArtifacts);
+    };
+  });
+  each('#artifacts .feat-cx', function (sel) {
+    sel.onchange = function () {
+      var val = sel.value ? Number(sel.value) : null;
+      post('/api/features/update', { id: sel.getAttribute('data-id'), complexity: val }).then(loadArtifacts);
     };
   });
   each('#artifacts [data-act="totop"]', function (b) {
