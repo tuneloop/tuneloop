@@ -28,12 +28,14 @@ between the two sides.
     gpt-5-class models, where it replaces `edit`/`write`).
 - **PR side:** the net merged diff's added (`+`) lines (`gh pr diff`), which collapses the
   PR's intermediate commits into what actually shipped. Only shipped content is attributed;
-  agent work overwritten before merge correctly earns no credit. A line the same file's
-  diff both removes and adds is **moved/re-indented code, not new content**, and is
-  excluded from both the numerator and the denominator — otherwise a later refactor PR
-  falsely links to whichever session originally authored the moved code. The cost: a pure-move refactor PR gets no content-match link — from
-  content alone, "the agent moved this" and "someone moved the agent's code" are
-  indistinguishable, so moves are never attributed (under-claim over over-claim).
+  agent work overwritten before merge correctly earns no credit. A line that **already
+  existed in the base version of the file** (moved, re-indented, duplicated into a new
+  variant, reverted) is not new content and is excluded from both the numerator and the
+  denominator — otherwise a later refactor or copy-the-pattern PR falsely links to
+  whichever session originally authored that code. The base file is read locally (`git show <mergeCommit>^:<path>`, or `origin/<base>` for open PRs); when the commit isn't in the 
+  clone, the diff's own removed lines — a subset of the same rule — are the fallback. 
+  The cost: a PR that only moves/copies existing code gets no content-match link — 
+  from content alone, "the agent moved this" and "someone moved the agent's code" are indistinguishable, so pre-existing content is never attributed(under-claim over over-claim)
   Machine-generated lockfiles (`package-lock.json`, `yarn.lock`, …) are excluded from the
   fraction entirely: nobody authors them, and a regenerated lockfile would deflate the %.
 - **Anchor:** containment of the PR's added lines within the session's authored lines —

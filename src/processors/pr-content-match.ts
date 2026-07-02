@@ -47,8 +47,10 @@ interface CandidatePr {
   num: string
   url: string
   art: ArtifactInput
-  /** Added/removed lines per repo-relative path (normalized + de-trivialized at match time). */
-  files: { path: string; added: string[]; removed: string[] }[]
+  /** Added/removed lines per repo-relative path (normalized + de-trivialized at match
+   * time), plus the file's full pre-PR content when the base commit is available locally
+   * (`base: null` = unavailable → the removed-lines rule is the fallback). */
+  files: { path: string; added: string[]; removed: string[]; base: string[] | null }[]
 }
 
 // Candidate PRs are the same for every session in a repo, so fetch once per repo per
@@ -61,7 +63,7 @@ export function __resetPrCache(): void {
 
 export const prContentMatch: Processor = {
   name: 'pr-content-match',
-  version: 2,
+  version: 3,
   kind: 'static',
   needs: { network: true },
   requires: ['segment-blocks'],
@@ -78,7 +80,7 @@ export const prContentMatch: Processor = {
     const authored = authoredByFile(session, cwd, repoRoot)
     if (authored.size === 0) return {}
 
-    const candidates = await candidatePrs(sh, ownerRepo)
+    const candidates = await candidatePrs(sh, ownerRepo, repoRoot)
     // gh INFRA failure (vs a repo with genuinely no candidate PRs): throw so the runner skips persisting
     if (candidates === null) throw new Error(`gh unavailable for ${ownerRepo}; keeping prior content-match results`)
     if (candidates.length === 0) return {}
@@ -112,11 +114,13 @@ export const prContentMatch: Processor = {
       for (const file of pr.files) {
         if (GENERATED_FILES.has(basename(file.path))) continue
         const auth = authored.get(file.path)
-        // Net-new only: a line the same file's diff both removes and re-adds is moved/
-        // re-indented code, not new content — matching it would credit whoever ORIGINALLY
-        // authored it (observed: a refactor PR falsely linked to old sessions)
-        const removed = new Set(meaningful(file.removed))
-        const prUnique = new Set(meaningful(file.added).filter((l) => !removed.has(l)))
+        // Net-new only: a line that already existed in the file BEFORE this PR (moved,
+        // re-indented, duplicated, reverted) is not new content — matching it would credit
+        // whoever ORIGINALLY authored it. Base file when available locally; the
+        // diff's own removed lines otherwise (a subset of the same rule)
+        const excluded = new Set(meaningful(file.removed))
+        if (file.base) for (const l of meaningful(file.base)) excluded.add(l)
+        const prUnique = new Set(meaningful(file.added).filter((l) => !excluded.has(l)))
         total += prUnique.size
         if (!auth) continue
         for (const line of prUnique) {
@@ -268,11 +272,11 @@ function shippedBeforeSession(pr: CandidatePr, sessionStart: string | undefined)
 
 // ---- candidate PRs (author-scoped, memoized per repo) ----------------------
 
-async function candidatePrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | null> {
+async function candidatePrs(sh: Sh, ownerRepo: string, repoRoot: string): Promise<CandidatePr[] | null> {
   const cached = prCacheByRepo.get(ownerRepo)
   if (cached) return cached
   // null = gh infra failure (never cached; run() throws), [] = genuinely no PRs (cached).
-  const p = fetchMyPrs(sh, ownerRepo).then((res) => {
+  const p = fetchMyPrs(sh, ownerRepo, repoRoot).then((res) => {
     if (res === null) prCacheByRepo.delete(ownerRepo)
     return res
   })
@@ -289,12 +293,24 @@ interface PrMeta {
   mergedAt?: string | null
   additions?: number
   deletions?: number
+  mergeCommit?: { oid?: string } | null
+  baseRefName?: string
 }
 
-async function fetchMyPrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | null> {
+/** The commit whose tree defines "already in the repo" for a PR: the merge commit's
+ * first parent for merged PRs (main just before this PR landed), the local base branch
+ * tip for open ones. Null when neither is known — base containment then degrades to
+ * the diff's removed-lines rule. */
+function prBaseRef(m: PrMeta): string | null {
+  if (m.mergeCommit?.oid) return `${m.mergeCommit.oid}^`
+  if (m.baseRefName) return `origin/${m.baseRefName}`
+  return null
+}
+
+async function fetchMyPrs(sh: Sh, ownerRepo: string, repoRoot: string): Promise<CandidatePr[] | null> {
   const list = await sh('gh', [
     'pr', 'list', '--repo', ownerRepo, '--author', '@me', '--state', 'all', '--limit', '200',
-    '--json', 'number,title,author,state,createdAt,mergedAt,additions,deletions',
+    '--json', 'number,title,author,state,createdAt,mergedAt,additions,deletions,mergeCommit,baseRefName',
   ])
   if (!list || list.code !== 0) return null // infra failure — don't cache
   let metas: PrMeta[]
@@ -307,8 +323,16 @@ async function fetchMyPrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | nu
   for (const m of metas) {
     const diff = await sh('gh', ['pr', 'diff', String(m.number), '--repo', ownerRepo])
     if (!diff || diff.code !== 0) continue
-    const files = parseDiff(diff.stdout)
-    if (files.length === 0) continue
+    const parsed = parseDiff(diff.stdout)
+    if (parsed.length === 0) continue
+    const baseRef = prBaseRef(m)
+    const files: CandidatePr['files'] = []
+    for (const f of parsed) {
+      // Local read, no network. Fails for new files (correct: everything is new) and
+      // for commits absent from this clone (fallback: removed-lines rule only).
+      const base = baseRef ? await sh('git', ['show', `${baseRef}:${f.path}`], { cwd: repoRoot }) : null
+      files.push({ ...f, base: base && base.code === 0 ? base.stdout.split('\n') : null })
+    }
     out.push(toCandidate(ownerRepo, m, files))
   }
   return out

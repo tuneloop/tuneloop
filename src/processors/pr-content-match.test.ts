@@ -62,8 +62,13 @@ function ctx(s: Session, sh: ProcessorContext['sh']): ProcessorContext {
 }
 
 // gh/git stub: toplevel /repo, origin o/r, a configurable PR list + per-number diffs.
-function sh(prList: unknown[], diffs: Record<number, string>): ProcessorContext['sh'] {
+// `baseFiles` serves `git show <ref>:<path>` (keyed exactly that way) for base-containment tests.
+function sh(prList: unknown[], diffs: Record<number, string>, baseFiles: Record<string, string> = {}): ProcessorContext['sh'] {
   return async (cmd: string, args: string[]): Promise<ShResult | null> => {
+    if (cmd === 'git' && args[0] === 'show') {
+      const body = baseFiles[args[1]!]
+      return body != null ? { stdout: body, code: 0 } : { stdout: '', code: 128 }
+    }
     if (cmd === 'git' && args.includes('rev-parse')) return { stdout: '/repo\n', code: 0 }
     if (cmd === 'git' && args.includes('remote')) return { stdout: 'git@github.com:o/r.git\n', code: 0 }
     if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'list') return { stdout: JSON.stringify(prList), code: 0 }
@@ -133,6 +138,31 @@ describe('pr-content-match', () => {
     const res = await prContentMatch.run(ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([pr(12)], { 12: mixed })))
     expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:12', confidence: 1 }))
     expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:12', json: { addedLines: 3 } }))
+  })
+
+  it('does not link a PR whose added lines DUPLICATE code already in the base file', async () => {
+    // The originals aren't removed (so the removed-lines rule can't catch it), 
+    // but they exist in the base file → not new content → no link.
+    const cloned = ['export function add(a, b) {', '  const sum = a + b', "  logger.info('adding')", '  return sum']
+    const d = diff([...cloned, 'const brandNewThing = 1', 'const anotherNewThing = 2'])
+    const base = ['// preamble', ...cloned, '// rest of file'].join('\n')
+    const res = await prContentMatch.run(ctx(
+      session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]),
+      sh([pr(16, { mergeCommit: { oid: 'abc123' } })], { 16: d }, { 'abc123^:src/foo.ts': base }),
+    ))
+    // cloned lines excluded from both sides: matched 0 of the 2 truly-new lines → no link
+    expect(res.sessionArtifacts ?? []).toEqual([])
+  })
+
+  it('falls back to the removed-lines rule when the base commit is not available locally', async () => {
+    // Same duplication scenario but git show fails (no mergeCommit → no base ref):
+    // the cloned lines match and the link goes through — documents the degraded mode.
+    const cloned = ['export function add(a, b) {', '  const sum = a + b', "  logger.info('adding')", '  return sum']
+    const res = await prContentMatch.run(ctx(
+      session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]),
+      sh([pr(16)], { 16: diff(cloned) }),
+    ))
+    expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:16', confidence: 1 }))
   })
 
   it('excludes machine-generated lockfiles from the attribution fraction', async () => {
