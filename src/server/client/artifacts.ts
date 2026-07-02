@@ -122,7 +122,7 @@ function renderPrTable() {
       ? '<a class="pr-link" href="' + esc(r.externalId) + '" target="_blank" rel="noopener">' + idLabel + '</a>'
       : idLabel;
     // Inline AI-attribution tag beside the PR id (alternative to the AI-written column).
-    var aiTag = r.aiPct != null ? ' <span class="pr-ai-tag" title="Share of this PR authored by the agent (content-matched)">' + Math.round(r.aiPct * 100) + '% AI</span>' : '';
+    var aiTag = r.aiPct != null ? ' <span class="pr-ai-tag" title="Share of this PR authored by the agent (best single session)">' + Math.round(r.aiPct * 100) + '% AI</span>' : '';
     var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : '';
     return '<tr class="arow" data-art="' + esc(key) + '" data-kind="pr">' +
       '<td>' + idHtml + aiTag + titleHtml + '</td>' +
