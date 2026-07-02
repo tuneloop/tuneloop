@@ -34,6 +34,8 @@ between the two sides.
   falsely links to whichever session originally authored the moved code. The cost: a pure-move refactor PR gets no content-match link — from
   content alone, "the agent moved this" and "someone moved the agent's code" are
   indistinguishable, so moves are never attributed (under-claim over over-claim).
+  Machine-generated lockfiles (`package-lock.json`, `yarn.lock`, …) are excluded from the
+  fraction entirely: nobody authors them, and a regenerated lockfile would deflate the %.
 - **Anchor:** containment of the PR's added lines within the session's authored lines —
   *a PR change links to the agent if the agent authored it.* The score is the fraction of
   the PR's added lines attributable to the session, so several sessions can each own a slice
@@ -64,6 +66,12 @@ others'.
 Renames / moves / relocations done without an agent tool call (rare, low-signal). A pure
 rename already contributes nothing (git rename detection ⇒ zero `+` lines); content moved
 to a new path manually is an accepted miss.
+
+**Shell-side mutations make the % a lower bound.** Only content emitted through file write
+tool calls is visible; changes the agent makes via shell commands (bulk `sed`/`perl` rewrites, `git mv`, 
+code generators, formatters) never appear in the authored set.
+Inferring content from arbitrary shell commands is unsound, so this is accepted: the attribution % is a floor, 
+and it never *over*-credits
 
 ## Algorithm choice: line-level containment
 

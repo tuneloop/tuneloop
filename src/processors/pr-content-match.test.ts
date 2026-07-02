@@ -135,6 +135,18 @@ describe('pr-content-match', () => {
     expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:12', json: { addedLines: 3 } }))
   })
 
+  it('excludes machine-generated lockfiles from the attribution fraction', async () => {
+    // PR = 7 matched foo.ts lines + a big package-lock.json blob the session never
+    // wrote → lockfile lines must not deflate the % (7/7, not 7/12).
+    const lock = [
+      'diff --git a/package-lock.json b/package-lock.json', '--- a/package-lock.json', '+++ b/package-lock.json', '@@ -0,0 +1,5 @@',
+      ...['"lockfileVersion": 3,', '"node_modules/x": {', '"version": "1.0.0",', '"resolved": "https://registry.npmjs.org/x",', '"integrity": "sha512-abc",'].map((l) => '+' + l),
+    ].join('\n')
+    const res = await prContentMatch.run(ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([pr(13)], { 13: FULL_DIFF + '\n' + lock })))
+    expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:13', confidence: 1 }))
+    expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:13', json: { addedLines: 7 } }))
+  })
+
   it('only considers the user’s own PRs (gh pr list is author-scoped)', async () => {
     // The stub returns no PRs (as if --author @me filtered them all out) → no links.
     const res = await prContentMatch.run(ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([], {})))
