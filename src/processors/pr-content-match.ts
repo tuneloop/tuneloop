@@ -48,7 +48,7 @@ interface CandidatePr {
   url: string
   art: ArtifactInput
   /** Added/removed lines per repo-relative path (normalized + de-trivialized at match
-   * time), plus the file's full pre-PR content when the base commit is available locally
+   * time), plus the file's full pre-PR content when its base blob is available locally
    * (`base: null` = unavailable → the removed-lines rule is the fallback). */
   files: { path: string; added: string[]; removed: string[]; base: string[] | null }[]
 }
@@ -293,24 +293,12 @@ interface PrMeta {
   mergedAt?: string | null
   additions?: number
   deletions?: number
-  mergeCommit?: { oid?: string } | null
-  baseRefName?: string
-}
-
-/** The commit whose tree defines "already in the repo" for a PR: the merge commit's
- * first parent for merged PRs (main just before this PR landed), the local base branch
- * tip for open ones. Null when neither is known — base containment then degrades to
- * the diff's removed-lines rule. */
-function prBaseRef(m: PrMeta): string | null {
-  if (m.mergeCommit?.oid) return `${m.mergeCommit.oid}^`
-  if (m.baseRefName) return `origin/${m.baseRefName}`
-  return null
 }
 
 async function fetchMyPrs(sh: Sh, ownerRepo: string, repoRoot: string): Promise<CandidatePr[] | null> {
   const list = await sh('gh', [
     'pr', 'list', '--repo', ownerRepo, '--author', '@me', '--state', 'all', '--limit', '200',
-    '--json', 'number,title,author,state,createdAt,mergedAt,additions,deletions,mergeCommit,baseRefName',
+    '--json', 'number,title,author,state,createdAt,mergedAt,additions,deletions',
   ])
   if (!list || list.code !== 0) return null // infra failure — don't cache
   let metas: PrMeta[]
@@ -325,17 +313,29 @@ async function fetchMyPrs(sh: Sh, ownerRepo: string, repoRoot: string): Promise<
     if (!diff || diff.code !== 0) continue
     const parsed = parseDiff(diff.stdout)
     if (parsed.length === 0) continue
-    const baseRef = prBaseRef(m)
     const files: CandidatePr['files'] = []
     for (const f of parsed) {
-      // Local read, no network. Fails for new files (correct: everything is new) and
-      // for commits absent from this clone (fallback: removed-lines rule only).
-      const base = baseRef ? await sh('git', ['show', `${baseRef}:${f.path}`], { cwd: repoRoot }) : null
-      files.push({ ...f, base: base && base.code === 0 ? base.stdout.split('\n') : null })
+      files.push({ path: f.path, added: f.added, removed: f.removed, base: await baseContent(sh, repoRoot, f) })
     }
     out.push(toCandidate(ownerRepo, m, files))
   }
   return out
+}
+
+/**
+ * The file's pre-PR content, read from the diff's own `index <old>..<new>` blob — the
+ * exact base the diff was computed against, for every merge strategy (merge/squash/
+ * rebase) and for open PRs (their merge-base). Local read, no network. Null (→ the
+ * removed-lines fallback) when the blob isn't in this clone (shallow/unfetched);
+ * `[]` for files new at base (zero old blob: everything is new content).
+ */
+async function baseContent(sh: Sh, repoRoot: string, f: ReturnType<typeof parseDiff>[number]): Promise<string[] | null> {
+  // Skip files the match loop won't score anyway (lockfiles can be huge blobs).
+  if (f.added.length === 0 || GENERATED_FILES.has(basename(f.path))) return null
+  if (!f.oldBlob) return null
+  if (/^0+$/.test(f.oldBlob)) return []
+  const res = await sh('git', ['cat-file', 'blob', f.oldBlob], { cwd: repoRoot })
+  return res && res.code === 0 ? res.stdout.split('\n') : null
 }
 
 function toCandidate(ownerRepo: string, m: PrMeta, files: CandidatePr['files']): CandidatePr {
@@ -360,22 +360,32 @@ function toCandidate(ownerRepo: string, m: PrMeta, files: CandidatePr['files']):
   return { id, num, url, art, files }
 }
 
-/** Parse a unified diff into per-file added (`+`) and removed (`-`) lines. */
-export function parseDiff(diff: string): { path: string; added: string[]; removed: string[] }[] {
-  const byFile = new Map<string, { added: string[]; removed: string[] }>()
-  let cur: { added: string[]; removed: string[] } | null = null
+/** Parse a unified diff into per-file added (`+`) and removed (`-`) lines, plus the
+ * pre-image blob hash from the `index <old>..<new>` header (base-containment reads it). */
+export function parseDiff(diff: string): { path: string; added: string[]; removed: string[]; oldBlob: string | null }[] {
+  const byFile = new Map<string, { added: string[]; removed: string[]; oldBlob: string | null }>()
+  let cur: { added: string[]; removed: string[]; oldBlob: string | null } | null = null
+  let pendingOldBlob: string | null = null // `index` precedes `+++ b/`, so hold it until cur exists
   for (const line of diff.split('\n')) {
     const m = line.match(/^\+\+\+ b\/(.+)$/)
     if (m) {
       cur = null
       if (m[1] !== '/dev/null') {
-        cur = byFile.get(m[1]!) ?? { added: [], removed: [] }
+        cur = byFile.get(m[1]!) ?? { added: [], removed: [], oldBlob: null }
+        cur.oldBlob ??= pendingOldBlob
         byFile.set(m[1]!, cur)
       }
+      pendingOldBlob = null
       continue
     }
     if (line.startsWith('diff --git')) {
       cur = null // so a deleted file's (`+++ /dev/null`) lines never leak into the previous file
+      pendingOldBlob = null
+      continue
+    }
+    const idx = line.match(/^index ([0-9a-f]+)\.\.[0-9a-f]+/)
+    if (idx) {
+      pendingOldBlob = idx[1]!
       continue
     }
     if (line.startsWith('--- ') || line.startsWith('@@')) continue

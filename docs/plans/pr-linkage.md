@@ -31,11 +31,16 @@ between the two sides.
   agent work overwritten before merge correctly earns no credit. A line that **already
   existed in the base version of the file** (moved, re-indented, duplicated into a new
   variant, reverted) is not new content and is excluded from both the numerator and the
-  denominator — otherwise a later refactor or copy-the-pattern PR falsely links to
-  whichever session originally authored that code. The base file is read locally (`git show <mergeCommit>^:<path>`, or `origin/<base>` for open PRs); when the commit isn't in the 
-  clone, the diff's own removed lines — a subset of the same rule — are the fallback. 
-  The cost: a PR that only moves/copies existing code gets no content-match link — 
-  from content alone, "the agent moved this" and "someone moved the agent's code" are indistinguishable, so pre-existing content is never attributed(under-claim over over-claim)
+  denominator — otherwise a later refactor or copy-the-pattern PR falsely links to whichever 
+  session originally authored that code. The base content comes from the diff's own 
+  `index <old>..<new>` pre-image blob, read locally with `git cat-file` — the exact base 
+  the diff was computed against, for every merge strategy (merge / squash / rebase)
+  and for open PRs (their merge-base). When the blob isn't in the clone, the diff's own
+  removed lines — a subset of the same rule — are the fallback. The check is per file, so
+  code duplicated from a *different* file is an accepted residual miss. The cost: a PR
+  that only moves/copies existing code gets no content-match link — from content alone,
+  "the agent moved this" and "someone moved the agent's code" are indistinguishable, so
+  pre-existing content is never attributed (under-claim over over-claim).
   Machine-generated lockfiles (`package-lock.json`, `yarn.lock`, …) are excluded from the
   fraction entirely: nobody authors them, and a regenerated lockfile would deflate the %.
 - **Anchor:** containment of the PR's added lines within the session's authored lines —

@@ -62,11 +62,12 @@ function ctx(s: Session, sh: ProcessorContext['sh']): ProcessorContext {
 }
 
 // gh/git stub: toplevel /repo, origin o/r, a configurable PR list + per-number diffs.
-// `baseFiles` serves `git show <ref>:<path>` (keyed exactly that way) for base-containment tests.
-function sh(prList: unknown[], diffs: Record<number, string>, baseFiles: Record<string, string> = {}): ProcessorContext['sh'] {
+// `baseBlobs` serves `git cat-file blob <hash>` (keyed by hash) for base-containment tests;
+// a missing hash fails like a blob absent from the clone.
+function sh(prList: unknown[], diffs: Record<number, string>, baseBlobs: Record<string, string> = {}): ProcessorContext['sh'] {
   return async (cmd: string, args: string[]): Promise<ShResult | null> => {
-    if (cmd === 'git' && args[0] === 'show') {
-      const body = baseFiles[args[1]!]
+    if (cmd === 'git' && args[0] === 'cat-file') {
+      const body = baseBlobs[args[2]!]
       return body != null ? { stdout: body, code: 0 } : { stdout: '', code: 128 }
     }
     if (cmd === 'git' && args.includes('rev-parse')) return { stdout: '/repo\n', code: 0 }
@@ -141,28 +142,39 @@ describe('pr-content-match', () => {
   })
 
   it('does not link a PR whose added lines DUPLICATE code already in the base file', async () => {
-    // The originals aren't removed (so the removed-lines rule can't catch it), 
-    // but they exist in the base file → not new content → no link.
+    // The originals aren't removed (so the removed-lines rule can't catch it),
+    // but they exist in the base blob (`index a..b`) → not new content → no link.
     const cloned = ['export function add(a, b) {', '  const sum = a + b', "  logger.info('adding')", '  return sum']
     const d = diff([...cloned, 'const brandNewThing = 1', 'const anotherNewThing = 2'])
     const base = ['// preamble', ...cloned, '// rest of file'].join('\n')
     const res = await prContentMatch.run(ctx(
       session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]),
-      sh([pr(16, { mergeCommit: { oid: 'abc123' } })], { 16: d }, { 'abc123^:src/foo.ts': base }),
+      sh([pr(16)], { 16: d }, { a: base }),
     ))
     // cloned lines excluded from both sides: matched 0 of the 2 truly-new lines → no link
     expect(res.sessionArtifacts ?? []).toEqual([])
   })
 
-  it('falls back to the removed-lines rule when the base commit is not available locally', async () => {
-    // Same duplication scenario but git show fails (no mergeCommit → no base ref):
-    // the cloned lines match and the link goes through — documents the degraded mode.
+  it('falls back to the removed-lines rule when the base blob is not in the clone', async () => {
+    // Same duplication scenario but `git cat-file` fails (blob unfetched): the cloned
+    // lines match and the link goes through — documents the degraded mode.
     const cloned = ['export function add(a, b) {', '  const sum = a + b', "  logger.info('adding')", '  return sum']
     const res = await prContentMatch.run(ctx(
       session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]),
       sh([pr(16)], { 16: diff(cloned) }),
     ))
     expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:16', confidence: 1 }))
+  })
+
+  it('treats a zero old blob (file new at base) as all-new content', async () => {
+    // `index 0000000..b` = the file did not exist at base → nothing pre-existing to
+    // exclude, even though cat-file would fail for the zero hash.
+    const newFile = FULL_DIFF.replace('index a..b 100644', 'index 0000000..b 100644')
+    const res = await prContentMatch.run(ctx(
+      session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]),
+      sh([pr(21)], { 21: newFile }),
+    ))
+    expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:21', confidence: 1 }))
   })
 
   it('excludes machine-generated lockfiles from the attribution fraction', async () => {
@@ -418,6 +430,6 @@ describe('parseDiff', () => {
     ].join('\n')
     const files = parseDiff(d)
     expect(files).toHaveLength(1)
-    expect(files[0]).toEqual({ path: 'src/a.ts', added: ['new a'], removed: ['old a'] })
+    expect(files[0]).toEqual({ path: 'src/a.ts', added: ['new a'], removed: ['old a'], oldBlob: null })
   })
 })
