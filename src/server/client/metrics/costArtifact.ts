@@ -6,6 +6,7 @@ import { state, $, esc, usd, get, autoBucket } from '../core'
 import { loadKpis } from '../kpis'
 import { stackChart } from '../charts'
 
+var caReqId = 0;
 function caNoun() { return state.ca.kind === 'pr' ? 'PRs' : 'features'; }
 function caTitle() { return state.ca.kind === 'pr' ? 'Cost per merged PR' : 'Cost per shipped feature'; }
 function caWinLabel() { return state.days === 'all' ? 'all time' : 'last ' + state.days + ' days'; }
@@ -101,7 +102,9 @@ export function renderCaControls() {
 export function loadCostArtifact() {
   var qs = ['kind=' + encodeURIComponent(state.ca.kind), 'days=' + encodeURIComponent(String(state.days)), 'bucket=' + encodeURIComponent(caBucket())];
   if (state.ca.complexity) qs.push('complexity=' + encodeURIComponent(state.ca.complexity));
+  var myReq = ++caReqId;
   get('/api/cost-artifact?' + qs.join('&')).then(function (d) {
+    if (myReq !== caReqId) return;
     if (!d || d.error) { $('#ca-burn').innerHTML = '<div class="empty">No data.</div>'; return; }
     renderCa(d);
   });

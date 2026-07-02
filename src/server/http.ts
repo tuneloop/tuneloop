@@ -29,10 +29,14 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         return
       }
       const complexity = body.complexity != null ? Number(body.complexity) : undefined
-      sendJson(res, 200, store.createFeature(title, body.parentId || undefined, complexity || undefined))
+      sendJson(res, 200, store.createFeature(title, body.parentId || undefined, Number.isFinite(complexity) ? complexity : undefined))
       return
     }
     if (path === '/api/features/update') {
+      if (body.complexity !== undefined) {
+        body.complexity = body.complexity != null ? Number(body.complexity) : null
+        if (typeof body.complexity === 'number' && !Number.isFinite(body.complexity)) body.complexity = null
+      }
       sendJson(res, 200, { ok: store.updateFeature(String(body.id), body) })
       return
     }
@@ -332,7 +336,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
         complexity: complexity || null,
         window: null,
         kpi: { current: store.costPerArtifact(kind, undefined, undefined, complexity), previous: null },
-        period: store.costPeriod(kind),
+        period: store.costPeriod(kind, undefined, undefined, complexity),
         burn: curves.burn,
         throughput: curves.throughput,
         reviewed: curves.reviewed,
@@ -355,7 +359,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       complexity: complexity || null,
       window: { from, to },
       kpi: { current: store.costPerArtifact(kind, from, to, complexity), previous: store.costPerArtifact(kind, prevFrom, from, complexity) },
-      period: store.costPeriod(kind, from, to),
+      period: store.costPeriod(kind, from, to, complexity),
       burn: curves.burn,
       throughput: curves.throughput,
       reviewed: curves.reviewed,

@@ -1143,7 +1143,7 @@ export class Store {
    * insists both be shown so dividing the curves doesn't read as a contradiction.
    * `throughput` here equals the KPI denominator exactly. No window = all time.
    */
-  costPeriod(kind: string, from?: string, to?: string): { burn: number; throughput: number; efficiency: number | null } {
+  costPeriod(kind: string, from?: string, to?: string, complexity?: string): { burn: number; throughput: number; efficiency: number | null } {
     const burnRange = from && to ? 'WHERE started_at >= ? AND started_at < ?' : 'WHERE started_at IS NOT NULL'
     const burnParams = from && to ? [from, to] : []
     const burn = (
@@ -1159,9 +1159,10 @@ export class Store {
       kind === 'pr'
         ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
         : ''
+    const cxFilter = complexityWhere(complexity, 'artifacts', kind)
     const throughput = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilter}`)
         .get(...thParams) as { n: number }
     ).n
     return { burn, throughput, efficiency: throughput ? burn / throughput : null }
@@ -2404,7 +2405,7 @@ export class Store {
         `INSERT INTO artifacts (id, kind, title, source, created_at, parent_artifact_id, complexity, complexity_basis)
          VALUES (?, 'feature', ?, 'user', ?, ?, ?, ?)`,
       )
-      .run(id, title, new Date().toISOString(), parentId ?? null, complexity ?? null, complexity ? 'user_tagged' : null)
+      .run(id, title, new Date().toISOString(), parentId ?? null, complexity ?? null, complexity != null ? 'user_tagged' : null)
     return { id }
   }
 
@@ -2680,6 +2681,8 @@ export interface ArtifactListItem {
   createdAt: string | null
   completedAt: string | null
   parentId: string | null
+  complexity: number | null
+  complexityBasis: string | null
   sessions: number
   costUsd: number
 }
@@ -3015,6 +3018,7 @@ function complexityWhere(bucket: string | undefined, alias: string, kind?: strin
   if (!bucket) return ''
   const buckets = bucket.split(',').filter(Boolean)
   if (!buckets.length) return ''
+  if (kind !== 'feature' && kind !== 'pr') return ''
   const clauses: string[] = []
   let hasNone = false
   for (const b of buckets) {

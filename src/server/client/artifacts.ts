@@ -2,6 +2,7 @@
 // (hierarchical list with ship-toggle, nest-under, move-to-top, delete). Feature
 // mutations POST to /api/features* and reload.
 import { state, $, esc, usd, dayOf, get, post } from './core'
+var CX_OPTS = [['', 'Not tagged'], ['1', 'Trivial'], ['2', 'Simple'], ['3', 'Moderate'], ['4', 'Complex'], ['5', 'Highly Complex']];
 import { syncHash } from './router'
 import { filterByArtifact, setView } from './sessions'
 
@@ -172,12 +173,8 @@ function renderFeatureManager(rows) {
         nestUnderOptions(rows, r.id, descendantsOf(rows, r.id)) + '</select>';
       var cxVal = r.complexity ? String(r.complexity) : '';
       var cxSelect = '<select class="feat-cx" data-id="' + esc(r.id) + '">' +
-        '<option value=""' + (cxVal === '' ? ' selected' : '') + '>Not tagged</option>' +
-        '<option value="1"' + (cxVal === '1' ? ' selected' : '') + '>Trivial</option>' +
-        '<option value="2"' + (cxVal === '2' ? ' selected' : '') + '>Simple</option>' +
-        '<option value="3"' + (cxVal === '3' ? ' selected' : '') + '>Moderate</option>' +
-        '<option value="4"' + (cxVal === '4' ? ' selected' : '') + '>Complex</option>' +
-        '<option value="5"' + (cxVal === '5' ? ' selected' : '') + '>Highly Complex</option></select>';
+        CX_OPTS.map(function (o) { return '<option value="' + o[0] + '"' + (o[0] === cxVal ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
+        '</select>';
       var toTop = r.parentId
         ? '<button class="menu-item" data-act="totop" data-id="' + esc(r.id) + '">Move to top level</button>'
         : '';
@@ -216,8 +213,7 @@ function renderFeatureManager(rows) {
       '<input id="nf-title" placeholder="New feature title" />' +
       '<select id="nf-parent">' + featureParentOptions(rows, '', '', null) + '</select>' +
       '<select id="nf-complexity"><option value="">Complexity (optional)</option>' +
-        '<option value="1">Trivial</option><option value="2">Simple</option><option value="3">Moderate</option>' +
-        '<option value="4">Complex</option><option value="5">Highly Complex</option></select>' +
+        CX_OPTS.slice(1).map(function (o) { return '<option value="' + o[0] + '">' + o[1] + '</option>'; }).join('') + '</select>' +
       '<button class="btn" id="nf-add">Add</button>' +
       '<button class="btn" id="nf-cancel">Cancel</button>' +
     '</div></div>';
