@@ -41,8 +41,8 @@ interface CandidatePr {
   num: string
   url: string
   art: ArtifactInput
-  /** Net added lines per repo-relative path (normalized + de-trivialized at match time). */
-  files: { path: string; added: string[] }[]
+  /** Added/removed lines per repo-relative path (normalized + de-trivialized at match time). */
+  files: { path: string; added: string[]; removed: string[] }[]
 }
 
 // Candidate PRs are the same for every session in a repo, so fetch once per repo per
@@ -55,7 +55,7 @@ export function __resetPrCache(): void {
 
 export const prContentMatch: Processor = {
   name: 'pr-content-match',
-  version: 2, 
+  version: 2,
   kind: 'static',
   needs: { network: true },
   requires: ['segment-blocks'],
@@ -105,7 +105,11 @@ export const prContentMatch: Processor = {
       const matchedToolIdxs = new Set<number>()
       for (const file of pr.files) {
         const auth = authored.get(file.path)
-        const prUnique = new Set(meaningful(file.added))
+        // Net-new only: a line the same file's diff both removes and re-adds is moved/
+        // re-indented code, not new content — matching it would credit whoever ORIGINALLY
+        // authored it (observed: a refactor PR falsely linked to old sessions)
+        const removed = new Set(meaningful(file.removed))
+        const prUnique = new Set(meaningful(file.added).filter((l) => !removed.has(l)))
         total += prUnique.size
         if (!auth) continue
         for (const line of prUnique) {
@@ -303,7 +307,7 @@ async function fetchMyPrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | nu
   return out
 }
 
-function toCandidate(ownerRepo: string, m: PrMeta, files: { path: string; added: string[] }[]): CandidatePr {
+function toCandidate(ownerRepo: string, m: PrMeta, files: CandidatePr['files']): CandidatePr {
   const num = String(m.number)
   const id = `pr:${ownerRepo}:${num}`
   const url = `https://github.com/${ownerRepo}/pull/${num}`
@@ -325,21 +329,29 @@ function toCandidate(ownerRepo: string, m: PrMeta, files: { path: string; added:
   return { id, num, url, art, files }
 }
 
-/** Parse a unified diff into per-file net added (`+`) lines. */
-export function parseDiff(diff: string): { path: string; added: string[] }[] {
-  const byFile = new Map<string, string[]>()
-  let cur: string | null = null
+/** Parse a unified diff into per-file added (`+`) and removed (`-`) lines. */
+export function parseDiff(diff: string): { path: string; added: string[]; removed: string[] }[] {
+  const byFile = new Map<string, { added: string[]; removed: string[] }>()
+  let cur: { added: string[]; removed: string[] } | null = null
   for (const line of diff.split('\n')) {
     const m = line.match(/^\+\+\+ b\/(.+)$/)
     if (m) {
-      cur = m[1] === '/dev/null' ? null : m[1]!
-      if (cur && !byFile.has(cur)) byFile.set(cur, [])
+      cur = null
+      if (m[1] !== '/dev/null') {
+        cur = byFile.get(m[1]!) ?? { added: [], removed: [] }
+        byFile.set(m[1]!, cur)
+      }
       continue
     }
-    if (line.startsWith('--- ') || line.startsWith('diff --git') || line.startsWith('@@')) continue
-    if (cur && line.startsWith('+') && !line.startsWith('+++')) byFile.get(cur)!.push(line.slice(1))
+    if (line.startsWith('diff --git')) {
+      cur = null // so a deleted file's (`+++ /dev/null`) lines never leak into the previous file
+      continue
+    }
+    if (line.startsWith('--- ') || line.startsWith('@@')) continue
+    if (cur && line.startsWith('+') && !line.startsWith('+++')) cur.added.push(line.slice(1))
+    else if (cur && line.startsWith('-') && !line.startsWith('---')) cur.removed.push(line.slice(1))
   }
-  return [...byFile].map(([path, added]) => ({ path, added }))
+  return [...byFile].map(([path, f]) => ({ path, ...f }))
 }
 
 // ---- session authored lines ------------------------------------------------

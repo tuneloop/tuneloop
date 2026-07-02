@@ -47,6 +47,15 @@ function diff(added: string[]): string {
 }
 const FULL_DIFF = diff(AUTHORED.split('\n'))
 
+// Like diff() but with removed lines too (a hunk that rewrites code).
+function diffRw(removed: string[], added: string[]): string {
+  return [
+    'diff --git a/src/foo.ts b/src/foo.ts', 'index a..b 100644', '--- a/src/foo.ts', '+++ b/src/foo.ts',
+    `@@ -1,${removed.length} +1,${added.length} @@`,
+    ...removed.map((l) => '-' + l), ...added.map((l) => '+' + l),
+  ].join('\n')
+}
+
 const noopLog = { debug() {}, info() {}, warn() {}, error() {} }
 function ctx(s: Session, sh: ProcessorContext['sh']): ProcessorContext {
   return { session: s, log: noopLog, llmEnabled: false, llm: null, existingFeatures: [], rejectedFeatureTitles: [], sh }
@@ -104,6 +113,26 @@ describe('pr-content-match', () => {
     const thin = diff(['  return sum', 'totally unrelated content here', 'another unrelated line entirely'])
     const res = await prContentMatch.run(ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([pr(9)], { 9: thin })))
     expect(res.sessionArtifacts ?? []).toEqual([])
+  })
+
+  it('does not link a PR that only MOVES session-authored code (removed+re-added)', async () => {
+    // A later refactor PR re-indents/relocates lines the session once authored: every
+    // added line also appears as a removed line, so nothing is net-new → no link.
+    const lines = AUTHORED.split('\n')
+    const moved = diffRw(lines, lines.map((l) => '    ' + l))
+    const res = await prContentMatch.run(ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([pr(46)], { 46: moved })))
+    expect(res.sessionArtifacts ?? []).toEqual([])
+  })
+
+  it('excludes moved lines from the denominator, not just the numerator', async () => {
+    // PR moves 4 foreign lines and genuinely adds 3 session-authored ones →
+    // confidence is 3/3 over net-new content, not 3/7.
+    const foreign = ['const a = old1()', 'const b = old2()', 'const c = old3()', 'const d = old4()']
+    const netNew = ['export function add(a, b) {', '  const sum = a + b', '  return sum']
+    const mixed = diffRw(foreign, [...foreign.map((l) => '  ' + l), ...netNew])
+    const res = await prContentMatch.run(ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([pr(12)], { 12: mixed })))
+    expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:12', confidence: 1 }))
+    expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:12', json: { addedLines: 3 } }))
   })
 
   it('only considers the user’s own PRs (gh pr list is author-scoped)', async () => {
@@ -337,5 +366,16 @@ describe('parseDiff', () => {
     expect(files[0]!.path).toBe('src/foo.ts')
     expect(files[0]!.added).toContain('export function add(a, b) {')
     expect(files[0]!.added).not.toContain('+++ b/src/foo.ts')
+    expect(files[0]!.removed).toEqual([])
+  })
+
+  it('scopes removed lines per file — a deleted file (+++ /dev/null) never leaks into the previous one', () => {
+    const d = [
+      'diff --git a/src/a.ts b/src/a.ts', '--- a/src/a.ts', '+++ b/src/a.ts', '@@ -1,1 +1,1 @@', '-old a', '+new a',
+      'diff --git a/src/gone.ts b/src/gone.ts', '--- a/src/gone.ts', '+++ /dev/null', '@@ -1,1 +0,0 @@', '-deleted line',
+    ].join('\n')
+    const files = parseDiff(d)
+    expect(files).toHaveLength(1)
+    expect(files[0]).toEqual({ path: 'src/a.ts', added: ['new a'], removed: ['old a'] })
   })
 })

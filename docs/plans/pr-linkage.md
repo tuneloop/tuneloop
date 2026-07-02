@@ -28,7 +28,12 @@ between the two sides.
     gpt-5-class models, where it replaces `edit`/`write`).
 - **PR side:** the net merged diff's added (`+`) lines (`gh pr diff`), which collapses the
   PR's intermediate commits into what actually shipped. Only shipped content is attributed;
-  agent work overwritten before merge correctly earns no credit.
+  agent work overwritten before merge correctly earns no credit. A line the same file's
+  diff both removes and adds is **moved/re-indented code, not new content**, and is
+  excluded from both the numerator and the denominator — otherwise a later refactor PR
+  falsely links to whichever session originally authored the moved code. The cost: a pure-move refactor PR gets no content-match link — from
+  content alone, "the agent moved this" and "someone moved the agent's code" are
+  indistinguishable, so moves are never attributed (under-claim over over-claim).
 - **Anchor:** containment of the PR's added lines within the session's authored lines —
   *a PR change links to the agent if the agent authored it.* The score is the fraction of
   the PR's added lines attributable to the session, so several sessions can each own a slice
