@@ -228,6 +228,27 @@ export function comboLabel(key) {
 
 export var SR_PALETTE = ['#0f7a55', '#b8860b', '#b4452f', '#3b6ea5', '#7d5ba6', '#1b8a8a', '#a65c2e', '#6b8e23'];
 
+// Complexity bucket → display label. One source of truth shared by the Cost-by-
+// Artifact filter buttons and the headline KPI subtext, so they always agree.
+export var CX_LABELS: Record<string, string> = {
+  trivial: 'Trivial', small: 'Simple', medium: 'Moderate', large: 'Complex', xl: 'Highly Complex', none: 'Not tagged',
+};
+// Comma-joined bucket keys → "Trivial, Simple" (preserving selection order).
+export function cxLabelList(keys: string) {
+  return (keys || '').split(',').filter(Boolean).map(function (k) { return CX_LABELS[k] || k; }).join(', ');
+}
+// A single artifact's complexity → its bucket label. Features carry an ordinal
+// (1–5, user-tagged); PRs carry a diff-size churn (line count) bucketed by the
+// same ranges as the Cost-by-Artifact filter. Null/untagged → '' (no label).
+var CX_ORDINAL = ['', 'trivial', 'small', 'medium', 'large', 'xl'];
+export function complexityLabel(kind: string, complexity: number | null | undefined) {
+  if (complexity == null) return '';
+  if (kind === 'feature') return CX_LABELS[CX_ORDINAL[complexity]] || '';
+  var n = Number(complexity);
+  var key = n <= 10 ? 'trivial' : n <= 100 ? 'small' : n <= 500 ? 'medium' : n <= 1500 ? 'large' : 'xl';
+  return CX_LABELS[key];
+}
+
 // Canonical outcome display order: concrete shipped artifacts first, softening
 // down to the LLM-judged catch-all. Shared by the success-rate "Count as success"
 // picker and the sessions Outcomes column so they read consistently. Types not

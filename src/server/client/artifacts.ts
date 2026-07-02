@@ -1,10 +1,20 @@
 // Artifacts tab: the Features/PRs sub-nav, the PR table, and the feature manager
 // (hierarchical list with ship-toggle, nest-under, move-to-top, delete). Feature
 // mutations POST to /api/features* and reload.
-import { state, $, esc, usd, dayOf, get, post } from './core'
+import { state, $, esc, usd, dayOf, get, post, complexityLabel } from './core'
 var CX_OPTS = [['', 'Not tagged'], ['1', 'Trivial'], ['2', 'Simple'], ['3', 'Moderate'], ['4', 'Complex'], ['5', 'Highly Complex']];
 import { syncHash } from './router'
 import { filterByArtifact, setView } from './sessions'
+
+// The complexity tag as a pill — reuses the grey b-null badge (same as the other
+// artifacts-view pills). Empty for untagged features / PRs with no recorded churn.
+// PRs get the raw line count as a tooltip since their bucket is derived from diff size.
+function complexityPill(kind, complexity) {
+  var label = complexityLabel(kind, complexity);
+  if (!label) return '';
+  var title = kind === 'pr' ? ' title="' + esc(Number(complexity) + ' lines changed') + '"' : '';
+  return '<span class="badge b-null"' + title + '>' + esc(label) + '</span>';
+}
 
 export function renderArtKindSeg() {
   var opts = [['feature', 'Features'], ['pr', 'PRs']];
@@ -124,7 +134,7 @@ function renderPrTable() {
       : idLabel;
     var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : '';
     return '<tr class="arow" data-art="' + esc(key) + '" data-kind="pr">' +
-      '<td>' + idHtml + titleHtml + '</td>' +
+      '<td>' + idHtml + ' ' + complexityPill('pr', r.complexity) + titleHtml + '</td>' +
       '<td>' + (r.status ? esc(r.status) : '—') + '</td>' +
       '<td class="num">' + r.sessions + '</td>' +
       '<td class="num">' + usd(r.costUsd) + '</td>' +
@@ -182,7 +192,7 @@ function renderFeatureManager(rows) {
         '" data-id="' + esc(r.id) + '" data-parent="' + esc(r.parentId || '') + '">' +
         '<div class="feat-name" style="padding-left:' + indent + 'px">' + twig +
           '<span class="nm" title="' + esc(r.title || '') + '">' +
-          esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + '</div>' +
+          esc(r.title || '(untitled)') + '</span> ' + proposed + ' ' + statusHtml + ' ' + complexityPill('feature', r.complexity) + '</div>' +
         '<span class="feat-repos" title="' + esc(repos) + '">' + esc(repos) + '</span>' +
         '<span class="feat-last" title="' + esc(r.lastSessionAt || '') + '">' + esc(last) + '</span>' +
         '<span class="feat-num">' + r.sessions + '</span>' +
