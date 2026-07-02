@@ -106,11 +106,12 @@ are kept, so it never over-excludes.
 
 ## What it writes
 
-The processor is `static` + `needs.network`, requires `segment-blocks`, and fetches
-candidate PRs once per repo per process (memoized; a transient `gh` failure is not cached).
-The candidate set is the author's 200 most-recent PRs in the repo, any state
-(`gh pr list --author @me --state all --limit 200`); the per-session merge-time guard then
-trims those that shipped before the session ran.
+The processor is `static` + `needs.network` and requires `segment-blocks`. The candidate
+set is the author's 200 most-recent PRs in the repo, any state (`gh pr list --author @me
+--state all --limit 200`), fetched once per repo per process. On a `gh` infrastructure
+failure the run **throws** rather than persisting an empty result — which would wipe
+previously discovered links and cache the wipe; throwing keeps prior rows and retries on
+the next analyze.
 
 - `artifacts` (kind `pr`): the PR, with `json.addedLines` = total PR-added lines, which
   makes `matched` (and per-PR attribution summed across sessions) recoverable from
@@ -123,8 +124,33 @@ trims those that shipped before the session ran.
   PRs the session explicitly created/merged, `outcomes-git` already owns cost attribution at
   block grain and the `pr_created`/`pr_merged` outcomes, so those rows are not re-emitted.
   Block links carry NULL confidence (per-block fraction is not quantified; the session→PR
-  attribution % lives on the session link). Coexisting links to one PR never double-count
-  because the store's cost queries `UNION` over usage-fact rows.
+  attribution % lives on the session link).
+
+**Block→PR attribution is one unified backward-fill.** `outcomes-git`'s fill anchors only
+on explicit `create`/`merge` calls, so a human-pushed PR sandwiched before a
+session-created one has its blocks absorbed into the next created PR. The processor re-runs
+the same backward-fill with the inferred PRs as extra anchors — each at its **last
+corroborated matched block** — and emits the contiguous segments owned by inferred PRs.
+Each block belongs to exactly one PR by construction.
+
+Precision of the synthetic anchor, in order of defense:
+
+- **Per-line matched blocks**: only tool calls whose own authored lines appear in the PR's
+  diff mark their blocks — an unrelated later edit to the same file can't manufacture a
+  straggler matched block.
+- **Corroboration**: an isolated matched block far past the cluster (gap > ~10% of the
+  session's blocks) is rejected — almost always a shared identical line in a later PR's
+  segment; the anchor falls back to the cluster's end (single matched block accepted;
+  all-isolated → earliest). Every failure of this guard is an under-claim.
+- **Contested blocks**: an explicit anchor wins; between inferred PRs higher confidence
+  wins and the loser falls back to an earlier matched block. A PR contested out entirely
+  gets **no block rows and no cost claim** — the store's whole-session cost fallback is
+  gated off for content-match links (`saNoContentMatchFallback`), so its cost is zero
+  rather than the whole session; the attribution % on the session link stands.
+
+Where the two fills disagree (the reclaimed blocks), block-cost reads suppress
+`outcomes-git`'s proximity row in favor of the content-match row (`blockNotSuperseded`);
+sessions without content matches keep the pure deterministic fill.
 
 `refresh()` keeps discovered PRs' merge status current via `gh pr view` (these PRs may exist
 only because of a content match, so no other processor refreshes them), mirroring

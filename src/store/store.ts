@@ -738,10 +738,11 @@ export class Store {
         SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
         JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
         JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-        WHERE ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
+        WHERE ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed' AND ${blockNotSuperseded('ba')}
         UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
         JOIN usage_facts u ON u.session_id = sa2.session_id
         WHERE sa2.artifact_id = a.id AND COALESCE(sa2.role,'') <> 'reviewed'
+        AND ${saNoContentMatchFallback('sa2')}
         AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed'))), 0)`
     // An artifact is "in window" (and a candidate at all) only via a NON-reviewed
     // session link — this doubles as the "produced by this store" guard, so a PR you
@@ -946,6 +947,7 @@ export class Store {
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
              JOIN block_artifacts ba ON ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
+                                     AND ${blockNotSuperseded('ba')}
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
              WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
@@ -954,6 +956,7 @@ export class Store {
              SELECT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
              JOIN session_artifacts sa ON sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
+                                       AND ${saNoContentMatchFallback('sa')}
              JOIN usage_facts u ON u.session_id = sa.session_id
              WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced}
                AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed')
@@ -1051,6 +1054,7 @@ export class Store {
                     SELECT 1 FROM block_usage bu
                     JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
                                             AND COALESCE(ba.role,'') <> 'reviewed'
+                                            AND ${blockNotSuperseded('ba')}
                     JOIN artifacts a ON a.id = ba.artifact_id
                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
                       AND a.kind = ? AND a.completed_at IS NOT NULL
@@ -2011,7 +2015,7 @@ export class Store {
       .prepare(
         `SELECT ba.block_idx AS idx, a.id AS aid, a.ident, a.title, a.kind
          FROM block_artifacts ba JOIN artifacts a ON a.id = ba.artifact_id
-         WHERE ba.session_id = ? AND a.kind IN ('pr','feature')`,
+         WHERE ba.session_id = ? AND a.kind IN ('pr','feature') AND ${blockNotSuperseded('ba')}`,
       )
       .all(id) as Array<{ idx: number; aid: string; ident: string | null; title: string | null; kind: string }>
     for (const r of artRows) {
@@ -2253,12 +2257,12 @@ export class Store {
                     FROM block_artifacts ba
                     JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
                     JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-                    WHERE ba.artifact_id = a.id
+                    WHERE ba.artifact_id = a.id AND ${blockNotSuperseded('ba')}
                     UNION
                     -- whole-session fallback when this artifact has no block links
                     SELECT u.session_id, u.idx AS uidx, u.cost_usd
                     FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
-                    WHERE sa2.artifact_id = a.id
+                    WHERE sa2.artifact_id = a.id AND ${saNoContentMatchFallback('sa2')}
                       AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
                   )
                 ), 0) AS costUsd
@@ -2952,6 +2956,29 @@ function bucketExpr(col: string, bucket: Bucket): string {
   if (bucket === 'day') return `date(${col})`
   if (bucket === 'month') return `strftime('%Y-%m', ${col})`
   return `strftime('%Y-W%W', ${col})`
+}
+
+/**
+ * Block→PR read guard: where outcomes-git's proximity fill and pr-content-match's
+ * evidence-based fill claim the same block, the content-match row is the corrected one
+ * (see unifiedBlockFill in pr-content-match.ts), so outcomes-git's row must not count.
+ * Other producers/roles (reviews, features) pass untouched.
+ */
+function blockNotSuperseded(ba: string): string {
+  return `NOT (${ba}.producer = 'outcomes-git' AND COALESCE(${ba}.role,'') = 'contributed'
+    AND EXISTS (SELECT 1 FROM block_artifacts pcm
+      WHERE pcm.session_id = ${ba}.session_id AND pcm.block_idx = ${ba}.block_idx
+        AND pcm.producer = 'pr-content-match' AND pcm.role = 'contributed'))`
+}
+
+/**
+ * Whole-session cost fallback guard: a pr-content-match derived link never triggers it —
+ * content-match cost flows exclusively through its block fill rows, so no fill means a
+ * zero cost claim, not the whole session. The fallback remains for its real audience
+ * (user-linked artifacts and producers without block attribution).
+ */
+function saNoContentMatchFallback(sa: string): string {
+  return `NOT (COALESCE(${sa}.source,'') = 'derived' AND ${sa}.producer = 'pr-content-match')`
 }
 
 // Display title: the enrichment-derived `title` annotation, else the native adapter title

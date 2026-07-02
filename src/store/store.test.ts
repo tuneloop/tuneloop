@@ -86,6 +86,91 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(chip?.confidence).toBeCloseTo(0.85)
   })
 
+  it('pr-content-match block rows supersede outcomes-git’s proximity fill for the same block', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    // Two blocks with $1 and $2 of usage.
+    db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,?,?)').run('s1', 0, 1)
+    db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,?,?)').run('s1', 1, 2)
+    db.prepare('INSERT INTO block_usage (session_id, usage_idx, block_idx) VALUES (?,?,?)').run('s1', 0, 0)
+    db.prepare('INSERT INTO block_usage (session_id, usage_idx, block_idx) VALUES (?,?,?)').run('s1', 1, 1)
+
+    const prA: ArtifactInput = { ...richPr, id: 'pr:o/r:11', ident: '11', externalId: 'https://github.com/o/r/pull/11' }
+    const prB: ArtifactInput = { ...richPr, id: 'pr:o/r:7', ident: '7', externalId: 'https://github.com/o/r/pull/7' }
+    // outcomes-git's explicit-only backward-fill absorbed BOTH blocks into created PR#11…
+    store.persistResult('s1', 'outcomes-git', 3, 'h1', null, {
+      artifacts: [prA],
+      sessionArtifacts: [{ artifactId: prA.id, role: 'created', source: 'explicit' }],
+      blockArtifacts: [
+        { blockIdx: 0, artifactId: prA.id, role: 'contributed', source: 'explicit' },
+        { blockIdx: 1, artifactId: prA.id, role: 'contributed', source: 'explicit' },
+      ],
+    })
+    // …but pr-content-match proved block 1 was human-pushed PR#7's work.
+    store.persistResult('s1', 'pr-content-match', 1, 'h1', null, {
+      artifacts: [prB],
+      sessionArtifacts: [{ artifactId: prB.id, role: 'edited', source: 'derived', confidence: 1 }],
+      blockArtifacts: [{ blockIdx: 1, artifactId: prB.id, role: 'contributed', source: 'derived' }],
+    })
+
+    const rows = store.artifactList('pr')
+    const cost = Object.fromEntries(rows.map((r) => [r.id, r.costUsd]))
+    expect(cost['pr:o/r:11']).toBe(1) // block 0 only — its block-1 row is superseded
+    expect(cost['pr:o/r:7']).toBe(2) // reclaimed block 1
+
+    // Rejecting the derived link deletes pr-content-match's block rows → the
+    // suppression lifts and outcomes-git's proximity fill counts again (graceful revert).
+    store.rejectSessionLink('s1', 'pr:o/r:7')
+    const after = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
+    expect(after['pr:o/r:11']).toBe(3) // blocks 0+1 back
+    expect(after['pr:o/r:7']).toBeUndefined() // link gone entirely
+  })
+
+  it('a content-match link with no block rows claims zero cost (whole-session fallback gated off)', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,?,?)').run('s1', 0, 1)
+    db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,?,?)').run('s1', 1, 2)
+    db.prepare('INSERT INTO block_usage (session_id, usage_idx, block_idx) VALUES (?,?,?)').run('s1', 0, 0)
+    db.prepare('INSERT INTO block_usage (session_id, usage_idx, block_idx) VALUES (?,?,?)').run('s1', 1, 1)
+
+    const prA: ArtifactInput = { ...richPr, id: 'pr:o/r:3', ident: '3', externalId: 'https://github.com/o/r/pull/3' }
+    const prB: ArtifactInput = { ...richPr, id: 'pr:o/r:7', ident: '7', externalId: 'https://github.com/o/r/pull/7' }
+    // outcomes-git: created PR#3, fill claims blocks 0+1.
+    store.persistResult('s1', 'outcomes-git', 3, 'h1', null, {
+      artifacts: [prA],
+      sessionArtifacts: [{ artifactId: prA.id, role: 'created', source: 'explicit' }],
+      blockArtifacts: [
+        { blockIdx: 0, artifactId: prA.id, role: 'contributed', source: 'explicit' },
+        { blockIdx: 1, artifactId: prA.id, role: 'contributed', source: 'explicit' },
+      ],
+    })
+    // pr-content-match: PR#7's only matched block was contested away by an explicit
+    // anchor → session-level attribution link, NO block rows.
+    store.persistResult('s1', 'pr-content-match', 2, 'h1', null, {
+      artifacts: [prB],
+      sessionArtifacts: [{ artifactId: prB.id, role: 'edited', source: 'derived', confidence: 1 }],
+    })
+
+    const cost = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
+    // PR#3 keeps its blocks untouched…
+    expect(cost['pr:o/r:3']).toBe(3)
+    // …and PR#7 claims NOTHING — without the gate, the whole-session fallback would
+    // charge it the full $3 (all of PR#3's work). Attribution % still lives on the link.
+    expect(cost['pr:o/r:7']).toBe(0)
+
+    // The fallback still works for its real audience: a user-linked PR with no block rows.
+    seedSession(store, db, 's2')
+    db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,?,?)').run('s2', 0, 5)
+    const prC: ArtifactInput = { ...richPr, id: 'pr:o/r:9', ident: '9', externalId: 'https://github.com/o/r/pull/9' }
+    store.persistResult('s2', 'outcomes-git', 3, 'h2', null, { artifacts: [prC] })
+    db.prepare("INSERT INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer) VALUES ('s2','pr:o/r:9','edited','user',1,'dashboard')").run()
+    const cost2 = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
+    expect(cost2['pr:o/r:9']).toBe(5) // whole-session fallback intact for user links
+  })
+
   it('a genuine status transition (open -> merged) still applies', () => {
     const db = openDb(':memory:')
     const store = new Store(db)

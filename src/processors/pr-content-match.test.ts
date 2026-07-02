@@ -178,6 +178,109 @@ describe('pr-content-match', () => {
     expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', confidence: 1 }))
   })
 
+  // "Session A": PR#3 created by the session, PR#7 human-pushed, PR#11 created by the
+  // session, then unrelated trailing work. The unified backward-fill must give PR#7 its
+  // own contiguous block segment instead of letting PR#11's explicit fill absorb it —
+  // and emit rows ONLY for the inferred PR (explicit segments stay outcomes-git's).
+  describe('unified block fill', () => {
+    const chunk = (tag: string) => [`const ${tag} = 1`, `function f_${tag}() {`, `  return ${tag} + 100`]
+    const A = chunk('alpha'), B = chunk('beta'), C = chunk('gamma'), D = chunk('delta')
+    const diffFor = (path: string, added: string[]) =>
+      [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, '@@ -0,0 +1 @@', ...added.map((l) => '+' + l)].join('\n')
+
+    it('a human-pushed PR reclaims its contiguous segment between two created PRs', async () => {
+      const s = session([
+        { kind: 'edit', file: '/repo/src/a.ts', newString: A.join('\n') }, // block 0
+        { kind: 'shell', command: 'gh pr create --fill', raw: 'https://github.com/o/r/pull/3' }, // closes block 0
+        { kind: 'edit', file: '/repo/src/b.ts', newString: B.join('\n') }, // block 1 (PR#7's work)
+        { kind: 'shell', command: 'git commit -m wip' }, // closes block 1
+        { kind: 'edit', file: '/repo/src/c.ts', newString: C.join('\n') }, // block 2
+        { kind: 'shell', command: 'gh pr create --fill', raw: 'https://github.com/o/r/pull/11' }, // closes block 2
+        { kind: 'edit', file: '/repo/src/d.ts', newString: D.join('\n') }, // block 3, trailing (no PR)
+      ])
+      const stub = sh([pr(3), pr(7), pr(11)], { 3: diffFor('src/a.ts', A), 7: diffFor('src/b.ts', B), 11: diffFor('src/c.ts', C) })
+      const res = await prContentMatch.run(ctx(s, stub))
+      // Attribution links for all three PRs; block rows ONLY for the inferred PR#7,
+      // exactly its segment (block 1) — nothing for created PRs, nothing trailing.
+      expect((res.sessionArtifacts ?? []).map((a) => a.artifactId).sort()).toEqual(['pr:o/r:11', 'pr:o/r:3', 'pr:o/r:7'])
+      expect(res.blockArtifacts).toEqual([{ blockIdx: 1, artifactId: 'pr:o/r:7', role: 'contributed', source: 'derived' }])
+      expect((res.outcomes ?? []).map((o) => o.artifactId)).toEqual(['pr:o/r:7'])
+    })
+
+    it('fills the unmatched thinking blocks between a PR’s matched blocks (contiguity)', async () => {
+      const s = session([
+        { kind: 'edit', file: '/repo/src/a.ts', newString: A.join('\n') }, // block 0
+        { kind: 'shell', command: 'gh pr create --fill', raw: 'https://github.com/o/r/pull/3' }, // closes block 0
+        { kind: 'edit', file: '/repo/src/b.ts', newString: B.join('\n') }, // block 1 (PR#7 part 1)
+        { kind: 'shell', command: 'git commit -m one' }, // closes block 1
+        { kind: 'shell', command: 'npm test' }, // block 2 — no authored match
+        { kind: 'shell', command: 'git commit -m two' }, // closes block 2
+        { kind: 'edit', file: '/repo/src/b2.ts', newString: D.join('\n') }, // block 3 (PR#7 part 2)
+      ])
+      const prDiff = diffFor('src/b.ts', B) + '\n' + diffFor('src/b2.ts', D)
+      const res = await prContentMatch.run(ctx(s, sh([pr(3), pr(7)], { 3: diffFor('src/a.ts', A), 7: prDiff })))
+      // PR#7 matched blocks 1 and 3; the fill claims 1..3 including the unmatched block 2.
+      expect((res.blockArtifacts ?? []).map((b) => b.blockIdx).sort()).toEqual([1, 2, 3])
+      expect(new Set((res.blockArtifacts ?? []).map((b) => b.artifactId))).toEqual(new Set(['pr:o/r:7']))
+    })
+
+    it('an isolated late false-positive match cannot drag the segment rightward', async () => {
+      // PR#7's real work is block 1. Block 4 edits a shared file whose one line also
+      // appears in PR#7's diff — a classic late false positive. With 5 blocks G=2, the
+      // {1,4} gap of 3 is uncorroborated → the anchor falls back to the earliest matched
+      // block, so PR#7 claims ONLY block 1 (never 2–4).
+      const SH = ['export const SHARED_TOKEN = 9']
+      const s = session([
+        { kind: 'edit', file: '/repo/src/a.ts', newString: A.join('\n') }, // block 0
+        { kind: 'shell', command: 'gh pr create --fill', raw: 'https://github.com/o/r/pull/3' }, // closes block 0
+        { kind: 'edit', file: '/repo/src/b.ts', newString: B.join('\n') }, // block 1 (PR#7's work)
+        { kind: 'shell', command: 'git commit -m one' }, // closes block 1
+        { kind: 'shell', command: 'npm test' }, // block 2
+        { kind: 'shell', command: 'git commit -m two' }, // closes block 2
+        { kind: 'shell', command: 'npm run lint' }, // block 3
+        { kind: 'shell', command: 'git commit -m three' }, // closes block 3
+        { kind: 'edit', file: '/repo/src/shared.ts', newString: SH.join('\n') }, // block 4 — the FP
+      ])
+      const prDiff = diffFor('src/b.ts', B) + '\n' + diffFor('src/shared.ts', SH)
+      const res = await prContentMatch.run(ctx(s, sh([pr(3), pr(7)], { 3: diffFor('src/a.ts', A), 7: prDiff })))
+      expect(res.blockArtifacts).toEqual([{ blockIdx: 1, artifactId: 'pr:o/r:7', role: 'contributed', source: 'derived' }])
+    })
+
+    it('an explicit anchor wins a contested block; the loser gets no block rows (zero cost claim)', async () => {
+      // The inferred PR's ONLY matched block is the one that also holds the create call
+      // for PR#3 → explicit keeps the anchor, PR#7 gets no block rows. That is a ZERO
+      // cost claim by design (the store gates the whole-session fallback off for
+      // content-match links — see saNoContentMatchFallback); the block stays wholly
+      // PR#3's, and PR#7's attribution % on the session link still stands.
+      const s = session([
+        { kind: 'edit', file: '/repo/src/a.ts', newString: A.join('\n') },
+        { kind: 'edit', file: '/repo/src/b.ts', newString: B.join('\n') },
+        { kind: 'shell', command: 'gh pr create --fill', raw: 'https://github.com/o/r/pull/3' },
+      ])
+      const res = await prContentMatch.run(ctx(s, sh([pr(3), pr(7)], { 3: diffFor('src/a.ts', A), 7: diffFor('src/b.ts', B) })))
+      expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:7', confidence: 1 }))
+      expect(res.blockArtifacts ?? []).toEqual([])
+    })
+
+    it('per-line attribution: a later non-matching edit to a matched file is not a matched block', async () => {
+      // Block 3 re-edits src/b.ts but with content that appears NOWHERE in PR#7's diff.
+      // Under file-granular matching that block would count as "matched" (gap 2 = G →
+      // corroborated!) and drag the segment to 1–3; per-line attribution keeps it out.
+      const Z = ['const zeta = 99', 'function unrelated() {', '  return zeta - 1']
+      const s = session([
+        { kind: 'edit', file: '/repo/src/a.ts', newString: A.join('\n') }, // block 0
+        { kind: 'shell', command: 'gh pr create --fill', raw: 'https://github.com/o/r/pull/3' }, // closes block 0
+        { kind: 'edit', file: '/repo/src/b.ts', newString: B.join('\n') }, // block 1 (PR#7's real work)
+        { kind: 'shell', command: 'git commit -m one' }, // closes block 1
+        { kind: 'shell', command: 'npm test' }, // block 2
+        { kind: 'shell', command: 'git commit -m two' }, // closes block 2
+        { kind: 'edit', file: '/repo/src/b.ts', newString: Z.join('\n') }, // block 3 — same FILE, no matching lines
+      ])
+      const res = await prContentMatch.run(ctx(s, sh([pr(3), pr(7)], { 3: diffFor('src/a.ts', A), 7: diffFor('src/b.ts', B) })))
+      expect(res.blockArtifacts).toEqual([{ blockIdx: 1, artifactId: 'pr:o/r:7', role: 'contributed', source: 'derived' }])
+    })
+  })
+
   it('does not cache a transient gh failure (later sessions in the repo still match)', async () => {
     // First `gh pr list` fails (code 1); a second attempt succeeds. The failure must not
     // poison the per-repo cache — otherwise every later session sees zero candidate PRs.
@@ -192,8 +295,9 @@ describe('pr-content-match', () => {
       return null
     }
     const s = () => session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }])
-    const first = await prContentMatch.run(ctx(s(), flaky))
-    expect(first.sessionArtifacts ?? []).toEqual([]) // gh failed → no links this run
+    // gh failed → the run THROWS (so the runner keeps prior results instead of
+    // persisting an empty result that would wipe previously discovered links).
+    await expect(prContentMatch.run(ctx(s(), flaky))).rejects.toThrow(/gh unavailable/)
     const second = await prContentMatch.run(ctx(s(), flaky))
     expect(second.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', confidence: 1 }))
   })

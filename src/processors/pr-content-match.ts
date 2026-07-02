@@ -21,7 +21,7 @@
  */
 import { isAbsolute, resolve } from 'node:path'
 import { registerProcessor } from '../core/registry'
-import { deterministicBlocks, blockMembership } from '../core/blocks'
+import { deterministicBlocks, blockMembership, attributeBlocksToPrs } from '../core/blocks'
 import type { Session, ToolCall } from '../core/model'
 import type { Processor, ProcessorContext, RefreshContext, RefreshResult, ShResult } from '../core/processor'
 import type { ArtifactInput, BlockArtifactInput, OutcomeInput, SessionArtifactInput } from '../store/types'
@@ -47,7 +47,7 @@ interface CandidatePr {
 
 // Candidate PRs are the same for every session in a repo, so fetch once per repo per
 // process (keyed owner/repo). Mirrors loadOpenRouterPrices' process-level cache.
-const prCacheByRepo = new Map<string, Promise<CandidatePr[]>>()
+const prCacheByRepo = new Map<string, Promise<CandidatePr[] | null>>()
 /** Test seam: drop the per-repo PR cache. */
 export function __resetPrCache(): void {
   prCacheByRepo.clear()
@@ -55,7 +55,7 @@ export function __resetPrCache(): void {
 
 export const prContentMatch: Processor = {
   name: 'pr-content-match',
-  version: 1,
+  version: 2, 
   kind: 'static',
   needs: { network: true },
   requires: ['segment-blocks'],
@@ -73,6 +73,8 @@ export const prContentMatch: Processor = {
     if (authored.size === 0) return {}
 
     const candidates = await candidatePrs(sh, ownerRepo)
+    // gh INFRA failure (vs a repo with genuinely no candidate PRs): throw so the runner skips persisting
+    if (candidates === null) throw new Error(`gh unavailable for ${ownerRepo}; keeping prior content-match results`)
     if (candidates.length === 0) return {}
 
     // PRs the session explicitly created/merged: outcomes-git owns their cost/outcome
@@ -80,15 +82,18 @@ export const prContentMatch: Processor = {
     // GitHub owner/repo are case-insensitive — parsePrRefs (transcript casing) and our
     // candidate id (git-remote casing) can skew, which must not make a self-created PR
     // look inferred (that would double-emit outcomes-git's rows).
-    const explicit = new Set(parsePrRefs(session).filter((r) => r.kind === 'create' || r.kind === 'merge').map((r) => r.id.toLowerCase()))
+    const mutatingRefs = parsePrRefs(session).filter((r) => r.kind === 'create' || r.kind === 'merge')
+    const explicit = new Set(mutatingRefs.map((r) => r.id.toLowerCase()))
 
     const blocks = deterministicBlocks(session)
     const toolToBlock = blocks.length ? blockMembership(session, blocks).tool : []
 
     const artifacts: ArtifactInput[] = []
     const sessionArtifacts: SessionArtifactInput[] = []
-    const blockArtifacts: BlockArtifactInput[] = []
     const outcomes: OutcomeInput[] = []
+    // Inferred PRs that passed the gates, with the blocks whose tool calls matched them —
+    // inputs to the unified block→PR fill after the loop.
+    const inferredMatches: Array<{ id: string; confidence: number; blocks: Set<number> }> = []
 
     for (const pr of candidates) {
       // A PR that merged before the session started cannot contain the session's code.
@@ -103,11 +108,12 @@ export const prContentMatch: Processor = {
         const prUnique = new Set(meaningful(file.added))
         total += prUnique.size
         if (!auth) continue
-        let hit = 0
-        for (const line of prUnique) if (auth.lines.has(line)) hit++
-        if (hit > 0) {
-          matched += hit
-          for (const idx of auth.toolIdxs) matchedToolIdxs.add(idx)
+        for (const line of prUnique) {
+          const tls = auth.lines.get(line)
+          if (!tls) continue
+          matched++
+          // Only the tool calls that authored THIS matched line mark their blocks.
+          for (const idx of tls) matchedToolIdxs.add(idx)
         }
       }
       // Evidence floor: need at least a few real matched lines before trusting the ratio.
@@ -127,18 +133,16 @@ export const prContentMatch: Processor = {
       // for created/merged PRs; only emit them for the NEW links we discover.
       if (inferred) {
         outcomes.push({ type: 'pr_contributed', artifactId: pr.id, ts: session.endedAt })
-        // Attribute the authoring blocks so cost-per-PR scopes to them. Confidence is left
-        // NULL like outcomes-git's block links — per-block fraction isn't quantified; the
-        // session→PR attribution % lives on the session link.
-        const seen = new Set<number>()
+        const matchedBlocks = new Set<number>()
         for (const idx of matchedToolIdxs) {
           const bi = toolToBlock[idx]
-          if (bi == null || seen.has(bi)) continue
-          seen.add(bi)
-          blockArtifacts.push({ blockIdx: bi, artifactId: pr.id, role: 'contributed', source: 'derived' })
+          if (bi != null) matchedBlocks.add(bi)
         }
+        if (matchedBlocks.size) inferredMatches.push({ id: pr.id, confidence, blocks: matchedBlocks })
       }
     }
+
+    const blockArtifacts = unifiedBlockFill(blocks, toolToBlock, mutatingRefs, inferredMatches)
 
     return { artifacts, sessionArtifacts, blockArtifacts, outcomes }
   },
@@ -168,6 +172,79 @@ export const prContentMatch: Processor = {
   },
 }
 
+// ---- block→PR attribution (unified backward-fill) ---------------------------
+
+/**
+ * One backward-fill over both anchor kinds — explicit (the block holding a
+ * `gh pr create`/`merge`, as outcomes-git) and synthetic (an inferred PR's last
+ * corroborated matched block) — so each block belongs to exactly one PR, and a
+ * human-pushed PR reclaims the blocks outcomes-git's explicit-only fill would
+ * absorb into the next created PR.
+ *
+ * Contested block: explicit wins (ground truth); between inferred PRs higher
+ * confidence wins, the loser falls back to an earlier matched block. A PR contested
+ * out entirely gets no block rows and thus NO cost claim (the store gates the
+ * whole-session fallback off for this producer — saNoContentMatchFallback);
+ * its attribution % on the session link stands. Under-claim over over-claim.
+ *
+ * Only inferred-owned segments are emitted; explicit segments stay outcomes-git's.
+ * Where the fills disagree, cost reads prefer ours (store.ts blockNotSuperseded).
+ * Block confidence is NULL as in outcomes-git: attribution % lives on the session link.
+ */
+function unifiedBlockFill(
+  blocks: ReturnType<typeof deterministicBlocks>,
+  toolToBlock: number[],
+  mutatingRefs: Array<{ id: string; toolIndex: number }>,
+  inferredMatches: Array<{ id: string; confidence: number; blocks: Set<number> }>,
+): BlockArtifactInput[] {
+  if (!blocks.length || !inferredMatches.length) return []
+  const anchors = new Map<number, string>()
+  for (const ref of mutatingRefs) {
+    const bi = toolToBlock[ref.toolIndex]
+    if (bi != null) anchors.set(bi, ref.id)
+  }
+  // Corroboration distance, scaled to session size: in a 350-block session a lone match
+  // 150 blocks past the cluster is noise; in a 5-block session a gap of 2 is normal.
+  const gap = Math.max(2, Math.ceil(blocks.length * 0.1))
+  // Confidence order (id tiebreak for reproducibility across gh list orderings).
+  for (const im of [...inferredMatches].sort((a, b) => b.confidence - a.confidence || a.id.localeCompare(b.id))) {
+    const anchor = corroboratedAnchor([...im.blocks], gap)
+    if (anchor < 0) continue
+    // Preference: the corroborated anchor, then earlier matched blocks (each strictly
+    // more conservative). Matched blocks PAST the anchor are the suspected false
+    // positives — never used, not even as contested-block fallbacks.
+    const prefs = [anchor, ...[...im.blocks].filter((b) => b < anchor).sort((a, b) => b - a)]
+    for (const bi of prefs) {
+      if (!anchors.has(bi)) {
+        anchors.set(bi, im.id)
+        break
+      }
+    }
+  }
+  const inferredIds = new Set(inferredMatches.map((im) => im.id))
+  const out: BlockArtifactInput[] = []
+  for (const { blockIdx, artifactId } of attributeBlocksToPrs(blocks, anchors)) {
+    if (inferredIds.has(artifactId)) out.push({ blockIdx, artifactId, role: 'contributed', source: 'derived' })
+  }
+  return out
+}
+
+/**
+ * Synthetic anchor: the LAST matched block whose gap to the previous one is ≤ `gap`.
+ * An isolated straggler past the cluster (a shared line coinciding with a later PR's
+ * segment) is rejected so it can't drag the segment end rightward. A single matched
+ * block is accepted; if every pair is isolated, the earliest wins (minimal claim).
+ */
+function corroboratedAnchor(matched: number[], gap: number): number {
+  const desc = [...matched].sort((a, b) => b - a)
+  if (desc.length === 0) return -1 // defensive; callers pass non-empty sets
+  if (desc.length === 1) return desc[0]!
+  for (let i = 0; i < desc.length - 1; i++) {
+    if (desc[i]! - desc[i + 1]! <= gap) return desc[i]!
+  }
+  return desc[desc.length - 1]!
+}
+
 /** True only when the PR merged strictly before the session started — the one case where
  * the session provably cannot have authored any of its shipped code. Open/unmerged PRs
  * (no `completedAt`) and unknown/unparseable times are kept, so the guard never over-excludes. */
@@ -180,15 +257,13 @@ function shippedBeforeSession(pr: CandidatePr, sessionStart: string | undefined)
 
 // ---- candidate PRs (author-scoped, memoized per repo) ----------------------
 
-async function candidatePrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[]> {
+async function candidatePrs(sh: Sh, ownerRepo: string): Promise<CandidatePr[] | null> {
   const cached = prCacheByRepo.get(ownerRepo)
   if (cached) return cached
-  // fetchMyPrs returns null on an INFRASTRUCTURE failure (gh missing/errored/unparseable)
-  // vs [] for a repo that genuinely has no candidate PRs. Only cache the latter — a
-  // transient gh failure must not poison every later session in the same repo/process.
+  // null = gh infra failure (never cached; run() throws), [] = genuinely no PRs (cached).
   const p = fetchMyPrs(sh, ownerRepo).then((res) => {
     if (res === null) prCacheByRepo.delete(ownerRepo)
-    return res ?? []
+    return res
   })
   prCacheByRepo.set(ownerRepo, p)
   return p
@@ -270,10 +345,10 @@ export function parseDiff(diff: string): { path: string; added: string[] }[] {
 // ---- session authored lines ------------------------------------------------
 
 interface Authored {
-  /** Normalized, de-trivialized authored lines for this file (union of all edits). */
-  lines: Set<string>
-  /** tool_calls indices that wrote this file — for block attribution. */
-  toolIdxs: number[]
+  /** Normalized authored line → tool-call indices that authored it. Per-LINE so only
+   * tool calls whose own lines match a PR mark their blocks — an unrelated later edit
+   * to the same file can't manufacture a straggler "matched block". */
+  lines: Map<string, number[]>
 }
 
 function authoredByFile(session: Session, cwd: string, repoRoot: string): Map<string, Authored> {
@@ -287,11 +362,17 @@ function authoredByFile(session: Session, cwd: string, repoRoot: string): Map<st
       if (!rel) continue
       let entry = out.get(rel)
       if (!entry) {
-        entry = { lines: new Set(), toolIdxs: [] }
+        entry = { lines: new Map() }
         out.set(rel, entry)
       }
-      for (const l of meaningful(lines)) entry.lines.add(l)
-      entry.toolIdxs.push(i)
+      for (const l of meaningful(lines)) {
+        let tls = entry.lines.get(l)
+        if (!tls) {
+          tls = []
+          entry.lines.set(l, tls)
+        }
+        tls.push(i)
+      }
     }
   })
   return out
