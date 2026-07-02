@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 8
+const SCHEMA_VERSION = 9
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -15,6 +15,17 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT
+);
+
+-- Ingest provenance: which source directories were scanned, and when each was
+-- last analyzed. Upserted per run; a root untouched by a scoped re-run (e.g.
+-- \`--source codex\`) keeps its prior timestamp, so this answers "when was THIS
+-- directory last analyzed" per directory, unlike the store-wide meta.last_analyze_at.
+CREATE TABLE IF NOT EXISTS analyzed_roots (
+  source           TEXT,
+  path             TEXT,
+  last_analyzed_at TEXT,
+  PRIMARY KEY (source, path)
 );
 
 -- Hot row per session. Aggregation queries live here; the blob is elsewhere.

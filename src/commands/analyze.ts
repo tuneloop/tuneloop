@@ -1,4 +1,5 @@
-import { basename } from 'node:path'
+import { existsSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
 import { loadConfig } from '../config'
 import type { LlmOverrides } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
@@ -98,9 +99,18 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   }
   const activeAdapters = selected.size ? adapters.filter((a) => selected.has(a.id)) : adapters
 
+  // Ingest provenance: the (source, directory) roots actually scanned this run,
+  // recorded after the run completes so `--schema` / coverage can report what's
+  // covered. Only roots that exist on disk — a default root for an uninstalled
+  // harness was never really analyzed.
+  const scannedRoots: Array<{ source: string; path: string }> = []
   const parsedSessions: Session[] = []
   for (const adapter of activeAdapters) {
     const roots = sourceRoots.get(adapter.id) ?? (opts.dirs && opts.dirs.length > 0 ? opts.dirs : adapter.defaultRoots())
+    for (const root of roots) {
+      const abs = resolve(root)
+      if (existsSync(abs)) scannedRoots.push({ source: adapter.id, path: abs })
+    }
     log.debug(`[${adapter.id}] scanning: ${roots.join(', ')}`)
     if (adapter.discoverSessions) {
       // Store-backed adapter (e.g. OpenCode): one DB yields many sessions.
@@ -285,7 +295,10 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // store is fresh. Drives the dashboard's "last analyzed" line + the stale-store
   // nudge; per-session analyzed_at / processor ran_at only move when work is done,
   // so they can't answer "when did analyze last finish" (e.g. for a no-op re-run).
-  store.setMeta('last_analyze_at', new Date().toISOString())
+  const finishedAt = new Date().toISOString()
+  store.setMeta('last_analyze_at', finishedAt)
+  // Per-directory provenance, stamped with the same completion time.
+  store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
   store.close()
 }
