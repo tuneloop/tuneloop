@@ -56,14 +56,48 @@ function init() {
   get('/api/overview').then(function (o) {
     state.overview = o;
     var range = o.firstAt && o.lastAt ? dayOf(o.firstAt) + ' → ' + dayOf(o.lastAt) : '';
-    // Date range + "analyzed" share the range line; the db path drops below.
-    var analyzed = o.lastAnalyzedAt ? 'analyzed ' + dayOf(o.lastAnalyzedAt) : '';
-    var metaLine = [range, analyzed].filter(Boolean).join(' · ');
     // Tilde the home dir so screenshots don't leak the username.
-    var dbPath = (o.dbPath || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/');
+    var tilde = function (p) { return (p || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/'); };
+    var dbPath = tilde(o.dbPath || '');
+    // The header shows just the store location; the session range, last-analyzed
+    // time, and per-directory scan history live in an info popover beside it.
+    var roots = o.analyzedRoots || [];
+    var info = '';
+    if (range || o.lastAnalyzedAt || roots.length) {
+      var head =
+        (range ? '<div class="mi-head">Sessions ' + esc(range) + '</div>' : '') +
+        (o.lastAnalyzedAt ? '<div class="mi-head">Last analyzed ' + esc(dayOf(o.lastAnalyzedAt)) + '</div>' : '');
+      var rows = roots.length
+        ? roots.map(function (r) {
+            return '<div class="mi-row"><span class="mi-path">' + esc(tilde(r.path)) + '</span>' +
+              '<span class="mi-when">' + esc(r.lastAnalyzedAt ? dayOf(r.lastAnalyzedAt) : '—') + '</span></div>';
+          }).join('')
+        : '<div class="mi-empty">No directory scan history yet — run <code>tuneloop analyze</code>.</div>';
+      info = '<span class="meta-info-wrap">' +
+        '<button type="button" class="meta-info-btn" id="metaInfoBtn" title="Store details" aria-label="Store details">&#9432;</button>' +
+        '<div class="meta-info-pop" id="metaInfoPop">' + head +
+          '<div class="mi-title">Analyzed directories</div>' + rows + '</div></span>';
+    }
     $('#meta').innerHTML =
-      (metaLine ? '<span class="meta-range">' + esc(metaLine) + '</span>' : '') +
-      (dbPath ? '<span class="meta-path">' + esc(dbPath) + '</span>' : '');
+      '<span class="meta-top">' +
+        (dbPath ? '<span class="meta-path">' + esc(dbPath) + '</span>' : '') + info +
+      '</span>';
+    var miBtn = document.getElementById('metaInfoBtn');
+    if (miBtn) {
+      miBtn.onclick = function (e) {
+        e.stopPropagation();
+        var pop = document.getElementById('metaInfoPop');
+        if (pop) pop.classList.toggle('on');
+      };
+      // Close on an outside click (same pattern as the outcome popover).
+      document.addEventListener('mousedown', function (e) {
+        var pop = document.getElementById('metaInfoPop');
+        if (!pop || !pop.classList.contains('on')) return;
+        var wrap = document.querySelector('.meta-info-wrap');
+        if (wrap && wrap.contains(e.target as Node)) return;
+        pop.classList.remove('on');
+      });
+    }
     // The overview is what classifies the store (empty / un-enriched / ok) and
     // whether any outcomes exist, so surface the nudges + correct the outcome-rate
     // tile now that it's known (these paint from cached payloads — no refetch).

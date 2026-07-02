@@ -48,6 +48,8 @@ export interface Summary {
   enrichmentRan: boolean
   /** ISO timestamp of the most recent `analyze` run (null if never recorded). */
   lastAnalyzedAt: string | null
+  /** Source directories scanned, each with its own last-analyzed time (empty until an analyze runs on this schema). */
+  analyzedRoots: Array<{ source: string | null; path: string; lastAnalyzedAt: string | null }>
   /** Enrichment dimension distributions, empty when enrichment hasn't run. */
   useCases: Dist[]
   complexity: Dist[]
@@ -74,6 +76,22 @@ export class Store {
   /** Upsert a value into the key-value `meta` table. */
   setMeta(key: string, value: string): void {
     this.db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(key, value)
+  }
+
+  /**
+   * Stamp each source directory scanned this run with the run timestamp. Upsert,
+   * so roots a scoped re-run didn't touch keep their prior stamp — the table then
+   * answers "when was THIS directory last analyzed" per directory.
+   */
+  recordAnalyzedRoots(roots: Array<{ source: string; path: string }>, at: string): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO analyzed_roots (source, path, last_analyzed_at) VALUES (?, ?, ?)
+         ON CONFLICT(source, path) DO UPDATE SET last_analyzed_at = excluded.last_analyzed_at`,
+    )
+    const tx = this.db.transaction((rows: Array<{ source: string; path: string }>) => {
+      for (const r of rows) stmt.run(r.source, r.path, at)
+    })
+    tx(roots)
   }
 
   /**
@@ -646,6 +664,9 @@ export class Store {
       analysisCostUsd,
       enrichmentRan,
       lastAnalyzedAt: this.getMeta('last_analyze_at') ?? null,
+      analyzedRoots: this.db
+        .prepare('SELECT source, path, last_analyzed_at AS lastAnalyzedAt FROM analyzed_roots ORDER BY source, path')
+        .all() as Summary['analyzedRoots'],
       useCases: this.facetDistribution('use_case'),
       complexity: this.scalarDist('complexity'),
       autonomy: this.scalarDist('autonomy'),
