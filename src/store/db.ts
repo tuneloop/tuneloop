@@ -175,6 +175,9 @@ CREATE TABLE IF NOT EXISTS processor_runs (
   out_tokens INTEGER,
   cost_usd   REAL,
   ran_at     TEXT,
+  -- Set to 1 by a user link/unlink to force the next analyze to re-run this
+  -- processor; reset to 0 (the default) whenever persistResult rewrites the row.
+  invalidated INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (session_id, processor)
 );
 
@@ -326,5 +329,8 @@ function migrate(db: DB): void {
   }
   if (tableExists('tool_calls') && !has('tool_calls', 'error_message')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_message TEXT')
+  }
+  if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
+    db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')
   }
 }
