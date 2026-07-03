@@ -36,6 +36,7 @@
     "watch": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "typecheck:client": "tsc -p src/server/client --noEmit",
+    "gen:query-skill": "tsx scripts/gen-query-schema.ts",
     "test": "vitest run",
     "prepublishOnly": "npm run build"
   },

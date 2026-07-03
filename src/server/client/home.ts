@@ -223,9 +223,9 @@ export function paintHighlights() {
       '<button class="see-tx" type="button" data-view="artifacts">Artifacts →</button>' +
       '<button class="see-tx" type="button" data-view="sessions">Your sessions →</button>' +
     '</div>' +
-    '<div class="home-ask">Want to do a deep dive into the data? Everything lives in a local SQLite store at ' +
-    '<code>' + esc(dbPath) + '</code> — point your coding agent at it. ' +
-    '<span class="muted">(Guided agent querying coming soon.)</span></div></div>';
+    '<div class="home-ask">Want to do a deep dive into the data? It all lives in a local SQLite store at ' +
+    '<code>' + esc(dbPath) + '</code>. Install the query skill and your coding agent can explore it for you: ' +
+    '<code>npx skills add Relvy-AI/tuneloop</code></div></div>';
   Array.prototype.forEach.call(document.querySelectorAll('#highlights .see-tx[data-view]'), function (b) {
     b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); window.scrollTo(0, 0); };
   });

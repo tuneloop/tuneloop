@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import './register'
 import { analyze } from './commands/analyze'
 import { serve } from './commands/serve'
+import { queryCommand } from './commands/query'
 
 // Read once from package.json so the CLI version never drifts from the package.
 // Resolves the same in dev (src/), in the bundle (dist/), and when installed
@@ -80,6 +81,18 @@ program
   .option('--no-open', 'do not open the browser automatically')
   .action(async (options: { db?: string; port?: number; open?: boolean }) => {
     await serve({ db: options.db, port: options.port, open: options.open })
+  })
+
+program
+  .command('query')
+  .description('Run a read-only SQL query (SELECT only) over the local store. --schema dumps the DDL + facets/measures for agents.')
+  .argument('[sql]', 'SQL SELECT to run; omit when using --schema')
+  .option('--db <path>', 'path to the tuneloop SQLite store')
+  .option('--schema', 'print the store schema (tables + facets + measures) instead of running a query')
+  .option('--json', 'output JSON instead of a text table')
+  .option('--limit <n>', 'max rows to return (default 1000)', (v) => parseInt(v, 10))
+  .action(async (sql: string | undefined, options: { db?: string; schema?: boolean; json?: boolean; limit?: number }) => {
+    await queryCommand(sql, options)
   })
 
 program.parseAsync(process.argv).catch((err) => {

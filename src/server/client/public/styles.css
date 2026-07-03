@@ -26,7 +26,24 @@ a { color: var(--emerald); }
   margin-left: auto; display: flex; flex-direction: column; align-items: flex-end; gap: 2px;
   color: var(--muted); font-size: 12px;
 }
+.top .meta .meta-top { display: flex; align-items: center; gap: 6px; }
 .top .meta .meta-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--gray); }
+/* Info popover: the per-directory scan history next to the range + store path. */
+.meta-info-wrap { position: relative; display: inline-flex; }
+.meta-info-btn { border: 0; background: transparent; color: var(--gray); cursor: pointer; font-size: 13px; line-height: 1; padding: 0; }
+.meta-info-btn:hover { color: var(--ink); }
+.meta-info-pop {
+  display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; text-align: left;
+  min-width: 240px; max-width: 440px; padding: 10px 12px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.12);
+}
+.meta-info-pop.on { display: block; }
+.meta-info-pop .mi-head { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.meta-info-pop .mi-title { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+.meta-info-pop .mi-row { display: flex; justify-content: space-between; gap: 16px; padding: 3px 0; font-size: 12px; }
+.meta-info-pop .mi-path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--ink); word-break: break-all; }
+.meta-info-pop .mi-when { color: var(--gray); white-space: nowrap; }
+.meta-info-pop .mi-empty { font-size: 12px; color: var(--muted); }
 .tabnav { border-bottom: 1px solid var(--line); background: var(--paper); }
 .tabnav .inner { max-width: 1180px; margin: 0 auto; padding: 0 28px; display: flex; gap: 2px; }
 .tab { border: 0; background: transparent; padding: 14px 18px; font-family: Georgia, serif; font-size: 15px; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
@@ -96,6 +113,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; background: var(--paper); padding: 5px 12px; cursor: pointer; font-size: 13px; color: var(--muted); }
 .seg button.on { background: var(--ink); color: #f3efe6; }
+/* Primary segmented control (the section-scoping Artifact toggle): emerald active
+   fill + slightly larger, so it reads as more important than the neutral Bucket. */
+.seg.seg-primary button { padding: 8px 18px; font-size: 14px; }
+.seg.seg-primary button.on { background: var(--emerald); color: #f3efe6; }
 .dist-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 22px; }
 .card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .card h3 { margin: 0 0 12px; font-size: 14px; }
@@ -157,12 +178,12 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .feat-list { max-height: 460px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; }
 /* Fixed (not auto) last column so the header and row grids — separate grid
    containers — resolve identical column edges and the labels sit over the data. */
-.feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 104px 72px 84px 142px; align-items: center; gap: 12px; padding: 8px 12px; }
+.feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 104px 72px 84px 240px; align-items: center; gap: 12px; padding: 8px 12px; }
 .feat-head { position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 1px solid var(--line); }
 .feat-head span { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .feat-row { border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .feat-row:last-child { border-bottom: none; }
-.feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; overflow: hidden; }
 .feat-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feat-twig { color: var(--muted); }
 .feat-repos, .feat-last { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -176,6 +197,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .pr-th:hover { color: var(--ink); }
 .feat-num { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .feat-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.ship-btn { border-color: var(--emerald); color: var(--emerald); background: transparent; white-space: nowrap; }
+.ship-btn:hover { background: var(--emerald); color: #fff; }
+.ship-btn.shipped { border-color: var(--line); color: var(--muted); }
+.ship-btn.shipped:hover { border-color: var(--muted); background: transparent; color: var(--ink); }
 /* Secondary actions live behind a per-row hamburger. The menu is position:fixed
    (positioned in JS) so the scroll container's overflow doesn't clip it. */
 .feat-menu-wrap { position: relative; display: inline-flex; }
@@ -266,7 +291,7 @@ th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; t
 td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .pr-title { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .b-success { background: #e2f0e8; color: var(--emerald); }
 .b-partial { background: #f6ecd2; color: var(--amber); }
 .b-failure { background: #f4ddd6; color: var(--red); }
@@ -573,6 +598,36 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .link-ac-error { color: var(--red); font-size: 11px; margin-top: 4px; }
 .link-ac-spinner { color: var(--muted); font-size: 11px; margin-top: 4px; font-style: italic; }
 
+/* Interactive feature-cost treemap (featTreemap.ts): drill-down + breadcrumb +
+   threshold slider + cursor tooltip. DOM divs (not SVG) so the polish is cheap. */
+.tm { display: flex; flex-direction: column; gap: 10px; }
+.tm-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-height: 20px; }
+.tm-crumb { font-size: 13px; color: var(--muted); }
+.tm-crumb a { color: var(--emerald); cursor: pointer; }
+.tm-crumb a:hover { text-decoration: underline; }
+.tm-crumb .sep { margin: 0 6px; opacity: .5; }
+.tm-thr { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.tm-thr input[type=range] { width: 120px; accent-color: var(--emerald); }
+.tm-thrval { width: 52px; display: inline-block; }
+.tm-chart { position: relative; width: 100%; height: 480px; border: 1px solid var(--line);
+  border-radius: 8px; overflow: hidden; background: var(--paper); }
+.tm-cell { position: absolute; overflow: hidden; cursor: default; border: 1px solid rgba(255,255,255,.55); }
+.tm-cell.haskids { cursor: pointer; }
+.tm-cell:focus-visible { outline: 2px solid var(--ink); outline-offset: -2px; }
+.tm-cell .l { position: absolute; top: 4px; left: 6px; right: 6px;
+  font: 600 12px/1.15 ui-monospace, "SF Mono", Menlo, monospace; color: rgba(255,255,255,.97);
+  text-shadow: 0 1px 2px rgba(0,0,0,.32); white-space: nowrap; text-overflow: ellipsis; overflow: hidden; pointer-events: none; }
+.tm-cell .v { position: absolute; top: 19px; left: 6px; font: 700 12px/1.1 ui-monospace, Menlo, monospace;
+  color: rgba(255,255,255,.95); text-shadow: 0 1px 2px rgba(0,0,0,.3); pointer-events: none; }
+.tm-cell.direct { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.16) 0 6px, transparent 6px 12px); }
+.tm-cell.haskids::after { content: ""; position: absolute; right: 5px; bottom: 4px; width: 0; height: 0;
+  border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 7px solid rgba(255,255,255,.8); }
+.tm-cell.tiny .l, .tm-cell.tiny .v { display: none; }
+.tm-tip { position: fixed; z-index: 50; pointer-events: none; display: none; max-width: 280px;
+  background: var(--ink); color: #fff; padding: 8px 10px; border-radius: 6px; font-size: 12px;
+  line-height: 1.35; box-shadow: 0 4px 14px rgba(0,0,0,.25); }
+.tm-tip b { font-weight: 600; }
+.tm-tip .pct { color: #9fe3c4; }
 /* Highlights digest — the Dashboard's default view: computed insights about your
    recent AI work, set as editorial sentences with the real numbers as emerald
    accents, each drilling into the surface behind it. */

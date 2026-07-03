@@ -188,6 +188,27 @@ describe('artifact upsert (PR clobber safety)', () => {
   })
 })
 
+describe('recordAnalyzedRoots (ingest provenance)', () => {
+  it('upserts scanned roots; a root a scoped re-run skips keeps its prior stamp', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+
+    // First run scans both harnesses' roots.
+    store.recordAnalyzedRoots(
+      [{ source: 'claude-code', path: '/home/u/.claude/projects' }, { source: 'codex', path: '/home/u/.codex/sessions' }],
+      '2026-01-01T00:00:00Z',
+    )
+    // A scoped re-run (`--source claude`) touches only the claude-code root.
+    store.recordAnalyzedRoots([{ source: 'claude-code', path: '/home/u/.claude/projects' }], '2026-02-01T00:00:00Z')
+
+    const rows = db.prepare('SELECT source, path, last_analyzed_at FROM analyzed_roots ORDER BY path').all()
+    expect(rows).toEqual([
+      { source: 'claude-code', path: '/home/u/.claude/projects', last_analyzed_at: '2026-02-01T00:00:00Z' }, // re-stamped
+      { source: 'codex', path: '/home/u/.codex/sessions', last_analyzed_at: '2026-01-01T00:00:00Z' }, // untouched, prior stamp
+    ])
+  })
+})
+
 describe('summary.enrichmentRan', () => {
   it('is true only once an LLM-backed processor run is recorded', () => {
     const db = openDb(':memory:')

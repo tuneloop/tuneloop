@@ -2,15 +2,16 @@ import { describe, expect, it, beforeEach } from 'vitest'
 import { openDb } from './db'
 import { Store } from './store'
 
-// Reviewed session<->artifact links must never be counted as PRODUCTION work in
-// the Highlights digest (mirrors the cost-per-artifact guards in review-cost.test).
+// The Highlights digest counts every artifact you CONTRIBUTED to — authored OR
+// reviewed — at full cost, matching the cost-per-shipped-artifact KPI. A PR you only
+// reviewed is eligible for the biggest-shipped spotlight, and review spend counts
+// toward converted_spend.
 // Scenario, all merged (completed_at set), all-time window:
 //   PR #100 — you BUILT it.  session P $10 (contributed)
 //   PR #200 — a teammate's, you REVIEWED. session R $50 (reviewed) — costly review
 //   PR #300 — you BUILT ($20) and someone REVIEWED ($8) it.
-// Without the guards: #200 ($50) would be the costliest "shipped" PR, #300 would
-// cost $28, and shipped spend would swallow the whole $88. With them: #200 is not
-// yours to spotlight, #300 costs only its $20 production, shipped spend is $30.
+// Spotlight: #200 wins ($50 — the costliest thing you touched, review included).
+// converted_spend: every block is linked to a merged PR, so all $88 converts.
 type DB = ReturnType<typeof openDb>
 
 function addSession(db: DB, id: string, cost: number) {
@@ -62,26 +63,28 @@ beforeEach(() => {
   blockLink(db, 'S', 0, 'pr:o/r:300', 'reviewed'); sessLink(db, 'S', 'pr:o/r:300', 'reviewed')
 })
 
-describe('Highlights exclude reviewed links from production math', () => {
-  it('spotlights the costliest PRODUCED PR, not the costlier reviewed-only one', () => {
+describe('Highlights count every artifact you contributed to (reviewed included)', () => {
+  it('spotlights the costliest PR you contributed to — reviewed PRs included', () => {
     const hs = store.highlights()
     const big = hs.find((h) => h.kind === 'biggest_shipped')!
     expect(big).toBeTruthy()
     expect(big.artifactKind).toBe('pr')
-    expect(big.ident).toBe('300') // #300 ($20 production), NOT the reviewed-only #200 ($50)
-    expect(big.cost).toBe(20) // production block only — the reviewed $8 on #300 is excluded
+    expect(big.ident).toBe('200') // reviewed-only #200 ($50) is now eligible and the costliest
+    expect(big.cost).toBe(50) // full cost — the review block counts
   })
 
-  it('never surfaces a PR you only reviewed', () => {
+  it('surfaces a PR you only reviewed (contribution counts)', () => {
     const hs = store.highlights()
-    expect(hs.some((h) => h.ident === '200')).toBe(false)
+    expect(hs.some((h) => h.ident === '200')).toBe(true)
   })
 
-  it('counts only production spend as "shipped" in converted_spend', () => {
+  it('counts every block that touched a merged PR as converted, review included', () => {
     const conv = store.highlights().find((h) => h.kind === 'converted_spend')!
     expect(conv).toBeTruthy()
     expect(conv.total).toBe(88) // all spend: $10 + $50 + $20 + $8
-    expect(conv.shipped).toBe(30) // produced sessions only: P $10 + Q $20 (reviewers R, S excluded)
-    expect(conv.pct).toBe(34) // round(100 * 30 / 88)
+    // Block-level, all roles: every block is linked to a merged PR, so all spend
+    // converts — the review blocks R ($50) and S ($8) now count too.
+    expect(conv.shipped).toBe(88)
+    expect(conv.pct).toBe(100)
   })
 })

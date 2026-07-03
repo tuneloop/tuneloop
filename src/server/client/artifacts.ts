@@ -173,13 +173,14 @@ function renderFeatureManager(rows) {
       var r = e.node, indent = e.depth * 22;
       var twig = e.depth ? '<span class="feat-twig">&#8627;</span> ' : '';
       var shipped = !!r.completedAt;
+      // "open" badge omitted — the top-level "Mark shipped" button implies open status.
       var statusHtml = shipped
         ? '<span class="badge b-success">shipped ' + esc(dayOf(r.completedAt)) + '</span>'
-        : '<span class="badge b-null">open</span>';
+        : '';
       var proposed = r.source === 'derived' ? '<span class="tag">proposed</span>' : '';
       var repos = (r.repos && r.repos.length) ? r.repos.join(', ') : '—';
       var last = r.lastSessionAt ? dayOf(r.lastSessionAt) : '—';
-      // Secondary actions (ship toggle · nest-under · move-to-top · delete) collapse
+      // Secondary actions (nest-under · complexity · move-to-top · delete) collapse
       // into a per-row hamburger; only the indent shifts, so columns stay aligned.
       var nest = '<select class="feat-nest" data-id="' + esc(r.id) + '">' +
         nestUnderOptions(rows, r.id, descendantsOf(rows, r.id)) + '</select>';
@@ -200,12 +201,12 @@ function renderFeatureManager(rows) {
         '<span class="feat-num">' + r.sessions + '</span>' +
         '<span class="feat-num">' + usd(r.costUsd) + '</span>' +
         '<div class="feat-actions">' +
+          '<button class="btn ship-btn' + (shipped ? ' shipped' : '') + '" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
+            (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
           '<button class="btn sess-btn" data-art="' + esc(r.title || '') + '" data-kind="feature">Sessions &rarr;</button>' +
           '<div class="feat-menu-wrap">' +
             '<button class="feat-menu-btn" aria-label="More actions">&#8943;</button>' +
             '<div class="feat-menu">' +
-              '<button class="menu-item" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
-                (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
               '<div class="menu-nest"><label>Nest under</label>' + nest + '</div>' +
               '<div class="menu-nest"><label>Complexity</label>' + cxSelect + '</div>' +
               toTop +

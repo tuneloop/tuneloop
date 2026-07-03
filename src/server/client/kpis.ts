@@ -58,7 +58,7 @@ export function renderOpenMetric() {
 var lastKpis: any = null;
 
 // The complexity-filtered cost-per-artifact figure, published by the Cost-by-
-// Artifact detail (renderCa) so the headline tile can mirror the active filter.
+// Artifact detail (renderBurn) so the headline tile can mirror the active filter.
 // Tagged with its kind/window/complexity so a stale filter never paints.
 var caKpiOverride: any = null;
 export function setCaKpiOverride(o: any) { caKpiOverride = o; }
