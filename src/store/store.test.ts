@@ -116,15 +116,36 @@ describe('artifact upsert (PR clobber safety)', () => {
 
     const rows = store.artifactList('pr')
     const cost = Object.fromEntries(rows.map((r) => [r.id, r.costUsd]))
-    expect(cost['pr:o/r:11']).toBe(1) // block 0 only — its block-1 row is superseded
+    expect(cost['pr:o/r:11']).toBe(1) // block 0 only — block 1's outcomes-git row was displaced at write time
     expect(cost['pr:o/r:7']).toBe(2) // reclaimed block 1
+    // The table is 1-1: block 1 has exactly the content-match row, not both.
+    const blockRows = db
+      .prepare(`SELECT producer FROM block_artifacts WHERE session_id = 's1' AND block_idx = 1 AND role = 'contributed'`)
+      .all() as Array<{ producer: string }>
+    expect(blockRows.map((r) => r.producer)).toEqual(['pr-content-match'])
 
-    // Rejecting the derived link deletes pr-content-match's block rows → the
-    // suppression lifts and outcomes-git's proximity fill counts again (graceful revert).
+    // Rejecting the derived link deletes pr-content-match's block rows. Because the
+    // displaced outcomes-git row was removed at WRITE time, block 1 is momentarily
+    // orphaned — its cost is unattributed until the next analyze regenerates the
+    // deterministic fill (reject flags the session's processors invalidated for exactly
+    // that). Reject no longer reverts synchronously — the accepted trade for a 1-1 table.
     store.rejectSessionLink('s1', 'pr:o/r:7')
-    const after = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
-    expect(after['pr:o/r:11']).toBe(3) // blocks 0+1 back
-    expect(after['pr:o/r:7']).toBeUndefined() // link gone entirely
+    const afterReject = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
+    expect(afterReject['pr:o/r:11']).toBe(1) // block 1 orphaned, not yet back
+    expect(afterReject['pr:o/r:7']).toBeUndefined() // link gone entirely
+
+    // Next analyze: outcomes-git re-derives its fill; the link is tombstoned so
+    // content-match no longer contests block 1, which reverts to PR#11.
+    store.persistResult('s1', 'outcomes-git', 3, 'h1', null, {
+      artifacts: [prA],
+      sessionArtifacts: [{ artifactId: prA.id, role: 'created', source: 'explicit' }],
+      blockArtifacts: [
+        { blockIdx: 0, artifactId: prA.id, role: 'contributed', source: 'explicit' },
+        { blockIdx: 1, artifactId: prA.id, role: 'contributed', source: 'explicit' },
+      ],
+    })
+    const afterReanalyze = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
+    expect(afterReanalyze['pr:o/r:11']).toBe(3) // blocks 0+1 back
   })
 
   it('a content-match link with no block rows claims zero cost (whole-session fallback gated off)', () => {

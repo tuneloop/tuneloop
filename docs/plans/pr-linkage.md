@@ -168,9 +168,18 @@ Precision of the synthetic anchor, in order of defense:
   gated off for content-match links (`saNoContentMatchFallback`), so its cost is zero
   rather than the whole session; the attribution % on the session link stands.
 
-Where the two fills disagree (the reclaimed blocks), block-cost reads suppress
-`outcomes-git`'s proximity row in favor of the content-match row (`blockNotSuperseded`);
-sessions without content matches keep the pure deterministic fill.
+Where the two fills disagree (the reclaimed blocks), the content-match row **displaces**
+`outcomes-git`'s proximity row at **write time** — `store.persistResult` deletes the
+superseded `outcomes-git` block row when `pr-content-match` persists, so `block_artifacts`
+holds exactly one `contributed` row per block and no read path filters (the processor's
+`requires: ['outcomes-git']` guarantees the proximity row exists first). Sessions without
+content matches keep the pure deterministic fill untouched.
+
+One consequence of write-time (vs read-time) reconciliation: rejecting a content-match
+link deletes its block rows, and the displaced `outcomes-git` row is already gone, so the
+freed block's cost is momentarily unattributed until the next `analyze` regenerates the
+deterministic fill (reject already flags the session's processors invalidated, so the next
+run heals it). Reject no longer reverts synchronously — an accepted trade for a 1-1 table.
 
 `refresh()` keeps discovered PRs' merge status current via `gh pr view` (these PRs may exist
 only because of a content match, so no other processor refreshes them), mirroring
