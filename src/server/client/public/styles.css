@@ -178,12 +178,12 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .feat-list { max-height: 460px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; }
 /* Fixed (not auto) last column so the header and row grids — separate grid
    containers — resolve identical column edges and the labels sit over the data. */
-.feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 104px 72px 84px 142px; align-items: center; gap: 12px; padding: 8px 12px; }
+.feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 104px 72px 84px 240px; align-items: center; gap: 12px; padding: 8px 12px; }
 .feat-head { position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 1px solid var(--line); }
 .feat-head span { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .feat-row { border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .feat-row:last-child { border-bottom: none; }
-.feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; overflow: hidden; }
 .feat-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feat-twig { color: var(--muted); }
 .feat-repos, .feat-last { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -197,6 +197,10 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .pr-th:hover { color: var(--ink); }
 .feat-num { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .feat-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.ship-btn { border-color: var(--emerald); color: var(--emerald); background: transparent; white-space: nowrap; }
+.ship-btn:hover { background: var(--emerald); color: #fff; }
+.ship-btn.shipped { border-color: var(--line); color: var(--muted); }
+.ship-btn.shipped:hover { border-color: var(--muted); background: transparent; color: var(--ink); }
 /* Secondary actions live behind a per-row hamburger. The menu is position:fixed
    (positioned in JS) so the scroll container's overflow doesn't clip it. */
 .feat-menu-wrap { position: relative; display: inline-flex; }
@@ -287,7 +291,7 @@ th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; t
 td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .pr-title { color: var(--muted); font-size: 12px; margin-top: 2px; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .b-success { background: #e2f0e8; color: var(--emerald); }
 .b-partial { background: #f6ecd2; color: var(--amber); }
 .b-failure { background: #f4ddd6; color: var(--red); }
