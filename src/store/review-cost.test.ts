@@ -66,16 +66,16 @@ beforeEach(() => {
   reviewedOutcome(db, 'D', 'pr:o/r:50', '2026-06-01T11:00:00Z')
 })
 
-describe('cost-per-shipped-PR excludes reviews', () => {
-  it('counts only PRs you produced, and charges only production cost', () => {
+describe('cost-per-shipped-artifact counts every PR you contributed to', () => {
+  it('counts all merged PRs you authored OR reviewed, at full cost', () => {
     const { count, costPerUnit } = store.costPerArtifact('pr')
-    expect(count).toBe(2) // #41 and #50; the review-only #30 is NOT counted as shipped
-    // numerator = production blocks only: #41 ($4) + #50 prod ($3) = $7; review blocks excluded.
-    expect(costPerUnit).toBeCloseTo(3.5, 5) // 7 / 2
+    expect(count).toBe(3) // #41, #50, AND the review-only #30 — all merged, all contributed to
+    // numerator = full cost incl. review: #41 ($4) + #30 review ($1) + #50 ($3 prod + $1 review) = $9
+    expect(costPerUnit).toBeCloseTo(3, 5) // 9 / 3
   })
 
-  it('costPeriod throughput matches the KPI denominator (review-only excluded)', () => {
-    expect(store.costPeriod('pr').throughput).toBe(2)
+  it('costPeriod throughput matches the KPI denominator (all contributed)', () => {
+    expect(store.costPeriod('pr').throughput).toBe(3)
   })
 })
 
@@ -104,5 +104,18 @@ describe('PRs reviewed series', () => {
 
   it('is empty for features (no review signal)', () => {
     expect(store.costCurves('feature', 'day').reviewed).toEqual([])
+  })
+})
+
+describe('cost treemap reconciles with the KPI (all contributed shipped artifacts)', () => {
+  it('treemap total = cost-per-unit × count, review cost included', () => {
+    const shipped = store.artifactList('pr', undefined, undefined, undefined, true)
+    // Every merged PR you contributed to — including the review-only #30.
+    expect(shipped.map((r) => r.id).sort()).toEqual(['pr:o/r:30', 'pr:o/r:41', 'pr:o/r:50'])
+    const kpi = store.costPerArtifact('pr')
+    expect(shipped.length).toBe(kpi.count) // same set / denominator (3)
+    const total = shipped.reduce((s, r) => s + (r.costUsd || 0), 0)
+    expect(total).toBe(9) // $4 + $1 + $4, review cost included
+    expect(total).toBeCloseTo((kpi.costPerUnit || 0) * kpi.count, 5) // C = A × B
   })
 })
