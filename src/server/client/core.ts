@@ -49,9 +49,8 @@ export interface ClientState {
   // toggles it (userPicked), after which it sticks and the headline tile mirrors
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
   // a manual pick overrides until the window changes.
-  // `kind` (feature|pr) scopes only the AI-spend burn graph; `flow` (shipped|reviewed)
-  // toggles the bottom PR throughput graph. `complexity` scopes the cost-by-artifact view.
-  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; flow: string; complexity: string }
+  // `kind` (feature|pr) scopes the whole section; `complexity` scopes the cost-by-artifact view.
+  ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; complexity: string }
   spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
   sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
   // operational detail: one shared bucket, a per-graph "break down by" choice
@@ -75,7 +74,7 @@ export var state: ClientState = {
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
   sr: { outcomes: ['session_success'], bucket: '', by: '', filters: {} },
-  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', flow: 'shipped', complexity: '' },
+  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', complexity: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },

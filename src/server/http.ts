@@ -368,8 +368,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   if (path === '/api/feature-costs') {
     // Hierarchical cost-per-feature for the cost-artifact section's breakdown
     // charts (icicle / treemap): every feature with its own (direct) cost and the
-    // subtree rollup over parent_artifact_id. All-time (total invested per feature).
-    sendJson(res, 200, { nodes: store.featureCostTree() })
+    // subtree rollup over parent_artifact_id. `days` scopes to features SHIPPED in
+    // the window (per-feature cost stays all-time); `complexity` scopes by bucket.
+    const { from, to } = windowFromDays(url.searchParams.get('days'))
+    sendJson(res, 200, { nodes: store.featureCostTree(url.searchParams.get('complexity') || undefined, from, to) })
     return
   }
   if (path === '/api/outcome-types') {
@@ -430,7 +432,23 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/artifacts') {
-    sendJson(res, 200, store.artifactList(url.searchParams.get('kind') ?? undefined))
+    // Optional `complexity` scopes to artifacts of the selected bucket(s) (applies
+    // only when a single `kind` is given — the bucket→value mapping is per-kind).
+    // Optional `days` scopes to artifacts completed in the window (all-time when
+    // absent — the Artifacts tab relies on that to list still-open PRs). `shipped=1`
+    // (the cost treemap) keeps only completed/merged, produced (non-review) artifacts.
+    const { from, to } = windowFromDays(url.searchParams.get('days'))
+    sendJson(
+      res,
+      200,
+      store.artifactList(
+        url.searchParams.get('kind') ?? undefined,
+        url.searchParams.get('complexity') || undefined,
+        from,
+        to,
+        url.searchParams.get('shipped') === '1',
+      ),
+    )
     return
   }
   if (path === '/api/timeseries') {
@@ -518,6 +536,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
   res.end(json)
+}
+
+// A dashboard time window from the shared `days` param (a positive number of days,
+// or 'all'/missing for all-time). Ending "now", matching the cost-artifact/KPI
+// window derivation so every panel scopes to the same span.
+function windowFromDays(daysRaw: string | null): { from?: string; to?: string } {
+  if (!daysRaw || daysRaw === 'all') return {}
+  const parsed = parseInt(daysRaw, 10)
+  const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 7
+  const now = Date.now()
+  return { from: new Date(now - days * 86_400_000).toISOString(), to: new Date(now).toISOString() }
 }
 
 // The dashboard SPA is built by tsup into dist/client (app.js + index.html +

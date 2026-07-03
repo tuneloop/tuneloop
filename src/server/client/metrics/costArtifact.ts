@@ -3,26 +3,19 @@
 // stacked panels:
 //   1. Cost breakdown treemap — feature (hierarchical) or PR (flat) per the toggle.
 //   2. AI spend converted vs unconverted — burn for the toggled kind.
-//   3. PRs shipped/reviewed — one graph with a shipped|reviewed toggle (default
-//      shipped); always PR-scoped (review only exists for PRs).
+//   3. Throughput — one graph: "Features shipped" or "PRs merged". For PRs it counts
+//      every merged PR you contributed to (authored OR reviewed), matching the KPI.
 // The window comes from the top-level selector (state.days); the curve bucket is
 // derived from it (short windows get fine buckets) unless the user picks one.
-import { state, $, esc, get, autoBucket, CX_LABELS } from '../core'
+import { state, $, esc, get, autoBucket, CX_LABELS, cxLabelList } from '../core'
 import { loadKpis, paintKpis, setCaKpiOverride } from '../kpis'
 import { stackChart } from '../charts'
 import { renderFeatTreemap } from '../featTreemap'
 
 var caReqId = 0;
 function caNoun() { return state.ca.kind === 'pr' ? 'PRs' : 'features'; }
-function caTitle() { return state.ca.kind === 'pr' ? 'Cost per merged PR' : 'Cost per shipped feature'; }
 function caWinLabel() { return state.days === 'all' ? 'all time' : 'last ' + state.days + ' days'; }
 function caBucket() { return autoBucket(state.ca.bucket); }
-
-function flowButtons() {
-  return [['shipped', 'Shipped'], ['reviewed', 'Reviewed']].map(function (o) {
-    return '<button class="' + (o[0] === state.ca.flow ? 'on' : '') + '" data-f="' + o[0] + '">' + o[1] + '</button>';
-  }).join('');
-}
 
 export function renderCostArtifact() {
   var pr = state.ca.kind === 'pr';
@@ -30,9 +23,8 @@ export function renderCostArtifact() {
   var shipVerb = pr ? 'merged' : 'shipped';
   var win = esc(caWinLabel());
   var tmTitle = pr ? 'PR cost breakdown' : 'Feature cost breakdown';
-  var tmSub = pr ? 'all time &middot; total spend per merged PR' : 'all time &middot; total spend per feature &amp; sub-features';
+  var tmSub = esc(caWinLabel()) + (pr ? ' &middot; total spend per merged PR' : ' &middot; total spend per feature &amp; sub-features');
   $('#metric-detail').innerHTML =
-    '<div class="metric-head"><h2>' + esc(caTitle()) + '</h2></div>' +
     '<div class="ca-controls" id="ca-controls"></div>' +
     // 1. Cost breakdown treemap (feature or PR, per the top-level toggle).
     '<div class="panel">' +
@@ -55,18 +47,15 @@ export function renderCostArtifact() {
       '</div>' +
       '<div class="card-note" id="ca-burn-note"></div>' +
     '</div>' +
-    // 3. Throughput — "Features shipped" (no toggle) for features, or "PRs
-    //    shipped/reviewed" (toggle, default shipped) for PRs (review is PR-only).
+    // 3. Throughput — one graph: "Features shipped" or "PRs merged" (all PRs you
+    //    contributed to, authored or reviewed). No toggle.
     '<div class="panel">' +
-      '<div class="panel-head">' +
-        '<h2 id="ca-flow-title"></h2>' +
-        (pr ? '<span class="seg" id="ca-flow">' + flowButtons() + '</span>' : '') +
-      '</div>' +
+      '<div class="panel-head"><h2 id="ca-flow-title"></h2></div>' +
       '<div id="ca-flow-chart"></div>' +
+      (pr ? '<div class="card-note">Includes every merged PR you contributed to &mdash; authored or reviewed.</div>' : '') +
     '</div>' +
     '<div class="card-note" id="ca-note"></div>';
   renderCaControls();
-  wireFlow();
   loadTreemap();
   loadCostArtifact();
 }
@@ -127,37 +116,33 @@ export function renderCaControls() {
       // Every box checked ⇒ clear the filter (also re-includes untagged artifacts);
       // a partial selection stores just those buckets.
       state.ca.complexity = set.length === boxes.length ? '' : set.join(',');
+      loadTreemap(); // treemap is complexity-scoped too (cache keyed by the filter)
       loadCostArtifact();
     };
   });
 }
 
-// Shipped/reviewed toggle for the bottom PR graph — re-renders from cached PR
-// curves (no refetch; both series come from one response).
-function wireFlow() {
-  var seg = $('#ca-flow');
-  if (!seg) return;
-  Array.prototype.forEach.call(seg.children, function (btn) {
-    btn.onclick = function () {
-      state.ca.flow = btn.getAttribute('data-f');
-      Array.prototype.forEach.call(seg.children, function (b) {
-        b.className = b.getAttribute('data-f') === state.ca.flow ? 'on' : '';
-      });
-      renderFlow();
-    };
-  });
-}
-
-// Treemap cost nodes are all-time (window/bucket-independent), so fetch once per
-// kind and cache. Features come hierarchical from /api/feature-costs; PRs are a
-// flat set mapped from /api/artifacts (each PR a tile sized by its all-time cost).
+// Treemap nodes scope to the top-level window (artifacts completed in it) and the
+// complexity filter — both applied server-side — while each tile stays sized by the
+// artifact's all-time build cost, so the treemap decomposes the cost-per-artifact
+// KPI. Cached per (kind, complexity, window); a change to either invalidates both
+// kinds' caches (caTreeKey). Features come hierarchical from /api/feature-costs; PRs
+// are a flat set from /api/artifacts (each PR a tile sized by its all-time cost).
 var caFeatNodes: any[] | null = null;
 var caPrNodes: any[] | null = null;
+var caTreeKey = '';
+var caTreeReqId = 0;
 
 export function loadTreemap() {
+  var key = state.ca.complexity + '|' + state.days;
+  if (caTreeKey !== key) { caFeatNodes = null; caPrNodes = null; caTreeKey = key; }
+  var cx = state.ca.complexity ? '&complexity=' + encodeURIComponent(state.ca.complexity) : '';
+  var days = '&days=' + encodeURIComponent(String(state.days));
+  var myReq = ++caTreeReqId; // ignore an out-of-order response from a superseded filter/window
   if (state.ca.kind === 'pr') {
     if (caPrNodes) { renderTreemap(); return; }
-    get('/api/artifacts?kind=pr').then(function (rows) {
+    get('/api/artifacts?kind=pr&shipped=1' + days + cx).then(function (rows) {
+      if (myReq !== caTreeReqId) return;
       caPrNodes = (Array.isArray(rows) ? rows : []).map(function (r) {
         return { id: r.id, title: r.title || r.ident || r.externalId || r.id, parentId: null, ownCost: r.costUsd || 0, subtreeCost: r.costUsd || 0 };
       });
@@ -165,7 +150,8 @@ export function loadTreemap() {
     });
   } else {
     if (caFeatNodes) { renderTreemap(); return; }
-    get('/api/feature-costs').then(function (d) {
+    get('/api/feature-costs?days=' + encodeURIComponent(String(state.days)) + cx).then(function (d) {
+      if (myReq !== caTreeReqId) return;
       caFeatNodes = (d && d.nodes) || [];
       renderTreemap();
     });
@@ -177,19 +163,25 @@ function renderTreemap() {
   if (!el) return;
   var pr = state.ca.kind === 'pr';
   var nodes = pr ? caPrNodes : caFeatNodes;
+  var cxNote = state.ca.complexity ? ' <span class="metric-sub">complexity: ' + esc(cxLabelList(state.ca.complexity)) + '</span>' : '';
   if (!nodes) { el.innerHTML = '<div class="empty">Loading…</div>'; return; }
   if (!nodes.length) {
-    el.innerHTML = '<div class="empty">No ' + (pr ? 'PR' : 'feature') + ' costs yet — ' +
-      (pr ? 'merge a PR with linked sessions' : 'link sessions to features in the Features tab') + '.</div>';
+    var emptyMsg = state.ca.complexity
+      ? 'No ' + (pr ? 'PRs' : 'features') + ' match this complexity filter — widen the Complexity selection above.'
+      : state.days !== 'all'
+        ? 'No ' + (pr ? 'PRs merged' : 'features shipped') + ' in this window — widen the window above.'
+        : 'No ' + (pr ? 'merged PR' : 'shipped feature') + ' costs yet — ' +
+          (pr ? 'merge a PR with linked sessions' : 'ship a feature with linked sessions in the Features tab') + '.';
+    el.innerHTML = '<div class="empty">' + emptyMsg + '</div>';
     var leg0 = $('#ca-feat-legend'); if (leg0) leg0.innerHTML = '';
     return;
   }
   renderFeatTreemap(el, nodes, pr ? 'All PRs' : 'All features');
   var leg = $('#ca-feat-legend');
   if (leg) {
-    leg.innerHTML = pr
+    leg.innerHTML = (pr
       ? '<span class="leg">Area &prop; cost &middot; each tile is a merged PR. Use the slider to roll up the long tail into “Other”.</span>'
-      : '<span class="leg">Area &prop; subtree cost &middot; Click a tile to drill in; use the slider to roll up the long tail.</span>';
+      : '<span class="leg">Area &prop; subtree cost &middot; Click a tile to drill in; use the slider to roll up the long tail.</span>') + cxNote;
   }
 }
 
@@ -234,11 +226,11 @@ function renderBurn(d) {
         (state.ca.kind === 'pr' ? 'merged PR' : 'shipped feature') + ' of the selected complexity. Total spend is unchanged, ' +
         'so spend on ' + (state.ca.kind === 'pr' ? 'PRs' : 'features') + ' of other complexity falls into the unconverted band.')
     : '';
-  var note = 'Unit cost includes every session that built these ' + caNoun() +
+  var note = 'Unit cost includes every session that contributed to these ' + caNoun() +
     ', even spend from before the window — so it will not equal spend within the window.';
   if (state.ca.kind === 'pr') {
-    note += ' Only PRs a session created or merged (via gh or a GitHub MCP tool) are linked' +
-      ' — PRs opened or merged outside a captured session aren\'t counted (yet).';
+    note += ' Every merged PR you contributed to counts — authored or reviewed via gh in a' +
+      ' captured session; PRs merged outside a captured session aren\'t counted (yet).';
   }
   var n = $('#ca-note');
   if (n) n.innerHTML = esc(note);
@@ -248,24 +240,21 @@ function renderFlow() {
   var el = $('#ca-flow-chart');
   if (!el) return;
   var pr = state.ca.kind === 'pr';
-  var reviewed = pr && state.ca.flow === 'reviewed'; // review is PR-only
   var noun = pr ? 'PRs' : 'Features';
+  var verb = pr ? 'merged' : 'shipped';
   var titleEl = $('#ca-flow-title');
   if (titleEl) {
-    titleEl.innerHTML = noun + ' ' + (reviewed ? 'reviewed' : 'shipped') +
-      ' <span class="metric-sub">' + esc(caWinLabel()) + ' &middot; dated at ' + (reviewed ? 'review' : 'completion') + ' time</span>';
+    titleEl.innerHTML = noun + ' ' + verb +
+      ' <span class="metric-sub">' + esc(caWinLabel()) + ' &middot; dated at ' + (pr ? 'merge' : 'completion') + ' time</span>';
   }
   var d = caCurves;
   if (!d) { el.innerHTML = '<div class="empty">Loading…</div>'; return; }
-  var rows = reviewed ? (d.reviewed || []) : (d.throughput || []);
-  var pts = rows.map(function (r) { return { bucket: r.bucket, total: r.count, filled: r.count }; });
+  var pts = (d.throughput || []).map(function (r) { return { bucket: r.bucket, total: r.count, filled: r.count }; });
   if (pts.some(function (p) { return p.total > 0; })) {
     el.innerHTML = stackChart(d.buckets || [], pts, 'int');
     return;
   }
-  var hint = reviewed
-    ? 'a session that reviews a PR (reads its diff) shows here'
-    : (pr ? 'merge a PR' : 'mark a feature shipped in the Features tab') + ', or widen the window above';
-  el.innerHTML = '<div class="empty">No ' + noun.toLowerCase() + ' ' +
-    (reviewed ? 'reviewed' : (pr ? 'merged' : 'shipped')) + ' in this window — ' + hint + '.</div>';
+  var hint = pr ? 'author or review a PR that merges' : 'mark a feature shipped in the Features tab';
+  el.innerHTML = '<div class="empty">No ' + noun.toLowerCase() + ' ' + verb +
+    ' in this window — ' + hint + ', or widen the window above.</div>';
 }
