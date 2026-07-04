@@ -85,7 +85,7 @@ var PR_COLS = [['pr', 'Pull request', 0], ['status', 'Status', 0], ['sessions', 
 function renderPrTab(rows) {
   prRows = rows;
   if (!rows.length) {
-    $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A session that runs gh pr create / merge (or a GitHub MCP PR tool) will show here.</div>';
+    $('#artifacts').innerHTML = '<div class="empty">No PRs linked yet. A PR appears here once it\'s linked to a session — from the transcript (gh pr create / merge) or by matching code you pushed yourself.</div>';
     return;
   }
   $('#artifacts').innerHTML =
@@ -132,9 +132,11 @@ function renderPrTable() {
     var idHtml = r.externalId
       ? '<a class="pr-link" href="' + esc(r.externalId) + '" target="_blank" rel="noopener">' + idLabel + '</a>'
       : idLabel;
+    // Inline AI-attribution tag beside the PR id (alternative to the AI-written column).
+    var aiTag = r.aiPct != null ? ' <span class="pr-ai-tag" title="Share of this PR authored by the agent (best single session)">' + Math.round(r.aiPct * 100) + '% AI</span>' : '';
     var titleHtml = r.title ? '<div class="pr-title">' + esc(r.title) + '</div>' : '';
     return '<tr class="arow" data-art="' + esc(key) + '" data-kind="pr">' +
-      '<td>' + idHtml + ' ' + complexityPill('pr', r.complexity) + titleHtml + '</td>' +
+      '<td>' + idHtml + ' ' + complexityPill('pr', r.complexity) + aiTag + titleHtml + '</td>' +
       '<td>' + (r.status ? esc(r.status) : '—') + '</td>' +
       '<td class="num">' + r.sessions + '</td>' +
       '<td class="num">' + usd(r.costUsd) + '</td>' +
@@ -171,13 +173,14 @@ function renderFeatureManager(rows) {
       var r = e.node, indent = e.depth * 22;
       var twig = e.depth ? '<span class="feat-twig">&#8627;</span> ' : '';
       var shipped = !!r.completedAt;
+      // "open" badge omitted — the top-level "Mark shipped" button implies open status.
       var statusHtml = shipped
         ? '<span class="badge b-success">shipped ' + esc(dayOf(r.completedAt)) + '</span>'
-        : '<span class="badge b-null">open</span>';
+        : '';
       var proposed = r.source === 'derived' ? '<span class="tag">proposed</span>' : '';
       var repos = (r.repos && r.repos.length) ? r.repos.join(', ') : '—';
       var last = r.lastSessionAt ? dayOf(r.lastSessionAt) : '—';
-      // Secondary actions (ship toggle · nest-under · move-to-top · delete) collapse
+      // Secondary actions (nest-under · complexity · move-to-top · delete) collapse
       // into a per-row hamburger; only the indent shifts, so columns stay aligned.
       var nest = '<select class="feat-nest" data-id="' + esc(r.id) + '">' +
         nestUnderOptions(rows, r.id, descendantsOf(rows, r.id)) + '</select>';
@@ -198,12 +201,12 @@ function renderFeatureManager(rows) {
         '<span class="feat-num">' + r.sessions + '</span>' +
         '<span class="feat-num">' + usd(r.costUsd) + '</span>' +
         '<div class="feat-actions">' +
+          '<button class="btn ship-btn' + (shipped ? ' shipped' : '') + '" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
+            (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
           '<button class="btn sess-btn" data-art="' + esc(r.title || '') + '" data-kind="feature">Sessions &rarr;</button>' +
           '<div class="feat-menu-wrap">' +
             '<button class="feat-menu-btn" aria-label="More actions">&#8943;</button>' +
             '<div class="feat-menu">' +
-              '<button class="menu-item" data-act="toggle" data-id="' + esc(r.id) + '" data-completed="' + (shipped ? '1' : '0') + '">' +
-                (shipped ? 'Reopen' : 'Mark shipped') + '</button>' +
               '<div class="menu-nest"><label>Nest under</label>' + nest + '</div>' +
               '<div class="menu-nest"><label>Complexity</label>' + cxSelect + '</div>' +
               toTop +

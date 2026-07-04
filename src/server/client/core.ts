@@ -49,6 +49,7 @@ export interface ClientState {
   // toggles it (userPicked), after which it sticks and the headline tile mirrors
   // it. `bucket` is the curve granularity: '' = auto-derived from the window;
   // a manual pick overrides until the window changes.
+  // `kind` (feature|pr) scopes the whole section; `complexity` scopes the cost-by-artifact view.
   ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; complexity: string }
   spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
   sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
@@ -253,7 +254,7 @@ export function complexityLabel(kind: string, complexity: number | null | undefi
 // down to the LLM-judged catch-all. Shared by the success-rate "Count as success"
 // picker and the sessions Outcomes column so they read consistently. Types not
 // listed sort to the end (preserving their relative order).
-export var OUTCOME_ORDER = ['pr_merged', 'pr_created', 'pr_approved', 'pr_changes_requested', 'pr_reviewed', 'commit_pushed', 'file_written', 'session_success'];
+export var OUTCOME_ORDER = ['pr_merged', 'pr_created', 'pr_contributed', 'pr_approved', 'pr_changes_requested', 'pr_reviewed', 'commit_pushed', 'file_written', 'session_success'];
 export function outcomeRank(type) { var i = OUTCOME_ORDER.indexOf(type); return i < 0 ? OUTCOME_ORDER.length : i; }
 
 // Friendly display for an outcome type in selection UIs (success-rate picker,

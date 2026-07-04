@@ -499,13 +499,37 @@ export class Store {
           .prepare('INSERT OR REPLACE INTO block_annotations (session_id, block_idx, processor, key, value) VALUES (?,?,?,?,?)')
           .run(sessionId, ba.blockIdx, processor, ba.key, JSON.stringify(ba.value))
       }
+      // Cross-role block reconciliation — at most one PR-kind row per block. Precedence
+      // (highest first): pcm(contributed) > og(reviewed) > enrich(reviewed) > og(contributed).
+      // We PREVENT the insert when an equal-or-higher-ranked PR row already holds the block;
+      // when this row outranks the holder, we displace it. Feature-contributed rows (rank 0)
+      // are a different artifact kind (queried separately) and skip reconciliation. The rank
+      // guard makes this ORDER-INDEPENDENT — the same winner regardless of which producer ran
+      // (or re-ran) first. Rejected derived links `continue` before touching the block.
+      // (Follow-up: a partial UNIQUE index on the PR rows lets INSERT OR REPLACE displace the
+      // loser without this explicit DELETE; the guard stays.)
+      const heldPr = this.db.prepare(
+        `SELECT producer, role FROM block_artifacts WHERE session_id = ? AND block_idx = ?
+           AND (producer IN ('outcomes-git', 'pr-content-match') OR (producer = 'enrich-session' AND role = 'reviewed')) LIMIT 1`,
+      )
+      const displacePr = this.db.prepare(
+        `DELETE FROM block_artifacts WHERE session_id = ? AND block_idx = ?
+           AND (producer IN ('outcomes-git', 'pr-content-match') OR (producer = 'enrich-session' AND role = 'reviewed'))`,
+      )
+      const insertBlockArtifact = this.db.prepare(
+        'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
+      )
       for (const x of result.blockArtifacts ?? []) {
         if (x.source === 'derived' && rejected.has(x.artifactId)) continue
-        this.db
-          .prepare(
-            'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
-          )
-          .run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
+        const rank = prBlockRank(processor, x.role)
+        if (rank > 0) {
+          const held = heldPr.get(sessionId, x.blockIdx) as { producer: string; role: string | null } | undefined
+          if (held) {
+            if (prBlockRank(held.producer, held.role) >= rank) continue // outranked → don't insert
+            displacePr.run(sessionId, x.blockIdx) // this row outranks the holder → remove it
+          }
+        }
+        insertBlockArtifact.run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
       }
 
       this.db
@@ -962,15 +986,18 @@ export class Store {
     const scalar = (sql: string) => (this.db.prepare(sql).get(...wp) as { v: number }).v
 
     const total = scalar(`SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s WHERE 1=1${w}`)
-    // "Shipped" spend is production spend: a session whose cost counts here must have
-    // a NON-reviewed link to a completed artifact. A session that only reviewed a
-    // merged PR (a teammate's) is total spend, not shipped spend — excluding it keeps
-    // converted_spend honest. (Reviewed role exists on PRs only; harmless for features.)
+    // Converted spend is BLOCK-level: a usage row counts only if its block is linked
+    // to a completed artifact (any role — production OR your review of it), so only the
+    // parts of a session that touched a shipped artifact count, not the whole session.
+    // Matches the burn chart's green band and the cost-per-shipped-artifact basis.
     const shipped = scalar(
-      `SELECT COALESCE(SUM(cost_usd),0) AS v FROM sessions s
-       WHERE EXISTS (SELECT 1 FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id
-                     WHERE sa.session_id = s.id AND a.completed_at IS NOT NULL
-                       AND COALESCE(sa.role,'') <> 'reviewed')${w}`,
+      `SELECT COALESCE(SUM(u.cost_usd),0) AS v
+       FROM usage_facts u JOIN sessions s ON s.id = u.session_id
+       WHERE EXISTS (SELECT 1 FROM block_usage bu
+                     JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
+                     JOIN artifacts a ON a.id = ba.artifact_id
+                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
+                       AND a.completed_at IS NOT NULL)${w}`,
     )
 
     // Busiest source file — most distinct sessions, skipping generated noise. We
@@ -993,26 +1020,22 @@ export class Store {
 
     // Biggest shipped: shipped feature → merged PR → wip feature, among artifacts
     // active in the window, ranked by block-attributed cost (matches the Artifacts table).
-    // Reviewed links are excluded from both arms so a teammate's PR you reviewed
-    // never has its review cost counted as production cost (mirrors costPerArtifact).
+    // Full cost — all roles, production AND your review of it — so a PR you contributed
+    // to by reviewing is ranked on its real spend (mirrors costPerArtifact).
     const blockCost = `COALESCE((SELECT SUM(cost_usd) FROM (
-        SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
+        SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
         JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
         JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-        WHERE ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
-        UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
-        JOIN usage_facts u ON u.session_id = sa2.session_id
-        WHERE sa2.artifact_id = a.id AND COALESCE(sa2.role,'') <> 'reviewed'
-        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed'))), 0)`
-    // An artifact is "in window" (and a candidate at all) only via a NON-reviewed
-    // session link — this doubles as the "produced by this store" guard, so a PR you
-    // only reviewed is never picked as the biggest-shipped or stalled spotlight.
+        WHERE ba.artifact_id = a.id)), 0)`
+    // An artifact is "in window" (and a candidate at all) via ANY session link in the
+    // window — authored or reviewed — so every artifact you contributed to is eligible
+    // for the biggest-shipped / stalled spotlight.
     const inWindow =
       from && to
         ? `EXISTS (SELECT 1 FROM session_artifacts sa JOIN sessions s ON s.id = sa.session_id
-                   WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
+                   WHERE sa.artifact_id = a.id
                      AND s.started_at >= ? AND s.started_at < ?)`
-        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed')`
+        : `EXISTS (SELECT 1 FROM session_artifacts sa WHERE sa.artifact_id = a.id)`
     const pickWin = (kind: string, completion: 'shipped' | 'unshipped') =>
       this.db
         .prepare(
@@ -1186,16 +1209,18 @@ export class Store {
     const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
     const cxFilter = complexityWhere(complexity, 'a', kind)
     const params = from && to ? [kind, from, to] : [kind]
-    // "Shipped" means a PR THIS store produced — a PR whose only link is `reviewed`
-    // (a teammate's PR you reviewed) is not yours to count or cost here; it belongs
-    // to the separate "PRs reviewed" view. Harmless for features (no reviewed role).
-    const produced =
+    // Every shipped artifact you CONTRIBUTED to counts — one you authored OR one you
+    // only reviewed (any session link) — as long as it's completed/merged, and its
+    // FULL cost (production + your review of it) is charged. So the cost-breakdown
+    // treemap, which sums the same per-artifact cost, reconciles with this KPI.
+    // (Reviewed role is PRs only; the guard is a no-op for features.)
+    const contributed =
       kind === 'pr'
-        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = a.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = a.id)"
         : ''
     const count = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts a WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${contributed} ${cxFilter}`)
         .get(...params) as { n: number }
     ).n
     if (count === 0) return { count: 0, costPerUnit: null }
@@ -1203,25 +1228,17 @@ export class Store {
       this.db
         .prepare(
           `SELECT COALESCE(SUM(cost_usd),0) AS s FROM (
-             -- block-attributed: usage rows in blocks linked to an in-window completed artifact.
-             -- Reviewed block links are excluded so review cost never inflates production cost.
-             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             -- block-attributed: usage rows in blocks linked to an in-window completed
+             -- artifact (all roles — production AND your review of it).
+             SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
-             JOIN block_artifacts ba ON ba.artifact_id = a.id AND COALESCE(ba.role,'') <> 'reviewed'
+             JOIN block_artifacts ba ON ba.artifact_id = a.id
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}
-             UNION
-             -- fallback: whole sessions of in-window artifacts that have NO production block links
-             SELECT u.session_id, u.idx AS uidx, u.cost_usd
-             FROM artifacts a
-             JOIN session_artifacts sa ON sa.artifact_id = a.id AND COALESCE(sa.role,'') <> 'reviewed'
-             JOIN usage_facts u ON u.session_id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${produced} ${cxFilter}
-               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id AND COALESCE(bx.role,'') <> 'reviewed')
+             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${contributed} ${cxFilter}
            )`,
         )
-        .get(...params, ...params) as { s: number }
+        .get(...params) as { s: number }
     ).s
     return { count, costPerUnit: num / count }
   }
@@ -1294,15 +1311,13 @@ export class Store {
   } {
     // Anchored on usage_facts and dated at message time (COALESCE u.ts → session
     // start), so spend buckets at block-level time granularity (P5), and the
-    // converted sub-band greens only the BLOCKS that produced a shipped artifact —
-    // not the whole session. kind binds first (in the CASE subquery), then window.
-    // "Produced by this store" guard (PRs only): a PR whose only link is `reviewed`
-    // is a teammate's PR you reviewed — not something you shipped — so it's excluded
-    // from the shipped throughput and the green "shipped spend" sub-band. Its review
-    // spend lives in the separate "PRs reviewed" view.
-    const produced =
+    // converted sub-band greens the BLOCKS linked to a shipped artifact (any role —
+    // production or review), not the whole session. kind binds first (CASE), then
+    // window. Throughput counts every completed artifact you CONTRIBUTED to (any
+    // session link — authored or reviewed); PRs only, no-op for features.
+    const contributed =
       kind === 'pr'
-        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id)"
         : ''
     const cxFilter = complexityWhere(complexity, 'a', kind) // for burn subquery (alias `a`)
     const cxFilterBare = complexityWhere(complexity, 'artifacts', kind) // for throughput (bare table name)
@@ -1315,7 +1330,6 @@ export class Store {
                 COALESCE(SUM(CASE WHEN EXISTS (
                     SELECT 1 FROM block_usage bu
                     JOIN block_artifacts ba ON ba.session_id = bu.session_id AND ba.block_idx = bu.block_idx
-                                            AND COALESCE(ba.role,'') <> 'reviewed'
                     JOIN artifacts a ON a.id = ba.artifact_id
                     WHERE bu.session_id = u.session_id AND bu.usage_idx = u.idx
                       AND a.kind = ? AND a.completed_at IS NOT NULL ${cxFilter}
@@ -1330,7 +1344,7 @@ export class Store {
     const throughput = this.db
       .prepare(
         `SELECT ${bucketExpr('completed_at', bucket)} AS bucket, COUNT(*) AS count
-         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilterBare} GROUP BY bucket ORDER BY bucket`,
+         FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${contributed} ${cxFilterBare} GROUP BY bucket ORDER BY bucket`,
       )
       .all(...thParams) as Array<{ bucket: string; count: number }>
     // PRs reviewed per bucket, dated at REVIEW time (when you reviewed, not when the
@@ -1414,16 +1428,17 @@ export class Store {
     ).s
     const thRange = from && to ? 'AND completed_at >= ? AND completed_at < ?' : ''
     const thParams = from && to ? [kind, from, to] : [kind]
-    // Same "produced by this store" guard as costPerArtifact, so this throughput
-    // (the KPI denominator) matches the cost-per-shipped count exactly (PRs only).
-    const produced =
+    // Same "contributed" guard as costPerArtifact, so this throughput (the KPI
+    // denominator) matches the cost-per-shipped count exactly: every completed
+    // artifact you have a session link to, authored or reviewed (PRs only).
+    const contributed =
       kind === 'pr'
-        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id AND COALESCE(spx.role,'') <> 'reviewed')"
+        ? "AND EXISTS (SELECT 1 FROM session_artifacts spx WHERE spx.artifact_id = artifacts.id)"
         : ''
     const cxFilter = complexityWhere(complexity, 'artifacts', kind)
     const throughput = (
       this.db
-        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${produced} ${cxFilter}`)
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE kind = ? AND completed_at IS NOT NULL ${thRange} ${contributed} ${cxFilter}`)
         .get(...thParams) as { n: number }
     ).n
     return { burn, throughput, efficiency: throughput ? burn / throughput : null }
@@ -2312,10 +2327,19 @@ export class Store {
       .prepare('SELECT type, artifact_id AS artifactId FROM outcomes WHERE session_id = ?')
       .all(id) as Array<{ type: string; artifactId: string | null }>
 
+    // One row per artifact: a session can link the same PR under multiple roles
+    // (e.g. `created` by outcomes-git + `edited` by pr-content-match for its
+    // attribution %), so pick the strongest/most-explicit link for display.
     const artifacts = this.db
       .prepare(
-        `SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
-         FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?`,
+        `SELECT id, kind, title, ident, status, repo, externalId, role, source, confidence FROM (
+           SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source,
+             MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) OVER (PARTITION BY a.id) AS confidence,
+             ROW_NUMBER() OVER (PARTITION BY a.id ORDER BY
+               CASE sa.role WHEN 'created' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'edited' THEN 2 ELSE 3 END,
+               CASE COALESCE(sa.source,'') WHEN 'explicit' THEN 0 WHEN 'user' THEN 1 ELSE 2 END) AS rn
+           FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?
+         ) WHERE rn = 1`,
       )
       .all(id) as Array<Record<string, any>>
 
@@ -2491,41 +2515,54 @@ export class Store {
    * spanning several artifacts is counted in each, so the column can exceed
    * total spend (per-artifact attribution, by design).
    */
-  artifactList(kind?: string): ArtifactListItem[] {
+  artifactList(kind?: string, complexity?: string, from?: string, to?: string, shippedOnly = false): ArtifactListItem[] {
     const allowed = ['pr', 'feature', 'ticket']
     const kinds = kind && allowed.includes(kind) ? [kind] : ['pr', 'feature']
     const placeholders = kinds.map(() => '?').join(',')
+    // Complexity filter (buckets → this artifact's own complexity). No-op unless a
+    // single kind is requested — the bucket→value mapping differs by kind.
+    const cxFilter = complexityWhere(complexity, 'a', kind)
+    // Completion window: keep only artifacts completed (PR merged) in [from,to], to
+    // match the cost-per-artifact KPI's basis — the per-artifact cost stays all-time;
+    // the window selects which artifacts count. No window (all-time) keeps every row,
+    // including still-open PRs (the Artifacts tab relies on that).
+    const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const winParams = from && to ? [from, to] : []
+    // Shipped/merged-only (the cost-breakdown treemap): require a completion date so
+    // only shipped artifacts show — the same basis as costPerArtifact (which counts
+    // every completed artifact you contributed to, at full cost), so the tiles
+    // reconcile with the KPI. The HAVING clause below already requires a session link,
+    // so a merged PR you only reviewed still qualifies. The Artifacts tab leaves this
+    // off to list open/un-shipped rows too.
+    const shippedFilter = shippedOnly ? 'AND a.completed_at IS NOT NULL' : ''
     const rows = this.db
       .prepare(
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
                 a.external_id AS externalId, a.created_at AS createdAt, a.completed_at AS completedAt,
                 a.parent_artifact_id AS parentId, a.complexity, a.complexity_basis AS complexityBasis,
+                -- AI-attribution % = pr-content-match's confidence only (other producers write
+                -- confidence on session_artifacts too, e.g. review links).
+                MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) AS aiPct,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
                   SELECT SUM(cost_usd) FROM (
                     -- block-attributed cost (block→artifact): blocks partition the
                     -- session, so a multi-purpose session isn't charged whole (P1).
-                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
+                    SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
                     FROM block_artifacts ba
                     JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
                     JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
                     WHERE ba.artifact_id = a.id
-                    UNION
-                    -- whole-session fallback when this artifact has no block links
-                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
-                    FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
-                    WHERE sa2.artifact_id = a.id
-                      AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
                   )
                 ), 0) AS costUsd
          FROM artifacts a
          LEFT JOIN session_artifacts sa ON sa.artifact_id = a.id
-         WHERE a.kind IN (${placeholders})
+         WHERE a.kind IN (${placeholders}) ${cxFilter} ${range} ${shippedFilter}
          GROUP BY a.id
          HAVING (COUNT(DISTINCT sa.session_id) > 0 OR COALESCE(a.source,'') = 'user')
          ORDER BY COALESCE(a.created_at, a.completed_at) DESC, costUsd DESC`,
       )
-      .all(...kinds) as ArtifactListItem[]
+      .all(...kinds, ...winParams) as ArtifactListItem[]
     // Attach the repos each row spans and its last session time. Features use the
     // subtree union/max (an epic spans/aggregates everything under it); other
     // kinds (PRs) just carry their own repo and aren't shown a last-session time.
@@ -2587,6 +2624,96 @@ export class Store {
     const out = new Map<string, string | null>()
     for (const r of rows) out.set(r.id, subtreeMax(r.id))
     return out
+  }
+
+  /**
+   * Per-feature cost rolled up over the feature hierarchy, for the hierarchical
+   * cost-breakdown charts. `ownCost` is the spend attributed DIRECTLY to a feature
+   * (the same block-attributed-with-whole-session-fallback cost as the artifactList
+   * column); `subtreeCost` adds every descendant's own cost, so a parent epic
+   * reflects the total invested beneath it (subtreeCost − Σ children.subtreeCost =
+   * ownCost). All-time, not windowed: total investment per feature, matching the
+   * artifactList cost semantics. Cycle-safe + memoized, mirroring featureLastSession.
+   * parentId is normalized to null when it doesn't point at another feature, so the
+   * client can treat such rows as roots.
+   */
+  featureCostTree(complexity?: string, from?: string, to?: string): Array<{
+    id: string
+    title: string | null
+    parentId: string | null
+    ownCost: number
+    subtreeCost: number
+  }> {
+    // Complexity filter on each feature's own ordinal. Applied identically to the
+    // node set and the cost query below, so survivors stay consistent; orphaned
+    // children (parent filtered out) re-root and subtreeCost rolls up only the
+    // surviving descendants — see the parentId/children normalization below.
+    const cxNodes = complexityWhere(complexity, 'artifacts', 'feature')
+    const cxCost = complexityWhere(complexity, 'a', 'feature')
+    // Only SHIPPED features (completed_at set) — the treemap decomposes the
+    // cost-per-shipped-feature KPI, so un-shipped features are excluded (matching
+    // costPerArtifact). A window further bounds it to features shipped in [from,to];
+    // per-feature cost stays all-time (the window picks which features count, not
+    // which spend). No window = all shipped features.
+    const win = from && to
+    const rangeNodes = win ? 'AND completed_at >= ? AND completed_at < ?' : ''
+    const rangeCost = win ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const winParams = win ? [from, to] : []
+    const rows = this.db
+      .prepare(
+        `SELECT id, title, parent_artifact_id AS parentId
+         FROM artifacts WHERE kind = 'feature' AND completed_at IS NOT NULL ${cxNodes} ${rangeNodes}`,
+      )
+      .all(...winParams) as Array<{ id: string; title: string | null; parentId: string | null }>
+    if (!rows.length) return []
+    // Own (direct) cost per feature — identical attribution to artifactList's cost
+    // column: purely block-attributed (a feature with no block links contributes zero;
+    // DISTINCT so a shared usage row counts once).
+    const costRows = this.db
+      .prepare(
+        `SELECT a.id AS id, COALESCE((
+           SELECT SUM(cost_usd) FROM (
+             SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
+             FROM block_artifacts ba
+             JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
+             JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
+             WHERE ba.artifact_id = a.id
+           )
+         ), 0) AS ownCost
+         FROM artifacts a WHERE a.kind = 'feature' AND a.completed_at IS NOT NULL ${cxCost} ${rangeCost}`,
+      )
+      .all(...winParams) as Array<{ id: string; ownCost: number }>
+    const own = new Map<string, number>()
+    for (const r of costRows) own.set(r.id, r.ownCost || 0)
+
+    const children = new Map<string, string[]>()
+    for (const r of rows) {
+      if (!r.parentId || !own.has(r.parentId)) continue
+      const arr = children.get(r.parentId)
+      if (arr) arr.push(r.id)
+      else children.set(r.parentId, [r.id])
+    }
+    const memo = new Map<string, number>()
+    const onStack = new Set<string>()
+    const subtreeCost = (id: string): number => {
+      const cached = memo.get(id)
+      if (cached !== undefined) return cached
+      let sum = own.get(id) ?? 0
+      if (!onStack.has(id)) {
+        onStack.add(id)
+        for (const c of children.get(id) ?? []) sum += subtreeCost(c)
+        onStack.delete(id)
+      }
+      memo.set(id, sum)
+      return sum
+    }
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      parentId: r.parentId && own.has(r.parentId) ? r.parentId : null,
+      ownCost: own.get(r.id) ?? 0,
+      subtreeCost: subtreeCost(r.id),
+    }))
   }
 
   /**
@@ -2946,6 +3073,9 @@ export interface ArtifactListItem {
   complexityBasis: string | null
   sessions: number
   costUsd: number
+  /** Max content-match AI-attribution fraction across the artifact's session links (0–1);
+   * null when no content-match link exists (e.g. an explicit-only PR). PRs only. */
+  aiPct: number | null
 }
 
 /** One window's worth of headline KPIs (see Store.kpis). */
@@ -3259,6 +3389,20 @@ function bucketExpr(col: string, bucket: Bucket): string {
   if (bucket === 'day') return `date(${col})`
   if (bucket === 'month') return `strftime('%Y-%m', ${col})`
   return `strftime('%Y-W%W', ${col})`
+}
+
+/**
+ * Precedence of a PR-kind block attribution — higher wins the single row that block keeps
+ * (cross-role 1-1, applied in persistResult). 0 = not a ranked PR row (e.g. enrich's
+ * feature-contributed, a different artifact kind that coexists). Order of the ranks:
+ * pcm content-match (the code literally shipped) > og explicit review > enrich derived
+ * review > og proximity-fill contribution.
+ */
+function prBlockRank(producer: string, role: string | null | undefined): number {
+  if (producer === 'pr-content-match') return 4
+  if (producer === 'outcomes-git') return role === 'reviewed' ? 3 : 1
+  if (producer === 'enrich-session' && role === 'reviewed') return 2
+  return 0
 }
 
 export type ComplexityBucket = 'trivial' | 'small' | 'medium' | 'large' | 'xl'
