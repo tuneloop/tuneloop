@@ -2,22 +2,24 @@
 
 Local analytics for your AI coding sessions. **Count outcomes, not tokens.**
 
+<br>
+
 <p align="center">
   <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (outcome rate, cost per shipped artifact, spend, sessions, tool error rate) above a per-PR cost breakdown treemap" width="900">
 </p>
+
+<br>
 
 **tuneloop** turns the session transcripts your AI coding tools already write into
 a local dashboard of what you actually shipped, what it cost, and your work
 patterns. Concretely, it enriches each session with:
 
 - **Outcome links** — merged PRs, features shipped, files changed
-- **Granular cost attribution to outcomes** — Sometimes the whole session is
-  scoped to a single piece of work, and sometimes you may have a long session
-  where you work on multiple things. tuneloop attributes cost to each
-  appropriately. (Example: Turns 1-4 were about PR #2, rest were PR #4)
+- **Granular cost attribution to outcomes**
 - **Task complexity**
 - **Agent autonomy**
-- **Work type** — plan, implementation, debugging, …
+- **Work type**
+- **Key decisions**
 - **Tool error categories**
 
 Combined with the data already in the transcript — model, agent harness, repo, and
@@ -79,16 +81,24 @@ dashboard useful depends on it.
 
 **Highlights** turns the same data into plain-English insights about your recent work:
 
+<br>
+
 <p align="center">
   <img src="docs/img/highlights_tab.png" alt="tuneloop Highlights tab — a question-led digest: sessions run, most AI spend on shipped vs unshipped work, share of spend that shipped, and success rate by complexity" width="900">
 </p>
 
+<br>
+
 And every session is a readable transcript you can navigate turn-by-turn, by work
 type, or by error — with the files it changed alongside:
+
+<br>
 
 <p align="center">
   <img src="docs/img/session_transcript_viewer.png" alt="tuneloop session viewer — turn-by-turn transcript with work-type filter pills, tool calls, and a Files tab, next to the filterable session list" width="900">
 </p>
+
+<br>
 
 ## How it works
 
