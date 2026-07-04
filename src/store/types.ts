@@ -72,6 +72,40 @@ export interface FileIndexInput {
   path: string
 }
 
+// ---- friction mining (docs/plans/friction-mining.md) ------------------------
+
+export type FrictionType = 're-steer' | 'context-supply' | 'tool-gap' | 'rework' | 'preference' | 'other'
+export type FrictionTrigger = 'unprompted' | 'after_tool_error' | 'after_review' | 'agent_stated'
+export type FrictionRemedy = 'add_doc' | 'add_skill' | 'add_tool' | 'model_or_prompt' | 'none'
+
+/**
+ * A new friction topic to mint. Insert-or-ignore semantics: an id that already
+ * exists keeps its original row (topic identity is stable, never auto-renamed).
+ */
+export interface FrictionTopicInput {
+  id: string
+  label: string
+  type: FrictionType
+  remedy?: FrictionRemedy
+  /** Owning repo; undefined = global (allowed for preference-type topics). */
+  repo?: string
+  firstSeen?: string
+}
+
+/** One friction event on one follow-up user turn. `idx` orders events within the session. */
+export interface FrictionEventInput {
+  idx: number
+  /** seq of the user turn this event points at — the evidence pointer. */
+  turnSeq?: number
+  blockIdx?: number
+  type: FrictionType
+  trigger: FrictionTrigger
+  remedyHint: FrictionRemedy
+  description: string
+  /** Existing or just-minted topic id; undefined when no topic fits. */
+  topicId?: string
+}
+
 export interface AnnotationInput {
   key: string
   value: unknown

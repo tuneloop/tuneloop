@@ -13,6 +13,7 @@ import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
+import { loadFriction } from './friction'
 
 function init() {
   // Attach Back/Forward + hash-edit listeners and read where the URL says to land.
@@ -122,7 +123,8 @@ function init() {
   loadKpis();
   // Sessions load via buildFilters() → applyFilters() once facets resolve, so the
   // list arrives already windowed to the default (30d) with its active chips.
-  loadArtifacts();
+  loadArtifacts()
+  loadFriction();
   get('/api/outcome-types').then(function (t) {
     state.outcomeTypes = t || [];
     if (state.metric === 'success_rate') renderSrControls();

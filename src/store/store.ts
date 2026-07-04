@@ -5,12 +5,12 @@ import type { ProcessorResult, RefreshResult } from '../core/processor'
 import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
 import { deterministicBlocks } from '../core/blocks'
-import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
+import { classifyError, ERROR_CATEGORIES, resultText } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import { isSyntheticUser } from '../core/turns'
+import { isSyntheticUser, stripReminders } from '../core/turns'
 import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
 
 export interface Dist {
@@ -55,6 +55,39 @@ export interface Summary {
   complexity: Dist[]
   autonomy: Dist[]
   features: { total: number; derived: number; linked: number }
+}
+
+/** One topic row + baseline for the Friction view (see frictionOverview). */
+export interface FrictionOverview {
+  topics: Array<{
+    id: string
+    label: string
+    type: string
+    remedy: string | null
+    repo: string | null
+    events: number
+    sessions: number
+    avgCostUsd: number | null
+    successRate: number | null
+    mergedRate: number | null
+  }>
+  baseline: { sessions: number; avgCostUsd: number | null; successRate: number | null; mergedRate: number | null }
+  untopicedEvents: number
+  repos: string[]
+}
+
+/** One friction event with its evidence turn, for the topic drill-down. */
+export interface FrictionTopicEvent {
+  sessionId: string
+  sessionTitle: string
+  startedAt: string | null
+  turnSeq: number | null
+  type: string
+  trigger: string
+  remedyHint: string
+  description: string
+  /** The user's actual words (from the session blob); absent when unrecoverable. */
+  evidence?: string
 }
 
 /** One computed insight for the Highlights digest. The client maps `kind` to the
@@ -318,6 +351,35 @@ export class Store {
       this.db.prepare('DELETE FROM block_tool WHERE session_id = ? AND producer = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM block_annotations WHERE session_id = ? AND processor = ?').run(sessionId, processor)
       this.db.prepare('DELETE FROM block_artifacts WHERE session_id = ? AND producer = ?').run(sessionId, processor)
+      this.db.prepare('DELETE FROM friction_events WHERE session_id = ? AND processor = ?').run(sessionId, processor)
+
+      // Topics before events. OR IGNORE keeps identity 
+      // stable: re-minting an existing id never renames or retypes the topic
+      for (const t of result.frictionTopics ?? []) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO friction_topics (id, label, type, remedy, repo, source, first_seen)
+             VALUES (?,?,?,?,?,'derived',?)`,
+          )
+          .run(t.id, t.label, t.type, t.remedy ?? null, t.repo ?? null, t.firstSeen ?? new Date().toISOString())
+      }
+      for (const e of result.frictionEvents ?? []) {
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO friction_events
+               (session_id, idx, processor, turn_seq, block_idx, type, trigger_kind, remedy_hint, description, topic_id)
+             VALUES (?,?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(sessionId, e.idx, processor, e.turnSeq ?? null, e.blockIdx ?? null, e.type, e.trigger, e.remedyHint, e.description, e.topicId ?? null)
+      }
+      // Prune derived topics left with no member events. Unconditional: gating on
+      // friction keys would miss a re-run that now emits none. User topics are kept.
+      this.db
+        .prepare(
+          `DELETE FROM friction_topics WHERE source = 'derived'
+             AND id NOT IN (SELECT DISTINCT topic_id FROM friction_events WHERE topic_id IS NOT NULL)`,
+        )
+        .run()
 
       for (const a of result.annotations ?? []) {
         this.db
@@ -515,6 +577,184 @@ export class Store {
       .prepare("SELECT id, COALESCE(title, '') AS title, parent_artifact_id AS parentId, source FROM artifacts WHERE kind = 'feature'")
       .all() as Array<{ id: string; title: string; parentId: string | null; source: string | null }>
     return rows.map((r) => ({ ...r, repos: repoSets.get(r.id) ?? [] }))
+  }
+
+  /**
+   * Friction topics visible to a session: its repo's topics + globals (repo NULL).
+   * Feeds ProcessorContext.existingTopics so enrich-friction matches existing
+   * topics before minting (assign-at-extraction; see docs/plans/friction-mining.md).
+   */
+  listFrictionTopics(repo: string | null): Array<{ id: string; label: string; type: string; repo: string | null }> {
+    return this.db
+      .prepare(
+        `SELECT id, COALESCE(label, '') AS label, COALESCE(type, 'other') AS type, repo
+         FROM friction_topics WHERE repo IS NULL OR repo = ? ORDER BY first_seen`,
+      )
+      .all(repo ?? '') as Array<{ id: string; label: string; type: string; repo: string | null }>
+  }
+
+  /** Every friction topic (all repos + globals) — the merge pass's input. */
+  allFrictionTopics(): Array<{ id: string; label: string; type: string; repo: string | null; source: string | null }> {
+    return this.db
+      .prepare(`SELECT id, COALESCE(label,'') AS label, COALESCE(type,'other') AS type, repo, source FROM friction_topics ORDER BY first_seen`)
+      .all() as Array<{ id: string; label: string; type: string; repo: string | null; source: string | null }>
+  }
+
+  /**
+   * Apply one topic merge (Phase 2 of the friction-mining plan): re-point every
+   * member event of `dropId` to `keepId`, then delete the absorbed topic. The
+   * kept topic's identity (id, label) is untouched. Only derived topics may be
+   * absorbed — a user-authored topic is never auto-deleted.
+   */
+  applyFrictionMerge(keepId: string, dropId: string): boolean {
+    const tx = this.db.transaction(() => {
+      const keep = this.db.prepare('SELECT id FROM friction_topics WHERE id = ?').get(keepId)
+      const drop = this.db.prepare("SELECT id FROM friction_topics WHERE id = ? AND COALESCE(source,'derived') <> 'user'").get(dropId)
+      if (!keep || !drop || keepId === dropId) return false
+      this.db.prepare('UPDATE friction_events SET topic_id = ? WHERE topic_id = ?').run(keepId, dropId)
+      this.db.prepare('DELETE FROM friction_topics WHERE id = ?').run(dropId)
+      return true
+    })
+    return tx()
+  }
+
+  /**
+   * The Friction view's main payload: every topic with member counts and the
+   * outcome/cost profile of its member sessions, plus the BASELINE over all
+   * friction-analyzed sessions (the fair comparison cohort — sessions never run
+   * through enrich-friction don't dilute it). All numbers are read-time (the
+   * store holds no rollups) and, per DR-6 (friction-mining plan), they are
+   * associations to display, never causal claims.
+   */
+  frictionOverview(repo?: string | null): FrictionOverview {
+    const repoPred = repo ? 'AND s.repo = ?' : ''
+    const repoArgs = repo ? [repo] : []
+
+    // One row per (topic, member session) with that session's outcome bits —
+    // DISTINCT so a topic with several events in one session counts it once.
+    const memberStats = this.db
+      .prepare(
+        `SELECT topic_id AS id, COUNT(*) AS sessions, AVG(cost_usd) AS avgCostUsd,
+                AVG(success) AS successRate, AVG(merged) AS mergedRate
+         FROM (
+           SELECT DISTINCT e.topic_id, s.id AS sid, s.cost_usd,
+             EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'session_success') AS success,
+             EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'pr_merged') AS merged
+           FROM friction_events e JOIN sessions s ON s.id = e.session_id
+           WHERE e.topic_id IS NOT NULL ${repoPred}
+         ) GROUP BY topic_id`,
+      )
+      .all(...repoArgs) as Array<{ id: string; sessions: number; avgCostUsd: number | null; successRate: number; mergedRate: number }>
+    const statsById = new Map(memberStats.map((r) => [r.id, r]))
+
+    // The repo slice constrains the events count too (session join), not just topic
+    // visibility — else a GLOBAL topic shows all-repo occurrences next to sliced stats.
+    const topicRows = this.db
+      .prepare(
+        `SELECT t.id, COALESCE(t.label,'') AS label, COALESCE(t.type,'other') AS type, t.remedy, t.repo,
+                COUNT(s.id) AS events
+         FROM friction_topics t
+         LEFT JOIN friction_events e ON e.topic_id = t.id
+         LEFT JOIN sessions s ON s.id = e.session_id ${repo ? 'AND s.repo = ?' : ''}
+         WHERE 1=1 ${repo ? 'AND (t.repo IS NULL OR t.repo = ?)' : ''}
+         GROUP BY t.id`,
+      )
+      .all(...(repo ? [repo, repo] : [])) as Array<{ id: string; label: string; type: string; remedy: string | null; repo: string | null; events: number }>
+
+    const topics = topicRows
+      .map((t) => {
+        const st = statsById.get(t.id)
+        return {
+          ...t,
+          sessions: st?.sessions ?? 0,
+          avgCostUsd: st?.avgCostUsd ?? null,
+          successRate: st ? st.successRate : null,
+          mergedRate: st ? st.mergedRate : null,
+        }
+      })
+      // A repo slice hides topics whose remaining member sessions are elsewhere.
+      .filter((t) => !repo || t.sessions > 0)
+      .sort((a, b) => b.events - a.events || b.sessions - a.sessions)
+
+    // Baseline cohort: friction-analyzed sessions (the friction_count annotation
+    // is written on every enrich-friction run, including zero-event ones).
+    const baseline = this.db
+      .prepare(
+        `SELECT COUNT(*) AS sessions, AVG(cost_usd) AS avgCostUsd,
+                AVG(success) AS successRate, AVG(merged) AS mergedRate
+         FROM (
+           SELECT s.id, s.cost_usd,
+             EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'session_success') AS success,
+             EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'pr_merged') AS merged
+           FROM sessions s
+           WHERE EXISTS (SELECT 1 FROM annotations a WHERE a.session_id = s.id AND a.key = 'friction_count') ${repoPred}
+         )`,
+      )
+      .get(...repoArgs) as { sessions: number; avgCostUsd: number | null; successRate: number | null; mergedRate: number | null }
+
+    const untopiced = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM friction_events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.topic_id IS NULL ${repoPred}`,
+      )
+      .get(...repoArgs) as { n: number }
+
+    // Repos that have any friction data — drives the view's repo slicer.
+    const repos = (
+      this.db
+        .prepare(
+          `SELECT DISTINCT s.repo FROM friction_events e JOIN sessions s ON s.id = e.session_id
+           WHERE s.repo IS NOT NULL AND s.repo <> '' ORDER BY s.repo`,
+        )
+        .all() as Array<{ repo: string }>
+    ).map((r) => r.repo)
+
+    return { topics, baseline, untopicedEvents: untopiced.n, repos }
+  }
+
+  /**
+   * One topic's evidence: every member event joined to its session, with the
+   * ACTUAL user turn text pulled from the session blob via turn_seq (the
+   * credibility of the topic view rests on showing the human's own words —
+   * DR-1). Blobs are decompressed once per member session; a missing blob or
+   * seq degrades to the abstract description, never an error.
+   */
+  frictionTopicEvents(topicId: string, repo?: string | null): FrictionTopicEvent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT e.session_id AS sessionId, e.turn_seq AS turnSeq, e.type, e.trigger_kind AS trigger,
+                e.remedy_hint AS remedyHint, e.description,
+                COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id = s.id AND key = 'title'), s.title, s.id) AS sessionTitle,
+                s.started_at AS startedAt
+         FROM friction_events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.topic_id = ? ${repo ? 'AND s.repo = ?' : ''}
+         ORDER BY s.started_at DESC, e.idx`,
+      )
+      .all(...(repo ? [topicId, repo] : [topicId])) as Array<FrictionTopicEvent & { turnSeq: number | null }>
+
+    // seq → user-turn text, one blob decompression per distinct session.
+    const turnText = new Map<string, Map<number, string>>()
+    for (const r of rows) {
+      if (r.turnSeq == null || turnText.has(r.sessionId)) continue
+      const seqMap = new Map<number, string>()
+      const blob = this.db.prepare('SELECT gz FROM session_blobs WHERE id = ?').get(r.sessionId) as { gz: Buffer } | undefined
+      if (blob?.gz) {
+        try {
+          const session = JSON.parse(gunzipSync(blob.gz).toString('utf8')) as Session
+          for (const ev of session.events) {
+            if (ev.kind === 'user' && !ev.isSidechain && ev.seq != null) seqMap.set(ev.seq, stripReminders(ev.text))
+          }
+        } catch {
+          /* evidence degrades to the description */
+        }
+      }
+      turnText.set(r.sessionId, seqMap)
+    }
+    for (const r of rows) {
+      const text = r.turnSeq != null ? turnText.get(r.sessionId)?.get(r.turnSeq) : undefined
+      if (text) r.evidence = text.length > 500 ? text.slice(0, 500) + ' …' : text
+    }
+    return rows
   }
 
   /**
@@ -3362,28 +3602,3 @@ function clipError(s: string): string {
   return s.slice(0, head).trimEnd() + `\n  … ${s.length - head - tail} chars omitted … \n` + s.slice(-tail).trimStart()
 }
 
-/** Best-effort readable text from a tool result's raw payload (string, content-block array, or object). */
-function resultText(raw: unknown): string {
-  if (raw == null) return ''
-  if (typeof raw === 'string') return raw
-  if (Array.isArray(raw)) {
-    return raw
-      .map((b) => (typeof b === 'string' ? b : b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
-      .filter(Boolean)
-      .join('\n')
-  }
-  if (typeof raw === 'object') {
-    const o = raw as Record<string, unknown>
-    for (const k of ['stdout', 'stderr', 'error', 'message', 'content']) {
-      const v = o[k]
-      if (typeof v === 'string' && v) return v
-      if (Array.isArray(v)) return resultText(v)
-    }
-    try {
-      return JSON.stringify(o)
-    } catch {
-      return ''
-    }
-  }
-  return String(raw)
-}

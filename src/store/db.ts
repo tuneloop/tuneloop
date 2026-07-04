@@ -307,6 +307,42 @@ CREATE TABLE IF NOT EXISTS user_link_overrides (
   PRIMARY KEY (session_id, artifact_id),
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+-- Friction topics: recurring cross-session friction patterns, maintained
+-- incrementally by enrich-friction (assign-at-extraction, like features).
+-- Identity is stable: rows are INSERT OR IGNOREd, never auto-renamed (a bad
+-- rename would retroactively mislabel every member event). repo NULL = global.
+CREATE TABLE IF NOT EXISTS friction_topics (
+  id         TEXT PRIMARY KEY,   -- friction:derived:<repo-slug>:<label-slug>
+  label      TEXT,
+  type       TEXT,               -- dominant coarse type (re-steer | context-supply | ...)
+  remedy     TEXT,               -- dominant remedy hint (add_doc | add_skill | ...)
+  repo       TEXT,               -- NULL = global (preference-type topics)
+  source     TEXT,               -- derived | user
+  first_seen TEXT
+);
+
+-- Friction events: one row per follow-up user turn where the human had to
+-- compensate for the agent (nudge / re-steer / re-supply context / rework).
+-- turn_seq points at the evidence turn in the session blob; topic_id groups
+-- occurrences across sessions. No rollups here — topic counts are read-time.
+CREATE TABLE IF NOT EXISTS friction_events (
+  session_id   TEXT,
+  idx          INTEGER,          -- position within the session's event list
+  processor    TEXT,
+  turn_seq     INTEGER,          -- seq of the user turn (evidence pointer)
+  block_idx    INTEGER,          -- owning block, when resolvable
+  type         TEXT,             -- re-steer | context-supply | tool-gap | rework | preference | other
+  trigger_kind TEXT,             -- unprompted | after_tool_error | after_review | agent_stated
+  remedy_hint  TEXT,             -- add_doc | add_skill | add_tool | model_or_prompt | none
+  description  TEXT,             -- one abstract sentence (the clusterable text)
+  topic_id     TEXT,             -- NULL when the event matched no topic
+  PRIMARY KEY (session_id, idx),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY(topic_id) REFERENCES friction_topics(id)
+);
+CREATE INDEX IF NOT EXISTS ix_friction_events_topic ON friction_events(topic_id);
+CREATE INDEX IF NOT EXISTS ix_friction_events_type ON friction_events(type);
 `
 
 export function openDb(path: string): DB {

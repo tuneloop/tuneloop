@@ -19,6 +19,32 @@
  */
 import type { CanonicalAction } from './model'
 
+/** Best-effort readable text from a tool result's raw payload (string, content-block array, or object). */
+export function resultText(raw: unknown): string {
+  if (raw == null) return ''
+  if (typeof raw === 'string') return raw
+  if (Array.isArray(raw)) {
+    return raw
+      .map((b) => (typeof b === 'string' ? b : b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  if (typeof raw === 'object') {
+    const o = raw as Record<string, unknown>
+    for (const k of ['stdout', 'stderr', 'error', 'message', 'content']) {
+      const v = o[k]
+      if (typeof v === 'string' && v) return v
+      if (Array.isArray(v)) return resultText(v)
+    }
+    try {
+      return JSON.stringify(o)
+    } catch {
+      return ''
+    }
+  }
+  return String(raw)
+}
+
 export interface ErrorCategorySpec {
   key: string
   label: string

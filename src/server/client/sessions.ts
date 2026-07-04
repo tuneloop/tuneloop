@@ -1934,7 +1934,7 @@ function linkAcSelect(inp: HTMLInputElement, menu: HTMLElement, sessionId: strin
 }
 
 export function setView(name) {
-  ['highlights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'dashboard', 'artifacts', 'friction', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {

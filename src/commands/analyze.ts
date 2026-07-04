@@ -19,6 +19,7 @@ import type { Summary } from '../store/store'
 import { createLogger } from '../util/log'
 import { Progress } from '../util/progress'
 import { makeSh } from '../util/sh'
+import { runFrictionMerge } from '../reducers/friction-merge'
 
 export interface AnalyzeOptions {
   dirs?: string[]
@@ -277,6 +278,17 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       }
     } catch (err) {
       log.warn(`refresh failed for ${p.name}: ${(err as Error).message}`)
+    }
+  }
+
+  // Cross-session reduce step: merge near-duplicate friction topics (Phase 2 of
+  // friction mining). Hash-gated on the topic set, so a run that minted no new
+  // topics skips it; a failure degrades to unmerged topics, never aborts analyze.
+  if (llm) {
+    try {
+      await runFrictionMerge(store, llm, log)
+    } catch (err) {
+      log.warn(`friction merge pass failed: ${(err as Error).message}`)
     }
   }
 

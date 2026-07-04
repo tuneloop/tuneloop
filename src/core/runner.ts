@@ -1,5 +1,5 @@
 import type { Session } from './model'
-import type { FeatureRef, Processor, ProcessorContext } from './processor'
+import type { FeatureRef, FrictionTopicRef, Processor, ProcessorContext } from './processor'
 import type { LlmClient } from '../llm/types'
 import type { Store } from '../store/store'
 import type { Logger } from '../util/log'
@@ -51,13 +51,17 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   // The whole (cross-repo) hierarchy is sent; repo isolation is enforced on
   // linkage inside the processor, not by hiding other repos' features.
   const existingFeatures: FeatureRef[] = store.listFeatures()
+  // Same freshness rule for friction topics (repo-scoped + globals): a session
+  // must see topics that earlier sessions in this run minted, so occurrences
+  // accumulate on one topic instead of spawning near-duplicates.
+  const existingTopics: FrictionTopicRef[] = store.listFrictionTopics(session.project.repo ?? null) as FrictionTopicRef[]
   const rejectedFeatureTitles = store.rejectedFeatureTitles(session.id)
   const allUserLinked = store.userLinkedArtifactsAll(session.id)
   const userLinkedArtifacts = allUserLinked
     .filter((a) => a.kind === 'feature' || !a.hasNonEnrichBlocks)
     .map(({ hasNonEnrichBlocks: _, ...rest }) => rest)
   const prBlockAttributions = store.prBlockAttributions(session.id)
-  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, rejectedFeatureTitles, userLinkedArtifacts, prBlockAttributions, sh }
+  const ctx: ProcessorContext = { session, log, llmEnabled, llm, existingFeatures, existingTopics, rejectedFeatureTitles, userLinkedArtifacts, prBlockAttributions, sh }
   // The cache key is the session's content hash alone. Link/unlink no longer
   // perturbs the hash — those actions invalidate the affected processor_runs
   // rows directly (Store.invalidateSessionProcessors), so a re-linked artifact

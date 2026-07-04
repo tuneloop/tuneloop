@@ -4,7 +4,7 @@ import { enrichPrArtifact, parsePrRefs, prArtifactBase } from './github-pr'
 import type { Block } from '../core/blocks'
 import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
-import { isSyntheticUser, stripReminders } from '../core/turns'
+import { followupTurns, userTurns } from '../core/turns'
 import { costOfUsage } from '../pricing/pricing'
 import type { JsonSchema } from '../llm/types'
 import type {
@@ -618,50 +618,6 @@ function digest(s: Session): string {
     tail || '(none)',
   ].join('\n')
 }
-
-/**
- * All main-thread human turns, in order. Excludes sidechain (subagent) turns,
- * strips injected reminders, and drops Claude-injected pseudo-user turns —
- * slash-command echoes, local-command caveats/stdout, interrupts, tool
- * rejections. Those are machinery, not the human steering the agent; counting
- * them skewed the opener (the first REAL prompt) and the autonomy signal (AL-33).
- */
-function userTurns(s: Session): string[] {
-  const out: string[] = []
-  for (const ev of s.events) {
-    if (ev.kind !== 'user' || ev.isSidechain) continue
-    const t = stripReminders(ev.text)
-    if (t && !isSyntheticUser(t)) out.push(t)
-  }
-  return out
-}
-
-/**
- * Substantive follow-up turns: the user turns AFTER the opening request, minus
- * bare approvals/continuations ("yes", "continue"). This is a CEILING on
- * steering, not steering itself — a follow-up may be genuine direction
- * ("use Postgres instead") or mere workflow progression ("commit and open a PR",
- * "mark it done"), and only the model can tell those apart from the text. The
- * count feeds the autonomy classification (autonomous → guided → minimal as
- * genuine steering rises; see AL-33). Deliberately conservative: only whole-turn
- * known approvals are dropped, so nothing substantive is hidden from the model.
- */
-function followupTurns(turns: string[]): string[] {
-  return turns.slice(1).filter((t) => !isApproval(t))
-}
-
-/** A short, content-free affirmation/continuation ("yes", "ok continue") that lets the agent proceed rather than redirecting it. */
-function isApproval(text: string): boolean {
-  const t = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
-  if (!t) return true
-  if (t.split(' ').length > 6) return false // too long to be a bare approval
-  return APPROVAL_RE.test(t)
-}
-
-// Whole-turn approval/continuation phrases (matched against punctuation-stripped,
-// lowercased text). Kept conservative — when unsure, a turn counts as steering.
-const APPROVAL_RE =
-  /^(y|yes|yep|yup|yeah|ya|ok|okay|k|kk|sure|fine|cool|great|perfect|nice|good|awesome|excellent|thanks|thank you|thanks a lot|thank you so much|ty|thx|continue|please continue|proceed|go|go ahead|go for it|go on|do it|do that|keep going|carry on|next|lgtm|looks good|looks great|that works|sounds good|ship it|approved|correct|right|exactly|agreed|got it|makes sense|yes please|ok thanks|perfect thanks|great thanks|yes continue|ok continue|ok go ahead|sure go ahead)$/
 
 /** Keep every turn within budget; for very long sessions keep the opening + most recent and elide the middle. */
 function userSpine(turns: string[], perMsg = 800, totalBudget = 6000): string {

@@ -78,7 +78,7 @@ const ghSh = async (cmd: string, args: string[]): Promise<ShResult | null> => {
 }
 
 function ctx(session: Session, llm: LlmClient, sh = ghSh): ProcessorContext {
-  return { session, log: noopLog, llmEnabled: true, llm, existingFeatures: [], rejectedFeatureTitles: [], userLinkedArtifacts: [], prBlockAttributions: [], sh }
+  return { session, log: noopLog, llmEnabled: true, llm, existingFeatures: [], existingTopics: [], rejectedFeatureTitles: [], userLinkedArtifacts: [], prBlockAttributions: [], sh }
 }
 
 describe('enrich-session reviewed-PR linkage', () => {

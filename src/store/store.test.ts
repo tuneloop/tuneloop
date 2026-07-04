@@ -122,3 +122,79 @@ describe('summary.lastAnalyzedAt', () => {
     expect(store.summary().lastAnalyzedAt).toBe('2026-06-30T12:00:00.000Z')
   })
 })
+
+describe('friction events + topics persistence', () => {
+  const ev = (idx: number, topicId?: string) => ({
+    idx,
+    turnSeq: idx * 2,
+    type: 'context-supply' as const,
+    trigger: 'unprompted' as const,
+    remedyHint: 'add_doc' as const,
+    description: `event ${idx}`,
+    topicId,
+  })
+  const topic = { id: 'friction:derived:o-r:sqlite-db', label: 'Default Sqlite Db Not Known', type: 'context-supply' as const, repo: 'o/r' }
+
+  it('round-trips events + topics; re-persist replaces; orphaned derived topics are pruned', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+
+    store.persistResult('s1', 'enrich-friction', 1, 'h1', 'm', {
+      frictionTopics: [topic],
+      frictionEvents: [ev(0, topic.id), ev(1)],
+    })
+    expect(db.prepare('SELECT COUNT(*) c FROM friction_events').get()).toMatchObject({ c: 2 })
+    expect(store.listFrictionTopics('o/r')).toEqual([expect.objectContaining({ id: topic.id, label: topic.label })])
+    // repo scoping: another repo does not see it; globals would.
+    expect(store.listFrictionTopics('other/repo')).toEqual([])
+
+    // Re-persist with no friction at all: events replaced, orphan topic pruned.
+    store.persistResult('s1', 'enrich-friction', 2, 'h2', 'm', {})
+    expect(db.prepare('SELECT COUNT(*) c FROM friction_events').get()).toMatchObject({ c: 0 })
+    expect(store.listFrictionTopics('o/r')).toEqual([])
+  })
+
+  it('re-minting an existing topic id keeps the original row (identity is stable)', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    seedSession(store, db, 's2')
+
+    store.persistResult('s1', 'enrich-friction', 1, 'h1', 'm', { frictionTopics: [topic], frictionEvents: [ev(0, topic.id)] })
+    store.persistResult('s2', 'enrich-friction', 1, 'h2', 'm', {
+      frictionTopics: [{ ...topic, label: 'A Different Label' }],
+      frictionEvents: [ev(0, topic.id)],
+    })
+    expect(store.listFrictionTopics('o/r')).toEqual([expect.objectContaining({ label: 'Default Sqlite Db Not Known' })])
+    // Both sessions' events share the topic.
+    expect(db.prepare('SELECT COUNT(*) c FROM friction_events WHERE topic_id = ?').get(topic.id)).toMatchObject({ c: 2 })
+  })
+
+  it('a repo slice constrains a GLOBAL topic to sliced event counts and drill-down events', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 'sa')
+    seedSession(store, db, 'sb')
+    db.prepare("UPDATE sessions SET repo = 'a' WHERE id = 'sa'").run()
+    db.prepare("UPDATE sessions SET repo = 'b' WHERE id = 'sb'").run()
+    const g = { id: 'friction:derived:global:oss-pr', label: 'OSS PR Descriptions', type: 'preference' as const }
+    store.persistResult('sa', 'enrich-friction', 1, 'ha', 'm', { frictionTopics: [g], frictionEvents: [ev(0, g.id), ev(1, g.id)] })
+    store.persistResult('sb', 'enrich-friction', 1, 'hb', 'm', { frictionTopics: [g], frictionEvents: [ev(0, g.id)] })
+
+    expect(store.frictionOverview(null).topics[0]).toMatchObject({ id: g.id, events: 3 })
+    // Sliced to repo a: the row's occurrences must agree with its sliced session stats.
+    expect(store.frictionOverview('a').topics[0]).toMatchObject({ id: g.id, events: 2, sessions: 1 })
+    expect(store.frictionTopicEvents(g.id)).toHaveLength(3)
+    expect(store.frictionTopicEvents(g.id, 'a')).toHaveLength(2)
+  })
+
+  it('deleting a session cascades its friction events', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    store.persistResult('s1', 'enrich-friction', 1, 'h1', 'm', { frictionTopics: [topic], frictionEvents: [ev(0, topic.id)] })
+    db.prepare('DELETE FROM sessions WHERE id = ?').run('s1')
+    expect(db.prepare('SELECT COUNT(*) c FROM friction_events').get()).toMatchObject({ c: 0 })
+  })
+})

@@ -20,6 +20,9 @@ import type {
   BlockUsageInput,
   FeatureRevisionInput,
   FileIndexInput,
+  FrictionEventInput,
+  FrictionTopicInput,
+  FrictionType,
   OutcomeInput,
   SessionArtifactInput,
 } from '../store/types'
@@ -54,6 +57,15 @@ export interface FeatureRef {
   repos?: string[]
 }
 
+/** An existing friction topic a processor can assign events to (see FrictionTopicInput). */
+export interface FrictionTopicRef {
+  id: string
+  label: string
+  type: FrictionType
+  /** Owning repo; null/undefined = global. */
+  repo?: string | null
+}
+
 /** A user-linked artifact that needs block-level attribution. */
 export interface UserLinkedArtifact {
   artifactId: string
@@ -78,6 +90,11 @@ export interface ProcessorContext {
   llm: LlmClient | null
   /** Existing features in the store, to bias derived feature linkage toward. */
   existingFeatures: FeatureRef[]
+  /**
+   * Existing friction topics visible to this session (its repo + globals), read
+   * fresh per session like existingFeatures so assignments compound across a run.
+   */
+  existingTopics: FrictionTopicRef[]
   /** Titles of features the user has rejected for this session (tombstoned). */
   rejectedFeatureTitles: string[]
   /** User-linked PRs/features for this session that have no block-level attribution yet. */
@@ -105,6 +122,9 @@ export interface ProcessorResult {
   /** Per-block labels / links (use_case from enrich-session, PR/commit from outcomes-git, feature from enrich-session). */
   blockAnnotations?: BlockAnnotationInput[]
   blockArtifacts?: BlockArtifactInput[]
+  /** Friction facts (enrich-friction): topics first (events reference them by id). */
+  frictionTopics?: FrictionTopicInput[]
+  frictionEvents?: FrictionEventInput[]
   /** For enrichment processors: the LLM spend this processor incurred. */
   selfCost?: { tokens: TokenUsage; usd: number }
 }

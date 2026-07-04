@@ -3,7 +3,13 @@
  * "user" messages. Several features need this distinction: the session digest
  * (so autonomy/intent aren't skewed by slash-command echoes) and the
  * Files-changed view (so an edit links to the prompt that actually caused it).
+ *
+ * Also home to the turn-spine helpers (userTurns / followupTurns / isApproval)
+ * shared by enrich-session's digest and the steering processor — one definition
+ * of "substantive follow-up" so the deterministic count and the LLM prompt can
+ * never disagree.
  */
+import type { Session } from './model'
 
 // Claude-injected "user" turns that aren't the human's intent: slash-command
 // echoes and their args/output (`<command-name>`, `<command-args>`,
@@ -31,3 +37,58 @@ export function isRealUserText(text: string): boolean {
   const t = stripReminders(text)
   return !!t && !isSyntheticUser(t)
 }
+
+/**
+ * All main-thread human turns, in order. Excludes sidechain (subagent) turns,
+ * strips injected reminders, and drops Claude-injected pseudo-user turns —
+ * slash-command echoes, local-command caveats/stdout, interrupts, tool
+ * rejections. Those are machinery, not the human steering the agent; counting
+ * them skewed the opener (the first REAL prompt) and the autonomy signal (AL-33).
+ */
+export function userTurns(s: Session): string[] {
+  return userTurnEvents(s).map((t) => t.text)
+}
+
+/** A real human turn plus its main-thread seq — the evidence pointer friction events persist. */
+export interface UserTurn {
+  text: string
+  seq?: number
+}
+
+/** Same filter as userTurns, but keeps each turn's seq (see UserTurn). */
+export function userTurnEvents(s: Session): UserTurn[] {
+  const out: UserTurn[] = []
+  for (const ev of s.events) {
+    if (ev.kind !== 'user' || ev.isSidechain) continue
+    const t = stripReminders(ev.text)
+    if (t && !isSyntheticUser(t)) out.push({ text: t, seq: ev.seq })
+  }
+  return out
+}
+
+/**
+ * Substantive follow-up turns: the user turns AFTER the opening request, minus
+ * bare approvals/continuations ("yes", "continue"). This is a CEILING on
+ * steering, not steering itself — a follow-up may be genuine direction
+ * ("use Postgres instead") or mere workflow progression ("commit and open a PR",
+ * "mark it done"), and only a model can tell those apart from the text. The
+ * count feeds the autonomy classification and the deterministic `followup_count`
+ * annotation (steering processor). Deliberately conservative: only whole-turn
+ * known approvals are dropped, so nothing substantive is hidden.
+ */
+export function followupTurns(turns: string[]): string[] {
+  return turns.slice(1).filter((t) => !isApproval(t))
+}
+
+/** A short, content-free affirmation/continuation ("yes", "ok continue") that lets the agent proceed rather than redirecting it. */
+export function isApproval(text: string): boolean {
+  const t = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!t) return true
+  if (t.split(' ').length > 6) return false // too long to be a bare approval
+  return APPROVAL_RE.test(t)
+}
+
+// Whole-turn approval/continuation phrases (matched against punctuation-stripped,
+// lowercased text). Kept conservative — when unsure, a turn counts as steering.
+const APPROVAL_RE =
+  /^(y|yes|yep|yup|yeah|ya|ok|okay|k|kk|sure|fine|cool|great|perfect|nice|good|awesome|excellent|thanks|thank you|thanks a lot|thank you so much|ty|thx|continue|please continue|proceed|go|go ahead|go for it|go on|do it|do that|keep going|carry on|next|lgtm|looks good|looks great|that works|sounds good|ship it|approved|correct|right|exactly|agreed|got it|makes sense|yes please|ok thanks|perfect thanks|great thanks|yes continue|ok continue|ok go ahead|sure go ahead)$/
