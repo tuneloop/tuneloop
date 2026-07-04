@@ -38,7 +38,7 @@ program
   .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
   .option('--llm-model <id>', 'enrichment model id; overrides env')
   .option('--llm-base-url <url>', 'OpenAI-compatible endpoint URL (for openai-compatible / custom hosts); overrides env')
-  .option('--no-serve', 'analyze only; do not serve the dashboard or open the browser')
+  .option('--no-serve', 'analyze only; do not serve the dashboard')
   .option('-v, --verbose', 'verbose logging')
   .action(
     async (
@@ -66,7 +66,8 @@ program
         verbose: options.verbose,
         llm: { provider: options.llmProvider, model: options.llmModel, baseURL: options.llmBaseUrl },
       })
-      // Serve + open the browser by default so results are visible immediately; --no-serve opts out.
+      // Serve the dashboard by default and print its URL (press Enter to open a
+      // browser tab); --no-serve opts out.
       if (options.serve !== false) {
         await serve({ db: options.db, port: options.port })
       }
@@ -78,7 +79,7 @@ program
   .description('Serve the local dashboard over the analyzed store.')
   .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--port <n>', 'port to listen on (default 4319)', (v) => parseInt(v, 10))
-  .option('--no-open', 'do not open the browser automatically')
+  .option('--no-open', 'serve headless; do not prompt to open the browser')
   .action(async (options: { db?: string; port?: number; open?: boolean }) => {
     await serve({ db: options.db, port: options.port, open: options.open })
   })

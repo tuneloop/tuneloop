@@ -3,12 +3,12 @@
 // Lands on the Highlights tab by default (when the hash is empty); an explicit
 // deep link to any other view wins. Bundled by tsup into dist/client/app.js and
 // loaded by index.html.
-import { state, $, esc, get, dayOf } from './core'
+import { state, $, esc, get, dayOf, tildeHome } from './core'
 import { initRouter, withoutSync, buildHash } from './router'
 import { loadFacets } from './facets'
 import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
-import { renderHighlights, paintHighlights, goHighlights } from './home'
+import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams } from './sessions'
@@ -57,7 +57,7 @@ function init() {
     state.overview = o;
     var range = o.firstAt && o.lastAt ? dayOf(o.firstAt) + ' → ' + dayOf(o.lastAt) : '';
     // Tilde the home dir so screenshots don't leak the username.
-    var tilde = function (p) { return (p || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/'); };
+    var tilde = tildeHome;
     var dbPath = tilde(o.dbPath || '');
     // The header shows just the store location; the session range, last-analyzed
     // time, and per-directory scan history live in an info popover beside it.
@@ -104,6 +104,7 @@ function init() {
     renderNotices();
     paintKpis();
     paintHighlights();
+    paintDashAsk();
     loadFacets().then(function () {
       // Build the sessions filter bar. If we landed on the sessions view, restore
       // its filter from the URL (facets are needed to populate the selects, so this

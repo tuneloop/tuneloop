@@ -658,6 +658,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .home-ask { max-width: 720px; margin-top: 18px; padding: 14px 16px; background: var(--track); border-radius: 10px; font-size: 13px; color: var(--ink); }
 .home-ask code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; background: var(--paper); padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
 .home-ask .muted { color: var(--muted); }
+/* On the Dashboard tab the deep-dive prompt spans the content width; on Highlights
+   it stays inside the 720px reading column (same pattern as .notice above). */
+#dash-ask .home-ask { max-width: none; }
 .home-back { display: inline-block; margin-top: 10px; cursor: pointer; }
 
 /* Store-state nudge (fresh / un-enriched store) — see notice.ts. Emerald-accented

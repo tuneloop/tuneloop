@@ -3,7 +3,7 @@
 // each a sentence with the real numbers + a "See the data →" drill-in into the
 // surface behind it (with a grounding banner, see askbanner.ts). Rendered into
 // #metric-detail when state.metric === 'highlights' (the landing default).
-import { state, $, esc, usd, num, get } from './core'
+import { state, $, esc, usd, num, get, tildeHome } from './core'
 import { openMetric, renderWindow, loadKpis } from './kpis'
 import { filterByArtifact, setView } from './sessions'
 import { openArtifactSearch } from './artifacts'
@@ -191,6 +191,28 @@ export function renderHighlights() {
   });
 }
 
+// The store path shown in the "deep dive" prompt: the highlights payload's if
+// loaded, else the overview's, else the default.
+function askDbPath() {
+  return tildeHome((lastHl && lastHl.dbPath) || (state.overview && state.overview.dbPath) || '~/.tuneloop/tuneloop.sqlite');
+}
+
+// The "explore the raw store yourself" prompt shared by the Highlights and
+// Dashboard tabs (query-skill pitch). One string so the copy never diverges.
+export function deepDiveHtml() {
+  return '<div class="home-ask">Want to do a deep dive into the data? It all lives in a local SQLite store at ' +
+    '<code>' + esc(askDbPath()) + '</code>. Install the query skill and your coding agent can explore it for you: ' +
+    '<code>npx skills add tuneloop/tuneloop</code></div>';
+}
+
+// Mirror the prompt at the bottom of the Dashboard tab. Hidden on an empty store
+// (nothing to explore yet), matching how Highlights suppresses its own body.
+export function paintDashAsk() {
+  var el = $('#dash-ask');
+  if (!el) return;
+  el.innerHTML = storeStatus() === 'empty' ? '' : deepDiveHtml();
+}
+
 // Paint the digest from the last fetched payload. Separated from the fetch so the
 // overview load can trigger a repaint that folds in the store-state nudge (a fresh
 // store replaces the digest with a first-run prompt; an un-enriched one prepends
@@ -211,7 +233,6 @@ export function paintHighlights() {
       '<button type="button" class="hrow-to" data-i="' + i + '">See the data <i>→</i></button></div>';
   }).join('');
   if (!rows) rows = '<div class="empty">Nothing notable in ' + esc(winLabel) + ' yet — widen the window, or run more sessions.</div>';
-  var dbPath = (lastHl && lastHl.dbPath) || (state.overview && state.overview.dbPath) || '~/.tuneloop/tuneloop.sqlite';
   $('#highlights').innerHTML =
     '<div class="hl">' +
     noticeHtml() + // enrichment nudge when un-enriched; '' once enrichment has run
@@ -223,9 +244,7 @@ export function paintHighlights() {
       '<button class="see-tx" type="button" data-view="artifacts">Artifacts →</button>' +
       '<button class="see-tx" type="button" data-view="sessions">Your sessions →</button>' +
     '</div>' +
-    '<div class="home-ask">Want to do a deep dive into the data? It all lives in a local SQLite store at ' +
-    '<code>' + esc(dbPath) + '</code>. Install the query skill and your coding agent can explore it for you: ' +
-    '<code>npx skills add Relvy-AI/tuneloop</code></div></div>';
+    deepDiveHtml() + '</div>';
   Array.prototype.forEach.call(document.querySelectorAll('#highlights .see-tx[data-view]'), function (b) {
     b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); window.scrollTo(0, 0); };
   });

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { createInterface } from 'node:readline'
 import { loadConfig } from '../config'
 import { createDashboardServer, type ShFn } from '../server/http'
 import { openDb } from '../store/db'
@@ -35,6 +36,7 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const port = opts.port ?? 4319
+  const url = `http://localhost:${port}`
   const server = createDashboardServer(store, config.dbPath, makeSh())
 
   server.on('error', (err: NodeJS.ErrnoException) => {
@@ -43,18 +45,28 @@ export async function serve(opts: ServeOptions): Promise<void> {
     process.exitCode = 1
   })
 
+  // Wait for the user to hit Enter before opening a browser tab rather than
+  // launching one unprompted — an auto-opened tab is disruptive when the developer
+  // is mid-task in their browser. Needs an interactive TTY to read the keypress;
+  // --no-open (or a non-TTY stdin) serves headless with no prompt.
+  const interactive = opts.open !== false && Boolean(process.stdin.isTTY)
+
   // Bind to loopback only. The dashboard serves session transcripts (which can
   // contain proprietary code and secrets) over an unauthenticated API; without an
   // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. tuneloop is a
   // local single-developer tool, so 127.0.0.1 is the correct surface.
   server.listen(port, '127.0.0.1', () => {
-    const url = `http://localhost:${port}`
-    process.stdout.write(`\n  tuneloop dashboard  ${url}\n  store: ${config.dbPath}\n  Ctrl+C to stop\n\n`)
-    if (opts.open !== false) tryOpen(url)
+    const hint = interactive ? 'Enter to open in your browser · Ctrl+C to stop' : 'Ctrl+C to stop'
+    process.stdout.write(`\n  tuneloop dashboard  ${url}\n  store: ${config.dbPath}\n  ${hint}\n\n`)
   })
 
   await new Promise<void>((resolve) => {
+    // terminal:false so readline doesn't intercept Ctrl+C; the shell's cooked-mode
+    // stdin still delivers SIGINT to the process and a newline as a 'line' event.
+    const rl = interactive ? createInterface({ input: process.stdin, terminal: false }) : undefined
+    rl?.on('line', () => tryOpen(url))
     process.on('SIGINT', () => {
+      rl?.close()
       server.close()
       store.close()
       process.stdout.write('\nstopped.\n')

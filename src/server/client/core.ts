@@ -195,6 +195,8 @@ export function post(url, body) {
   return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(function (r) { return r.json(); });
 }
 export function dayOf(s) { return s ? String(s).slice(0, 10) : ''; }
+// Collapse a home dir to `~/` so screenshots (and any shared UI) don't leak the username.
+export function tildeHome(p) { return (p || '').replace(/^(\/Users\/[^/]+|\/home\/[^/]+|\/root)\//, '~/'); }
 
 export function badge(v) {
   var c = v === 'success' ? 'b-success' : v === 'partial' ? 'b-partial' : v === 'failure' ? 'b-failure' : v ? 'b-unknown' : 'b-null';
