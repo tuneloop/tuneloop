@@ -61,7 +61,7 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  version: 16,
+  version: 17,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],
@@ -236,47 +236,64 @@ export const enrichSession: Processor = {
       featureRevisions.push({ id, parentId })
     }
 
-    // Reviewed-PR linkage (Layer 2, derived): when a block classified `review`
-    // actually READ a PR, link this session to that PR as `reviewed`. Identity and
-    // the artifact row come from the shared github-pr helpers. We exclude PRs this
-    // same session created/merged (you don't "review" your own PR here). Confidence
-    // is modest (0.6) — the signal is an LLM use-case plus a read, not an explicit
-    // `gh pr review`. Gated on the LLM run, so disabled when no provider is set.
+    // Reviewed-PR linkage (Layer 2, derived): a PR READ inside a `review`-labeled block
+    // links this session to it as `reviewed`. Unlike Layer 1's explicit `gh pr review`
+    // there's no submission event, so we FORWARD-FILL: a read is where a PR ENTERS the
+    // review; the review blocks after it (analysis with no new read) belong to it until
+    // the next PR is read, and leading review blocks backfill to the first read. Bounded
+    // to review blocks (the LLM labeled them), so it never bleeds into production. Soft
+    // signal → confidence 0.6. Excludes self-created PRs and any PR Layer 1 already owns.
     const selfCreated = deterministicPrs
-    // PRs this session EXPLICITLY reviewed (gh pr review / MCP review tool) are
-    // owned by outcomes-git's Layer 1 (deterministic, confidence 1.0). Skip them
-    // here so the soft derived link never clobbers the explicit one.
     const explicitReviewed = new Set(refs.filter((r) => r.kind === 'review').map((r) => r.id))
     const toolBlock = blocks.length > 0 ? blockMembership(session, blocks).tool : []
-    const sessionHasReview = useCases.includes('review')
-    // prId → the review block(s) where it was read. The block set drives block-grain
-    // cost attribution below; a PR with no tool-read block (human-pasted link only)
-    // maps to an empty set and falls back to whole-session cost (a pure-review session
-    // IS the review). A block that reads several PRs links to each — aggregate cost
-    // stays conserved because the cost queries UNION-dedupe identical usage rows.
-    const reviewed = new Map<string, Set<number>>()
+    const seqToBlock: number[] = []
+    for (const b of blocks) for (let s = b.startSeq; s <= b.endSeq; s++) seqToBlock[s] = b.idx
+
+    // Each review block's target PR = the one READ earliest in it (1-1 within reviews).
+    // A tool read orders by toolIndex; a human-pasted link (toolIndex -1) opens the block
+    // via its user turn, so it precedes any tool read (key -1). Tightened gate: the read
+    // must land IN a review block. A PR conflicted out of every block it was read in (an
+    // earlier read won that block) is dropped entirely below — no link, no cost.
+    const target = new Map<number, { pr: string; key: number }>()
     for (const ref of refs) {
       if (ref.kind !== 'read' || selfCreated.has(ref.id) || explicitReviewed.has(ref.id)) continue
-      // Block-grain gate: the PR was read INSIDE a review block. A human-pasted PR
-      // link has no owning tool call, so fall back to "the session reviewed somewhere".
-      const blockIdx = ref.toolIndex >= 0 ? toolBlock[ref.toolIndex] : undefined
-      const inReviewBlock = blockIdx != null && useCases[blockIdx] === 'review'
-      const humanRef = ref.toolIndex < 0 && sessionHasReview
-      if (!inReviewBlock && !humanRef) continue
-      const set = reviewed.get(ref.id) ?? new Set<number>()
-      if (inReviewBlock) set.add(blockIdx!)
-      reviewed.set(ref.id, set)
+      const bi = ref.toolIndex >= 0 ? toolBlock[ref.toolIndex] : ref.atSeq != null ? seqToBlock[ref.atSeq] : undefined
+      if (bi == null || useCases[bi] !== 'review') continue
+      const key = ref.toolIndex >= 0 ? ref.toolIndex : -1
+      const prev = target.get(bi)
+      if (!prev || key < prev.key) target.set(bi, { pr: ref.id, key })
     }
-    for (const [id, reviewBlocks] of reviewed) {
+
+    // Forward-fill the review blocks: carry the last read's PR across analysis blocks;
+    // leading review blocks (before the first read) backfill to the first target.
+    const reviewBlockPr = new Map<number, string>()
+    let curReview: string | undefined
+    const pendingReview: number[] = []
+    for (let bi = 0; bi < blocks.length; bi++) {
+      if (useCases[bi] !== 'review') continue
+      const hit = target.get(bi)?.pr
+      if (hit) {
+        curReview = hit
+        for (const p of pendingReview) reviewBlockPr.set(p, hit)
+        pendingReview.length = 0
+        reviewBlockPr.set(bi, hit)
+      } else if (curReview) {
+        reviewBlockPr.set(bi, curReview)
+      } else {
+        pendingReview.push(bi) // review block before any read — resolves at the first read
+      }
+    }
+
+    // Only PRs that actually won a review block get linked — a PR conflicted out of every
+    // block it was read in earns no link at all (its cost stays with the block's winner).
+    for (const id of new Set(reviewBlockPr.values())) {
       const ref = refs.find((r) => r.id === id)! // any ref carrying this identity
       artifacts.push(await enrichPrArtifact(ctx.sh, prArtifactBase(ref), session.project.cwd))
       sessionArtifacts.push({ artifactId: id, role: 'reviewed', source: 'derived', confidence: 0.6 })
       outcomes.push({ type: 'pr_reviewed', artifactId: id, ts: session.endedAt })
-      // Block-grain: attribute each review block's cost to the PR it reviewed, so
-      // "cost to review PR X" is the review blocks only, not the whole session.
-      for (const bi of reviewBlocks) {
-        blockArtifacts.push({ blockIdx: bi, artifactId: id, role: 'reviewed', source: 'derived', confidence: 0.6 })
-      }
+    }
+    for (const [bi, id] of reviewBlockPr) {
+      blockArtifacts.push({ blockIdx: bi, artifactId: id, role: 'reviewed', source: 'derived', confidence: 0.6 })
     }
 
     return {
