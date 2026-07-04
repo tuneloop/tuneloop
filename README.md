@@ -2,6 +2,9 @@
 
 Local analytics for your AI coding sessions. **Count outcomes, not tokens.**
 
+tuneloop turns the session transcripts your AI coding tools already write into a
+local dashboard of what you actually shipped, what it cost, and your work patterns.
+
 <br>
 
 <p align="center">
@@ -10,9 +13,7 @@ Local analytics for your AI coding sessions. **Count outcomes, not tokens.**
 
 <br>
 
-**tuneloop** turns the session transcripts your AI coding tools already write into
-a local dashboard of what you actually shipped, what it cost, and your work
-patterns. Concretely, it enriches each session with:
+Concretely, it enriches each session with:
 
 - **Outcome links** — merged PRs, features shipped, files changed
 - **Granular cost attribution to outcomes**
@@ -29,7 +30,7 @@ more — this data lets you answer questions like:
 - Are my agents getting more autonomous over time on complex tasks?
 - What's my success rate on repo *X* vs. repo *Y* — or any other dimension you care about?
 
-Works with **Claude Code**, **Codex**, and **OpenCode**. Everything runs and stays
+Works with Claude Code, Codex, and OpenCode. Everything runs and stays
 on your machine; enrichments that need an LLM can use your own provider key or a
 local model. The built-ins above are just the defaults — tuneloop is extensible,
 and adding your own enrichment is straightforward.
