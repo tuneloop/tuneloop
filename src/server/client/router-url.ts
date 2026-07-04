@@ -33,7 +33,7 @@ export interface NavState {
 // 'dashboard' (see parseHash). main.ts decides to LAND on highlights when the hash
 // is empty; an explicit deep link to any other view wins.
 export const VIEWS = ['highlights', 'dashboard', 'artifacts', 'sessions']
-export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions', 'ops']
+export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions', 'ops', 'ai_attribution']
 export const ART_KINDS = ['feature', 'pr']
 export const DEFAULT_METRIC = 'success_rate'
 export const DEFAULT_ARTKIND = 'feature'

@@ -1043,6 +1043,135 @@ export class Store {
       errorRate: tc.calls ? tc.errs / tc.calls : null,
       costPerFeature: this.costPerArtifact('feature', from, to),
       costPerPr: this.costPerArtifact('pr', from, to),
+      aiAttribution: this.aiAttribution(from, to),
+    }
+  }
+
+  /**
+   * The headline AI-attribution number: over merged PRs completed in the window that
+   * pr-content-match measured (an attribution link + a recorded addedLines), the
+   * added-line-weighted AI-authored fraction. Weighting by PR size keeps one huge
+   * hand-written PR from being averaged away by ten tiny agent ones (and vice versa).
+   * A LOWER BOUND by construction: best single session per PR, and shell-side edits
+   * are invisible to content matching (see docs/plans/pr-linkage.md)
+   */
+  aiAttribution(from?: string, to?: string): AiAttributionKpi {
+    const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const params = from && to ? [from, to] : []
+    const r = this.db
+      .prepare(
+        `SELECT COUNT(*) AS prCount, COALESCE(SUM(addedLines),0) AS addedLines,
+                SUM(aiPct * addedLines) AS weighted
+         FROM (${this.measuredPrSql(range)})`,
+      )
+      .get(...params) as { prCount: number; addedLines: number; weighted: number | null }
+    return {
+      pct: r.addedLines > 0 ? (r.weighted ?? 0) / r.addedLines : null,
+      prCount: r.prCount,
+      addedLines: r.addedLines,
+    }
+  }
+
+  /** One row per content-measured merged PR: identity, completion time, AI %, size. */
+  private measuredPrSql(range: string): string {
+    return `SELECT a.ident, a.repo, a.title, a.external_id AS externalId,
+                   a.completed_at AS completedAt,
+                   MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) AS aiPct,
+                   COALESCE(json_extract(a.json, '$.addedLines'), 0) AS addedLines
+            FROM artifacts a JOIN session_artifacts sa ON sa.artifact_id = a.id
+            WHERE a.kind = 'pr' AND a.completed_at IS NOT NULL ${range}
+            GROUP BY a.id
+            HAVING aiPct IS NOT NULL AND addedLines > 0`
+  }
+
+  /**
+   * Closed-without-merge / still-open counterparts to aiAttribution(): agent-matched
+   * PRs that didn't (yet) ship. Windowed by when the PR was OPENED, not merged/closed
+   * — no close date is fetched for these states, so opened-date is the only anchor
+   * available. Narrow by construction: this only sees PRs that were actually opened
+   * on GitHub and passed the content-match gates — work that never became a PR, or
+   * that fell below the match threshold, is invisible here too (see
+   * docs/plans/pr-linkage.md). Don't read "closed" as "all abandoned AI work": it's a
+   * lower bound on abandonment, same spirit as aiAttribution() being a lower bound on
+   * attribution.
+   */
+  unshippedAttribution(from?: string, to?: string): { closed: { count: number }; open: { count: number } } {
+    const range = from && to ? 'AND a.created_at >= ? AND a.created_at < ?' : ''
+    const params = from && to ? [from, to] : []
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) AS count
+         FROM (${this.unshippedPrSql(range)})
+         GROUP BY status`,
+      )
+      .all(...params) as Array<{ status: string; count: number }>
+    const byStatus = new Map(rows.map((r) => [r.status, { count: r.count }]))
+    return {
+      closed: byStatus.get('closed') ?? { count: 0 },
+      open: byStatus.get('open') ?? { count: 0 },
+    }
+  }
+
+  /** One row per content-measured PR that hasn't merged (open or closed-without-merge). */
+  private unshippedPrSql(range: string): string {
+    return `SELECT a.ident, a.status AS status, a.created_at AS createdAt,
+                   MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) AS aiPct,
+                   COALESCE(json_extract(a.json, '$.addedLines'), 0) AS addedLines
+            FROM artifacts a JOIN session_artifacts sa ON sa.artifact_id = a.id
+            WHERE a.kind = 'pr' AND a.status IN ('open', 'closed') AND a.created_at IS NOT NULL ${range}
+            GROUP BY a.id
+            HAVING aiPct IS NOT NULL AND addedLines > 0`
+  }
+
+  /** The AI-attribution detail: trend (weighted % per completion bucket) + a
+   *  distribution histogram (PRs by AI-% band) + the windowed headline figure. */
+  aiAttributionDetail(
+    bucket: Bucket,
+    from?: string,
+    to?: string,
+  ): {
+    buckets: string[]
+    trend: Array<{ bucket: string; pct: number; prCount: number }>
+    histogram: Array<{ band: string; count: number }>
+    /** Every measured PR (merge-desc) — the histogram's drill-down list. */
+    prs: Array<{ ident: string; repo: string | null; title: string | null; externalId: string | null; aiPct: number; addedLines: number; completedAt: string }>
+    kpi: AiAttributionKpi
+    unshipped: { closed: { count: number }; open: { count: number } }
+  } {
+    const range = from && to ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const params = from && to ? [from, to] : []
+    const trend = this.db
+      .prepare(
+        `SELECT ${bucketExpr('completedAt', bucket)} AS bucket,
+                SUM(aiPct * addedLines) / SUM(addedLines) AS pct, COUNT(*) AS prCount
+         FROM (${this.measuredPrSql(range)})
+         GROUP BY 1 ORDER BY 1`,
+      )
+      .all(...params) as Array<{ bucket: string; pct: number; prCount: number }>
+    // Fixed 20-point bands so the shape ("a little of many" vs "most of a few")
+    // reads at a glance; the top band is closed [80,100].
+    const bands = ['0–20%', '20–40%', '40–60%', '60–80%', '80–100%']
+    const histRows = this.db
+      .prepare(
+        `SELECT MIN(4, CAST(aiPct * 5 AS INTEGER)) AS band, COUNT(*) AS count
+         FROM (${this.measuredPrSql(range)})
+         GROUP BY 1`,
+      )
+      .all(...params) as Array<{ band: number; count: number }>
+    const byBand = new Map(histRows.map((h) => [h.band, h.count]))
+    const prs = this.db
+      .prepare(
+        `SELECT ident, repo, title, externalId, aiPct, addedLines, completedAt
+         FROM (${this.measuredPrSql(range)}) ORDER BY completedAt DESC`,
+      )
+      .all(...params) as Array<{ ident: string; repo: string | null; title: string | null; externalId: string | null; aiPct: number; addedLines: number; completedAt: string }>
+    return {
+      buckets: trend.map((t) => t.bucket),
+      trend,
+      histogram: bands.map((band, i) => ({ band, count: byBand.get(i) ?? 0 })),
+      prs,
+      kpi: this.aiAttribution(from, to),
+      unshipped: this.unshippedAttribution(from, to),
     }
   }
 
@@ -2848,6 +2977,15 @@ export interface KpiSnapshot {
   errorRate: number | null
   costPerFeature: { count: number; costPerUnit: number | null }
   costPerPr: { count: number; costPerUnit: number | null }
+  aiAttribution: AiAttributionKpi
+}
+
+/** Added-line-weighted AI-authored share of the window's content-measured merged PRs. */
+export interface AiAttributionKpi {
+  /** Σ(aiPct × addedLines) ÷ Σ(addedLines); null when no PR in the window was measured. */
+  pct: number | null
+  prCount: number
+  addedLines: number
 }
 
 /** One bucket of a success-rate series: the cohort's numerator/denominator/rate. */

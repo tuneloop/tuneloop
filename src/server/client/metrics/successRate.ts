@@ -53,8 +53,22 @@ export function renderSrControls() {
     byOpts += '<option value="' + esc(f.key) + '"' + (f.key === state.sr.by ? ' selected' : '') + '>' +
       esc(f.label || f.key) + '</option>';
   });
+  // One-click success definitions. "Shipped" = the session's code verifiably landed
+  // in a PR (created/merged/content-matched) — evidence-based, vs the LLM-judged
+  // default. Only offered when the outcome types actually exist in the store.
+  var PRESETS = [
+    { label: 'Shipped', set: ['pr_merged', 'pr_created', 'pr_contributed'] },
+    { label: 'LLM-judged', set: ['session_success'] }
+  ].map(function (p) {
+    return { label: p.label, set: p.set.filter(function (t) { return oc.some(function (o) { return o.type === t; }); }) };
+  }).filter(function (p) { return p.set.length > 0; });
+  var presetBtns = PRESETS.map(function (p, i) {
+    var on = p.set.length === state.sr.outcomes.length && p.set.every(function (t) { return state.sr.outcomes.indexOf(t) >= 0; });
+    return '<button class="' + (on ? 'on' : '') + '" data-p="' + i + '">' + esc(p.label) + '</button>';
+  }).join('');
   $('#sr-controls').innerHTML =
     '<div class="sr-ctrl-row"><span class="sr-lbl">Count as success</span>' +
+      (presetBtns ? '<span class="seg" id="sr-presets">' + presetBtns + '</span>' : '') +
       '<span class="sr-checks">' + (checks || '<span class="empty">No outcomes recorded yet — run analysis with a provider key to add LLM-judged outcomes.</span>') + '</span></div>' +
     '<div class="sr-ctrl-row">' +
       '<span class="sr-by-ctrl"><span class="sr-lbl">Bucket</span><span class="seg" id="sr-bucket">' + bucketBtns + '</span></span>' +
@@ -62,6 +76,16 @@ export function renderSrControls() {
       '<span class="sr-by-ctrl" style="margin-left:18px"><span class="sr-lbl">Break down by</span>' +
       '<select class="sr-by" id="sr-by">' + byOpts + '</select></span></div>';
   wireFacetFilters('sr', $('#sr-controls'), state.sr.filters, renderSrControls, loadSuccessRate);
+  var presetSeg = $('#sr-presets');
+  if (presetSeg) Array.prototype.forEach.call(presetSeg.children, function (btn) {
+    btn.onclick = function () {
+      state.sr.outcomes = PRESETS[parseInt(btn.getAttribute('data-p'), 10)].set.slice();
+      saveSrPrefs();
+      renderSrControls();
+      loadSuccessRate();
+      loadKpis(); // the headline tile counts success the same way — keep it in sync
+    };
+  });
   Array.prototype.forEach.call(document.querySelectorAll('.sr-oc'), function (c) {
     c.onchange = function () {
       var set = [];

@@ -57,6 +57,7 @@ export interface ClientState {
   // ('' | 'name' | 'error_category'), and row-level scopes for the error-rate
   // chart (tool names + error categories — ops-specific, not the shared facets).
   ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
+  ai: { bucket: string } // AI-written-share detail controls
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
   // Artifacts tab list controls (PRs/Features table): free-text search + the PR
@@ -78,6 +79,7 @@ export var state: ClientState = {
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
+  ai: { bucket: '' },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' },
   art: { q: '', sort: 'created', dir: 'desc' }

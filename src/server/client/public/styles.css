@@ -52,7 +52,9 @@ a { color: var(--emerald); }
 .view { display: none; }
 .view.on { display: block; }
 main { max-width: 1180px; margin: 0 auto; padding: 28px; }
-.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+/* min sized so all six headline tiles share one row inside main's 1124px content
+   width (6·170 + 5·14 = 1090); auto-fit still wraps gracefully when narrower. */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; }
 .tile { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .tile .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .tile .value { font-family: ui-monospace, Menlo, monospace; font-size: 26px; margin-top: 6px; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px; }
@@ -150,6 +152,20 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
   border-radius: 6px; cursor: pointer;
 }
 .occ-row:hover { background: var(--track); }
+/* AI-histogram drill-down rows (PR # · repo · title · AI% · size · merged date · link icon).
+   The ident cell is a fixed, never-shrinking column so the PR number stays legible
+   even when the repo name is long enough to truncate. */
+.aihist-pr-row {
+  display: grid; grid-template-columns: 40px 130px minmax(0,1fr) 44px 76px 78px 16px;
+  gap: 10px; align-items: baseline; padding: 5px 6px; font-size: 12px; border-radius: 6px;
+}
+.aihist-pr-row[data-url] { cursor: pointer; }
+.aihist-pr-row:hover { background: var(--track); }
+.aihist-pr-row > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aihist-ident { font-family: ui-monospace, Menlo, monospace; color: var(--ink); }
+.aihist-repo { color: var(--muted); }
+.aihist-link { opacity: 0; color: var(--emerald); transition: opacity .1s; }
+.aihist-pr-row[data-url]:hover .aihist-link { opacity: 1; }
 .occ-row > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .occ-tool { font-family: ui-monospace, Menlo, monospace; color: var(--ink); }
 .occ-cmd { font-family: ui-monospace, Menlo, monospace; color: var(--muted); }

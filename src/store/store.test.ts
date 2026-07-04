@@ -86,6 +86,84 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(chip?.confidence).toBeCloseTo(0.85)
   })
 
+  it('aiAttribution: added-line-weighted over measured merged PRs; other producers’ confidence excluded', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    // PR A: 100 added lines @ 90% AI. PR B: 900 added lines @ 10% AI.
+    // Weighted = (0.9·100 + 0.1·900) / 1000 = 0.18 (a plain average would say 0.5).
+    store.persistResult('s1', 'pr-content-match', 1, 'h1', null, {
+      artifacts: [
+        { ...richPr, id: 'pr:o/r:1', ident: '1', completedAt: '2026-06-10T00:00:00Z', json: { addedLines: 100 } },
+        { ...richPr, id: 'pr:o/r:2', ident: '2', completedAt: '2026-06-20T00:00:00Z', json: { addedLines: 900 } },
+      ],
+      sessionArtifacts: [
+        { artifactId: 'pr:o/r:1', role: 'edited', source: 'derived', confidence: 0.9 },
+        { artifactId: 'pr:o/r:2', role: 'edited', source: 'derived', confidence: 0.1 },
+      ],
+    })
+    // A review link at confidence 1 on PR 2 must not leak into the attribution number.
+    store.persistResult('s1', 'outcomes-git', 3, 'h2', null, {
+      sessionArtifacts: [{ artifactId: 'pr:o/r:2', role: 'reviewed', source: 'explicit', confidence: 1 }],
+    })
+
+    const all = store.aiAttribution()
+    expect(all.prCount).toBe(2)
+    expect(all.addedLines).toBe(1000)
+    expect(all.pct).toBeCloseTo(0.18)
+    // Windowing is by PR completion: a window covering only PR 1 sees only PR 1.
+    const w = store.aiAttribution('2026-06-05T00:00:00Z', '2026-06-15T00:00:00Z')
+    expect(w.prCount).toBe(1)
+    expect(w.pct).toBeCloseTo(0.9)
+    // Empty window → null pct (renders as "—"), not 0.
+    expect(store.aiAttribution('2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z').pct).toBeNull()
+
+    const d = store.aiAttributionDetail('month')
+    expect(d.trend).toEqual([
+      { bucket: '2026-06', pct: expect.closeTo(0.18), prCount: 2 },
+    ])
+    // Histogram bands: 0.9 → 80–100%, 0.1 → 0–20%.
+    expect(d.histogram.find((h) => h.band === '80–100%')?.count).toBe(1)
+    expect(d.histogram.find((h) => h.band === '0–20%')?.count).toBe(1)
+    expect(d.histogram.find((h) => h.band === '40–60%')?.count).toBe(0)
+    expect(d.kpi.pct).toBeCloseTo(0.18)
+    // Drill-down list: every measured PR, merge-desc, with the fields the rows render.
+    expect(d.prs.map((p) => p.ident)).toEqual(['2', '1'])
+    expect(d.prs[1]).toMatchObject({ ident: '1', repo: 'o/r', addedLines: 100, completedAt: '2026-06-10T00:00:00Z' })
+    expect(d.prs[1]!.aiPct).toBeCloseTo(0.9)
+  })
+
+  it('unshippedAttribution: closed-without-merge and still-open PRs, dated at PR open', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    store.persistResult('s1', 'pr-content-match', 1, 'h1', null, {
+      artifacts: [
+        // Merged PRs must NOT show up here — this is the closed/open counterpart.
+        { ...richPr, id: 'pr:o/r:1', ident: '1', status: 'merged', createdAt: '2026-06-01T00:00:00Z', completedAt: '2026-06-10T00:00:00Z', json: { addedLines: 100 } },
+        { ...richPr, id: 'pr:o/r:2', ident: '2', status: 'closed', createdAt: '2026-06-12T00:00:00Z', completedAt: undefined, json: { addedLines: 40 } },
+        { ...richPr, id: 'pr:o/r:3', ident: '3', status: 'open', createdAt: '2026-06-15T00:00:00Z', completedAt: undefined, json: { addedLines: 25 } },
+      ],
+      sessionArtifacts: [
+        { artifactId: 'pr:o/r:1', role: 'edited', source: 'derived', confidence: 0.9 },
+        { artifactId: 'pr:o/r:2', role: 'edited', source: 'derived', confidence: 0.8 },
+        { artifactId: 'pr:o/r:3', role: 'edited', source: 'derived', confidence: 0.7 },
+      ],
+    })
+
+    const all = store.unshippedAttribution()
+    expect(all.closed).toEqual({ count: 1 })
+    expect(all.open).toEqual({ count: 1 })
+
+    // Windowed by PR-open date: a window covering only PR 2's createdAt sees only it.
+    const w = store.unshippedAttribution('2026-06-11T00:00:00Z', '2026-06-13T00:00:00Z')
+    expect(w.closed).toEqual({ count: 1 })
+    expect(w.open).toEqual({ count: 0 })
+
+    // Bundled into the detail payload the client reads.
+    expect(store.aiAttributionDetail('month').unshipped).toEqual(all)
+  })
+
   it('pr-content-match block rows supersede outcomes-git’s proximity fill for the same block', () => {
     const db = openDb(':memory:')
     const store = new Store(db)

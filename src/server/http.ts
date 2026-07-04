@@ -411,6 +411,14 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     )
     return
   }
+  if (path === '/api/ai-attribution') {
+    // AI-written share detail: weighted % per completion bucket + the AI-% histogram.
+    const q = url.searchParams
+    const rawBucket = q.get('bucket')
+    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
+    sendJson(res, 200, store.aiAttributionDetail(bucket, q.get('from') ?? undefined, q.get('to') ?? undefined))
+    return
+  }
   if (path === '/api/artifact-suggest') {
     // Typeahead for the session-list artifact search.
     const q = url.searchParams.get('q') ?? ''

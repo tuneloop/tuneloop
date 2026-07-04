@@ -10,6 +10,7 @@ import { renderCostArtifact } from './metrics/costArtifact'
 import { renderTotalSpend } from './metrics/totalSpend'
 import { renderSessionsMetric } from './metrics/sessionsMetric'
 import { renderOps } from './metrics/ops'
+import { renderAiAttribution } from './metrics/aiAttribution'
 
 // The top-level window selector + caption. Sets the window every headline tile
 // AND every expansion's charts are computed over. Lives where the caption used
@@ -35,7 +36,7 @@ export function renderWindow() {
       // Every expansion's charts track the same window. Re-default each curve
       // bucket for the new span (clear manual picks), then re-render whichever
       // detail is open so its charts + labels follow N.
-      state.sr.bucket = ''; state.ca.bucket = ''; state.spend.bucket = ''; state.sm.bucket = ''; state.ops.bucket = '';
+      state.sr.bucket = ''; state.ca.bucket = ''; state.spend.bucket = ''; state.sm.bucket = ''; state.ops.bucket = ''; state.ai.bucket = '';
       renderOpenMetric();
     };
   });
@@ -50,6 +51,7 @@ export function renderOpenMetric() {
   else if (m === 'total_spend') renderTotalSpend();
   else if (m === 'sessions') renderSessionsMetric();
   else if (m === 'ops') renderOps();
+  else if (m === 'ai_attribution') renderAiAttribution();
 }
 
 // The most recent /api/kpis payload, kept so the tile row can repaint without a
@@ -112,6 +114,7 @@ export function paintKpis() {
   // successDefinable reads the overview, so this corrects once that lands (see the
   // paintKpis callers in main.ts) and the enrichment nudge explains why.
   var srKnown = successDefinable();
+  var ai = cur.aiAttribution || {}, aiPrev = prev.aiAttribution || {};
   var tiles = [
     { label: 'Session Outcome Rate', value: srKnown ? fmtVal(cur.successRate, 'pct') : '—',
       delta: srKnown ? kpiDelta(cur.successRate, prev.successRate, 'points', 'up') : '',
@@ -124,7 +127,14 @@ export function paintKpis() {
     { label: 'Sessions', value: num(cur.sessions),
       delta: kpiDelta(cur.sessions, prev.sessions, 'rel', null), sub: '', metric: 'sessions' },
     { label: 'Tool error rate', value: fmtVal(cur.errorRate, 'pct'),
-      delta: kpiDelta(cur.errorRate, prev.errorRate, 'points', 'down'), sub: 'of tool calls', metric: 'ops' }
+      delta: kpiDelta(cur.errorRate, prev.errorRate, 'points', 'down'), sub: 'of tool calls', metric: 'ops' },
+    // Added-line-weighted share of merged-PR code the agent authored (a lower
+    // bound — see the detail view's note). No good/bad direction: more AI code
+    // isn't inherently either, so the delta is neutral
+    { label: 'AI-written share', value: ai.pct != null ? fmtVal(ai.pct, 'pct') : '—',
+      delta: ai.pct != null && aiPrev.pct != null ? kpiDelta(ai.pct, aiPrev.pct, 'points', null) : '',
+      sub: ai.pct != null ? 'of added lines · ' + (ai.prCount || 0) + ' measured PR' + (ai.prCount === 1 ? '' : 's') : 'no content-matched PRs yet',
+      metric: 'ai_attribution' }
   ];
   $('#kpis').innerHTML = tiles.map(function (t) {
     // Tiles with a metric key are clickable nav into that metric's detail view.
