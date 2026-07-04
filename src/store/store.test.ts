@@ -148,7 +148,7 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(afterReanalyze['pr:o/r:11']).toBe(3) // blocks 0+1 back
   })
 
-  it('a content-match link with no block rows claims zero cost (whole-session fallback gated off)', () => {
+  it('cost is block-grain only: any link with no block rows claims zero (no whole-session fallback)', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
     seedSession(store, db, 's1')
@@ -178,18 +178,19 @@ describe('artifact upsert (PR clobber safety)', () => {
     const cost = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
     // PR#3 keeps its blocks untouched…
     expect(cost['pr:o/r:3']).toBe(3)
-    // …and PR#7 claims NOTHING — without the gate, the whole-session fallback would
-    // charge it the full $3 (all of PR#3's work). Attribution % still lives on the link.
+    // …and PR#7 claims NOTHING — no block rows means no cost, since there is no
+    // whole-session fallback anymore. Attribution % still lives on the link.
     expect(cost['pr:o/r:7']).toBe(0)
 
-    // The fallback still works for its real audience: a user-linked PR with no block rows.
+    // Same rule for a user-linked PR with no block rows: zero for now, reconciled to
+    // block-grain cost on the next analyze (manual links don't carry block rows yet).
     seedSession(store, db, 's2')
     db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,?,?)').run('s2', 0, 5)
     const prC: ArtifactInput = { ...richPr, id: 'pr:o/r:9', ident: '9', externalId: 'https://github.com/o/r/pull/9' }
     store.persistResult('s2', 'outcomes-git', 3, 'h2', null, { artifacts: [prC] })
     db.prepare("INSERT INTO session_artifacts (session_id, artifact_id, role, source, confidence, producer) VALUES ('s2','pr:o/r:9','edited','user',1,'dashboard')").run()
     const cost2 = Object.fromEntries(store.artifactList('pr').map((r) => [r.id, r.costUsd]))
-    expect(cost2['pr:o/r:9']).toBe(5) // whole-session fallback intact for user links
+    expect(cost2['pr:o/r:9']).toBe(0) // no block rows → zero (no whole-session fallback)
   })
 
   it('a genuine status transition (open -> merged) still applies', () => {
@@ -206,6 +207,88 @@ describe('artifact upsert (PR clobber safety)', () => {
     expect(row.status).toBe('merged') // real new value overwrites the old 'open'
     expect(row.title).toBe('A nicely enriched PR')
     expect(row.complexity).toBe(120) // the earlier non-null churn is preserved, not blanked
+  })
+})
+
+describe('cross-role block reconciliation (1-1 per block)', () => {
+  // One PR-kind row per block, by precedence pcm > og-reviewed > enrich-reviewed > og-contributed.
+  const prRows = (db: ReturnType<typeof openDb>) =>
+    db
+      .prepare(
+        `SELECT block_idx AS blockIdx, producer, role, artifact_id AS artifactId
+         FROM block_artifacts WHERE session_id = 's1' ORDER BY block_idx, producer`,
+      )
+      .all()
+
+  it('enrich review displaces an outcomes-git contribution on the same block', () => {
+    const db = openDb(':memory:'); const store = new Store(db); seedSession(store, db, 's1')
+    store.persistResult('s1', 'outcomes-git', 5, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:11', role: 'contributed', source: 'explicit' }],
+    })
+    store.persistResult('s1', 'enrich-session', 17, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:7', role: 'reviewed', source: 'derived', confidence: 0.6 }],
+    })
+    expect(prRows(db)).toEqual([{ blockIdx: 0, producer: 'enrich-session', role: 'reviewed', artifactId: 'pr:o/r:7' }])
+  })
+
+  it('an explicit outcomes-git review holds the block against a derived enrich review', () => {
+    const db = openDb(':memory:'); const store = new Store(db); seedSession(store, db, 's1')
+    store.persistResult('s1', 'outcomes-git', 5, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:11', role: 'reviewed', source: 'explicit', confidence: 1 }],
+    })
+    store.persistResult('s1', 'enrich-session', 17, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:7', role: 'reviewed', source: 'derived', confidence: 0.6 }],
+    })
+    expect(prRows(db)).toEqual([{ blockIdx: 0, producer: 'outcomes-git', role: 'reviewed', artifactId: 'pr:o/r:11' }])
+  })
+
+  it('pr-content-match displaces both outcomes-git (any role) and enrich review rows', () => {
+    const db = openDb(':memory:'); const store = new Store(db); seedSession(store, db, 's1')
+    store.persistResult('s1', 'outcomes-git', 5, 'h1', null, {
+      blockArtifacts: [
+        { blockIdx: 0, artifactId: 'pr:o/r:11', role: 'reviewed', source: 'explicit', confidence: 1 },
+        { blockIdx: 1, artifactId: 'pr:o/r:12', role: 'contributed', source: 'explicit' },
+      ],
+    })
+    store.persistResult('s1', 'enrich-session', 17, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 1, artifactId: 'pr:o/r:7', role: 'reviewed', source: 'derived', confidence: 0.6 }],
+    })
+    store.persistResult('s1', 'pr-content-match', 5, 'h1', null, {
+      blockArtifacts: [
+        { blockIdx: 0, artifactId: 'pr:o/r:99', role: 'contributed', source: 'derived' },
+        { blockIdx: 1, artifactId: 'pr:o/r:99', role: 'contributed', source: 'derived' },
+      ],
+    })
+    expect(prRows(db)).toEqual([
+      { blockIdx: 0, producer: 'pr-content-match', role: 'contributed', artifactId: 'pr:o/r:99' },
+      { blockIdx: 1, producer: 'pr-content-match', role: 'contributed', artifactId: 'pr:o/r:99' },
+    ])
+  })
+
+  it('a feature-contributed row coexists with a PR row on the same block (different kind)', () => {
+    const db = openDb(':memory:'); const store = new Store(db); seedSession(store, db, 's1')
+    store.persistResult('s1', 'outcomes-git', 5, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:11', role: 'contributed', source: 'explicit' }],
+    })
+    store.persistResult('s1', 'enrich-session', 17, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'feature:x', role: 'contributed', source: 'derived', confidence: 0.5 }],
+    })
+    expect(prRows(db)).toEqual([
+      { blockIdx: 0, producer: 'enrich-session', role: 'contributed', artifactId: 'feature:x' },
+      { blockIdx: 0, producer: 'outcomes-git', role: 'contributed', artifactId: 'pr:o/r:11' },
+    ])
+  })
+
+  it('is order-independent: a lower-ranked producer that persists LATER cannot displace the winner', () => {
+    const db = openDb(':memory:'); const store = new Store(db); seedSession(store, db, 's1')
+    // pcm persists FIRST, og-contributed SECOND — og(1) must not clobber pcm(4).
+    store.persistResult('s1', 'pr-content-match', 5, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:99', role: 'contributed', source: 'derived' }],
+    })
+    store.persistResult('s1', 'outcomes-git', 5, 'h1', null, {
+      blockArtifacts: [{ blockIdx: 0, artifactId: 'pr:o/r:11', role: 'contributed', source: 'explicit' }],
+    })
+    expect(prRows(db)).toEqual([{ blockIdx: 0, producer: 'pr-content-match', role: 'contributed', artifactId: 'pr:o/r:99' }])
   })
 })
 

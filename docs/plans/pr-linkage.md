@@ -164,9 +164,9 @@ Precision of the synthetic anchor, in order of defense:
   all-isolated → earliest). Every failure of this guard is an under-claim.
 - **Contested blocks**: an explicit anchor wins; between inferred PRs higher confidence
   wins and the loser falls back to an earlier matched block. A PR contested out entirely
-  gets **no block rows and no cost claim** — the store's whole-session cost fallback is
-  gated off for content-match links (`saNoContentMatchFallback`), so its cost is zero
-  rather than the whole session; the attribution % on the session link stands.
+  gets **no block rows and no cost claim** — cost is block-grain only (there is no
+  whole-session fallback), so no block rows means zero cost; the attribution % on the
+  session link stands.
 
 Where the two fills disagree (the reclaimed blocks), the content-match row **displaces**
 `outcomes-git`'s proximity row at **write time** — `store.persistResult` deletes the

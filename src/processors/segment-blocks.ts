@@ -15,7 +15,7 @@ import { blockMembership, deterministicBlocks } from '../core/blocks'
  */
 export const segmentBlocks: Processor = {
   name: 'segment-blocks',
-  version: 1,
+  version: 2,
   kind: 'static',
   run(ctx: ProcessorContext): ProcessorResult {
     const { session } = ctx

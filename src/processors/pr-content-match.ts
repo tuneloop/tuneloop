@@ -63,7 +63,7 @@ export function __resetPrCache(): void {
 
 export const prContentMatch: Processor = {
   name: 'pr-content-match',
-  version: 4,
+  version: 5,
   kind: 'static',
   needs: { network: true },
   // outcomes-git is a hard dep for WRITE ORDERING, not for input: its block rows
