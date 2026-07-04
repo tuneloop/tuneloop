@@ -437,13 +437,37 @@ export class Store {
           .prepare('INSERT OR REPLACE INTO block_annotations (session_id, block_idx, processor, key, value) VALUES (?,?,?,?,?)')
           .run(sessionId, ba.blockIdx, processor, ba.key, JSON.stringify(ba.value))
       }
+      // Cross-role block reconciliation — at most one PR-kind row per block. Precedence
+      // (highest first): pcm(contributed) > og(reviewed) > enrich(reviewed) > og(contributed).
+      // We PREVENT the insert when an equal-or-higher-ranked PR row already holds the block;
+      // when this row outranks the holder, we displace it. Feature-contributed rows (rank 0)
+      // are a different artifact kind (queried separately) and skip reconciliation. The rank
+      // guard makes this ORDER-INDEPENDENT — the same winner regardless of which producer ran
+      // (or re-ran) first. Rejected derived links `continue` before touching the block.
+      // (Follow-up: a partial UNIQUE index on the PR rows lets INSERT OR REPLACE displace the
+      // loser without this explicit DELETE; the guard stays.)
+      const heldPr = this.db.prepare(
+        `SELECT producer, role FROM block_artifacts WHERE session_id = ? AND block_idx = ?
+           AND (producer IN ('outcomes-git', 'pr-content-match') OR (producer = 'enrich-session' AND role = 'reviewed')) LIMIT 1`,
+      )
+      const displacePr = this.db.prepare(
+        `DELETE FROM block_artifacts WHERE session_id = ? AND block_idx = ?
+           AND (producer IN ('outcomes-git', 'pr-content-match') OR (producer = 'enrich-session' AND role = 'reviewed'))`,
+      )
+      const insertBlockArtifact = this.db.prepare(
+        'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
+      )
       for (const x of result.blockArtifacts ?? []) {
         if (x.source === 'derived' && rejected.has(x.artifactId)) continue
-        this.db
-          .prepare(
-            'INSERT OR REPLACE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, confidence, producer) VALUES (?,?,?,?,?,?,?)',
-          )
-          .run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
+        const rank = prBlockRank(processor, x.role)
+        if (rank > 0) {
+          const held = heldPr.get(sessionId, x.blockIdx) as { producer: string; role: string | null } | undefined
+          if (held) {
+            if (prBlockRank(held.producer, held.role) >= rank) continue // outranked → don't insert
+            displacePr.run(sessionId, x.blockIdx) // this row outranks the holder → remove it
+          }
+        }
+        insertBlockArtifact.run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
       }
 
       this.db
@@ -759,14 +783,10 @@ export class Store {
     // Full cost — all roles, production AND your review of it — so a PR you contributed
     // to by reviewing is ranked on its real spend (mirrors costPerArtifact).
     const blockCost = `COALESCE((SELECT SUM(cost_usd) FROM (
-        SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
+        SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd FROM block_artifacts ba
         JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
         JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
-        WHERE ba.artifact_id = a.id
-        UNION SELECT u.session_id, u.idx AS uidx, u.cost_usd FROM session_artifacts sa2
-        JOIN usage_facts u ON u.session_id = sa2.session_id
-        WHERE sa2.artifact_id = a.id
-        AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id))), 0)`
+        WHERE ba.artifact_id = a.id)), 0)`
     // An artifact is "in window" (and a candidate at all) via ANY session link in the
     // window — authored or reviewed — so every artifact you contributed to is eligible
     // for the biggest-shipped / stalled spotlight.
@@ -970,23 +990,15 @@ export class Store {
           `SELECT COALESCE(SUM(cost_usd),0) AS s FROM (
              -- block-attributed: usage rows in blocks linked to an in-window completed
              -- artifact (all roles — production AND your review of it).
-             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
              FROM artifacts a
              JOIN block_artifacts ba ON ba.artifact_id = a.id
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
              WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${contributed} ${cxFilter}
-             UNION
-             -- fallback: whole sessions of in-window artifacts that have NO block links
-             SELECT u.session_id, u.idx AS uidx, u.cost_usd
-             FROM artifacts a
-             JOIN session_artifacts sa ON sa.artifact_id = a.id
-             JOIN usage_facts u ON u.session_id = sa.session_id
-             WHERE a.kind = ? AND a.completed_at IS NOT NULL ${range} ${contributed} ${cxFilter}
-               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
            )`,
         )
-        .get(...params, ...params) as { s: number }
+        .get(...params) as { s: number }
     ).s
     return { count, costPerUnit: num / count }
   }
@@ -2075,10 +2087,19 @@ export class Store {
       .prepare('SELECT type, artifact_id AS artifactId FROM outcomes WHERE session_id = ?')
       .all(id) as Array<{ type: string; artifactId: string | null }>
 
+    // One row per artifact: a session can link the same PR under multiple roles
+    // (e.g. `created` by outcomes-git + `edited` by pr-content-match for its
+    // attribution %), so pick the strongest/most-explicit link for display.
     const artifacts = this.db
       .prepare(
-        `SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source
-         FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?`,
+        `SELECT id, kind, title, ident, status, repo, externalId, role, source, confidence FROM (
+           SELECT a.id, a.kind, a.title, a.ident, a.status, a.repo, a.external_id AS externalId, sa.role, sa.source,
+             MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) OVER (PARTITION BY a.id) AS confidence,
+             ROW_NUMBER() OVER (PARTITION BY a.id ORDER BY
+               CASE sa.role WHEN 'created' THEN 0 WHEN 'reviewed' THEN 1 WHEN 'edited' THEN 2 ELSE 3 END,
+               CASE COALESCE(sa.source,'') WHEN 'explicit' THEN 0 WHEN 'user' THEN 1 ELSE 2 END) AS rn
+           FROM session_artifacts sa JOIN artifacts a ON a.id = sa.artifact_id WHERE sa.session_id = ?
+         ) WHERE rn = 1`,
       )
       .all(id) as Array<Record<string, any>>
 
@@ -2279,22 +2300,19 @@ export class Store {
         `SELECT a.id, a.kind, a.title, a.ident, a.repo, a.status, a.source,
                 a.external_id AS externalId, a.created_at AS createdAt, a.completed_at AS completedAt,
                 a.parent_artifact_id AS parentId, a.complexity, a.complexity_basis AS complexityBasis,
+                -- AI-attribution % = pr-content-match's confidence only (other producers write
+                -- confidence on session_artifacts too, e.g. review links).
+                MAX(CASE WHEN sa.producer = 'pr-content-match' THEN sa.confidence END) AS aiPct,
                 COUNT(DISTINCT sa.session_id) AS sessions,
                 COALESCE((
                   SELECT SUM(cost_usd) FROM (
                     -- block-attributed cost (block→artifact): blocks partition the
                     -- session, so a multi-purpose session isn't charged whole (P1).
-                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
+                    SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
                     FROM block_artifacts ba
                     JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
                     JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
                     WHERE ba.artifact_id = a.id
-                    UNION
-                    -- whole-session fallback when this artifact has no block links
-                    SELECT u.session_id, u.idx AS uidx, u.cost_usd
-                    FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
-                    WHERE sa2.artifact_id = a.id
-                      AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
                   )
                 ), 0) AS costUsd
          FROM artifacts a
@@ -2409,22 +2427,17 @@ export class Store {
       .all(...winParams) as Array<{ id: string; title: string | null; parentId: string | null }>
     if (!rows.length) return []
     // Own (direct) cost per feature — identical attribution to artifactList's cost
-    // column: block-attributed where the session was block-linked, whole-session
-    // fallback otherwise, UNION-deduped so a shared usage row counts once.
+    // column: purely block-attributed (a feature with no block links contributes zero;
+    // DISTINCT so a shared usage row counts once).
     const costRows = this.db
       .prepare(
         `SELECT a.id AS id, COALESCE((
            SELECT SUM(cost_usd) FROM (
-             SELECT u.session_id, u.idx AS uidx, u.cost_usd
+             SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
              FROM block_artifacts ba
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
              WHERE ba.artifact_id = a.id
-             UNION
-             SELECT u.session_id, u.idx AS uidx, u.cost_usd
-             FROM session_artifacts sa2 JOIN usage_facts u ON u.session_id = sa2.session_id
-             WHERE sa2.artifact_id = a.id
-               AND NOT EXISTS (SELECT 1 FROM block_artifacts bx WHERE bx.artifact_id = a.id)
            )
          ), 0) AS ownCost
          FROM artifacts a WHERE a.kind = 'feature' AND a.completed_at IS NOT NULL ${cxCost} ${rangeCost}`,
@@ -2820,6 +2833,9 @@ export interface ArtifactListItem {
   complexityBasis: string | null
   sessions: number
   costUsd: number
+  /** Max content-match AI-attribution fraction across the artifact's session links (0–1);
+   * null when no content-match link exists (e.g. an explicit-only PR). PRs only. */
+  aiPct: number | null
 }
 
 /** One window's worth of headline KPIs (see Store.kpis). */
@@ -3133,6 +3149,20 @@ function bucketExpr(col: string, bucket: Bucket): string {
   if (bucket === 'day') return `date(${col})`
   if (bucket === 'month') return `strftime('%Y-%m', ${col})`
   return `strftime('%Y-W%W', ${col})`
+}
+
+/**
+ * Precedence of a PR-kind block attribution — higher wins the single row that block keeps
+ * (cross-role 1-1, applied in persistResult). 0 = not a ranked PR row (e.g. enrich's
+ * feature-contributed, a different artifact kind that coexists). Order of the ranks:
+ * pcm content-match (the code literally shipped) > og explicit review > enrich derived
+ * review > og proximity-fill contribution.
+ */
+function prBlockRank(producer: string, role: string | null | undefined): number {
+  if (producer === 'pr-content-match') return 4
+  if (producer === 'outcomes-git') return role === 'reviewed' ? 3 : 1
+  if (producer === 'enrich-session' && role === 'reviewed') return 2
+  return 0
 }
 
 export type ComplexityBucket = 'trivial' | 'small' | 'medium' | 'large' | 'xl'

@@ -31,6 +31,9 @@ export interface PrRef {
   kind: PrRefKind
   /** Index into `session.toolCalls` this ref came from; -1 for a human prompt. */
   toolIndex: number
+  /** For a human-pasted link (toolIndex -1): the main-thread seq of the user event it
+   *  appeared in, so a caller can map it to the block that turn opened. Unset for tool refs. */
+  atSeq?: number
   /** Only set for kind 'review': approve / request-changes / comment. */
   verdict?: PrVerdict
 }
@@ -145,10 +148,11 @@ export function parsePrRefs(session: Session): PrRef[] {
     }
   })
 
-  // A PR link a human pasted into a real prompt is an intentful read.
+  // A PR link a human pasted into a real prompt is an intentful read. Stamp the user
+  // event's seq (atSeq) so a caller can map the ref to the block that turn opened.
   for (const ev of session.events) {
     if (ev.kind !== 'user' || ev.isSidechain) continue
-    addUrl('read', -1, ev.text)
+    if (addUrl('read', -1, ev.text)) refs[refs.length - 1]!.atSeq = ev.seq
   }
 
   return refs

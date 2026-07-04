@@ -299,6 +299,8 @@ tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .tag { display: inline-block; background: var(--track); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; margin: 1px 3px 1px 0; }
 .tag.click { cursor: pointer; }
 .tag.click:hover { background: #dfe9e0; color: var(--emerald); }
+.ai-note { color: var(--emerald); font-weight: 600; }
+.pr-ai-tag { display: inline-block; margin-left: 8px; padding: 0 7px; border-radius: 999px; background: #dfe9e0; color: var(--muted); font-size: 10px; font-weight: 600; vertical-align: middle; }
 .num { font-family: ui-monospace, Menlo, monospace; }
 /* Outcome rate vs. cost table (Session Outcome Rate detail, option B). */
 .sr-tbl th.num, .sr-tbl td.num { text-align: right; }

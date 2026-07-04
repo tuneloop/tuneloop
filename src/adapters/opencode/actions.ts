@@ -7,7 +7,12 @@ import type { CanonicalAction } from '../../core/model'
  * `<server>_<tool>` but we can't reliably distinguish those from built-ins by
  * name, so only the known built-ins are mapped and the rest fall through.
  */
-const FILE_WRITE = new Set(['write', 'edit', 'patch'])
+// OpenCode's registered file-mutating tool ids: `write` ({filePath,content}),
+// `edit` ({filePath,oldString,newString}), and `apply_patch` ({patchText} in the
+// Codex `*** Begin Patch` format). `apply_patch` is mutually exclusive with edit/write
+// and only enabled for gpt-5-class models (registry `usePatch` gate); a MultiEditTool
+// exists in the source but is registered nowhere, so `multiedit` is intentionally omitted.
+const FILE_WRITE = new Set(['write', 'edit', 'apply_patch'])
 const FILE_READ = new Set(['read'])
 const SEARCH = new Set(['grep', 'glob', 'list'])
 const WEB = new Set(['webfetch', 'websearch'])

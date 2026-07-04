@@ -23,3 +23,6 @@ skills/*-workspace/
 *.log
 .cursorindexingignore
 .specstory/
+
+# Local prototype/experiment scratch
+experiments/

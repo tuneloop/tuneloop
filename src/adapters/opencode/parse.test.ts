@@ -81,6 +81,12 @@ function writeFixture(path: string): void {
     type: 'tool', tool: 'edit', callID: 'call_edit',
     state: { status: 'completed', input: { filePath: '/repo/x.ts', oldString: 'foo', newString: 'bar' }, output: 'ok' },
   }))
+  // apply_patch: gpt-5-only file-write tool, carries a whole patch string ({patchText}),
+  // no single filePath. Real opencode tool id (multiedit exists in source but is unregistered).
+  insPart.run('Pa6', 'Pa', 'P', 1782000001600, JSON.stringify({
+    type: 'tool', tool: 'apply_patch', callID: 'call_apply_patch',
+    state: { status: 'completed', input: { patchText: '*** Begin Patch\n*** Add File: z.ts\n+hi\n*** End Patch' }, output: 'ok' },
+  }))
 
   // Child (subagent): one assistant turn with a read tool and an errored grep.
   insMsg.run('Ca', 'C', 1782000060000, JSON.stringify({
@@ -145,6 +151,10 @@ describe('opencode adapter', () => {
     expect(byId.call_bash!.action).toBe('shell')
     expect(byId.call_bash!.target.command).toBe('ls -la')
     expect(byId.call_bash!.isSidechain).toBe(false)
+    // The three registered file-mutating tool ids map to file_write.
+    expect(byId.call_write!.action).toBe('file_write')
+    expect(byId.call_edit!.action).toBe('file_write')
+    expect(byId.call_apply_patch!.action).toBe('file_write')
     expect(byId.call_task!.action).toBe('task_spawn')
     expect(byId.call_read!.action).toBe('file_read')
     expect(byId.call_read!.isSidechain).toBe(true)

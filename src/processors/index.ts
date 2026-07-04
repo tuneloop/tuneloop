@@ -2,4 +2,5 @@
 import './segment-blocks'
 import './files-touched'
 import './outcomes-git'
+import './pr-content-match'
 import './enrich-session'

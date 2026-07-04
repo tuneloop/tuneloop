@@ -17,7 +17,7 @@ import type { Event, Session, ToolCall } from './model'
 import { isRealUserText, stripReminders } from './turns'
 
 /** A tool action that closes a block (cost-attribution boundary). */
-export type BoundaryKind = 'commit' | 'pr_create' | 'pr_merge'
+export type BoundaryKind = 'commit' | 'pr_create' | 'pr_merge' | 'pr_review'
 
 export interface Block {
   idx: number
@@ -70,10 +70,17 @@ export function boundaryKind(tc: ToolCall): BoundaryKind | null {
     const cmd = tc.target.command
     if (/\bgh\s+pr\s+merge\b/.test(cmd)) return 'pr_merge'
     if (/\bgh\s+pr\s+create\b/.test(cmd)) return 'pr_create'
+    // Posting a review closes a block too: the reading/analysis leading up to it is
+    // its own unit of work, so it doesn't bleed into the next (produce-a-PR) stretch.
+    if (/\bgh\s+pr\s+review\b/.test(cmd)) return 'pr_review'
     if (/\bgit\b[^\n]*\bcommit\b/.test(cmd)) return 'commit'
     return null
   }
   if (tc.action === 'mcp_call' && /pull_request/i.test(tc.name)) {
+    // Review FIRST — `create_pull_request_review` contains "create" but is a POSTED
+    // review, not a PR creation (mirrors parsePrRefs' ordering). A review READ
+    // (get/list ...review) closes nothing.
+    if (/review/i.test(tc.name)) return /(?:create|submit|add)/i.test(tc.name) ? 'pr_review' : null
     if (/merge/i.test(tc.name)) return 'pr_merge'
     if (/create/i.test(tc.name)) return 'pr_create'
   }
@@ -109,8 +116,9 @@ export function deterministicBlocks(session: Session): Block[] {
         const tc = idToTool.get(b.id)
         if (!tc) continue
         const k = boundaryKind(tc)
-        if (k === 'pr_merge' || k === 'pr_create') { bk = k; break } // PR dominates a same-message commit
-        if (k === 'commit') bk = 'commit'
+        if (k === 'pr_merge' || k === 'pr_create') { bk = k; break } // producing a PR dominates a same-message review/commit
+        if (k === 'pr_review') bk = 'pr_review' // a review outranks a bare commit in the same message
+        else if (k === 'commit' && bk !== 'pr_review') bk = 'commit'
       }
       closeKind[i] = bk
     }
@@ -275,9 +283,11 @@ export function blockSpine(session: Session, blocks: Block[]): string {
         ? ' · opened a PR'
         : b.boundaryKind === 'pr_merge'
           ? ' · merged a PR'
-          : b.boundaryKind === 'commit'
-            ? ' · git commit'
-            : ''
+          : b.boundaryKind === 'pr_review'
+            ? ' · reviewed a PR'
+            : b.boundaryKind === 'commit'
+              ? ' · git commit'
+              : ''
     const head = opener ? `user: "${clip(opener, 200)}"` : '(continued work — no new prompt)'
     lines.push(`[${b.idx}] ${head}${acts ? ` · ${acts}` : ''}${tag}`)
   }
