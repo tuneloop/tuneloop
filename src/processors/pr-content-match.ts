@@ -63,10 +63,15 @@ export function __resetPrCache(): void {
 
 export const prContentMatch: Processor = {
   name: 'pr-content-match',
-  version: 3,
+  version: 5,
   kind: 'static',
   needs: { network: true },
-  requires: ['segment-blocks'],
+  // outcomes-git is a hard dep for WRITE ORDERING, not for input: its block rows
+  // must already be persisted when this processor persists, so our evidence-based
+  // fill can physically displace its proximity fill for the same block (1-1 table,
+  // no read-time reconciliation — see store.persistResult). Bump this version
+  // whenever outcomes-git's block attribution changes, so the displace re-fires.
+  requires: ['segment-blocks', 'outcomes-git'],
   async run(ctx) {
     const { session, sh } = ctx
     const cwd = session.project.cwd
@@ -203,7 +208,9 @@ export const prContentMatch: Processor = {
  * its attribution % on the session link stands. Under-claim over over-claim.
  *
  * Only inferred-owned segments are emitted; explicit segments stay outcomes-git's.
- * Where the fills disagree, cost reads prefer ours (store.ts blockNotSuperseded).
+ * Where the fills disagree, our row physically DISPLACES outcomes-git's proximity
+ * row for that block at write time (store.persistResult), keeping block_artifacts
+ * 1-1 — no read-time reconciliation.
  * Block confidence is NULL as in outcomes-git: attribution % lives on the session link.
  */
 function unifiedBlockFill(

@@ -22,7 +22,7 @@ export { stripInertRegions } from './github-pr'
  */
 export const outcomesGit: Processor = {
   name: 'outcomes-git',
-  version: 4,
+  version: 5,
   kind: 'static',
   needs: { network: true },
   requires: ['segment-blocks'],
@@ -63,28 +63,14 @@ export const outcomesGit: Processor = {
       }
     }
 
-    // Block→PR: map each PR's create/merge call to its (closing) block, then
-    // attribute every block to the next PR it fed into — the full cost of
-    // producing the PR, including the commit-bounded blocks leading up to it.
     const blocks = deterministicBlocks(session)
     const tool = blocks.length ? blockMembership(session, blocks).tool : []
     const blockArtifacts: BlockArtifactInput[] = []
-    if (blocks.length && mutating.length) {
-      const closingBlockToArtifact = new Map<number, string>()
-      for (const ref of mutating) {
-        const blockIdx = tool[ref.toolIndex]
-        if (blockIdx != null) closingBlockToArtifact.set(blockIdx, ref.id)
-      }
-      for (const { blockIdx, artifactId } of attributeBlocksToPrs(blocks, closingBlockToArtifact)) {
-        blockArtifacts.push({ blockIdx, artifactId, role: 'contributed', source: 'explicit' })
-      }
-    }
 
-    // Layer 1 — EXPLICIT reviews (`gh pr review` / MCP review tool). Deterministic,
-    // so the link is source='explicit', confidence 1.0. Self-created PRs are excluded
-    // (you don't "review" your own PR here). Cost attributes at block grain to the
-    // blocks where this PR was reviewed or read — "cost to review PR X", not the
-    // whole session. enrich-session's derived Layer 2 skips any PR linked here.
+    // Layer 1 — EXPLICIT reviews (`gh pr review` / MCP review tool). Deterministic, so
+    // the link is source='explicit', confidence 1.0. Self-created PRs are excluded (you
+    // don't "review" your own PR here). enrich-session's derived Layer 2 skips any PR
+    // linked here. Block-grain cost is assigned below, alongside created PRs.
     const mutatingIds = new Set(mutating.map((r) => r.id))
     const reviewed = new Map<string, { ref: (typeof refs)[number]; verdict?: PrVerdict }>()
     for (const r of refs) {
@@ -94,20 +80,35 @@ export const outcomesGit: Processor = {
       if (!prev || (rankVerdict(r.verdict) > rankVerdict(prev.verdict))) reviewed.set(r.id, { ref: r, verdict: r.verdict })
     }
     for (const [id, { ref, verdict }] of reviewed) {
-      const art = await enrichPrArtifact(sh, prArtifactBase(ref), cwd)
-      artifacts.push(art)
+      artifacts.push(await enrichPrArtifact(sh, prArtifactBase(ref), cwd))
       sessionArtifacts.push({ artifactId: id, role: 'reviewed', source: 'explicit', confidence: 1 })
       outcomes.push({ type: 'pr_reviewed', artifactId: id, ts: session.endedAt })
       if (verdict === 'approved') outcomes.push({ type: 'pr_approved', artifactId: id, ts: session.endedAt })
       else if (verdict === 'changes_requested') outcomes.push({ type: 'pr_changes_requested', artifactId: id, ts: session.endedAt })
-      if (blocks.length) {
-        const blockIdxs = new Set<number>()
-        for (const r of refs) {
-          if (r.id !== id || (r.kind !== 'review' && r.kind !== 'read') || r.toolIndex < 0) continue
-          const bi = tool[r.toolIndex]
-          if (bi != null) blockIdxs.add(bi)
-        }
-        for (const bi of blockIdxs) blockArtifacts.push({ blockIdx: bi, artifactId: id, role: 'reviewed', source: 'explicit', confidence: 1 })
+    }
+
+    // Block→PR — ONE backward-fill over both event kinds, so every block belongs to
+    // exactly one PR under one role (1-1): each block is attributed to the NEXT event
+    // at/after it — `gh pr create`/`merge` → `contributed` (the work producing the PR,
+    // incl. the blocks leading up to it); `gh pr review` → `reviewed` (the reading/
+    // analysis leading up to posting the review). Because `gh pr review` is now a block
+    // boundary (deterministicBlocks), a review and a later create never collapse into
+    // one block. A create/merge + review in the SAME message go to production (create/
+    // merge dominate). Blocks after the last event stay unattributed, as for create-only.
+    if (blocks.length) {
+      const anchors = new Map<number, string>()
+      const roleOf = new Map<string, 'contributed' | 'reviewed'>()
+      for (const ref of mutating) {
+        const bi = tool[ref.toolIndex]
+        if (bi != null) { anchors.set(bi, ref.id); roleOf.set(ref.id, 'contributed') }
+      }
+      for (const [id, { ref }] of reviewed) {
+        const bi = tool[ref.toolIndex]
+        if (bi != null && !anchors.has(bi)) { anchors.set(bi, id); roleOf.set(id, 'reviewed') } // create/merge on a shared block wins
+      }
+      for (const { blockIdx, artifactId } of attributeBlocksToPrs(blocks, anchors)) {
+        const role = roleOf.get(artifactId)!
+        blockArtifacts.push({ blockIdx, artifactId, role, source: 'explicit', ...(role === 'reviewed' ? { confidence: 1 } : {}) })
       }
     }
 
