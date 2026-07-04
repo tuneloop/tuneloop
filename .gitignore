@@ -5,6 +5,11 @@ coverage/
 
 # tuneloop's local data store (default location when run from a repo)
 .tuneloop/
+# Local SQLite stores dropped in the working tree (contain private session data)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
 
 # skill-creator eval workspaces (transient benchmark artifacts)
 skills/*-workspace/

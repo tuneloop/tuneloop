@@ -4,13 +4,13 @@
   "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
-  "homepage": "https://github.com/Relvy-AI/tuneloop#readme",
+  "homepage": "https://github.com/tuneloop/tuneloop#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Relvy-AI/tuneloop.git"
+    "url": "git+https://github.com/tuneloop/tuneloop.git"
   },
   "bugs": {
-    "url": "https://github.com/Relvy-AI/tuneloop/issues"
+    "url": "https://github.com/tuneloop/tuneloop/issues"
   },
   "type": "module",
   "bin": {

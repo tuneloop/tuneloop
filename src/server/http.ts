@@ -9,7 +9,12 @@ import { ERROR_CATEGORIES } from '../core/error-category'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
-/** Read-only JSON API + dashboard SPA over the analyzed store. */
+/**
+ * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
+ * time; POST endpoints write user curation only (features + session↔artifact
+ * links), stamped user-authored so `analyze` never clobbers them. Deriving facts
+ * from transcripts stays in the `analyze` path.
+ */
 export function createDashboardServer(store: Store, dbPath: string, sh?: ShFn): Server {
   return createServer((req, res) => {
     route(req, res, store, dbPath, sh ?? null).catch((err) => sendJson(res, 500, { error: (err as Error).message }))

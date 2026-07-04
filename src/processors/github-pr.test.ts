@@ -52,9 +52,9 @@ describe('parsePrRefs', () => {
   })
 
   it('detects a read from `gh pr diff <num> --repo owner/repo`', () => {
-    const refs = parsePrRefs(sess([tc('shell', { target: { command: 'gh pr diff 21 --repo Relvy-AI/tuneloop' } })]))
+    const refs = parsePrRefs(sess([tc('shell', { target: { command: 'gh pr diff 21 --repo tuneloop/tuneloop' } })]))
     expect(refs).toEqual([
-      expect.objectContaining({ id: 'pr:Relvy-AI/tuneloop:21', kind: 'read', url: 'https://github.com/Relvy-AI/tuneloop/pull/21' }),
+      expect.objectContaining({ id: 'pr:tuneloop/tuneloop:21', kind: 'read', url: 'https://github.com/tuneloop/tuneloop/pull/21' }),
     ])
   })
 
