@@ -409,6 +409,39 @@ describe('friction events + topics persistence', () => {
     expect(store.frictionTopicEvents(g.id, 'a')).toHaveLength(2)
   })
 
+  it('a time window constrains counts, baseline, and drill-down — but lastSeen stays all-time', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 'old')
+    seedSession(store, db, 'new')
+    db.prepare("UPDATE sessions SET started_at = '2026-01-10T00:00:00Z' WHERE id = 'old'").run()
+    db.prepare("UPDATE sessions SET started_at = '2026-06-10T00:00:00Z' WHERE id = 'new'").run()
+    store.persistResult('old', 'enrich-friction', 2, 'h1', 'm', {
+      frictionTopics: [topic],
+      frictionEvents: [ev(0, topic.id)],
+      annotations: [{ key: 'friction_count', value: 1 }],
+    })
+    store.persistResult('new', 'enrich-friction', 2, 'h2', 'm', {
+      frictionTopics: [topic],
+      frictionEvents: [ev(0, topic.id), ev(1, topic.id)],
+      annotations: [{ key: 'friction_count', value: 2 }],
+    })
+
+    const all = store.frictionOverview(null)
+    expect(all.topics[0]).toMatchObject({ id: topic.id, events: 3, sessions: 2, lastSeen: '2026-06-10T00:00:00Z' })
+    expect(all.baseline.sessions).toBe(2)
+
+    // Window covering only the OLD session: counts shrink, lastSeen still reports
+    // the all-time latest occurrence (the resolved-vs-active signal).
+    const w = store.frictionOverview(null, '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')
+    expect(w.topics[0]).toMatchObject({ id: topic.id, events: 1, sessions: 1, lastSeen: '2026-06-10T00:00:00Z' })
+    expect(w.baseline.sessions).toBe(1)
+    expect(store.frictionTopicEvents(topic.id, null, '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z')).toHaveLength(1)
+
+    // A window with no member sessions hides the topic entirely.
+    expect(store.frictionOverview(null, '2027-01-01T00:00:00Z', '2027-02-01T00:00:00Z').topics).toEqual([])
+  })
+
   it('deleting a session cascades its friction events', () => {
     const db = openDb(':memory:')
     const store = new Store(db)

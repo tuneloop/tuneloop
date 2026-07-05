@@ -696,14 +696,16 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 
 /* ---- Friction tab -------------------------------------------------------- */
 .fr-caption { color: var(--muted); font-size: 13px; margin-bottom: 14px; max-width: 860px; }
+.fr-filters { margin: 2px 0 12px; }
+.fr-repo-grp { margin-left: auto; }
 #fr-repo { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 13px; }
 .fr-table th.num, .fr-table td.num { text-align: right; }
+.fr-when { white-space: nowrap; }
 .fr-row { cursor: pointer; }
 .fr-row:hover td { background: #faf7f0; }
 .fr-row.on td { background: #f5f1e7; }
-.fr-caret { color: var(--muted); font-size: 11px; }
 .fr-repo { color: var(--gray); font-size: 11px; margin-left: 6px; }
-.fr-base { color: var(--gray); font-size: 11px; font-weight: 400; }
+.fr-base { display: block; color: var(--gray); font-size: 11px; font-weight: 400; white-space: nowrap; }
 /* Coarse friction-type chips: corrective types warm, supply/gap types neutral-cool. */
 .fr-t-re-steer, .fr-t-rework { background: #f4ddd6; color: var(--red); }
 .fr-t-context-supply { background: #f6ecd2; color: var(--amber); }

@@ -157,19 +157,21 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
   if (path === '/api/friction') {
     // The Friction view: topics ranked by occurrences + outcome/cost profile vs
-    // the friction-analyzed baseline, optionally sliced to one repo.
-    sendJson(res, 200, store.frictionOverview(url.searchParams.get('repo')))
+    // the friction-analyzed baseline, optionally sliced to one repo and windowed.
+    const w = windowFromDays(url.searchParams.get('days'))
+    sendJson(res, 200, store.frictionOverview(url.searchParams.get('repo'), w.from, w.to))
     return
   }
   if (path === '/api/friction/topic') {
     // Drill-down: one topic's member events with their evidence turns,
-    // honoring the same repo slice as the overview.
+    // honoring the same repo slice + window as the overview.
     const id = url.searchParams.get('id')
     if (!id) {
       sendJson(res, 400, { error: 'missing id' })
       return
     }
-    sendJson(res, 200, store.frictionTopicEvents(id, url.searchParams.get('repo')))
+    const w = windowFromDays(url.searchParams.get('days'))
+    sendJson(res, 200, store.frictionTopicEvents(id, url.searchParams.get('repo'), w.from, w.to))
     return
   }
   if (path === '/api/distribution') {

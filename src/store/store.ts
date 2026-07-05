@@ -67,6 +67,8 @@ export interface FrictionOverview {
     repo: string | null
     events: number
     sessions: number
+    /** All-time last occurrence (never windowed) — the resolved-vs-active signal. */
+    lastSeen: string | null
     avgCostUsd: number | null
     successRate: number | null
     mergedRate: number | null
@@ -650,9 +652,12 @@ export class Store {
    * store holds no rollups) and, per DR-6 (friction-mining plan), they are
    * associations to display, never causal claims.
    */
-  frictionOverview(repo?: string | null): FrictionOverview {
-    const repoPred = repo ? 'AND s.repo = ?' : ''
-    const repoArgs = repo ? [repo] : []
+  frictionOverview(repo?: string | null, from?: string | null, to?: string | null): FrictionOverview {
+    const win = !!(from && to) // half-open [from, to), same convention as highlights
+    // One combined member-session predicate: counts, stats, baseline, and the
+    // untopiced tally must all honor the same repo slice + time window.
+    const sessPred = `${repo ? 'AND s.repo = ?' : ''} ${win ? 'AND s.started_at >= ? AND s.started_at < ?' : ''}`
+    const sessArgs = [...(repo ? [repo] : []), ...(win ? [from!, to!] : [])]
 
     // One row per (topic, member session) with that session's outcome bits —
     // DISTINCT so a topic with several events in one session counts it once.
@@ -665,25 +670,41 @@ export class Store {
              EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'session_success') AS success,
              EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'pr_merged') AS merged
            FROM friction_events e JOIN sessions s ON s.id = e.session_id
-           WHERE e.topic_id IS NOT NULL ${repoPred}
+           WHERE e.topic_id IS NOT NULL ${sessPred}
          ) GROUP BY topic_id`,
       )
-      .all(...repoArgs) as Array<{ id: string; sessions: number; avgCostUsd: number | null; successRate: number; mergedRate: number }>
+      .all(...sessArgs) as Array<{ id: string; sessions: number; avgCostUsd: number | null; successRate: number; mergedRate: number }>
     const statsById = new Map(memberStats.map((r) => [r.id, r]))
 
-    // The repo slice constrains the events count too (session join), not just topic
-    // visibility — else a GLOBAL topic shows all-repo occurrences next to sliced stats.
+    // The repo slice + window constrain the events count too (session join), not just
+    // topic visibility — else a GLOBAL topic shows all-repo/all-time occurrences next
+    // to sliced stats.
     const topicRows = this.db
       .prepare(
         `SELECT t.id, COALESCE(t.label,'') AS label, COALESCE(t.type,'other') AS type, t.remedy, t.repo,
                 COUNT(s.id) AS events
          FROM friction_topics t
          LEFT JOIN friction_events e ON e.topic_id = t.id
-         LEFT JOIN sessions s ON s.id = e.session_id ${repo ? 'AND s.repo = ?' : ''}
+         LEFT JOIN sessions s ON s.id = e.session_id ${sessPred}
          WHERE 1=1 ${repo ? 'AND (t.repo IS NULL OR t.repo = ?)' : ''}
          GROUP BY t.id`,
       )
-      .all(...(repo ? [repo, repo] : [])) as Array<{ id: string; label: string; type: string; remedy: string | null; repo: string | null; events: number }>
+      .all(...sessArgs, ...(repo ? [repo] : [])) as Array<{ id: string; label: string; type: string; remedy: string | null; repo: string | null; events: number }>
+
+    // Last occurrence per topic: repo-sliced but NEVER windowed — "last seen 5 weeks
+    // ago" is exactly the signal a window would erase
+    const lastSeenById = new Map(
+      (
+        this.db
+          .prepare(
+            `SELECT e.topic_id AS id, MAX(s.started_at) AS lastSeen
+             FROM friction_events e JOIN sessions s ON s.id = e.session_id
+             WHERE e.topic_id IS NOT NULL ${repo ? 'AND s.repo = ?' : ''}
+             GROUP BY e.topic_id`,
+          )
+          .all(...(repo ? [repo] : [])) as Array<{ id: string; lastSeen: string | null }>
+      ).map((r) => [r.id, r.lastSeen]),
+    )
 
     const topics = topicRows
       .map((t) => {
@@ -691,13 +712,14 @@ export class Store {
         return {
           ...t,
           sessions: st?.sessions ?? 0,
+          lastSeen: lastSeenById.get(t.id) ?? null,
           avgCostUsd: st?.avgCostUsd ?? null,
           successRate: st ? st.successRate : null,
           mergedRate: st ? st.mergedRate : null,
         }
       })
-      // A repo slice hides topics whose remaining member sessions are elsewhere.
-      .filter((t) => !repo || t.sessions > 0)
+      // A repo slice or time window hides topics with no member sessions inside it.
+      .filter((t) => (!repo && !win) || t.sessions > 0)
       .sort((a, b) => b.events - a.events || b.sessions - a.sessions)
 
     // Baseline cohort: friction-analyzed sessions (the friction_count annotation
@@ -711,17 +733,17 @@ export class Store {
              EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'session_success') AS success,
              EXISTS (SELECT 1 FROM outcomes o WHERE o.session_id = s.id AND o.type = 'pr_merged') AS merged
            FROM sessions s
-           WHERE EXISTS (SELECT 1 FROM annotations a WHERE a.session_id = s.id AND a.key = 'friction_count') ${repoPred}
+           WHERE EXISTS (SELECT 1 FROM annotations a WHERE a.session_id = s.id AND a.key = 'friction_count') ${sessPred}
          )`,
       )
-      .get(...repoArgs) as { sessions: number; avgCostUsd: number | null; successRate: number | null; mergedRate: number | null }
+      .get(...sessArgs) as { sessions: number; avgCostUsd: number | null; successRate: number | null; mergedRate: number | null }
 
     const untopiced = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM friction_events e JOIN sessions s ON s.id = e.session_id
-         WHERE e.topic_id IS NULL ${repoPred}`,
+         WHERE e.topic_id IS NULL ${sessPred}`,
       )
-      .get(...repoArgs) as { n: number }
+      .get(...sessArgs) as { n: number }
 
     // Repos that have any friction data — drives the view's repo slicer.
     const repos = (
@@ -743,7 +765,8 @@ export class Store {
    * DR-1). Blobs are decompressed once per member session; a missing blob or
    * seq degrades to the abstract description, never an error.
    */
-  frictionTopicEvents(topicId: string, repo?: string | null): FrictionTopicEvent[] {
+  frictionTopicEvents(topicId: string, repo?: string | null, from?: string | null, to?: string | null): FrictionTopicEvent[] {
+    const win = !!(from && to)
     const rows = this.db
       .prepare(
         `SELECT e.session_id AS sessionId, e.turn_seq AS turnSeq, e.type, e.trigger_kind AS trigger,
@@ -751,10 +774,10 @@ export class Store {
                 COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id = s.id AND key = 'title'), s.title, s.id) AS sessionTitle,
                 s.started_at AS startedAt
          FROM friction_events e JOIN sessions s ON s.id = e.session_id
-         WHERE e.topic_id = ? ${repo ? 'AND s.repo = ?' : ''}
+         WHERE e.topic_id = ? ${repo ? 'AND s.repo = ?' : ''} ${win ? 'AND s.started_at >= ? AND s.started_at < ?' : ''}
          ORDER BY s.started_at DESC, e.idx`,
       )
-      .all(...(repo ? [topicId, repo] : [topicId])) as Array<FrictionTopicEvent & { turnSeq: number | null }>
+      .all(topicId, ...(repo ? [repo] : []), ...(win ? [from!, to!] : [])) as Array<FrictionTopicEvent & { turnSeq: number | null }>
 
     // seq → user-turn text, one blob decompression per distinct session.
     const turnText = new Map<string, Map<number, string>>()
