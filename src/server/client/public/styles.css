@@ -316,7 +316,9 @@ tr.srow td { vertical-align: middle; }
 .tag-more { border: 0; background: var(--track); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; cursor: pointer; margin-left: 2px; }
 .tag-more:hover { background: #dfe9e0; color: var(--emerald); }
 svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: var(--muted); }
-.overlay { position: fixed; inset: 0; background: rgba(20,18,15,.4); opacity: 0; pointer-events: none; transition: opacity .15s; }
+/* Above ALL page content — sticky table headers carry z-index (fr-scroll/feat-head),
+   and without one here they'd paint over the dim layer — but below the drawer (10). */
+.overlay { position: fixed; inset: 0; background: rgba(20,18,15,.4); opacity: 0; pointer-events: none; transition: opacity .15s; z-index: 9; }
 .overlay.on { opacity: 1; pointer-events: auto; }
 .drawer { position: fixed; top: 0; right: 0; height: 100%; width: min(900px, 96vw); background: var(--bg); border-left: 1px solid var(--line); transform: translateX(100%); transition: transform .18s ease; overflow-y: auto; z-index: 10; }
 .drawer.on { transform: translateX(0); }
@@ -699,7 +701,21 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .fr-filters { margin: 2px 0 12px; }
 .fr-repo-grp { margin-left: auto; }
 #fr-repo { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 13px; }
+/* Fixed-height scroll window (features-list pattern) so a long topic list scrolls
+   within the panel. Sticky header needs separate borders — collapsed ones scroll
+   away with the rows — so the th carries its own bottom border + background. */
+/* Viewport-relative height (min 460px): tall windows see more topics, the box
+   still ends above the untopiced line + footer. */
+.fr-scroll { max-height: max(460px, calc(100vh - 420px)); overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; }
+.fr-scroll .fr-table { border-collapse: separate; border-spacing: 0; }
+.fr-scroll .fr-table th { position: sticky; top: 0; z-index: 2; background: var(--paper); }
+.fr-scroll .fr-table tr:last-child td { border-bottom: 0; }
 .fr-table th.num, .fr-table td.num { text-align: right; }
+/* Advise-pass recommendation: clamped under the remedy class in the cell, in full
+   at the top of the expanded detail. */
+.fr-advice { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  color: var(--muted); font-size: 12px; margin-top: 2px; max-width: 280px; }
+.fr-advice-full { font-size: 13px; margin: 4px 0 8px; padding: 8px 10px; background: #f2eddf; border-radius: 7px; }
 .fr-when { white-space: nowrap; }
 .fr-row { cursor: pointer; }
 .fr-row:hover td { background: #faf7f0; }

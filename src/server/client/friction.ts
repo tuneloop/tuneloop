@@ -131,19 +131,24 @@ function renderFriction() {
         '<td>' + esc(t.label) +
         (t.repo ? ' <span class="fr-repo">' + esc(t.repo) + '</span>' : ' <span class="fr-repo">any repo</span>') + '</td>' +
         '<td>' + typeBadge(t.type) + '</td>' +
-        '<td>' + esc(REMEDY_LABELS[t.remedy] != null ? REMEDY_LABELS[t.remedy] : t.remedy || '') + '</td>' +
+        '<td>' + esc(REMEDY_LABELS[t.remedy] != null ? REMEDY_LABELS[t.remedy] : t.remedy || '') +
+        (t.advice ? '<span class="fr-advice" title="' + esc(t.advice) + '">' + esc(t.advice) + '</span>' : '') + '</td>' +
         '<td class="num">' + t.events + '</td>' +
         '<td class="num">' + t.sessions + '</td>' +
         '<td class="num fr-when">' + (t.lastSeen ? esc(dayOf(t.lastSeen)) : '—') + '</td>' +
         '<td class="num">' + vsBase(t.successRate, data.baseline.successRate) + '</td>' +
         '<td class="num">' + vsBase(t.mergedRate, data.baseline.mergedRate) + '</td>' +
         '<td class="num">' + vsBase(t.avgCostUsd, data.baseline.avgCostUsd, 'usd') + '</td></tr>'
-      if (open) row += '<tr class="fr-detail"><td colspan="9"><div id="fr-detail-' + cssId(t.id) + '" class="fr-ev-wrap">Loading…</div></td></tr>'
+      if (open) {
+        row += '<tr class="fr-detail"><td colspan="9">' +
+          (t.advice ? '<div class="fr-advice-full">' + esc(t.advice) + '</div>' : '') +
+          '<div id="fr-detail-' + cssId(t.id) + '" class="fr-ev-wrap">Loading…</div></td></tr>'
+      }
       return row
     })
     .join('')
 
-  html += '<table class="fr-table">' + head + body + '</table>'
+  html += '<div class="fr-scroll"><table class="fr-table">' + head + body + '</table></div>'
   if (data.untopicedEvents) {
     html += '<div class="empty" style="margin-top:10px">' + data.untopicedEvents + ' one-off friction event(s) matched no recurring topic.</div>'
   }
@@ -206,7 +211,8 @@ function paintTopicDetail(topicId, events) {
       return (
         '<div class="fr-ev">' +
         '<div class="fr-ev-head">' +
-        '<a class="fr-sess" data-session="' + esc(e.sessionId) + '">' + esc(e.sessionTitle || e.sessionId) + '</a>' +
+        '<a class="fr-sess" data-session="' + esc(e.sessionId) + '"' +
+        (e.turnSeq != null ? ' data-seq="' + e.turnSeq + '"' : '') + '>' + esc(e.sessionTitle || e.sessionId) + '</a>' +
         '<span class="fr-ev-meta">' + esc(dayOf(e.startedAt)) + (trig ? ' · ' + trig : '') + '</span>' +
         '</div>' +
         '<div class="fr-ev-desc">' + esc(e.description) + '</div>' +
@@ -218,7 +224,9 @@ function paintTopicDetail(topicId, events) {
   Array.prototype.forEach.call(el.querySelectorAll('.fr-sess'), function (a) {
     a.onclick = function (ev) {
       ev.stopPropagation() // don't toggle the topic row
-      openDetail(a.getAttribute('data-session'))
+      var seq = a.getAttribute('data-seq')
+      // Land on the evidence turn itself — the event's turn_seq pointer.
+      openDetail(a.getAttribute('data-session'), seq != null ? { turnSeq: parseInt(seq, 10) } : undefined)
     }
   })
 }

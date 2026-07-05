@@ -1,11 +1,5 @@
 # Friction Mining & Emergent Topics (the "Improve" step)
 
-Status: IMPLEMENTED (2026-07-04) — all phases built and e2e-verified.
-Code map: `src/core/turns.ts` (shared turn helpers) · `src/processors/steering.ts` ·
-`src/processors/enrich-friction.ts` · `src/reducers/friction-merge.ts` (invoked from analyze) ·
-`src/store/{db,store,types}.ts` (friction_events/friction_topics + reads) · `src/server/http.ts`
-(/api/friction*) · `src/server/client/friction.ts` (Friction tab).
-
 ## Goal
 
 Mine each session's follow-up user messages for moments where the human had to **nudge, re-steer,
@@ -14,7 +8,7 @@ re-supply context, or force rework** of the agent; aggregate them across session
 the outcome + cost graph (correlational only). Example:
 
 ```
-Context-supply → "point the agent at the default sqlite db before data analysis"  · 12 sessions
+Context-supply → "user had to tell the agent which env file holds the service credentials"  · 12 sessions
 Tool-gap       → "agent can't reach the staging DB; user pastes query results"     ·  8 sessions → add MCP
 ```
 
@@ -46,8 +40,12 @@ only the LLM layer can separate genuine steering from workflow progression.
 
 **`enrich-friction` (LLM enrichment, runs only on steered sessions):** one structured call per
 session. Prompt input: numbered follow-ups, each tagged with the tool errors (`error_category`) that
-preceded it positionally; assistant-limitation snippets; the existing topic list (repo + globals,
-read fresh per session via `ProcessorContext.existingTopics` so assignments compound). Output events
+preceded it positionally, an interrupt tag when the user pressed Esc in that window (naming the
+in-flight action — the direction the user vetoed), AND an `agent before:` digest (files edited, tool
+counts, tail of the agent's last message) so the model reads the user's REACTION instead of guessing
+what "no, not like that" refers to; assistant-limitation snippets; the existing topic list (repo +
+globals, read fresh per session via `ProcessorContext.existingTopics` so assignments compound).
+Tool-call rejections surface through the same error tags as `user_rejected`. Output events
 `{turn, type, description, matched_topic_id | new_topic_label, remedy_hint, trigger}`. Postprocess:
 bogus matched ids dropped; junk labels gated (event survives topicless); matched topics re-emitted
 (heals a mid-run orphan prune without breaking the event FK); empty LLM payload throws (a failure,
@@ -65,11 +63,15 @@ the pass retries next analyze. Legality: same repo, or a global keeper absorbs a
 duplicate (never the reverse); user-authored topics are never absorbed. Keeper = better-named,
 preferring the older topic when both names are adequate.
 
-**Dashboard:** Friction tab via `/api/friction` (+ `/api/friction/topic` drill-down). Topics ranked
-by occurrences with outcome/cost columns vs the friction-analyzed baseline (DR-6 caption: associations,
-not causes). The repo slice constrains topic visibility, event counts, and drill-down events alike.
+**Advise pass (`friction-advise.ts`):** turns each topic's remedy CLASS into a concrete 1–2 sentence
+recommendation synthesized from its member event descriptions, written to `friction_topics.advice`.
+Gated PER TOPIC on a hash of those descriptions (only regenerates when the member set changes); runs
+after merge so advice lands on keepers; a failed call or junk output stays unstamped and retries.
 
-## Spike learnings (Phase 0.5, 16 real sessions, 3 runs, <$1)
+**Dashboard:** Friction tab via `/api/friction` (+ `/api/friction/topic` drill-down). Topics ranked
+by occurrences with outcome/cost columns vs the friction-analyzed baseline
+
+## Spike learnings
 
 - The mechanic works: topics recur and match across sessions; quiet sessions come back empty.
 - **Precision >> recall; model-bound.** Haiku leaks collaboration-as-friction and force-fits topics;
@@ -78,7 +80,7 @@ not causes). The repo slice constrains topic visibility, event counts, and drill
   ≤6-word labels; when unsure whether an event matches, mint (merge pass cleans up); align tool
   errors positionally; never hint an expected event count (anchoring invents events).
 
-## Deferred
+## Next steps
 
 - PR-review-comment feed into the extraction prompt (see `after_review` note above).
 - Topic tombstones / user edit actions (features' `rejectedFeatureTitles` pattern) — until the
@@ -86,4 +88,5 @@ not causes). The repo slice constrains topic visibility, event counts, and drill
 - Auto-drafting the skill/doc/MCP a topic suggests — the obvious v2 ("draft this skill" button).
 - Per-event facet grain (v1 uses session rollup `friction_type` / `friction_count`).
 - Validating the assistant-limitation regex against all adapters before freezing it; possible
-  `capability-discovery` type (currently folded into `context-supply`).
+  `capability-discovery` type (currently folded into `context-supply`)
+- Drafting eval datasets automatically friction topics and its remediations

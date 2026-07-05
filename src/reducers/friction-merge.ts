@@ -87,7 +87,6 @@ export async function runFrictionMerge(store: Store, llm: LlmClient, log: Logger
       if (store.applyFrictionMerge(keep.id, drop.id)) {
         byId.delete(drop.id)
         applied++
-        log.info(`friction: merged "${drop.label}" into "${keep.label}"`)
       }
     }
   }

@@ -1,7 +1,7 @@
 import { registerProcessor } from '../core/registry'
 import { deterministicBlocks } from '../core/blocks'
 import { classifyError, resultText } from '../core/error-category'
-import { isApproval, userTurnEvents } from '../core/turns'
+import { isApproval, stripReminders, userTurnEvents } from '../core/turns'
 import { costOfUsage } from '../pricing/pricing'
 import type { FrictionTopicRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
@@ -155,6 +155,14 @@ interface Followup {
   seq?: number
   /** error_category keys of failed main-thread tool calls preceding this turn. */
   errors: string[]
+  /** Compact digest of what the assistant did/said since the previous user turn. */
+  did?: string
+  /**
+   * Set when the user pressed interrupt (Esc) in this window: what the agent was
+   * doing at that moment ('' when unrecoverable). The strongest re-steer signal —
+   * but the turn text must still react to it (same discipline as error tags).
+   */
+  interrupted?: string
 }
 
 /**
@@ -181,6 +189,31 @@ export function collectFollowups(session: Session): Followup[] {
     errors.push({ seq, cat: classifyError(t.action, resultText(t.result.raw).slice(0, 8000)) })
   }
 
+  // Assistant activity, for the per-followup digest: main-thread text snippets
+  // and tool calls keyed by seq (windowed per follow-up below).
+  const texts: Array<{ seq: number; text: string }> = []
+  for (const ev of session.events) {
+    if (ev.kind !== 'assistant' || ev.isSidechain || ev.seq == null) continue
+    for (const b of ev.blocks) if (b.type === 'text' && b.text.trim()) texts.push({ seq: ev.seq, text: b.text })
+  }
+  const calls: Array<{ seq: number; action: string; path?: string; cmd?: string }> = []
+  for (const t of session.toolCalls) {
+    if (t.isSidechain) continue
+    const seq = uidSeq.get(t.id)
+    if (seq == null) continue
+    calls.push({ seq, action: t.action, path: t.target.paths?.[0], cmd: t.target.command?.replace(/\s+/g, ' ').slice(0, 60) })
+  }
+
+  // Esc-interrupt markers: synthetic "user" events dropped from the real turn
+  // spine (core/turns.ts) but still present in the event stream — each one is
+  // the user cutting the agent off mid-action.
+  const interrupts: number[] = []
+  for (const ev of session.events) {
+    if (ev.kind !== 'user' || ev.isSidechain || ev.seq == null) continue
+    // Stripped text, matching how core/turns.ts excludes these from the real spine.
+    if (/^\[Request interrupted/i.test(stripReminders(ev.text))) interrupts.push(ev.seq)
+  }
+
   const out: Followup[] = []
   for (let i = 1; i < turns.length; i++) {
     const t = turns[i]!
@@ -188,9 +221,67 @@ export function collectFollowups(session: Session): Followup[] {
     const prevSeq = turns[i - 1]!.seq ?? -1
     const seq = t.seq ?? Number.MAX_SAFE_INTEGER
     const cats = errors.filter((e) => e.seq > prevSeq && e.seq < seq).map((e) => e.cat)
-    out.push({ text: t.text, seq: t.seq, errors: cats })
+    const mark = interrupts.find((m) => m > prevSeq && m < seq)
+    out.push({
+      text: t.text,
+      seq: t.seq,
+      errors: cats,
+      did: didDigest(texts, calls, prevSeq, seq),
+      interrupted: mark != null ? directionAt(texts, calls, prevSeq, mark) : undefined,
+    })
   }
   return out
+}
+
+/** What the agent was doing right before an interrupt: its last action or statement in the window. */
+function directionAt(
+  texts: Array<{ seq: number; text: string }>,
+  calls: Array<{ seq: number; action: string; path?: string; cmd?: string }>,
+  fromSeq: number,
+  toSeq: number,
+): string {
+  const last = <T extends { seq: number }>(xs: T[]) => xs.filter((x) => x.seq > fromSeq && x.seq < toSeq).at(-1)
+  const c = last(calls)
+  const t = last(texts)
+  // Prefer whichever came later — the in-flight tool call usually IS the direction.
+  if (c && (!t || c.seq >= t.seq)) return `running ${c.action}${c.path ? ` ${shortPath(c.path)}` : c.cmd ? ` \`${c.cmd}\`` : ''}`
+  if (t) {
+    const s = t.text.replace(/\s+/g, ' ').trim()
+    return `saying: "${s.length > 140 ? '… ' + s.slice(-140) : s}"`
+  }
+  return ''
+}
+
+/**
+ * "edited a.ts, b.ts; tools bash×2; said: …" — what the agent did between two
+ * user turns, so the model can read the user's REACTION instead of guessing what
+ * "no, not like that" refers to. Ends with the TAIL of the agent's last message
+ * (its conclusion) rather than the head.
+ */
+function didDigest(
+  texts: Array<{ seq: number; text: string }>,
+  calls: Array<{ seq: number; action: string; path?: string }>,
+  fromSeq: number,
+  toSeq: number,
+): string | undefined {
+  const inWin = <T extends { seq: number }>(xs: T[]) => xs.filter((x) => x.seq > fromSeq && x.seq < toSeq)
+  const parts: string[] = []
+  const wc = inWin(calls)
+  const edited = [...new Set(wc.filter((c) => c.action === 'file_write' && c.path).map((c) => shortPath(c.path!)))]
+  if (edited.length) parts.push(`edited ${edited.slice(0, 3).join(', ')}${edited.length > 3 ? ` +${edited.length - 3}` : ''}`)
+  const counts = new Map<string, number>()
+  for (const c of wc) if (c.action !== 'file_write') counts.set(c.action, (counts.get(c.action) ?? 0) + 1)
+  if (counts.size) parts.push('tools ' + [...counts.entries()].map(([a, n]) => (n > 1 ? `${a}×${n}` : a)).join(', '))
+  const last = inWin(texts).at(-1)
+  if (last) {
+    const t = last.text.replace(/\s+/g, ' ').trim()
+    parts.push(`said: "${t.length > 220 ? '… ' + t.slice(-220) : t}"`)
+  }
+  return parts.length ? parts.join('; ') : undefined
+}
+
+function shortPath(p: string): string {
+  return p.split('/').slice(-2).join('/')
 }
 
 // Assistant "I can't do X" statements — the agent-limitation signal (plan Q4: phrasings to be broadened as other harnesses' transcripts are validated).
@@ -235,7 +326,8 @@ function buildPrompt(session: Session, followups: Followup[], topics: FrictionTo
     trim(opener.replace(/\s+/g, ' '), 600),
     '',
     `Follow-up user turns (${followups.length}, bare approvals already removed; "(after errors: …)" = failed`,
-    'tool calls between the previous turn and this one):',
+    'tool calls between the previous turn and this one; the indented "agent before:" line digests what the',
+    "agent did and said just before that turn — context for reading the user's reaction, never itself friction):",
     numberedFollowups(followups),
     '',
     'Assistant limitation statements (the agent saying it cannot do something):',
@@ -271,14 +363,19 @@ function buildPrompt(session: Session, followups: Followup[], topics: FrictionTo
     '  render, when no explicit earlier spec was violated. It becomes friction only when the same correction',
     '  has to be repeated or the output contradicted an explicit instruction,',
     "- system/harness notifications and the user correcting their OWN earlier mistake.",
+    'A "(user INTERRUPTED the agent …)" tag means the user cut the agent off mid-action (Esc); the tag names',
+    'what the agent was doing. Use it ONLY to interpret that turn\'s text — the same test as error tags applies:',
+    "the turn must react to the agent's direction, and an interrupt followed by an unrelated request or a pause",
+    'to answer/think is NOT friction. The tag never makes an otherwise-collaborative turn friction.',
     'When the user repeatedly pastes screenshots to show the agent its own rendered output, the recurring gap',
     'is ONE tool-gap topic (the agent cannot verify rendered UI itself), not many per-tweak rework topics.',
     'Consecutive turns rejecting the same deliverable ("no, try again" × N) are ONE event, not N.',
     'Be sparse and certain: only emit an event when the agent clearly fell short. Emitting NO events is a',
     'common, correct answer for a smooth session.',
     'Rules for description: one abstract sentence a reader from another team would understand, phrased so',
-    'recurrences across sessions read the same ("user had to point the agent at the default sqlite db"),',
-    'never a quote, never session-specific details like line numbers.',
+    'recurrences across sessions read the same — e.g. "user had to tell the agent which env file holds the',
+    'service credentials", "user had to run the deploy command themselves and paste the output", "user had to',
+    'restate the team\'s changelog format" — never a quote, never session-specific details like line numbers.',
     'Rules for topics: a topic is a RECURRING friction pattern, named as a CONCRETE, ACTIONABLE gap in Title Case',
     '(6 words max) — name the specific missing thing ("Agent Tool Inventory Not Documented"), never an abstract',
     'theme ("Implementation Scope Ambiguity"). Match matched_topic_id ONLY when the event is genuinely another',
@@ -298,7 +395,9 @@ function buildPrompt(session: Session, followups: Followup[], topics: FrictionTo
 function numberedFollowups(followups: Followup[], perMsg = 500, maxTurns = 36): string {
   const labeled = followups.map((f, i) => {
     const errTag = f.errors.length ? ` (after errors: ${countTag(f.errors)})` : ''
-    return `[${i + 1}]${errTag} ${trim(f.text.replace(/\s+/g, ' '), perMsg)}`
+    const intTag = f.interrupted != null ? ` (user INTERRUPTED the agent${f.interrupted ? ` while it was ${f.interrupted}` : ''})` : ''
+    const head = `[${i + 1}]${errTag}${intTag} ${trim(f.text.replace(/\s+/g, ' '), perMsg)}`
+    return f.did ? `${head}\n    agent before: ${trim(f.did, 340)}` : head
   })
   if (labeled.length <= maxTurns) return labeled.join('\n')
   const head = labeled.slice(0, 12)

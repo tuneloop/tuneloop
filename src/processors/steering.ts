@@ -19,8 +19,8 @@ export const steering: Processor = {
   version: 1,
   kind: 'static',
   facets: [
-    // Session-grain filter/split: did the user intervene after the opener at all?
-    { key: 'steering', label: 'Steering', type: 'enum', source: 'annotation', roles: ['chart', 'filter', 'detail'] },
+    // Detail-only: did the user intervene after the opener at all?
+    { key: 'steering', label: 'Steering', type: 'enum', source: 'annotation', roles: ['detail'] },
   ],
   measures: [
     {

@@ -64,6 +64,8 @@ export interface FrictionOverview {
     label: string
     type: string
     remedy: string | null
+    /** Concrete recommendation from the advise pass; null until generated. */
+    advice: string | null
     repo: string | null
     events: number
     sessions: number
@@ -645,6 +647,37 @@ export class Store {
   }
 
   /**
+   * Every topic with its member event descriptions — the advise pass's input.
+   * `adviceHash` is the stamp from the last generation; the reducer compares it
+   * to a hash of the current descriptions to find topics whose advice is stale.
+   */
+  frictionAdviceCandidates(): Array<{
+    id: string
+    label: string
+    type: string
+    remedy: string | null
+    adviceHash: string | null
+    descriptions: string[]
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id, COALESCE(t.label,'') AS label, COALESCE(t.type,'other') AS type, t.remedy,
+                t.advice_hash AS adviceHash, json_group_array(e.description) AS descJson
+         FROM friction_topics t JOIN friction_events e ON e.topic_id = t.id
+         GROUP BY t.id ORDER BY t.first_seen`,
+      )
+      .all() as Array<{ id: string; label: string; type: string; remedy: string | null; adviceHash: string | null; descJson: string }>
+    return rows.map(({ descJson, ...r }) => ({
+      ...r,
+      descriptions: (safeJson<unknown[]>(descJson, []) ?? []).filter((d): d is string => typeof d === 'string' && !!d),
+    }))
+  }
+
+  setFrictionAdvice(id: string, advice: string, hash: string): void {
+    this.db.prepare('UPDATE friction_topics SET advice = ?, advice_hash = ? WHERE id = ?').run(advice, hash, id)
+  }
+
+  /**
    * The Friction view's main payload: every topic with member counts and the
    * outcome/cost profile of its member sessions, plus the BASELINE over all
    * friction-analyzed sessions (the fair comparison cohort — sessions never run
@@ -681,7 +714,7 @@ export class Store {
     // to sliced stats.
     const topicRows = this.db
       .prepare(
-        `SELECT t.id, COALESCE(t.label,'') AS label, COALESCE(t.type,'other') AS type, t.remedy, t.repo,
+        `SELECT t.id, COALESCE(t.label,'') AS label, COALESCE(t.type,'other') AS type, t.remedy, t.advice, t.repo,
                 COUNT(s.id) AS events
          FROM friction_topics t
          LEFT JOIN friction_events e ON e.topic_id = t.id
@@ -689,7 +722,7 @@ export class Store {
          WHERE 1=1 ${repo ? 'AND (t.repo IS NULL OR t.repo = ?)' : ''}
          GROUP BY t.id`,
       )
-      .all(...sessArgs, ...(repo ? [repo] : [])) as Array<{ id: string; label: string; type: string; remedy: string | null; repo: string | null; events: number }>
+      .all(...sessArgs, ...(repo ? [repo] : [])) as Array<{ id: string; label: string; type: string; remedy: string | null; advice: string | null; repo: string | null; events: number }>
 
     // Last occurrence per topic: repo-sliced but NEVER windowed — "last seen 5 weeks
     // ago" is exactly the signal a window would erase

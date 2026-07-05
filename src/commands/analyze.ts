@@ -19,6 +19,7 @@ import type { Summary } from '../store/store'
 import { createLogger } from '../util/log'
 import { Progress } from '../util/progress'
 import { makeSh } from '../util/sh'
+import { runFrictionAdvise } from '../reducers/friction-advise'
 import { runFrictionMerge } from '../reducers/friction-merge'
 
 export interface AnalyzeOptions {
@@ -289,6 +290,13 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       await runFrictionMerge(store, llm, log)
     } catch (err) {
       log.warn(`friction merge pass failed: ${(err as Error).message}`)
+    }
+    // Advise runs AFTER merge so recommendations attach to the kept topics;
+    // per-topic hash gate means only changed topics cost an LLM call.
+    try {
+      await runFrictionAdvise(store, llm, log)
+    } catch (err) {
+      log.warn(`friction advise pass failed: ${(err as Error).message}`)
     }
   }
 

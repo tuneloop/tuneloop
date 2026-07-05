@@ -1781,6 +1781,22 @@ export function openDetail(id, focus?: any) {
     }
     activeReveal = revealErrorTarget;
     if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
+
+    // Land on a specific user turn by its main-thread seq (friction evidence
+    // links pass the event's turn_seq pointer). Degrades to a normal open when
+    // the seq isn't in the transcript (pruned blob, synthetic turn).
+    if (focus && focus.turnSeq != null) {
+      var fgi = -1;
+      allTurns.forEach(function (t, i) { if (fgi < 0 && t.role === 'user' && !t.sidechain && t.seq === focus.turnSeq) fgi = i; });
+      if (fgi >= 0 && hasTx) {
+        showTab('transcript');
+        if (activeScope !== 'main') switchScope('main');
+        // Every main-thread user turn is in the nav list, so the index always resolves.
+        var fturn = -1;
+        userTurns.forEach(function (u, j) { if (fturn < 0 && u.i === fgi) fturn = j; });
+        if (fturn >= 0) requestAnimationFrame(function () { jumpToTurn(fturn); });
+      }
+    }
   });
 }
 

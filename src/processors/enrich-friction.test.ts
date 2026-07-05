@@ -110,6 +110,21 @@ describe('collectFollowups', () => {
     const session = buildSession([{ user: 'do the thing' }, { assistantText: 'done' }, { user: 'lgtm' }])
     expect(collectFollowups(session)).toEqual([])
   })
+
+  it('tags a follow-up when the user pressed interrupt, capturing what the agent was doing', () => {
+    const session = buildSession([
+      { user: 'fix the bug' },
+      { assistantText: 'I will start by refactoring the whole adapter layer' },
+      { user: '[Request interrupted by user]' }, // synthetic marker: dropped from turns, kept as signal
+      { user: 'no — do not refactor, just patch the bug' },
+      { assistantText: 'patched' },
+      { user: 'now add a regression test' },
+    ])
+    const followups = collectFollowups(session)
+    expect(followups).toHaveLength(2)
+    expect(followups[0]!.interrupted).toBe('saying: "I will start by refactoring the whole adapter layer"')
+    expect(followups[1]!.interrupted).toBeUndefined() // no interrupt in its window
+  })
 })
 
 describe('enrich-friction', () => {

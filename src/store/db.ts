@@ -309,17 +309,19 @@ CREATE TABLE IF NOT EXISTS user_link_overrides (
 );
 
 -- Friction topics: recurring cross-session friction patterns, maintained
--- incrementally by enrich-friction (assign-at-extraction, like features).
+-- incrementally by enrich-friction (assign-at-extraction, like features)
 -- Identity is stable: rows are INSERT OR IGNOREd, never auto-renamed (a bad
 -- rename would retroactively mislabel every member event). repo NULL = global.
 CREATE TABLE IF NOT EXISTS friction_topics (
-  id         TEXT PRIMARY KEY,   -- friction:derived:<repo-slug>:<label-slug>
-  label      TEXT,
-  type       TEXT,               -- dominant coarse type (re-steer | context-supply | ...)
-  remedy     TEXT,               -- dominant remedy hint (add_doc | add_skill | ...)
-  repo       TEXT,               -- NULL = global (preference-type topics)
-  source     TEXT,               -- derived | user
-  first_seen TEXT
+  id          TEXT PRIMARY KEY,  -- friction:derived:<repo-slug>:<label-slug>
+  label       TEXT,
+  type        TEXT,              -- dominant coarse type (re-steer | context-supply | ...)
+  remedy      TEXT,              -- dominant remedy hint (add_doc | add_skill | ...)
+  repo        TEXT,              -- NULL = global (preference type topics)
+  source      TEXT,              -- derived | user
+  first_seen  TEXT,
+  advice      TEXT,              -- concrete recommendation (advise pass; NULL until generated)
+  advice_hash TEXT               -- hash of the member descriptions the advice was built from
 );
 
 -- Friction events: one row per follow-up user turn where the human had to
@@ -379,5 +381,11 @@ function migrate(db: DB): void {
   }
   if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
     db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')
+  }
+  if (tableExists('friction_topics') && !has('friction_topics', 'advice')) {
+    db.exec('ALTER TABLE friction_topics ADD COLUMN advice TEXT')
+  }
+  if (tableExists('friction_topics') && !has('friction_topics', 'advice_hash')) {
+    db.exec('ALTER TABLE friction_topics ADD COLUMN advice_hash TEXT')
   }
 }
