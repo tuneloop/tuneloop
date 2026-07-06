@@ -1,0 +1,38 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { loadConfig } from './config'
+
+// stubEnv(name, undefined) deletes the var for the test; unstubAllEnvs restores.
+const unsetKeys = () => {
+  vi.stubEnv('TUNELOOP_LLM_API_KEY', undefined)
+  vi.stubEnv('OPENROUTER_API_KEY', undefined)
+}
+
+afterEach(() => vi.unstubAllEnvs())
+
+describe('LLM key resolution', () => {
+  it('resolves to null when the provider needs a key and none is set', () => {
+    unsetKeys()
+    expect(loadConfig({ llm: { provider: 'openrouter' } }).llm).toBeNull()
+  })
+
+  it('an in-process apiKey override enables the provider without any env key', () => {
+    unsetKeys()
+    const llm = loadConfig({ llm: { provider: 'openrouter', apiKey: 'sk-prompted' } }).llm
+    expect(llm?.apiKey).toBe('sk-prompted')
+    expect(llm?.provider).toBe('openrouter')
+    expect(llm?.model).toBeTruthy() // preset default model applies as usual
+  })
+
+  it('the apiKey override wins over both env sources', () => {
+    vi.stubEnv('TUNELOOP_LLM_API_KEY', 'sk-generic-env')
+    vi.stubEnv('OPENROUTER_API_KEY', 'sk-preset-env')
+    const llm = loadConfig({ llm: { provider: 'openrouter', apiKey: 'sk-prompted' } }).llm
+    expect(llm?.apiKey).toBe('sk-prompted')
+  })
+
+  it('env keys still work when no override is given', () => {
+    unsetKeys()
+    vi.stubEnv('OPENROUTER_API_KEY', 'sk-preset-env')
+    expect(loadConfig({ llm: { provider: 'openrouter' } }).llm?.apiKey).toBe('sk-preset-env')
+  })
+})

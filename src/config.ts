@@ -11,11 +11,18 @@ export interface TuneloopConfig {
   llm: { provider: string; model: string; apiKey: string; baseURL?: string } | null
 }
 
-/** Non-secret LLM knobs settable via CLI flags; they override env. The API key is env-only. */
+/**
+ * Non-secret LLM knobs settable via CLI flags; they override env. The API key
+ * deliberately has no flag — argv leaks into shell history and `ps` — so it
+ * comes from env, or from `apiKey` when the caller collected it interactively
+ * (analyze's run-only enrichment setup).
+ */
 export interface LlmOverrides {
   provider?: string
   model?: string
   baseURL?: string
+  /** In-process override (interactive prompt); never exposed as a CLI flag. */
+  apiKey?: string
 }
 
 function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
@@ -23,10 +30,14 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   if (!provider) return null
   const preset = PROVIDERS[provider]
 
-  // Key is env-only: TUNELOOP_LLM_API_KEY wins, else the preset's conventional env.
-  // Keyless local endpoints (Ollama) get a placeholder the SDK accepts.
+  // Key precedence: an in-process override (interactive prompt) wins, then
+  // TUNELOOP_LLM_API_KEY, then the preset's conventional env. Keyless local
+  // endpoints (Ollama) get a placeholder the SDK accepts.
   const apiKey =
-    process.env.TUNELOOP_LLM_API_KEY ?? (preset ? process.env[preset.keyEnv] : undefined) ?? (preset?.requiresKey === false ? 'local' : '')
+    o?.apiKey ??
+    process.env.TUNELOOP_LLM_API_KEY ??
+    (preset ? process.env[preset.keyEnv] : undefined) ??
+    (preset?.requiresKey === false ? 'local' : '')
   // Needs-a-key but none → stay static-only (the analyze hint covers it). resolveLlm
   // never throws: unknown provider / missing base-URL / empty model are recoverable
   // misconfig that createLlmClient validates inside analyze's graceful try/catch, so a
