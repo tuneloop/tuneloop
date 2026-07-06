@@ -10,7 +10,7 @@ import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
-import { createLlmClient } from '../llm'
+import { createLlmClient, PROVIDERS, PROVIDER_NAMES } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
@@ -18,6 +18,7 @@ import { Store } from '../store/store'
 import type { Summary } from '../store/store'
 import { createLogger } from '../util/log'
 import { Progress } from '../util/progress'
+import { askLine, askSecret } from '../util/prompt'
 import { makeSh } from '../util/sh'
 
 export interface AnalyzeOptions {
@@ -39,7 +40,26 @@ export interface AnalyzeOptions {
  */
 export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const log = createLogger(opts.verbose ? 'debug' : 'info')
-  const config = loadConfig({ db: opts.db, llm: opts.llm })
+  let config = loadConfig({ db: opts.db, llm: opts.llm })
+
+  // No enrichment provider configured: on an interactive terminal, offer a
+  // run-only setup (paste a key; it lives only in this process, nothing is
+  // written to disk) instead of silently degrading to static analysis.
+  // Non-interactive runs (CI, pipes) never block on stdin — they keep the
+  // one-line hint below.
+  let promptedProvider: string | null = null
+  let prompted = false
+  if (!config.llm && process.stdin.isTTY && process.stdout.isTTY) {
+    prompted = true
+    const answer = await promptForEnrichment()
+    if (answer) {
+      promptedProvider = answer.provider
+      // Re-resolve through the normal config path so the preset's default
+      // model / base URL apply exactly as they would from env.
+      config = loadConfig({ db: opts.db, llm: { ...opts.llm, provider: answer.provider, apiKey: answer.apiKey } })
+    }
+  }
+
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const sh = makeSh()
@@ -66,6 +86,10 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const llmModel = llm?.model ?? null
   if (llmEnabled) {
     log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
+  } else if (prompted) {
+    // The interactive offer above was declined (or the client failed to build
+    // and warned) — a full hint would repeat what the prompt just explained.
+    log.info('LLM enrichment off — static analysis only.')
   } else {
     printEnrichmentHint(log)
   }
@@ -300,13 +324,76 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Per-directory provenance, stamped with the same completion time.
   store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
+  if (promptedProvider && llmEnabled) printPersistHint(promptedProvider)
   store.close()
 }
 
+/** Offered when the user says yes but doesn't name a provider (README's primary example). */
+const DEFAULT_PROVIDER = 'anthropic'
+
 /**
- * Notice when no enrichment provider is configured — prints whenever enrichment
- * is off (not just the first run). Discoverability, not a gate; the multi-line
- * form with setup hints prints only on an interactive terminal.
+ * Interactive, run-only enrichment setup: when no provider is configured and
+ * we're on a TTY, offer to take a provider plus API key from the terminal.
+ * The key lives only in this process — nothing is written to disk — so a
+ * successful run ends by printing the `export` lines that make the setup
+ * permanent (printPersistHint). The opt-in is a yes/no defaulting to no
+ * (a bare Enter declines), and the key step is skippable the same way.
+ */
+async function promptForEnrichment(): Promise<{ provider: string; apiKey?: string } | null> {
+  const out = process.stdout
+  out.write(
+    [
+      '',
+      'LLM enrichment is off. It labels each session with a work type, complexity,',
+      'autonomy, and judged success, and names the features you shipped — using your',
+      'own key. Session summaries go only to the provider you choose.',
+      '',
+    ].join('\n') + '\n',
+  )
+  const yn = await askLine('Enable it for this run? [y/N]: ')
+  if (!/^y(es)?$/i.test(yn)) return null
+  const raw = await askLine(`Provider (${PROVIDER_NAMES.join(', ')}) [${DEFAULT_PROVIDER}]: `)
+  const provider = raw ? matchProvider(raw) : DEFAULT_PROVIDER
+  if (!provider) {
+    out.write(`Unknown provider "${raw}" — continuing without enrichment.\n`)
+    return null
+  }
+  const preset = PROVIDERS[provider]!
+  if (preset.requiresKey === false) return { provider } // local endpoints (Ollama) need no key
+  const apiKey = await askSecret(`API key for ${provider} (${preset.keyEnv}; input hidden) — Enter to skip: `)
+  if (!apiKey) return null
+  return { provider, apiKey }
+}
+
+/** Resolve a typed provider name: exact match or unique prefix (`anth` → `anthropic`), else null. */
+function matchProvider(name: string): string | null {
+  const n = name.toLowerCase()
+  if (PROVIDERS[n]) return n
+  const prefix = PROVIDER_NAMES.filter((p) => p.startsWith(n))
+  return prefix.length === 1 ? prefix[0]! : null
+}
+
+/**
+ * After a run that used a prompted (run-only) key: show how to make the setup
+ * stick. Deliberately does NOT echo the key back — it was entered hidden, and
+ * scrollback / screen shares shouldn't reveal it.
+ */
+function printPersistHint(provider: string): void {
+  const preset = PROVIDERS[provider]
+  const lines = [
+    '',
+    `Enrichment used ${provider} for this run only. To keep it on, add to your shell profile:`,
+    `    export TUNELOOP_LLM_PROVIDER=${provider}`,
+  ]
+  if (preset && preset.requiresKey !== false) lines.push(`    export ${preset.keyEnv}=<the key you just entered>`)
+  process.stdout.write(lines.join('\n') + '\n')
+}
+
+/**
+ * Notice when no enrichment provider is configured and the interactive offer
+ * (promptForEnrichment) couldn't run. In practice the multi-line TTY form only
+ * shows when stdout is a terminal but stdin isn't (e.g. `echo | tuneloop analyze`);
+ * fully non-interactive runs get the one-liner. Discoverability, not a gate.
  */
 function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
   if (!process.stdout.isTTY) {

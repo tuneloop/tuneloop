@@ -171,6 +171,11 @@ export ANTHROPIC_API_KEY=sk-ant-...
 npx tuneloop analyze
 ```
 
+Or skip the env setup: run `npx tuneloop analyze` in a terminal and, when no
+provider is configured, it offers to set one up interactively — pick a provider,
+paste a key (input hidden), and that run enriches. The key is never written to
+disk; the run ends by printing the `export` lines that make it permanent.
+
 Pick a preset and supply its key; the model defaults sensibly and is overridable
 with `TUNELOOP_LLM_MODEL` (or `--llm-model`). Anthropic and OpenAI are native;
 everything else speaks the OpenAI-compatible API.
@@ -202,7 +207,8 @@ TUNELOOP_LLM_API_KEY=… npx tuneloop analyze --llm-model my-model
 
 Enrichment is one structured **tool call** per session, so use a
 tool-call-capable model (all the hosted defaults qualify). Flags override the env
-for one run; the API key is always env-only. It's cheap — a typical corpus of ~80
+for one run; the API key is never a flag — set it in the env or paste it at the
+interactive prompt. It's cheap — a typical corpus of ~80
 sessions runs about **$0.60** with Claude Haiku. This cost shows up as **Analysis
 spend** in the summary, priced from a built-in table with an OpenRouter public
 price list filling gaps (cached under `~/.tuneloop/`).
