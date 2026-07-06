@@ -649,6 +649,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .hrow-to i { font-style: normal; display: inline-block; transition: transform .12s; }
 .hrow-to:hover { color: var(--emerald); }
 .hrow-to:hover i { transform: translateX(3px); }
+/* Trailing "— recurred in N sessions" clause on the friction fix-next line. */
+.hrow-sub { color: var(--gray); }
+.hrow-sub b { font-weight: 600; color: var(--muted); }
 /* Facet/artifact mention inside a highlight sentence — a small muted uppercase
    label ("PR", "FILE", "REPO") carries the tagging; the value is left as plain
    text (no fill/underline, which sat heavy or read link-like on long wrapping

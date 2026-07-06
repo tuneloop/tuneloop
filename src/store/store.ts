@@ -1239,7 +1239,38 @@ export class Store {
       }
     }
 
+    // --- Friction "fix this next": the top recurring topic with generated advice,
+    // as an action. ALL-TIME (not windowed like the rest): a fix is standing backlog,
+    // not a recency signal, and the count then matches the drill-in. ---
+    const fix = this.frictionSpotlight()
+    if (fix) out.push({ kind: 'friction_remedy', ...fix })
+
     return out
+  }
+
+  /** The single highest-leverage friction topic to act on: the one with the most
+   *  occurrences (≥2 sessions, all-time) that already carries a generated `advice`.
+   *  Ordered by occurrences to match the Friction tab, so the drill-in lands on its
+   *  top row. Null when nothing qualifies. */
+  private frictionSpotlight(): { topicId: string; label: string; remedy: string | null; advice: string; sessions: number; events: number; repos: number } | null {
+    const row = this.db
+      .prepare(
+        `SELECT t.id AS topicId, COALESCE(t.label,'') AS label, t.remedy, t.advice,
+                COUNT(DISTINCT s.id) AS sessions, COUNT(*) AS events,
+                COUNT(DISTINCT s.repo) AS repos
+         FROM friction_topics t
+         JOIN friction_events e ON e.topic_id = t.id
+         JOIN sessions s ON s.id = e.session_id
+         WHERE t.advice IS NOT NULL
+         GROUP BY t.id
+         HAVING sessions >= 2
+         ORDER BY events DESC, sessions DESC
+         LIMIT 1`,
+      )
+      .get() as
+      | { topicId: string; label: string; remedy: string | null; advice: string; sessions: number; events: number; repos: number }
+      | undefined
+    return row ?? null
   }
 
   /** Distribution of a scalar annotation value across sessions. */

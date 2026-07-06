@@ -50,6 +50,21 @@ export function loadFriction() {
   })
 }
 
+// Open the Friction tab with one topic expanded (the "fix this next" Highlight's
+// drill-in). Resets to All/all-repos so the topic is always present, then scrolls
+// its row into view.
+export function openFrictionTopic(id) {
+  windowDays = 'all'
+  repoFilter = ''
+  openTopicId = id
+  if (data) renderFriction()
+  else loadFriction()
+  requestAnimationFrame(function () {
+    var row = document.querySelector('#friction .fr-row.on')
+    if (row) row.scrollIntoView({ block: 'center' })
+  })
+}
+
 function pct(v) {
   return v == null ? '—' : Math.round(Number(v) * 100) + '%'
 }

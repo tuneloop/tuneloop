@@ -7,8 +7,12 @@ import { state, $, esc, usd, num, get } from './core'
 import { openMetric, renderWindow, loadKpis } from './kpis'
 import { filterByArtifact, setView } from './sessions'
 import { openArtifactSearch } from './artifacts'
+import { openFrictionTopic } from './friction'
 import { renderAskBanner, clearAsked } from './askbanner'
 import { storeStatus, noticeHtml } from './notice'
+
+// Remedy class → the action verb leading the fix line (mirrors friction.ts REMEDY_LABELS).
+var FR_REMEDY = { add_doc: 'Add docs', add_skill: 'Add a skill', add_tool: 'Add a tool', model_or_prompt: 'Tune the prompt', none: 'Fix' };
 
 // Highlights runs over a fixed window — wider than the Dashboard's 7d default so
 // short-lived signals still surface, but capped at 14 so the prior-period
@@ -25,6 +29,17 @@ function pct(n) { return Math.round(n) + '%'; }
 function ratePct(r) { return Math.round((r || 0) * 100) + '%'; }
 function signed(n) { return (Number(n) >= 0 ? '+' : '') + n + '%'; }
 function stripTags(s) { return String(s || '').replace(/<[^>]+>/g, ''); }
+
+// The digest wants a scannable one-liner, but friction `advice` runs 1-2 sentences.
+// Full text lives in the drill-in.
+function shortAdvice(s) {
+  s = String(s || '').trim();
+  if (s.length <= 85) return s;
+  var cut = s.slice(0, 80).replace(/\s+\S*$/, '');
+  // Don't orphan a "(" the cut opened but didn't close (e.g. a truncated "(e.g. …").
+  if (cut.lastIndexOf('(') > cut.lastIndexOf(')')) cut = cut.slice(0, cut.lastIndexOf('(')).trim();
+  return cut + '…';
+}
 
 // The change clause for a relative trend (spend, sessions). A big INCREASE (≥2×)
 // switches from an unreadable percentage ("+2169%") to a multiple with the prior
@@ -172,6 +187,17 @@ function present(h) {
           state.sm.filters = { complexity: ['substantial', 'open-ended'] };
           openMetric('sessions', true);
         },
+      };
+    }
+    case 'friction_remedy': {
+      var lead = FR_REMEDY[h.remedy] || 'Fix';
+      var scope = h.repos > 1 ? ' across ' + num(h.repos) + ' repos' : '';
+      var where = '<b>' + num(h.sessions) + ' session' + (h.sessions === 1 ? '' : 's') + '</b>' + scope;
+      return {
+        html: '<b>' + esc(lead) + ':</b> ' + esc(shortAdvice(h.advice)) + ' <span class="hrow-sub"> - recurred in ' + where + '.</span>',
+        to: 'Friction', section: 'friction',
+        about: 'Recurring friction topics mined from your follow-up turns, each with a suggested fix.',
+        run: function () { setView('friction'); openFrictionTopic(h.topicId); },
       };
     }
     default:

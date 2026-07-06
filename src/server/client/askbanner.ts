@@ -15,8 +15,9 @@ var SECTION_SLOT = {
   sessions_metric: 'ask-dashboard',
   artifacts: 'ask-artifacts',
   sessions: 'ask-sessions',
+  friction: 'ask-friction',
 };
-var ALL_SLOTS = ['ask-dashboard', 'ask-artifacts', 'ask-sessions'];
+var ALL_SLOTS = ['ask-dashboard', 'ask-artifacts', 'ask-sessions', 'ask-friction'];
 
 function seenKey(section) { return 'tuneloop.seen.' + section; }
 function seen(section) { try { return !!localStorage.getItem(seenKey(section)); } catch (e) { return false; } }
