@@ -172,9 +172,13 @@ function renderFriction() {
 
   Array.prototype.forEach.call(el.querySelectorAll('.fr-row'), function (tr) {
     tr.onclick = function () {
+      var sc = el.querySelector('.fr-scroll')
+      var top = sc ? sc.scrollTop : 0
       var id = tr.getAttribute('data-topic')
       openTopicId = openTopicId === id ? null : id
       renderFriction()
+      var sc2 = el.querySelector('.fr-scroll')
+      if (sc2) sc2.scrollTop = top
     }
   })
   if (openTopicId) loadTopicDetail(openTopicId)
