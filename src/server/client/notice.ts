@@ -73,7 +73,7 @@ export function noticeHtml(): string {
     // directory / --source) — not that analyze was never run. Word it accordingly.
     return notice('first-run',
       'No sessions found',
-      '<code>tuneloop analyze</code> scanned your Claude Code, Codex, and opencode history but found nothing. ' +
+      '<code>tuneloop analyze</code> scanned your Claude Code, Codex, opencode, and Pi history but found nothing. ' +
         'Point it at a directory — <code>tuneloop analyze &lt;dir&gt;</code> — or check <code>--source</code>.');
   }
   if (st === 'unenriched') {
