@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { parsePrRefs } from './github-pr'
+import { enrichPrArtifact, parsePrRefs, prArtifactBase } from './github-pr'
 import { emptyUsage } from '../core/model'
 import type { CanonicalAction, Event, Session, ToolCall } from '../core/model'
+import type { ShResult } from '../core/processor'
 
 function tc(action: CanonicalAction, fields: Partial<ToolCall>): ToolCall {
   return {
@@ -49,6 +50,15 @@ describe('parsePrRefs', () => {
       sess([tc('shell', { target: { command: 'gh pr merge https://github.com/acme/x/pull/7 --squash' } })]),
     )
     expect(refs).toEqual([expect.objectContaining({ id: 'pr:acme/x:7', kind: 'merge' })])
+  })
+
+  it('parses a GitHub Enterprise Server PR URL, keeping the enterprise host in the ref URL', () => {
+    const refs = parsePrRefs(
+      sess([tc('shell', { target: { command: 'gh pr merge https://github.acme-corp.com/acme/x/pull/7 --squash' } })]),
+    )
+    expect(refs).toEqual([
+      expect.objectContaining({ id: 'pr:acme/x:7', kind: 'merge', url: 'https://github.acme-corp.com/acme/x/pull/7' }),
+    ])
   })
 
   it('detects a read from `gh pr diff <num> --repo owner/repo`', () => {
@@ -131,5 +141,26 @@ describe('parsePrRefs', () => {
       sess([tc('mcp_call', { name: 'github__get_pull_request_reviews', input: { owner: 'o', repo: 'r', pull_number: 3 } })]),
     )
     expect(refs).toEqual([expect.objectContaining({ id: 'pr:o/r:3', kind: 'read' })])
+  })
+})
+
+describe('enrichPrArtifact', () => {
+  // A GHES externalId (host captured from a link): enrich must pass it through unchanged.
+  const ref = { id: 'pr:acme/x:7', owner: 'acme', repo: 'x', num: '7', url: 'https://github.acme-corp.com/acme/x/pull/7', kind: 'read' as const, toolIndex: 0 }
+
+  it('addresses gh by the full externalId URL, so the enterprise host round-trips', async () => {
+    const calls: string[][] = []
+    const sh = async (cmd: string, args: string[]): Promise<ShResult | null> => {
+      calls.push([cmd, ...args])
+      return { stdout: JSON.stringify({ title: 'Enterprise PR', state: 'OPEN' }), code: 0 }
+    }
+    const art = await enrichPrArtifact(sh, prArtifactBase(ref))
+    expect(calls[0]).toEqual(['gh', 'pr', 'view', ref.url, '--json', 'title,state,createdAt,mergedAt,additions,deletions,author'])
+    expect(art).toMatchObject({ externalId: ref.url, title: 'Enterprise PR', status: 'open' })
+  })
+
+  it('leaves the base row intact when gh is unavailable', async () => {
+    const base = prArtifactBase(ref)
+    expect(await enrichPrArtifact(async () => null, base)).toEqual(base)
   })
 })

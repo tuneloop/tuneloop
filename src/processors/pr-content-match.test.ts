@@ -93,6 +93,14 @@ describe('pr-content-match', () => {
     expect(res.blockArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:5', role: 'contributed', source: 'derived' }))
   })
 
+  it('uses gh’s host-correct url as the PR externalId (GHES round-trip, not a github.com guess)', async () => {
+    const ghesUrl = 'https://github.acme-corp.com/o/r/pull/5'
+    const res = await prContentMatch.run(
+      ctx(session([{ kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED }]), sh([pr(5, { url: ghesUrl })], { 5: FULL_DIFF })),
+    )
+    expect(res.artifacts).toContainEqual(expect.objectContaining({ id: 'pr:o/r:5', externalId: ghesUrl }))
+  })
+
   it('still measures attribution for a self-created PR, but defers its cost/outcome to outcomes-git', async () => {
     const s = session([
       { kind: 'edit', file: '/repo/src/foo.ts', newString: AUTHORED },
