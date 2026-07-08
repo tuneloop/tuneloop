@@ -293,6 +293,8 @@ async function candidatePrs(sh: Sh, ownerRepo: string, repoRoot: string): Promis
 
 interface PrMeta {
   number: number
+  /** gh's host-correct canonical URL — used directly so GHES/SSH-alias links round-trip. */
+  url?: string
   title?: string
   author?: { login?: string }
   state?: string
@@ -305,7 +307,7 @@ interface PrMeta {
 async function fetchMyPrs(sh: Sh, ownerRepo: string, repoRoot: string): Promise<CandidatePr[] | null> {
   const list = await sh('gh', [
     'pr', 'list', '--repo', ownerRepo, '--author', '@me', '--state', 'all', '--limit', '200',
-    '--json', 'number,title,author,state,createdAt,mergedAt,additions,deletions',
+    '--json', 'number,url,title,author,state,createdAt,mergedAt,additions,deletions',
   ])
   if (!list || list.code !== 0) return null // infra failure — don't cache
   let metas: PrMeta[]
@@ -348,7 +350,8 @@ async function baseContent(sh: Sh, repoRoot: string, f: ReturnType<typeof parseD
 function toCandidate(ownerRepo: string, m: PrMeta, files: CandidatePr['files']): CandidatePr {
   const num = String(m.number)
   const id = `pr:${ownerRepo}:${num}`
-  const url = `https://github.com/${ownerRepo}/pull/${num}`
+  // Prefer gh's host-correct URL; fall back to a github.com guess only if gh omitted it
+  const url = m.url ?? `https://github.com/${ownerRepo}/pull/${num}`
   const churn = (m.additions ?? 0) + (m.deletions ?? 0)
   const art: ArtifactInput = {
     id,

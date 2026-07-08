@@ -8,7 +8,10 @@ import type { Session } from '../core/model'
 import type { ShResult } from '../core/processor'
 import type { ArtifactInput } from '../store/types'
 
-const PR_URL = /https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
+// Host is intentionally not pinned to github.com so a pasted GitHub Enterprise Server PR
+// URL parses too. Non-capturing host keeps owner/repo/num at m[1..3]; a matched URL's real
+// host is preserved via m[0] (see pushRef)
+const PR_URL = /https:\/\/[^/\s]+\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/
 
 /**
  * create/merge = the session changed the PR; read = it only inspected the PR;
@@ -76,8 +79,10 @@ function mcpVerdict(input: unknown): PrVerdict {
  */
 export function parsePrRefs(session: Session): PrRef[] {
   const refs: PrRef[] = []
-  const pushRef = (owner: string, repo: string, num: string, kind: PrRefKind, toolIndex: number, verdict?: PrVerdict) => {
-    refs.push({ id: prId(owner, repo, num), owner, repo, num, url: canonicalUrl(owner, repo, num), kind, toolIndex, ...(verdict ? { verdict } : {}) })
+  // `url` = the real matched URL when the ref came from a link (host is ground truth, incl.
+  // GHES); omitted for a host-less ref (`--repo` command / MCP input) → github.com fallback.
+  const pushRef = (owner: string, repo: string, num: string, kind: PrRefKind, toolIndex: number, url?: string, verdict?: PrVerdict) => {
+    refs.push({ id: prId(owner, repo, num), owner, repo, num, url: url ?? canonicalUrl(owner, repo, num), kind, toolIndex, ...(verdict ? { verdict } : {}) })
   }
   // Resolve a PR identity from the FIRST source that yields one (preferring tool
   // output, then the command) — mirrors the original `raw ?? exec` semantics.
@@ -87,7 +92,7 @@ export function parsePrRefs(session: Session): PrRef[] {
       if (!url) continue
       const m = PR_URL.exec(url)
       if (!m || !m[1] || !m[2] || !m[3]) continue
-      pushRef(m[1], m[2], m[3], kind, toolIndex)
+      pushRef(m[1], m[2], m[3], kind, toolIndex, url)
       return true
     }
     return false
@@ -97,11 +102,11 @@ export function parsePrRefs(session: Session): PrRef[] {
     const url = matchPrUrl(exec)
     if (url) {
       const m = PR_URL.exec(url)
-      if (m && m[1] && m[2] && m[3]) { pushRef(m[1], m[2], m[3], kind, toolIndex, verdict); return true }
+      if (m && m[1] && m[2] && m[3]) { pushRef(m[1], m[2], m[3], kind, toolIndex, url, verdict); return true }
     }
     const numM = PR_NUM.exec(exec)
     const repoM = REPO_FLAG.exec(exec)
-    if (numM && repoM && repoM[1] && repoM[2]) { pushRef(repoM[1], repoM[2], numM[1]!, kind, toolIndex, verdict); return true }
+    if (numM && repoM && repoM[1] && repoM[2]) { pushRef(repoM[1], repoM[2], numM[1]!, kind, toolIndex, undefined, verdict); return true }
     return false
   }
 
@@ -184,6 +189,9 @@ export async function enrichPrArtifact(
 ): Promise<ArtifactInput> {
   const art: ArtifactInput = { ...base }
   if (!art.externalId) return art
+  // Address gh by the full externalId URL — for a link-sourced ref its host (github.com or a
+  // GHES instance) is read straight from the URL. A host-less ref carries only a github.com
+  // best-guess, so an enterprise repo referenced without a host won't enrich
   const res = await sh('gh', ['pr', 'view', art.externalId, '--json', 'title,state,createdAt,mergedAt,additions,deletions,author'], { cwd })
   if (res && res.code === 0) {
     try {
@@ -217,6 +225,9 @@ function prId(owner: string, repo: string, num: string): string {
   return `pr:${owner}/${repo}:${num}`
 }
 
+// Best-guess URL for a ref that arrived without a host (an MCP input, or a
+// `gh pr <verb> N --repo owner/repo` command): assume github.com. A ref from a real link
+// keeps that link's host instead (see pushRef)
 function canonicalUrl(owner: string, repo: string, num: string): string {
   return `https://github.com/${owner}/${repo}/pull/${num}`
 }
