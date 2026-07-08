@@ -2247,8 +2247,8 @@ export class Store {
       if (Array.isArray(input.edits)) {
         op = 'multiedit'
         hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
-          del: clip(String(e.old_string ?? e.oldString ?? ''), 4000),
-          ins: clip(String(e.new_string ?? e.newString ?? ''), 4000),
+          del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 4000),
+          ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 4000),
         }))
       } else if (input.content != null) {
         op = 'write'

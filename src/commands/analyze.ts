@@ -148,10 +148,13 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       const files = await adapter.discover(roots)
       discovered += files.length
       for (const file of files) {
-        const session = await adapter.parse(file)
-        if (!session) continue
-        parsed++
-        parsedSessions.push(session)
+        const result = await adapter.parse(file)
+        if (!result) continue
+        const sessions = Array.isArray(result) ? result : [result]
+        for (const session of sessions) {
+          parsed++
+          parsedSessions.push(session)
+        }
       }
     }
   }

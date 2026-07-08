@@ -475,14 +475,23 @@ function opencodeAuthored(t: ToolCall): { path: string; lines: string[] }[] {
   return []
 }
 
-/** Pi write/edit → (path, authored lines). Uses `path` + `content` or `old_string`/`new_string`. */
+/** Pi write/edit → (path, authored lines). Handles `content`, `new_string`, and `edits[].newText`. */
 function piAuthored(t: ToolCall): { path: string; lines: string[] }[] {
   const input = t.input as Record<string, unknown> | null
   if (!input || typeof input !== 'object') return []
-  const path = typeof input.path === 'string' ? input.path : null
+  const path = typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : null
   if (!path) return []
   if (typeof input.content === 'string') return [{ path, lines: input.content.split('\n') }]
   if (typeof input.new_string === 'string') return [{ path, lines: input.new_string.split('\n') }]
+  if (Array.isArray(input.edits)) {
+    const lines: string[] = []
+    for (const e of input.edits as Array<Record<string, unknown> | null>) {
+      if (!e) continue
+      const text = e.newText ?? e.new_string ?? e.newString
+      if (typeof text === 'string') lines.push(...text.split('\n'))
+    }
+    if (lines.length) return [{ path, lines }]
+  }
   return []
 }
 

@@ -12,7 +12,7 @@ import type {
   UserMessage,
 } from '../../core/model'
 import { mapAction } from './actions'
-import { findCanonicalLeaf, walkToLeaf } from './tree'
+import { findBranchPaths, findCanonicalLeaf, findLeaves, walkToLeaf } from './tree'
 import type { TreeEntry } from './tree'
 
 export const PARSE_VERSION = 1
@@ -21,7 +21,7 @@ const SOURCE = 'pi'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Raw = any
 
-export async function parsePi(path: string): Promise<Session | null> {
+export async function parsePi(path: string): Promise<Session | Session[] | null> {
   const content = await readFile(path, 'utf8')
   const lines = content.split('\n')
   const records: Raw[] = []
@@ -50,29 +50,95 @@ export async function parsePi(path: string): Promise<Session | null> {
   )
   if (!hasAssistant) return null
 
-  // Compute total tokens from ALL assistant messages across the entire tree
-  let tokens = emptyUsage()
+  // Resolve fork linkage if this session was forked from another file
+  const forkedFromId = await resolveParentSession(header.parentSession)
+
+  // Scan all entries for session title (session_info may be on any branch)
+  let title: string | undefined
   for (const e of entries) {
-    if (e.type === 'message') {
-      const m = (e as Raw).message
-      if (m?.role === 'assistant' && m.usage) {
-        tokens = addUsage(tokens, usageOf(m.usage))
-      }
+    if (e.type === 'session_info' && typeof (e as Raw).name === 'string') {
+      title = (e as Raw).name
     }
   }
 
-  // Resolve canonical path (handles both linear and branched sessions)
-  const canonicalLeaf = findCanonicalLeaf(entries)
-  const linearPath = walkToLeaf(entries, canonicalLeaf)
+  const hash = contentHash(content)
+  const leaves = findLeaves(entries)
 
-  // Walk the canonical path, building events and tool calls
+  // Linear session (single leaf) — return one Session
+  if (leaves.length <= 1) {
+    const canonicalLeaf = findCanonicalLeaf(entries)
+    if (!canonicalLeaf) return null
+    const linearPath = walkToLeaf(entries, canonicalLeaf)
+    const tokens = tokensFromTree(entries)
+    const { events, toolCalls, models, provider } = walkPath(linearPath)
+
+    if (!title) title = scanTitle(linearPath)
+
+    return {
+      id: `${SOURCE}:${sessionId}`,
+      sessionId,
+      source: SOURCE,
+      provider: provider ?? 'unknown',
+      title,
+      forkedFromId,
+      project: { cwd: header.cwd },
+      startedAt: header.timestamp,
+      endedAt: linearPath[linearPath.length - 1]?.timestamp ?? header.timestamp,
+      models: [...models],
+      tokens,
+      events,
+      toolCalls,
+      raw: { path, contentHash: hash },
+    }
+  }
+
+  // Branched session (multiple leaves) — emit one Session per leaf
+  const branches = findBranchPaths(entries, leaves)
+  const sessions: Session[] = []
+
+  for (let i = 0; i < branches.length; i++) {
+    const branch = branches[i]!
+    const isPrimary = i === 0 // sorted by timestamp desc, so first = canonical
+
+    const { events, toolCalls, models, provider } = walkPath(branch.path)
+    const tokens = tokensFromPath(branch.path)
+
+    const suffix = isPrimary ? '' : `~${branch.leafId}`
+    const id = `${SOURCE}:${sessionId}${suffix}`
+
+    sessions.push({
+      id,
+      sessionId: `${sessionId}${suffix}`,
+      source: SOURCE,
+      provider: provider ?? 'unknown',
+      title,
+      forkedFromId: isPrimary ? forkedFromId : sessionId,
+      project: { cwd: header.cwd },
+      startedAt: header.timestamp,
+      endedAt: branch.path[branch.path.length - 1]?.timestamp ?? header.timestamp,
+      models: [...models],
+      tokens,
+      events,
+      toolCalls,
+      raw: { path, contentHash: hash },
+    })
+  }
+
+  return sessions
+}
+
+/** Walk a linear path, extracting events, tool calls, models, and provider. */
+function walkPath(linearPath: TreeEntry[]): {
+  events: Event[]
+  toolCalls: ToolCall[]
+  models: Set<string>
+  provider: string | undefined
+} {
   const events: Event[] = []
   const toolCalls: ToolCall[] = []
   const models = new Set<string>()
   let provider: string | undefined
-  let title: string | undefined
 
-  // Pending tool calls from the most recent assistant message, keyed by id
   const pendingTools = new Map<string, { name: string; args: unknown; ts?: string }>()
 
   for (const entry of linearPath) {
@@ -87,13 +153,8 @@ export async function parsePi(path: string): Promise<Session | null> {
 
     if (entry.type === 'thinking_level_change' || entry.type === 'compaction' ||
         entry.type === 'branch_summary' || entry.type === 'custom' ||
-        entry.type === 'custom_message' || entry.type === 'label') {
-      continue
-    }
-
-    if (entry.type === 'session_info') {
-      const name = (entry as Raw).name
-      if (typeof name === 'string') title = name
+        entry.type === 'custom_message' || entry.type === 'label' ||
+        entry.type === 'session_info') {
       continue
     }
 
@@ -111,6 +172,21 @@ export async function parsePi(path: string): Promise<Session | null> {
       const costUsd = typeof m.usage?.cost?.total === 'number' ? m.usage.cost.total : undefined
 
       const blocks: ContentBlock[] = []
+
+      // Flush unresolved tool calls from prior assistant (result is on a different branch, not an error)
+      for (const [id, pending] of pendingTools) {
+        const mapped = mapAction(pending.name, pending.args)
+        toolCalls.push({
+          id,
+          name: mapped.name ?? pending.name,
+          action: mapped.action,
+          input: pending.args,
+          target: mapped.target,
+          result: { ok: false, isError: false },
+          isSidechain: false,
+          ts: pending.ts,
+        })
+      }
       pendingTools.clear()
 
       if (Array.isArray(m.content)) {
@@ -205,34 +281,45 @@ export async function parsePi(path: string): Promise<Session | null> {
     })
   }
 
-  // Scan all entries for session title (session_info may be on any branch)
-  if (!title) {
-    for (const e of entries) {
-      if (e.type === 'session_info' && typeof (e as Raw).name === 'string') {
-        title = (e as Raw).name
+  return { events, toolCalls, models, provider }
+}
+
+/** Sum tokens from ALL assistant messages across the entire tree. */
+function tokensFromTree(entries: TreeEntry[]): TokenUsage {
+  let tokens = emptyUsage()
+  for (const e of entries) {
+    if (e.type === 'message') {
+      const m = (e as Raw).message
+      if (m?.role === 'assistant' && m.usage) {
+        tokens = addUsage(tokens, usageOf(m.usage))
       }
     }
   }
+  return tokens
+}
 
-  // Resolve fork linkage if this session was forked from another
-  const forkedFromId = await resolveParentSession(header.parentSession)
-
-  return {
-    id: `${SOURCE}:${sessionId}`,
-    sessionId,
-    source: SOURCE,
-    provider: provider ?? 'unknown',
-    title,
-    forkedFromId,
-    project: { cwd: header.cwd },
-    startedAt: header.timestamp,
-    endedAt: linearPath[linearPath.length - 1]?.timestamp ?? header.timestamp,
-    models: [...models],
-    tokens,
-    events,
-    toolCalls,
-    raw: { path, contentHash: contentHash(content) },
+/** Sum tokens from assistant messages on a specific path only. */
+function tokensFromPath(path: TreeEntry[]): TokenUsage {
+  let tokens = emptyUsage()
+  for (const e of path) {
+    if (e.type === 'message') {
+      const m = (e as Raw).message
+      if (m?.role === 'assistant' && m.usage) {
+        tokens = addUsage(tokens, usageOf(m.usage))
+      }
+    }
   }
+  return tokens
+}
+
+/** Scan a path for session_info title. */
+function scanTitle(path: TreeEntry[]): string | undefined {
+  for (const e of path) {
+    if (e.type === 'session_info' && typeof (e as Raw).name === 'string') {
+      return (e as Raw).name
+    }
+  }
+  return undefined
 }
 
 async function resolveParentSession(parentPath: unknown): Promise<string | undefined> {
@@ -243,7 +330,7 @@ async function resolveParentSession(parentPath: unknown): Promise<string | undef
     if (!firstLine) return undefined
     const parentHeader = JSON.parse(firstLine)
     if (parentHeader.type === 'session' && typeof parentHeader.id === 'string') {
-      return `${SOURCE}:${parentHeader.id}`
+      return parentHeader.id
     }
   } catch {
     /* parent file missing or unreadable — not an error */
