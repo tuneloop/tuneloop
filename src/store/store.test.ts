@@ -378,6 +378,21 @@ describe('pruneOrphanedBranchSessions', () => {
     const others = db.prepare("SELECT id FROM sessions WHERE id LIKE 'pi:other%'").all() as Array<{ id: string }>
     expect(others).toHaveLength(2)
   })
+
+  it('does not delete a session whose id merely starts with the prefix bytes', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 'pi:abc')
+    seedSession(store, db, 'pi:abc~e4')
+    seedSession(store, db, 'pi:abcd') // unrelated session, prefix collision
+
+    const currentIds = new Set(['pi:abc'])
+    const pruned = store.pruneOrphanedBranchSessions('pi:abc', currentIds)
+
+    expect(pruned).toBe(1) // only pi:abc~e4
+    const remaining = db.prepare("SELECT id FROM sessions WHERE id LIKE 'pi:abc%'").all() as Array<{ id: string }>
+    expect(remaining.map((r) => r.id).sort()).toEqual(['pi:abc', 'pi:abcd'])
+  })
 })
 
 describe('summary.lastAnalyzedAt', () => {

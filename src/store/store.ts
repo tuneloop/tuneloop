@@ -2618,9 +2618,12 @@ export class Store {
   }
 
   pruneOrphanedBranchSessions(prefix: string, currentIds: Set<string>): number {
+    // Match the exact primary id OR its branch children (`prefix~<leaf>`) only —
+    // not a bare `prefix%`, which would also catch an unrelated session whose id
+    // merely starts with these bytes (e.g. `pi:abc` vs `pi:abcd`).
     const stored = this.db
-      .prepare('SELECT id FROM sessions WHERE id LIKE ? || \'%\'')
-      .all(prefix) as Array<{ id: string }>
+      .prepare("SELECT id FROM sessions WHERE id = ? OR id LIKE ? || '~%'")
+      .all(prefix, prefix) as Array<{ id: string }>
     let pruned = 0
     for (const row of stored) {
       if (!currentIds.has(row.id)) {
