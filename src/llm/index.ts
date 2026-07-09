@@ -1,11 +1,13 @@
 import type { TuneloopConfig } from '../config'
 import { createAnthropicClient } from './anthropic'
+import { createBedrockClient } from './bedrock'
 import { createOpenAiClient } from './openai'
 import { PROVIDERS } from './providers'
 import type { ClientOpts, LlmClient } from './types'
 
 export type { LlmClient, LlmResult, StructuredRequest, JsonSchema } from './types'
 export { PROVIDERS, PROVIDER_NAMES } from './providers'
+export type { ProviderPreset } from './providers'
 
 /** Build an LLM client from config, or null if enrichment isn't configured. */
 export function createLlmClient(llm: TuneloopConfig['llm']): LlmClient | null {
@@ -22,6 +24,8 @@ export function createLlmClient(llm: TuneloopConfig['llm']): LlmClient | null {
   switch (preset.shape) {
     case 'anthropic':
       return createAnthropicClient(llm.apiKey, llm.model, opts)
+    case 'bedrock':
+      return createBedrockClient(llm.apiKey, llm.model, opts)
     case 'openai':
     case 'openai-compatible':
       return createOpenAiClient(llm.apiKey, llm.model, opts)

@@ -57,3 +57,25 @@ describe('priceFor backfill gating', () => {
     expect(priceFor('openrouter', 'some-model')).toBeUndefined()
   })
 })
+
+describe('bedrock model-id unwrapping', () => {
+  it('prices a full inference-profile id at the vendor rate', () => {
+    // geo prefix + vendor + date snapshot + version suffix → anthropic/claude-haiku-4-5
+    const p = priceFor('bedrock', 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
+    expect(p).toEqual(priceFor('anthropic', 'claude-haiku-4-5'))
+    expect(p?.input).toBeGreaterThan(0)
+  })
+
+  it('prices a bare vendor-prefixed id (no geo, no version)', () => {
+    expect(priceFor('bedrock', 'anthropic.claude-haiku-4-5')).toEqual(priceFor('anthropic', 'claude-haiku-4-5'))
+  })
+
+  it('handles geo prefixes it has never seen (vendor.model are always the last two segments)', () => {
+    expect(priceFor('bedrock', 'us-gov.anthropic.claude-haiku-4-5-20251001-v1:0')).toEqual(priceFor('anthropic', 'claude-haiku-4-5'))
+    expect(priceFor('bedrock', 'jp.anthropic.claude-sonnet-5-20260203-v1:0')).toEqual(priceFor('anthropic', 'claude-sonnet-5'))
+  })
+
+  it('returns undefined for a vendor the table does not list', () => {
+    expect(priceFor('bedrock', 'us.meta.llama3-1-405b-instruct-v1:0')).toBeUndefined()
+  })
+})

@@ -10,7 +10,7 @@ import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
 import { getAdapters, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
-import { createLlmClient, PROVIDERS, PROVIDER_NAMES } from '../llm'
+import { createLlmClient, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
@@ -359,10 +359,33 @@ async function promptForEnrichment(): Promise<{ provider: string; apiKey?: strin
     return null
   }
   const preset = PROVIDERS[provider]!
-  if (preset.requiresKey === false) return { provider } // local endpoints (Ollama) need no key
-  const apiKey = await askSecret(`API key for ${provider} (${preset.keyEnv}; input hidden) — Enter to skip: `)
-  if (!apiKey) return null
-  return { provider, apiKey }
+  // A key already exported wins — same precedence config resolution applies — so don't ask for what the environment can answer
+  const envKey = envKeyFor(preset)
+  if (envKey) {
+    out.write(`Using ${envKey} from your environment.\n`)
+    return { provider }
+  }
+  const keyless = preset.keyless
+  if (keyless && 'placeholder' in keyless) return { provider } // endpoint has no key (Ollama)
+  const apiKey = await askSecret(
+    keyless
+      ? `API key for ${provider} (${preset.keyEnv}; input hidden) — Enter to use ${keyless.fallback}: `
+      : `API key for ${provider} (${preset.keyEnv}; input hidden) — Enter to skip: `,
+  )
+  if (apiKey) return { provider, apiKey }
+  if (!keyless) return null
+  // Enter on an optional key: only declare enrichment on if the fallback auth
+  // actually exists — otherwise every enrichment request would fail.
+  if (!(await keyless.isConfigured())) {
+    out.write(`No ${keyless.fallback} found — continuing without enrichment.\n`)
+    return null
+  }
+  return { provider }
+}
+
+/** The exported env var the preset's key would resolve from, if any is set. */
+function envKeyFor(preset: ProviderPreset): string | undefined {
+  return ['TUNELOOP_LLM_API_KEY', preset.keyEnv].find((k) => process.env[k])
 }
 
 /** Resolve a typed provider name: exact match or unique prefix (`anth` → `anthropic`), else null. */
@@ -385,7 +408,12 @@ function printPersistHint(provider: string): void {
     `Enrichment used ${provider} for this run only. To keep it on, add to your shell profile:`,
     `    export TUNELOOP_LLM_PROVIDER=${provider}`,
   ]
-  if (preset && preset.requiresKey !== false) lines.push(`    export ${preset.keyEnv}=<the key you just entered>`)
+  if (preset) {
+    const envKey = envKeyFor(preset)
+    if (envKey) lines.push(`    export ${envKey}=<the key already in your environment>`)
+    else if (!preset.keyless) lines.push(`    export ${preset.keyEnv}=<the key you just entered>`)
+    else if ('fallback' in preset.keyless) lines.push(`    export ${preset.keyEnv}=<your key — omit if ${preset.keyless.fallback} handle auth>`)
+  }
   process.stdout.write(lines.join('\n') + '\n')
 }
 
@@ -406,7 +434,7 @@ function printEnrichmentHint(log: ReturnType<typeof createLogger>): void {
       'LLM enrichment is off — static analysis only. Enable it with your own key, e.g.:',
       '    export TUNELOOP_LLM_PROVIDER=openrouter',
       '    export OPENROUTER_API_KEY=sk-or-...',
-      '  Providers: anthropic, openai, openrouter, groq, deepseek, gemini, ollama (see README).',
+      '  Providers: anthropic, openai, bedrock, openrouter, groq, deepseek, gemini, ollama (see README).',
       '',
     ].join('\n') + '\n',
   )

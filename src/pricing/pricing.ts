@@ -11,16 +11,30 @@ export interface ModelPrice {
 }
 
 /** Bump when models.json rates change so stored costs can be recomputed. */
-export const PRICE_TABLE_VERSION = '2026-06-30'
+export const PRICE_TABLE_VERSION = '2026-07-09'
 
 type Table = Record<string, Record<string, ModelPrice>>
 const TABLE = models as unknown as Table
+
+/**
+ * Bedrock ids wrap a vendor's model: `[geo.]vendor.model[-vN[:K]]` (e.g.
+ * `us.anthropic.claude-haiku-4-5-20251001-v1:0`). Unwrap to the vendor's own
+ * name — Bedrock charges the vendor's per-token rates, so its table applies
+ */
+function unwrapBedrockModel(model: string): { vendor: string; model: string } | null {
+  const parts = model.replace(/-v\d+(:\d+)?$/, '').split('.')
+  return parts.length >= 2 ? { vendor: parts[parts.length - 2]!, model: parts[parts.length - 1]! } : null
+}
 
 /**
  * Look up a price, tolerant of model-id drift: exact match, then strip a
  * trailing date snapshot (`-20251001` or `@20251001`), then prefix match.
  */
 export function priceFor(provider: string, model: string, opts?: { backfill?: boolean }): ModelPrice | undefined {
+  if (provider === 'bedrock') {
+    const unwrapped = unwrapBedrockModel(model)
+    if (unwrapped) return priceFor(unwrapped.vendor, unwrapped.model, opts)
+  }
   const byProvider = TABLE[provider]
   if (byProvider) {
     if (byProvider[model]) return byProvider[model]
