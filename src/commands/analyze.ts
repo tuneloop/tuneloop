@@ -148,10 +148,23 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       const files = await adapter.discover(roots)
       discovered += files.length
       for (const file of files) {
-        const session = await adapter.parse(file)
-        if (!session) continue
-        parsed++
-        parsedSessions.push(session)
+        const result = await adapter.parse(file)
+        if (!result) continue
+        const sessions = Array.isArray(result) ? result : [result]
+        for (const session of sessions) {
+          parsed++
+          parsedSessions.push(session)
+        }
+        // Prune orphaned branch sessions: when a multi-session file changes
+        // (e.g. Pi branch extended), leaves that are no longer leaves produce
+        // stale rows. Delete stored sessions sharing the ID prefix that weren't
+        // re-emitted. Only relevant when a file emits multiple sessions.
+        if (sessions.length > 1) {
+          const prefix = `${adapter.id}:${sessions[0]!.sessionId.split('~')[0]}`
+          const currentIds = new Set(sessions.map((s) => s.id))
+          const pruned = store.pruneOrphanedBranchSessions(prefix, currentIds)
+          if (pruned) log.debug(`[${adapter.id}] pruned ${pruned} orphaned branch session(s) from ${file}`)
+        }
       }
     }
   }

@@ -30,7 +30,7 @@ more — this data lets you answer questions like:
 - Are my agents getting more autonomous over time on complex tasks?
 - What's my success rate on repo *X* vs. repo *Y* — or any other dimension you care about?
 
-Works with Claude Code, Codex, and OpenCode. Everything runs and stays
+Works with Claude Code, Codex, OpenCode, and Pi. Everything runs and stays
 on your machine; enrichments that need an LLM can use your own provider key or a
 local model. The built-ins above are just the defaults — tuneloop is extensible,
 and adding your own enrichment is straightforward.

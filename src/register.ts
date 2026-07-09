@@ -2,4 +2,5 @@
 import './adapters/claude-code'
 import './adapters/codex'
 import './adapters/opencode'
+import './adapters/pi'
 import './processors'

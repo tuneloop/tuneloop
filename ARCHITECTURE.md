@@ -1,7 +1,7 @@
 # Architecture
 
 tuneloop turns the transcripts your AI coding tools already write — Claude Code,
-Codex, OpenCode — into a small, queryable set of facts about your work: what you
+Codex, OpenCode, Pi — into a small, queryable set of facts about your work: what you
 built, what it cost, and what shipped. Everything runs locally against a SQLite
 file on your machine. tuneloop never posts your session data anywhere: the only
 thing that leaves is a transcript sent to the LLM provider whose key you supply
@@ -42,7 +42,7 @@ interface SourceAdapter {
 }
 ```
 
-Built-ins: `claude-code`, `codex`, `opencode` (`src/adapters/*`). To add one,
+Built-ins: `claude-code`, `codex`, `opencode`, `pi` (`src/adapters/*`). To add one,
 implement the interface in `src/adapters/<vendor>/`, map the vendor's tool names
 to canonical actions in an `actions.ts`, and `registerAdapter` it (add the import
 to `src/register.ts`). For most of the pipeline that's enough — processors and
@@ -242,7 +242,7 @@ enrichment provider/model. See the README for the full env reference.
 
 ```
 src/
-  adapters/      one dir per tool (claude-code, codex, opencode) + types.ts
+  adapters/      one dir per tool (claude-code, codex, opencode, pi) + types.ts
   core/          model, processor + adapter interfaces, registry, runner,
                  blocks, turns, merge, hashing
   processors/    the built-in facts (see the table above)

@@ -419,7 +419,7 @@ function authoredByFile(session: Session, cwd: string, repoRoot: string): Map<st
   session.toolCalls.forEach((t, i) => {
     if (t.action !== 'file_write') return
     const extracted =
-      session.source === 'codex' ? codexAuthored(t) : session.source === 'opencode' ? opencodeAuthored(t) : claudeAuthored(t)
+      session.source === 'codex' ? codexAuthored(t) : session.source === 'opencode' ? opencodeAuthored(t) : session.source === 'pi' ? piAuthored(t) : claudeAuthored(t)
     for (const { path, lines } of extracted) {
       const rel = repoRel(path, cwd, repoRoot)
       if (!rel) continue
@@ -475,6 +475,26 @@ function opencodeAuthored(t: ToolCall): { path: string; lines: string[] }[] {
   if (!path) return []
   if (typeof input.content === 'string') return [{ path, lines: input.content.split('\n') }] // write
   if (typeof input.newString === 'string') return [{ path, lines: input.newString.split('\n') }] // edit
+  return []
+}
+
+/** Pi write/edit → (path, authored lines). Handles `content`, `new_string`, and `edits[].newText`. */
+function piAuthored(t: ToolCall): { path: string; lines: string[] }[] {
+  const input = t.input as Record<string, unknown> | null
+  if (!input || typeof input !== 'object') return []
+  const path = typeof input.path === 'string' ? input.path : typeof input.file_path === 'string' ? input.file_path : null
+  if (!path) return []
+  if (typeof input.content === 'string') return [{ path, lines: input.content.split('\n') }]
+  if (typeof input.new_string === 'string') return [{ path, lines: input.new_string.split('\n') }]
+  if (Array.isArray(input.edits)) {
+    const lines: string[] = []
+    for (const e of input.edits as Array<Record<string, unknown> | null>) {
+      if (!e) continue
+      const text = e.newText ?? e.new_string ?? e.newString
+      if (typeof text === 'string') lines.push(...text.split('\n'))
+    }
+    if (lines.length) return [{ path, lines }]
+  }
   return []
 }
 
