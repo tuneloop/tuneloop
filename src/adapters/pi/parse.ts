@@ -39,8 +39,9 @@ export async function parsePi(path: string): Promise<Session | Session[] | null>
   // Validate header
   const header = records[0]
   if (header.type !== 'session') return null
+  if (typeof header.id !== 'string' || !header.id) return null
 
-  const sessionId: string = header.id ?? ''
+  const sessionId: string = header.id
   const entries = records.slice(1) as TreeEntry[]
   if (!entries.length) return null
 
@@ -69,10 +70,8 @@ export async function parsePi(path: string): Promise<Session | Session[] | null>
     const canonicalLeaf = findCanonicalLeaf(entries)
     if (!canonicalLeaf) return null
     const linearPath = walkToLeaf(entries, canonicalLeaf)
-    const tokens = tokensFromTree(entries)
+    const tokens = tokensFromPath(linearPath)
     const { events, toolCalls, models, provider } = walkPath(linearPath)
-
-    if (!title) title = scanTitle(linearPath)
 
     return {
       id: `${SOURCE}:${sessionId}`,
@@ -178,7 +177,7 @@ function walkPath(linearPath: TreeEntry[]): {
         const mapped = mapAction(pending.name, pending.args)
         toolCalls.push({
           id,
-          name: mapped.name ?? pending.name,
+          name: pending.name,
           action: mapped.action,
           input: pending.args,
           target: mapped.target,
@@ -244,7 +243,7 @@ function walkPath(linearPath: TreeEntry[]): {
         const mapped = mapAction(pending.name, pending.args)
         toolCalls.push({
           id: toolCallId,
-          name: mapped.name ?? pending.name,
+          name: pending.name,
           action: mapped.action,
           input: pending.args,
           target: mapped.target,
@@ -271,7 +270,7 @@ function walkPath(linearPath: TreeEntry[]): {
     const mapped = mapAction(pending.name, pending.args)
     toolCalls.push({
       id,
-      name: mapped.name ?? pending.name,
+      name: pending.name,
       action: mapped.action,
       input: pending.args,
       target: mapped.target,
@@ -282,20 +281,6 @@ function walkPath(linearPath: TreeEntry[]): {
   }
 
   return { events, toolCalls, models, provider }
-}
-
-/** Sum tokens from ALL assistant messages across the entire tree. */
-function tokensFromTree(entries: TreeEntry[]): TokenUsage {
-  let tokens = emptyUsage()
-  for (const e of entries) {
-    if (e.type === 'message') {
-      const m = (e as Raw).message
-      if (m?.role === 'assistant' && m.usage) {
-        tokens = addUsage(tokens, usageOf(m.usage))
-      }
-    }
-  }
-  return tokens
 }
 
 /** Sum tokens from assistant messages on a specific path only. */
@@ -310,16 +295,6 @@ function tokensFromPath(path: TreeEntry[]): TokenUsage {
     }
   }
   return tokens
-}
-
-/** Scan a path for session_info title. */
-function scanTitle(path: TreeEntry[]): string | undefined {
-  for (const e of path) {
-    if (e.type === 'session_info' && typeof (e as Raw).name === 'string') {
-      return (e as Raw).name
-    }
-  }
-  return undefined
 }
 
 async function resolveParentSession(parentPath: unknown): Promise<string | undefined> {

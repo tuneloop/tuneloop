@@ -3,7 +3,6 @@ import type { CanonicalAction } from '../../core/model'
 export interface MappedAction {
   action: CanonicalAction
   target: { paths?: string[]; command?: string }
-  name?: string
 }
 
 export function mapAction(name: string, args: unknown): MappedAction {

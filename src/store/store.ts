@@ -2617,6 +2617,20 @@ export class Store {
     return total
   }
 
+  pruneOrphanedBranchSessions(prefix: string, currentIds: Set<string>): number {
+    const stored = this.db
+      .prepare('SELECT id FROM sessions WHERE id LIKE ? || \'%\'')
+      .all(prefix) as Array<{ id: string }>
+    let pruned = 0
+    for (const row of stored) {
+      if (!currentIds.has(row.id)) {
+        this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id)
+        pruned++
+      }
+    }
+    return pruned
+  }
+
   pruneOrphanArtifacts(): number {
     const r = this.db
       .prepare(
@@ -3368,12 +3382,19 @@ function buildTranscriptCore(session: Session): {
           // differ across harnesses (Claude Code: old_string/new_string;
           // OpenCode: oldString/newString).
           if (tc?.action === 'file_write' && input) {
-            const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
-            const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
-            if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
-            else {
-              const content = clip(String(input.content ?? ''), 2000)
-              if (content) tool.hunks = [{ del: '', ins: content }]
+            if (Array.isArray(input.edits)) {
+              tool.hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
+                del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
+                ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
+              }))
+            } else {
+              const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
+              const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
+              if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
+              else {
+                const content = clip(String(input.content ?? ''), 2000)
+                if (content) tool.hunks = [{ del: '', ins: content }]
+              }
             }
           }
           if (!ok) tool.error = clipError(resultText(res?.raw))

@@ -27,8 +27,11 @@ export function findCanonicalLeaf(entries: TreeEntry[]): string | null {
 export function walkToLeaf(entries: TreeEntry[], leafId: string): TreeEntry[] {
   const byId = new Map(entries.map((e) => [e.id, e]))
   const path: TreeEntry[] = []
+  const seen = new Set<string>()
   let current = byId.get(leafId)
   while (current) {
+    if (seen.has(current.id)) break
+    seen.add(current.id)
     path.unshift(current)
     current = current.parentId ? byId.get(current.parentId) : undefined
   }

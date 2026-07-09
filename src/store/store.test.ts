@@ -333,6 +333,53 @@ describe('summary.enrichmentRan', () => {
   })
 })
 
+describe('pruneOrphanedBranchSessions', () => {
+  it('deletes stored sessions with matching prefix that are not in the current emit set', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    // Simulate Run 1: file emitted primary + branch ~e4
+    seedSession(store, db, 'pi:abc')
+    seedSession(store, db, 'pi:abc~e4')
+    seedSession(store, db, 'pi:abc~e6')
+
+    // Run 2: file now emits primary + ~e4 only (e6 is no longer a leaf)
+    const currentIds = new Set(['pi:abc', 'pi:abc~e4'])
+    const pruned = store.pruneOrphanedBranchSessions('pi:abc', currentIds)
+
+    expect(pruned).toBe(1)
+    const remaining = db.prepare("SELECT id FROM sessions WHERE id LIKE 'pi:abc%'").all() as Array<{ id: string }>
+    expect(remaining.map((r) => r.id).sort()).toEqual(['pi:abc', 'pi:abc~e4'])
+  })
+
+  it('does nothing when all stored sessions are in the emit set', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 'pi:xyz')
+    seedSession(store, db, 'pi:xyz~b2')
+
+    const currentIds = new Set(['pi:xyz', 'pi:xyz~b2'])
+    const pruned = store.pruneOrphanedBranchSessions('pi:xyz', currentIds)
+
+    expect(pruned).toBe(0)
+  })
+
+  it('does not affect sessions from a different prefix', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 'pi:abc')
+    seedSession(store, db, 'pi:abc~e4')
+    seedSession(store, db, 'pi:other')
+    seedSession(store, db, 'pi:other~x1')
+
+    const currentIds = new Set(['pi:abc'])
+    store.pruneOrphanedBranchSessions('pi:abc', currentIds)
+
+    // pi:other sessions untouched
+    const others = db.prepare("SELECT id FROM sessions WHERE id LIKE 'pi:other%'").all() as Array<{ id: string }>
+    expect(others).toHaveLength(2)
+  })
+})
+
 describe('summary.lastAnalyzedAt', () => {
   it('is null until recorded, then round-trips the stamped timestamp', () => {
     const db = openDb(':memory:')
