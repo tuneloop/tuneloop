@@ -36,3 +36,25 @@ describe('LLM key resolution', () => {
     expect(loadConfig({ llm: { provider: 'openrouter' } }).llm?.apiKey).toBe('sk-preset-env')
   })
 })
+
+describe('keyless presets', () => {
+  it('ollama gets its placeholder key (the OpenAI SDK rejects an empty one)', () => {
+    unsetKeys()
+    vi.stubEnv('OLLAMA_API_KEY', undefined)
+    expect(loadConfig({ llm: { provider: 'ollama' } }).llm?.apiKey).toBe('local')
+  })
+
+  it('bedrock resolves keyless with an empty key (AWS credential chain handles auth)', () => {
+    unsetKeys()
+    vi.stubEnv('AWS_BEARER_TOKEN_BEDROCK', undefined)
+    const llm = loadConfig({ llm: { provider: 'bedrock' } }).llm
+    expect(llm?.apiKey).toBe('')
+    expect(llm?.model).toMatch(/anthropic\.claude/) // US inference-profile default
+  })
+
+  it('bedrock picks up a bearer API key from its conventional env', () => {
+    unsetKeys()
+    vi.stubEnv('AWS_BEARER_TOKEN_BEDROCK', 'bedrock-api-key')
+    expect(loadConfig({ llm: { provider: 'bedrock' } }).llm?.apiKey).toBe('bedrock-api-key')
+  })
+})

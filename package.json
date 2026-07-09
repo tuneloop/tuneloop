@@ -52,7 +52,9 @@
     "tuneloop"
   ],
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^0.32.0",
     "@anthropic-ai/sdk": "^0.105.0",
+    "@aws-sdk/credential-providers": "^3.1083.0",
     "better-sqlite3": "^12.11.1",
     "commander": "^12.1.0",
     "openai": "^6.44.0"

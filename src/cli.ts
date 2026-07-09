@@ -35,7 +35,7 @@ program
   .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
-  .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
+  .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, bedrock, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
   .option('--llm-model <id>', 'enrichment model id; overrides env')
   .option('--llm-base-url <url>', 'OpenAI-compatible endpoint URL (for openai-compatible / custom hosts); overrides env')
   .option('--no-serve', 'analyze only; do not serve the dashboard')

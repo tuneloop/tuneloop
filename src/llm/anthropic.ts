@@ -2,11 +2,29 @@ import Anthropic from '@anthropic-ai/sdk'
 import { parseJsonObject } from './json'
 import type { ClientOpts, LlmClient, LlmResult, StructuredRequest } from './types'
 
+/** The one slice of the Anthropic SDK surface the enrichment path uses — also satisfied by the Bedrock client. */
+export interface AnthropicMessagesClient {
+  messages: { create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> }
+}
+
 /** Anthropic-backed client. Data goes only to Anthropic, with the user's own key. */
 export function createAnthropicClient(apiKey: string, model: string, opts?: ClientOpts): LlmClient {
-  const client = new Anthropic({ apiKey })
+  return anthropicShapedClient(new Anthropic({ apiKey }), opts?.provider ?? 'anthropic', model)
+}
+
+/**
+ * Forced-tool structured completion over any client speaking the Anthropic
+ * Messages API (Anthropic itself, AWS Bedrock). `extraParams` lets a backend
+ * add request fields its endpoint requires (e.g. Bedrock's thinking opt-out).
+ */
+export function anthropicShapedClient(
+  client: AnthropicMessagesClient,
+  provider: string,
+  model: string,
+  extraParams?: Partial<Anthropic.MessageCreateParamsNonStreaming>,
+): LlmClient {
   return {
-    provider: opts?.provider ?? 'anthropic',
+    provider,
     model,
     async completeStructured(req: StructuredRequest): Promise<LlmResult> {
       const { system, user, schema, toolName, maxTokens = 1024 } = req
@@ -17,6 +35,7 @@ export function createAnthropicClient(apiKey: string, model: string, opts?: Clie
         messages: [{ role: 'user', content: user }],
         tools: [{ name: toolName, description: 'Record the structured analysis.', input_schema: schema as Anthropic.Tool.InputSchema }],
         tool_choice: { type: 'tool', name: toolName },
+        ...extraParams,
       })
       // The forced tool's input IS the structured result; salvage any text if absent.
       for (const b of resp.content) {

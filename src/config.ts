@@ -31,18 +31,19 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   const preset = PROVIDERS[provider]
 
   // Key precedence: an in-process override (interactive prompt) wins, then
-  // TUNELOOP_LLM_API_KEY, then the preset's conventional env. Keyless local
-  // endpoints (Ollama) get a placeholder the SDK accepts.
+  // TUNELOOP_LLM_API_KEY, then the preset's conventional env. Keyless presets
+  // get their placeholder (Ollama's SDK rejects an empty key) or '' (Bedrock:
+  // empty means "let the SDK use the AWS credential chain").
   const apiKey =
     o?.apiKey ??
     process.env.TUNELOOP_LLM_API_KEY ??
     (preset ? process.env[preset.keyEnv] : undefined) ??
-    (preset?.requiresKey === false ? 'local' : '')
+    (preset?.keyless && 'placeholder' in preset.keyless ? preset.keyless.placeholder : '')
   // Needs-a-key but none → stay static-only (the analyze hint covers it). resolveLlm
   // never throws: unknown provider / missing base-URL / empty model are recoverable
   // misconfig that createLlmClient validates inside analyze's graceful try/catch, so a
   // typo can't abort the run — nor the read-only `serve`, which builds no client.
-  if (preset && preset.requiresKey !== false && !apiKey) return null
+  if (preset && !preset.keyless && !apiKey) return null
 
   const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
   const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL

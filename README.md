@@ -173,17 +173,20 @@ npx tuneloop analyze
 
 Or skip the env setup: run `npx tuneloop analyze` in a terminal and, when no
 provider is configured, it offers to set one up interactively — pick a provider,
-paste a key (input hidden), and that run enriches. The key is never written to
-disk; the run ends by printing the `export` lines that make it permanent.
+paste a key (input hidden), and that run enriches. If the provider's key is
+already exported (e.g. `ANTHROPIC_API_KEY`), it's picked up without asking. The
+key is never written to disk; the run ends by printing the `export` lines that
+make it permanent.
 
 Pick a preset and supply its key; the model defaults sensibly and is overridable
-with `TUNELOOP_LLM_MODEL` (or `--llm-model`). Anthropic and OpenAI are native;
-everything else speaks the OpenAI-compatible API.
+with `TUNELOOP_LLM_MODEL` (or `--llm-model`). Anthropic, OpenAI, and AWS Bedrock
+are native; everything else speaks the OpenAI-compatible API.
 
 | `TUNELOOP_LLM_PROVIDER` | Key env | Notes |
 |---|---|---|
 | `anthropic` | `ANTHROPIC_API_KEY` | native |
 | `openai` | `OPENAI_API_KEY` | native |
+| `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` _(or standard AWS credentials)_ | Claude via AWS; set `AWS_REGION` |
 | `openrouter` | `OPENROUTER_API_KEY` | 400+ models via one key |
 | `groq` | `GROQ_API_KEY` | fast; free tier |
 | `deepseek` | `DEEPSEEK_API_KEY` | |
@@ -199,6 +202,12 @@ TUNELOOP_LLM_PROVIDER=openrouter OPENROUTER_API_KEY=sk-or-... \
 
 # Fully local, no key, nothing leaves your machine:
 npx tuneloop analyze --llm-provider ollama --llm-model qwen2.5
+
+# AWS Bedrock — a Bedrock API key, or any standard AWS credentials (SigV4):
+TUNELOOP_LLM_PROVIDER=bedrock AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-east-1 \
+  npx tuneloop analyze
+# The default model is a US inference profile; other regions pick theirs, e.g.
+#   --llm-model eu.anthropic.claude-haiku-4-5-20251001-v1:0
 
 # Any other OpenAI-compatible host:
 TUNELOOP_LLM_PROVIDER=openai-compatible TUNELOOP_LLM_BASE_URL=https://host/v1 \
