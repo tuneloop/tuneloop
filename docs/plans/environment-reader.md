@@ -51,19 +51,19 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 |-------|---------|-----------|--------|
 | `permissions.allow` | Yes | As-is (rule patterns) | Permission posture |
 | `permissions.deny` | Yes | As-is | Security posture |
-| `env` | Keys only | Strip all values | Which integrations wired |
+| `env` | Keys only | Strip values that look like tokens/keys | Which integrations wired |
 | `model` | Yes | As-is | Model preference |
-| `hooks` | Event types + hook count per event | Drop commands/urls/headers/args | Automation sophistication |
+| `hooks` | Event types + commands | Strip env vars / headers with tokens | Automation sophistication |
 | `enabledPlugins` | Yes | Plugin names + boolean | Ecosystem adoption |
 | `effortLevel` | Yes | As-is | Usage pattern |
 | `permissionMode` | Yes | As-is | Trust posture |
-| `apiKeyHelper` | Presence only | `true`/`false` | Auth method |
-| `awsCredentialExport` | Presence only | `true`/`false` | Auth method |
-| `gcpAuthRefresh` | Presence only | `true`/`false` | Auth method |
+| `apiKeyHelper` | Command path | As-is | Auth method |
+| `awsCredentialExport` | Command path | As-is | Auth method |
+| `gcpAuthRefresh` | Command path | As-is | Auth method |
 | `autoMemoryEnabled` | Yes | As-is | Feature adoption |
 | `availableModels` | Yes | As-is | Model restrictions |
-| `theme` | Skip | — | Low value |
-| `editorMode` | Skip | — | Low value |
+| `theme` | Yes | As-is | Preference |
+| `editorMode` | Yes | As-is | Preference |
 
 ### 2. MCP Servers
 
@@ -80,22 +80,34 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 |-------|---------|-----------|--------|
 | Server names | Yes | As-is | What tools connected |
 | `type` (http/sse/stdio) | Yes | As-is | Transport choice |
+| `url` | Yes | As-is | Endpoint identity |
+| `command` | Yes | As-is | Which binary |
+| `args` | Yes | Redact values matching token/key patterns | Server config |
 | `timeout` | Yes | As-is | Config sophistication |
 | `alwaysLoad` | Yes | As-is | Eager vs deferred |
-| `url` | No | Drop | May expose internal endpoints |
-| `command` | No | Drop | Reveals infra paths |
-| `args` | No | Drop | Often contains secrets/paths |
-| `env` | No | Drop entirely | API keys |
-| `headers` | No | Drop | Auth tokens |
-| `headersHelper` | No | Drop | Secret-generating scripts |
-| `oauth` | No | Drop | Client IDs, auth URLs |
+| `env` | Keys only | Strip all values (likely secrets) | What env is passed |
+| `headers` | Keys only | Strip values (auth tokens) | What headers set |
+| `headersHelper` | Command path | As-is | Auth mechanism |
+| `oauth` | Scopes + presence | Strip clientId, tokens | OAuth in use |
 
 **Stored shape:**
 ```json
 {
   "servers": {
-    "atlassian": { "type": "sse", "timeout": null, "alwaysLoad": false },
-    "postgres": { "type": "stdio", "timeout": 600000, "alwaysLoad": true }
+    "atlassian": {
+      "type": "sse",
+      "url": "https://mcp.atlassian.com/v1/sse",
+      "timeout": null,
+      "alwaysLoad": false
+    },
+    "postgres": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "[REDACTED]"],
+      "envKeys": ["PG_PASSWORD", "PG_HOST"],
+      "timeout": 600000,
+      "alwaysLoad": true
+    }
   },
   "count": 2
 }
@@ -121,8 +133,8 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | Frontmatter `tools` / `disallowedTools` | Yes | As-is | Tool scoping |
 | Frontmatter `effort` | Yes | As-is | Budget allocation |
 | Frontmatter `isolation` | Yes | As-is | Worktree usage |
-| Frontmatter `hooks` | No | Drop | May contain secrets |
-| Body content | No | Hash + line count | Proprietary instructions |
+| Frontmatter `hooks` | Yes | Strip token/key values from headers | Automation wiring |
+| Body content | Yes | Full text | Instruction content (adoption detection) |
 
 **Stored shape:**
 ```json
@@ -135,7 +147,7 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
       "tools": ["Read", "Bash"],
       "effort": "high",
       "isolation": null,
-      "bodyHash": "a1b2c3...",
+      "body": "Review all changed files for...",
       "bodyLines": 42
     }
   ],
@@ -162,7 +174,7 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | Frontmatter `description` | Yes | As-is | Purpose |
 | Frontmatter `invocation` | Yes | As-is | manual/auto/both |
 | Frontmatter `allowedTools` / `disallowedTools` | Yes | As-is | Scoping |
-| Body content | No | Hash + line count | Proprietary |
+| Body content | Yes | Full text | Instruction content (adoption detection) |
 
 **Stored shape:**
 ```json
@@ -173,11 +185,13 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
       "description": "Deploy to staging",
       "invocation": "manual",
       "allowedTools": ["Bash"],
-      "bodyHash": "d4e5f6...",
+      "body": "Run the deploy script...",
       "bodyLines": 18
     }
   ],
-  "legacyCommands": ["review.md", "fix.md"],
+  "legacyCommands": [
+    { "name": "review.md", "body": "Review the current...", "bodyLines": 12 }
+  ],
   "count": 3
 }
 ```
@@ -199,7 +213,7 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | `meta.name` (parsed from export) | Yes | As-is | Workflow catalog |
 | `meta.description` | Yes | As-is | Purpose |
 | `meta.phases` | Yes | As-is | Complexity |
-| Script body | No | Hash + line count | Proprietary |
+| Script body | Yes | Full text | Instruction content (adoption detection) |
 
 **Stored shape:**
 ```json
@@ -209,7 +223,7 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
       "name": "review-changes",
       "description": "Review changed files across dimensions",
       "phases": ["Review", "Verify"],
-      "bodyHash": "g7h8i9...",
+      "body": "export const meta = {...}\nconst results = ...",
       "bodyLines": 55
     }
   ],
@@ -235,9 +249,10 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | Existence (boolean) | Yes | As-is | Adoption signal |
 | Line count / byte size | Yes | As-is | Instruction depth |
 | Content hash | Yes | sha256 | Change detection |
-| Body content | No | — | Proprietary |
+| Body content | Yes | Full text | Adoption detection, instruction diff |
 | Rules: file count | Yes | As-is | Conditional instruction usage |
 | Rules: `paths` globs | Yes | As-is | Which areas have rules |
+| Rules: body content | Yes | Full text | Rule content |
 
 **Stored shape:**
 ```json
@@ -246,13 +261,16 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
     "exists": true,
     "lines": 87,
     "bytes": 3421,
-    "hash": "j0k1l2..."
+    "hash": "j0k1l2...",
+    "body": "# CLAUDE.md\n\nThis file provides..."
   },
   "claudeLocalMd": {
-    "exists": false
+    "exists": true,
+    "lines": 12,
+    "body": "# Local overrides..."
   },
   "rules": [
-    { "file": "testing.md", "paths": ["src/**/*.test.ts"], "lines": 12 }
+    { "file": "testing.md", "paths": ["src/**/*.test.ts"], "lines": 12, "body": "Always use vitest..." }
   ],
   "rulesCount": 1
 }
@@ -321,9 +339,22 @@ The storage/mechanism should be harness-agnostic; only the reader logic is per-h
 
 ## Security principles
 
-1. **Never capture values of environment variables** — keys only.
-2. **Never capture hook/MCP command strings, args, or URLs** — may contain tokens or internal infra.
-3. **Never capture auth-related content** — `credentials.json`, `apiKeyHelper` output, OAuth tokens.
-4. **Never capture instruction body text** — may contain proprietary business logic. Hash + size only.
-5. **Capture structural metadata only** — names, counts, types, patterns, presence flags.
-6. **Redact by default, allowlist what's safe** — not the reverse.
+Capture everything **except passwords, API keys, and tokens**. Specifically:
+
+1. **Redact env var values** — keys are safe, values often contain secrets (`API_KEY=sk-...`).
+2. **Redact header values** — `Authorization: Bearer ...` is always a token.
+3. **Redact args that match token patterns** — connection strings with passwords, `sk-*`, `Bearer *`.
+4. **Never capture `credentials.json`** or OAuth clientId/secret.
+5. **Capture everything else as-is** — commands, URLs, file paths, instruction bodies, configs.
+   These are important for adoption detection and config-diff signals.
+
+The redaction rule is simple: **if a value looks like a secret (token, key, password, connection
+string with credentials), replace it with `[REDACTED]`. Everything else is kept.**
+
+Pattern matching for redaction:
+- Env var values → always strip (too risky to pattern-match reliably)
+- Header values → always strip
+- Args containing `://.*:.*@` (connection strings with passwords) → redact
+- Args matching `sk-*`, `key-*`, `token-*`, `Bearer *` patterns → redact
+- OAuth `clientId`, `clientSecret` → redact
+- Everything else → keep as-is
