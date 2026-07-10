@@ -2854,16 +2854,20 @@ export class Store {
     this.db.transaction(() => {
       for (const input of inputs) {
         const existing = this.db
-          .prepare('SELECT id, state FROM insights WHERE detector = ? AND signal_key = ?')
-          .get(detector, input.signalKey) as { id: string; state: string } | undefined
+          .prepare('SELECT id, state FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
+          .get(detector, input.repo, input.signalKey) as { id: string; state: string } | undefined
 
         if (existing && existing.state === 'dismissed') continue
 
         if (existing) {
+          // Re-detection of a resolved insight means the problem came back — reopen it.
+          const reopened = existing.state === 'resolved'
           this.db
             .prepare(
               `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?, metric = ?,
-               fix_type = ?, fix_label = ?, fix_content = ?, last_seen_at = ?, detector_version = ?
+               fix_type = ?, fix_label = ?, fix_content = ?, last_seen_at = ?, detector_version = ?,
+               state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
+               state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
                WHERE id = ?`,
             )
             .run(
@@ -2877,6 +2881,7 @@ export class Store {
               input.fix.content,
               now,
               version,
+              now,
               existing.id,
             )
           this.db.prepare('DELETE FROM insight_evidence WHERE insight_id = ?').run(existing.id)
@@ -2889,14 +2894,15 @@ export class Store {
           const id = randomUUID()
           this.db
             .prepare(
-              `INSERT INTO insights (id, detector, signal_key, severity, state, title, description, count, metric,
+              `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count, metric,
                fix_type, fix_label, fix_content, first_seen_at, last_seen_at, detector_version)
-               VALUES (?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
               detector,
               input.signalKey,
+              input.repo,
               input.severity,
               input.title,
               input.description,
@@ -2925,8 +2931,18 @@ export class Store {
     })()
   }
 
-  insights(opts?: { state?: InsightState; detector?: string }): InsightRow[] {
-    let sql = `SELECT id, detector, signal_key, severity, state, title, description, count, metric,
+  persistDetectorError(detector: string, version: number): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO detector_runs (detector, version, status, in_tokens, out_tokens, cost_usd, ran_at)
+         VALUES (?, ?, 'error', NULL, NULL, NULL, ?)`,
+      )
+      .run(detector, version, now)
+  }
+
+  insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {
+    let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count, metric,
                fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version
                FROM insights WHERE state != 'dismissed'`
     const params: unknown[] = []
@@ -2938,12 +2954,17 @@ export class Store {
       sql += ' AND detector = ?'
       params.push(opts.detector)
     }
+    if (opts?.repo) {
+      sql += ' AND repo = ?'
+      params.push(opts.repo)
+    }
     sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC`
 
     const rows = this.db.prepare(sql).all(...params) as Array<{
       id: string
       detector: string
       signal_key: string
+      repo: string
       severity: string
       state: string
       title: string
@@ -2967,6 +2988,7 @@ export class Store {
         id: r.id,
         detector: r.detector,
         signalKey: r.signal_key,
+        repo: r.repo,
         severity: r.severity as InsightRow['severity'],
         state: r.state as InsightState,
         title: r.title,
@@ -2993,10 +3015,11 @@ export class Store {
 
   transitionInsight(id: string, newState: InsightState): boolean {
     const VALID_TRANSITIONS: Record<string, string[]> = {
-      surfaced: ['fix_issued', 'dismissed'],
-      fix_issued: ['adopted', 'dismissed'],
-      adopted: ['measured', 'dismissed'],
+      surfaced: ['fix_issued', 'resolved', 'dismissed'],
+      fix_issued: ['adopted', 'resolved', 'dismissed'],
+      adopted: ['measured', 'resolved', 'dismissed'],
       measured: ['resolved', 'dismissed'],
+      resolved: ['surfaced', 'dismissed'],
     }
     const row = this.db.prepare('SELECT state FROM insights WHERE id = ?').get(id) as { state: string } | undefined
     if (!row) return false

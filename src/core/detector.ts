@@ -28,6 +28,14 @@ export interface EvidenceRef {
 export interface InsightInput {
   /** Stable dedup key within this detector — same key on re-run updates the row, not duplicates it. */
   signalKey: string
+  /**
+   * Scoping for this insight:
+   *  - repo name (e.g. 'tuneloop') — insight specific to that repo
+   *  - '*' — cross-repo insight (pattern spans multiple repos)
+   *  - cwd path — for sessions not in a git repo, use the working directory
+   *  - '_unknown' — fallback when neither repo nor cwd is available
+   */
+  repo: string
   severity: 'high' | 'medium' | 'low'
   /** One-line card heading describing the problem. */
   title: string
@@ -40,8 +48,8 @@ export interface InsightInput {
   /** Optional numeric signal specific to this detector (e.g. wasted dollars, success-rate delta). */
   metric?: number
   fix: {
-    /** Controls rendering: snippet gets a copy button, nudge gets plain prose, command gets a run prompt. */
-    type: 'config-snippet' | 'behavioral-nudge' | 'install-command'
+    /** Controls rendering: snippet gets a copy button, nudge gets plain prose, command gets a run prompt, fix-prompt gets a paste-into-agent-config prompt. */
+    type: 'config-snippet' | 'behavioral-nudge' | 'install-command' | 'fix-prompt'
     /** Button/action text (short imperative, e.g. "Copy allowlist entry"). */
     label: string
     /** The deliverable: JSON config to paste, prose suggestion, or shell command. */

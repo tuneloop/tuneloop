@@ -32,13 +32,14 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
   }))
 
   // Persist results sequentially (SQLite writes are single-threaded anyway).
-  for (const result of results) {
+  for (const [i, result] of results.entries()) {
+    const d = applicable[i]!
     if (result.status === 'fulfilled') {
-      const { detector: d, insights } = result.value
-      store.persistInsights(d.name, d.version, insights)
-      log.debug(`detector ${d.name}: ${insights.length} insight(s)`)
+      store.persistInsights(d.name, d.version, result.value.insights)
+      log.debug(`detector ${d.name}: ${result.value.insights.length} insight(s)`)
     } else {
-      log.warn(`detector failed: ${result.reason?.message ?? result.reason}`)
+      store.persistDetectorError(d.name, d.version)
+      log.warn(`detector ${d.name} failed: ${result.reason?.message ?? result.reason}`)
     }
   }
 }

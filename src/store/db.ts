@@ -313,6 +313,7 @@ CREATE TABLE IF NOT EXISTS insights (
   id                TEXT PRIMARY KEY,
   detector          TEXT NOT NULL,
   signal_key        TEXT NOT NULL,
+  repo              TEXT NOT NULL DEFAULT '_unknown',
   severity          TEXT NOT NULL,
   state             TEXT NOT NULL DEFAULT 'surfaced',
   title             TEXT NOT NULL,
@@ -326,10 +327,11 @@ CREATE TABLE IF NOT EXISTS insights (
   last_seen_at      TEXT NOT NULL,
   state_changed_at  TEXT,
   detector_version  INTEGER NOT NULL,
-  UNIQUE(detector, signal_key)
+  UNIQUE(detector, repo, signal_key)
 );
 CREATE INDEX IF NOT EXISTS ix_insights_state ON insights(state);
 CREATE INDEX IF NOT EXISTS ix_insights_detector ON insights(detector);
+CREATE INDEX IF NOT EXISTS ix_insights_repo ON insights(repo);
 
 CREATE TABLE IF NOT EXISTS insight_evidence (
   insight_id  TEXT NOT NULL,

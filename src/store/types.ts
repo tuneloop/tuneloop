@@ -163,6 +163,7 @@ export interface InsightRow {
   id: string
   detector: string
   signalKey: string
+  repo: string
   severity: 'high' | 'medium' | 'low'
   state: InsightState
   title: string
