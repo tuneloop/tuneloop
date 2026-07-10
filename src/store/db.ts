@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 10
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -306,6 +306,53 @@ CREATE TABLE IF NOT EXISTS user_link_overrides (
   created_at  TEXT,
   PRIMARY KEY (session_id, artifact_id),
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+-- Insight ledger: persisted detector findings with lifecycle tracking.
+CREATE TABLE IF NOT EXISTS insights (
+  id                TEXT PRIMARY KEY,
+  detector          TEXT NOT NULL,
+  signal_key        TEXT NOT NULL,
+  severity          TEXT NOT NULL,
+  state             TEXT NOT NULL DEFAULT 'surfaced',
+  title             TEXT NOT NULL,
+  description       TEXT NOT NULL,
+  count             INTEGER NOT NULL,
+  metric            REAL,
+  fix_type          TEXT,
+  fix_label         TEXT,
+  fix_content       TEXT,
+  first_seen_at     TEXT NOT NULL,
+  last_seen_at      TEXT NOT NULL,
+  state_changed_at  TEXT,
+  detector_version  INTEGER NOT NULL,
+  UNIQUE(detector, signal_key)
+);
+CREATE INDEX IF NOT EXISTS ix_insights_state ON insights(state);
+CREATE INDEX IF NOT EXISTS ix_insights_detector ON insights(detector);
+
+CREATE TABLE IF NOT EXISTS insight_evidence (
+  insight_id  TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  turn_idx    INTEGER NOT NULL DEFAULT -1,
+  added_at    TEXT NOT NULL,
+  PRIMARY KEY (insight_id, session_id, turn_idx),
+  FOREIGN KEY(insight_id) REFERENCES insights(id) ON DELETE CASCADE,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(session_id);
+
+-- One row per detector: tracks when it last ran and at what version.
+-- S-tier detectors always re-run (cheap SQL); P-tier uses this for cache skipping.
+-- Token/cost columns are NULL for S-tier, populated for P-tier (LLM spend tracking).
+CREATE TABLE IF NOT EXISTS detector_runs (
+  detector    TEXT PRIMARY KEY,  -- detector name (e.g. 'permission-friction')
+  version     INTEGER NOT NULL,  -- detector version at time of run (for cache invalidation)
+  status      TEXT,              -- 'ok' | 'error'
+  in_tokens   INTEGER,           -- LLM input tokens (NULL for S-tier)
+  out_tokens  INTEGER,           -- LLM output tokens (NULL for S-tier)
+  cost_usd    REAL,              -- LLM cost in USD (NULL for S-tier)
+  ran_at      TEXT NOT NULL      -- ISO timestamp of last run
 );
 `
 

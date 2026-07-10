@@ -11,7 +11,9 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, FeatureRevisionInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import type { InsightInput } from '../core/detector'
+import type { InsightRow } from './types'
 
 export interface Dist {
   value: string
@@ -2822,6 +2824,187 @@ export class Store {
           ? `${r.repo || ''} #${r.ident || ''}${r.title ? ' — ' + r.title : ''}${r.status ? ' (' + r.status + ')' : ''}`
           : String(r.title || r.ident || r.id),
     }))
+  }
+
+  // ---- Insight Ledger ---------------------------------------------------------
+
+  /**
+   * Read-only query helper for detectors. Detectors need to ask arbitrary questions
+   * across all sessions (each one runs different SQL), but they should never write —
+   * all writes go through persistInsights(). This exposes SELECT access without
+   * handing out a write-capable DB connection.
+   */
+  queryAll(sql: string, ...params: unknown[]): unknown[] {
+    return this.db.prepare(sql).all(...params)
+  }
+
+  queryOne(sql: string, ...params: unknown[]): unknown {
+    return this.db.prepare(sql).get(...params)
+  }
+
+  detectorRun(detector: string): DetectorRunRow | undefined {
+    const row = this.db.prepare('SELECT version, status, ran_at as ranAt FROM detector_runs WHERE detector = ?').get(detector) as
+      | { version: number; status: string | null; ranAt: string }
+      | undefined
+    return row ? { version: row.version, status: row.status, ranAt: row.ranAt } : undefined
+  }
+
+  persistInsights(detector: string, version: number, inputs: InsightInput[], cost?: { inTokens: number; outTokens: number; usd: number }): void {
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const input of inputs) {
+        const existing = this.db
+          .prepare('SELECT id, state FROM insights WHERE detector = ? AND signal_key = ?')
+          .get(detector, input.signalKey) as { id: string; state: string } | undefined
+
+        if (existing && existing.state === 'dismissed') continue
+
+        if (existing) {
+          this.db
+            .prepare(
+              `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?, metric = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, last_seen_at = ?, detector_version = ?
+               WHERE id = ?`,
+            )
+            .run(
+              input.severity,
+              input.title,
+              input.description,
+              input.count,
+              input.metric ?? null,
+              input.fix.type,
+              input.fix.label,
+              input.fix.content,
+              now,
+              version,
+              existing.id,
+            )
+          this.db.prepare('DELETE FROM insight_evidence WHERE insight_id = ?').run(existing.id)
+          for (const ev of input.evidence.slice(0, 10)) {
+            this.db
+              .prepare('INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, added_at) VALUES (?, ?, ?, ?)')
+              .run(existing.id, ev.sessionId, ev.turnIdx ?? -1, now)
+          }
+        } else {
+          const id = randomUUID()
+          this.db
+            .prepare(
+              `INSERT INTO insights (id, detector, signal_key, severity, state, title, description, count, metric,
+               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, detector_version)
+               VALUES (?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              id,
+              detector,
+              input.signalKey,
+              input.severity,
+              input.title,
+              input.description,
+              input.count,
+              input.metric ?? null,
+              input.fix.type,
+              input.fix.label,
+              input.fix.content,
+              now,
+              now,
+              version,
+            )
+          for (const ev of input.evidence.slice(0, 10)) {
+            this.db
+              .prepare('INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, added_at) VALUES (?, ?, ?, ?)')
+              .run(id, ev.sessionId, ev.turnIdx ?? -1, now)
+          }
+        }
+      }
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO detector_runs (detector, version, status, in_tokens, out_tokens, cost_usd, ran_at)
+           VALUES (?, ?, 'ok', ?, ?, ?, ?)`,
+        )
+        .run(detector, version, cost?.inTokens ?? null, cost?.outTokens ?? null, cost?.usd ?? null, now)
+    })()
+  }
+
+  insights(opts?: { state?: InsightState; detector?: string }): InsightRow[] {
+    let sql = `SELECT id, detector, signal_key, severity, state, title, description, count, metric,
+               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version
+               FROM insights WHERE state != 'dismissed'`
+    const params: unknown[] = []
+    if (opts?.state) {
+      sql += ' AND state = ?'
+      params.push(opts.state)
+    }
+    if (opts?.detector) {
+      sql += ' AND detector = ?'
+      params.push(opts.detector)
+    }
+    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC`
+
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string
+      detector: string
+      signal_key: string
+      severity: string
+      state: string
+      title: string
+      description: string
+      count: number
+      metric: number | null
+      fix_type: string | null
+      fix_label: string | null
+      fix_content: string | null
+      first_seen_at: string
+      last_seen_at: string
+      state_changed_at: string | null
+      detector_version: number
+    }>
+
+    return rows.map((r) => {
+      const evidence = this.db
+        .prepare('SELECT session_id, turn_idx FROM insight_evidence WHERE insight_id = ? ORDER BY added_at DESC LIMIT 10')
+        .all(r.id) as Array<{ session_id: string; turn_idx: number }>
+      return {
+        id: r.id,
+        detector: r.detector,
+        signalKey: r.signal_key,
+        severity: r.severity as InsightRow['severity'],
+        state: r.state as InsightState,
+        title: r.title,
+        description: r.description,
+        count: r.count,
+        metric: r.metric,
+        fix: { type: r.fix_type ?? '', label: r.fix_label ?? '', content: r.fix_content ?? '' },
+        firstSeenAt: r.first_seen_at,
+        lastSeenAt: r.last_seen_at,
+        stateChangedAt: r.state_changed_at,
+        detectorVersion: r.detector_version,
+        evidence: evidence.map((e) => ({ sessionId: e.session_id, turnIdx: e.turn_idx === -1 ? null : e.turn_idx })),
+      }
+    })
+  }
+
+  dismissInsight(id: string): boolean {
+    const now = new Date().toISOString()
+    const result = this.db
+      .prepare("UPDATE insights SET state = 'dismissed', state_changed_at = ? WHERE id = ? AND state != 'dismissed'")
+      .run(now, id)
+    return result.changes > 0
+  }
+
+  transitionInsight(id: string, newState: InsightState): boolean {
+    const VALID_TRANSITIONS: Record<string, string[]> = {
+      surfaced: ['fix_issued', 'dismissed'],
+      fix_issued: ['adopted', 'dismissed'],
+      adopted: ['measured', 'dismissed'],
+      measured: ['resolved', 'dismissed'],
+    }
+    const row = this.db.prepare('SELECT state FROM insights WHERE id = ?').get(id) as { state: string } | undefined
+    if (!row) return false
+    const allowed = VALID_TRANSITIONS[row.state]
+    if (!allowed || !allowed.includes(newState)) return false
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run(newState, now, id)
+    return true
   }
 
   close() {

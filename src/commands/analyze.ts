@@ -8,7 +8,8 @@ import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
 import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
-import { getAdapters, getProcessors } from '../core/registry'
+import { runDetectors } from '../core/detector-runner'
+import { getAdapters, getDetectors, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
 import { createLlmClient, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
@@ -324,6 +325,13 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
 
   const pruned = store.pruneOrphanArtifacts()
   if (pruned > 0) log.debug(`pruned ${pruned} orphan artifact(s)`)
+
+  // Run detectors (cross-session pattern detection) after all processors complete.
+  const detectors = getDetectors()
+  if (detectors.length > 0) {
+    log.debug(`Running ${detectors.length} detector(s)...`)
+    await runDetectors({ detectors, store, log, llmEnabled, llm })
+  }
 
   log.info(
     `Scanned ${discovered} file(s), parsed ${parsed} session(s) into ${groups.size} unique session(s), ${reingested} new/changed.`,

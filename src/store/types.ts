@@ -154,3 +154,35 @@ export interface ProcessorRunRow {
   model: string | null
   invalidated: boolean
 }
+
+// ---- insight ledger types ---------------------------------------------------
+
+export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'measured' | 'resolved' | 'dismissed'
+
+export interface InsightRow {
+  id: string
+  detector: string
+  signalKey: string
+  severity: 'high' | 'medium' | 'low'
+  state: InsightState
+  title: string
+  description: string
+  count: number
+  metric: number | null
+  fix: {
+    type: string
+    label: string
+    content: string
+  }
+  firstSeenAt: string
+  lastSeenAt: string
+  stateChangedAt: string | null
+  detectorVersion: number
+  evidence: Array<{ sessionId: string; turnIdx: number | null }>
+}
+
+export interface DetectorRunRow {
+  version: number
+  status: string | null
+  ranAt: string
+}
