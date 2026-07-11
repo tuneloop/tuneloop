@@ -1,0 +1,260 @@
+import { describe, expect, it } from 'vitest'
+import { openDb } from './db'
+import { Store } from './store'
+import { insightId } from '../core/detector'
+import type { InsightInput } from '../core/detector'
+
+function setup() {
+  const db = openDb(':memory:')
+  const store = new Store(db)
+  for (const id of ['s1', 's2']) {
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider) VALUES (?,?,?,?)').run(id, id, 'claude-code', 'anthropic')
+  }
+  return { db, store }
+}
+
+function mkInsight(over: Partial<InsightInput> = {}): InsightInput {
+  const base: InsightInput = {
+    signalKey: 'k1',
+    repo: '*',
+    severity: 'high',
+    title: 'Repeated deploy corrections',
+    description: 'User re-explained the deploy sequence in 6 sessions',
+    evidence: [{ sessionId: 's1' }],
+    count: 6,
+    fix: { type: 'fix-prompt', label: 'Apply fix', content: '' },
+    ...over,
+  }
+  if (!base.fix.content) base.fix = { ...base.fix, content: `tuneloop-fix: ${insightId('det', base.repo, base.signalKey)}\n...` }
+  return base
+}
+
+const stateOf = (db: ReturnType<typeof openDb>, id: string) =>
+  (db.prepare('SELECT state FROM insights WHERE id = ?').get(id) as { state: string }).state
+
+describe('deterministic insight ids', () => {
+  it('id derives from (detector, repo, signalKey) and is stable across rebuilds', () => {
+    const a = setup()
+    a.store.persistInsights('det', 1, [mkInsight()])
+    const idA = (a.db.prepare('SELECT id FROM insights').get() as { id: string }).id
+    expect(idA).toBe(insightId('det', '*', 'k1'))
+
+    // A fresh store (rebuild) mints the identical id.
+    const b = setup()
+    b.store.persistInsights('det', 1, [mkInsight()])
+    const idB = (b.db.prepare('SELECT id FROM insights').get() as { id: string }).id
+    expect(idB).toBe(idA)
+  })
+
+  it('no concatenation-boundary collisions', () => {
+    expect(insightId('a', 'bc', 'k')).not.toBe(insightId('ab', 'c', 'k'))
+  })
+})
+
+describe('insight_state_log', () => {
+  it('logs null→surfaced on first insert and resolved→surfaced on reopen', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    store.transitionInsight(id, 'resolved')
+    store.persistInsights('det', 1, [mkInsight()]) // re-detection → reopen
+
+    const log = db
+      .prepare('SELECT from_state, to_state FROM insight_state_log WHERE insight_id = ? ORDER BY rowid')
+      .all(id) as Array<{ from_state: string | null; to_state: string }>
+    expect(log).toEqual([
+      { from_state: null, to_state: 'surfaced' },
+      { from_state: 'surfaced', to_state: 'resolved' },
+      { from_state: 'resolved', to_state: 'surfaced' },
+    ])
+  })
+
+  it('dismissInsight routes through the matrix and is logged', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    expect(store.dismissInsight(id)).toBe(true)
+    expect(store.dismissInsight(id)).toBe(false) // already dismissed
+    const last = db
+      .prepare('SELECT from_state, to_state FROM insight_state_log WHERE insight_id = ? ORDER BY rowid DESC LIMIT 1')
+      .get(id) as { from_state: string; to_state: string }
+    expect(last).toEqual({ from_state: 'surfaced', to_state: 'dismissed' })
+  })
+})
+
+describe('reconcileFixSightings', () => {
+  const sight = (store: Store, sessionId: string, id: string, turnAt = '2026-07-01T10:00:00Z', seq = 4) =>
+    store.recordFixMarkerSightings(sessionId, [{ insightId: id, seq, turnAt }])
+
+  it('surfaced insight chains to adopted (fix_issued logged in between)', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    sight(store, 's1', id)
+    expect(store.reconcileFixSightings()).toBe(1)
+    expect(stateOf(db, id)).toBe('adopted')
+    const states = db
+      .prepare('SELECT to_state FROM insight_state_log WHERE insight_id = ? ORDER BY rowid')
+      .all(id) as Array<{ to_state: string }>
+    expect(states.map((s) => s.to_state)).toEqual(['surfaced', 'fix_issued', 'adopted'])
+  })
+
+  it('already-adopted / dismissed insights are matched without transitions', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight(), mkInsight({ signalKey: 'k2' })])
+    const adoptedId = insightId('det', '*', 'k1')
+    const dismissedId = insightId('det', '*', 'k2')
+    sight(store, 's1', adoptedId)
+    store.reconcileFixSightings()
+    store.dismissInsight(dismissedId)
+    sight(store, 's2', dismissedId)
+
+    expect(store.reconcileFixSightings()).toBe(0) // no new adoptions
+    expect(stateOf(db, dismissedId)).toBe('dismissed')
+    const unmatched = db.prepare('SELECT COUNT(*) as n FROM fix_marker_sightings WHERE matched_at IS NULL').get() as { n: number }
+    expect(unmatched.n).toBe(0) // both sightings matched regardless
+  })
+
+  it('unknown id stays unmatched, then matches once the insight appears (rebuild self-heal)', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    sight(store, 's1', id) // marker scanned before the detector re-creates the insight
+    expect(store.reconcileFixSightings()).toBe(0)
+    expect((db.prepare('SELECT matched_at FROM fix_marker_sightings').get() as { matched_at: string | null }).matched_at).toBeNull()
+
+    store.persistInsights('det', 1, [mkInsight()])
+    expect(store.reconcileFixSightings()).toBe(1)
+    expect(stateOf(db, id)).toBe('adopted')
+  })
+
+  it('re-ingesting an adopted fix session keeps the insight↔session link', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    sight(store, 's1', id)
+    store.reconcileFixSightings()
+    expect(store.insights()[0]!.fixSessions.map((f) => f.sessionId)).toEqual(['s1'])
+
+    // Resume of the fix session → wipe-and-replace re-inserts the sighting unmatched.
+    sight(store, 's1', id)
+    expect(store.reconcileFixSightings()).toBe(0) // no transition — already adopted
+    const row = store.insights()[0]!
+    expect(row.state).toBe('adopted')
+    expect(row.fixSessions.map((f) => f.sessionId)).toEqual(['s1']) // link survived
+  })
+
+  it('rejects a fix-prompt that does not embed its own insight id', () => {
+    const { store } = setup()
+    expect(() => store.persistInsights('det', 1, [mkInsight({ fix: { type: 'fix-prompt', label: 'Apply', content: 'no marker here' } })])).toThrow(
+      /does not embed its insight id/,
+    )
+  })
+
+  it('one adoption when two sessions sight the same insight in one reconcile', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    store.recordFixMarkerSightings('s1', [{ insightId: id, seq: 4, turnAt: '2026-07-01T10:00:00Z' }])
+    store.recordFixMarkerSightings('s2', [{ insightId: id, seq: 2, turnAt: '2026-07-01T11:00:00Z' }])
+
+    expect(store.reconcileFixSightings()).toBe(1) // not 2 — matrix rejects the second pass
+    expect(stateOf(db, id)).toBe('adopted')
+    const unmatched = db.prepare('SELECT COUNT(*) as n FROM fix_marker_sightings WHERE matched_at IS NULL').get() as { n: number }
+    expect(unmatched.n).toBe(0)
+    expect(store.insights()[0]!.fixSessions.map((f) => f.sessionId)).toEqual(['s1', 's2'])
+  })
+
+  it('a re-scanned previous-cycle fix session does not re-adopt a reopened insight (variant A)', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+
+    sight(store, 's1', id, '2020-01-01T00:00:00Z')
+    store.reconcileFixSightings()
+    store.transitionInsight(id, 'resolved')
+    store.persistInsights('det', 1, [mkInsight()]) // recurrence → reopen
+
+    // User resumes the OLD fix session → wipe-and-replace re-inserts its sighting unmatched.
+    sight(store, 's1', id, '2020-01-01T00:00:00Z')
+    expect(store.reconcileFixSightings()).toBe(0) // stale evidence must not transition
+    expect(stateOf(db, id)).toBe('surfaced')
+    const unmatched = db.prepare('SELECT COUNT(*) as n FROM fix_marker_sightings WHERE matched_at IS NULL').get() as { n: number }
+    expect(unmatched.n).toBe(0) // …but it is matched, not retried forever
+  })
+
+  it('a genuine re-fix pasted before the reopen was recorded still adopts (variant B)', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+
+    sight(store, 's1', id, '2020-01-01T00:00:00Z')
+    store.reconcileFixSightings()
+    store.transitionInsight(id, 'resolved')
+
+    // Problem recurs; user re-pastes the fix (event time after the resolve) —
+    // all of this lands in ONE analyze run: sighting recorded, then the
+    // detector re-detection reopens, then reconcile.
+    const rePaste = new Date(Date.now() + 60_000).toISOString()
+    sight(store, 's2', id, rePaste, 2)
+    store.persistInsights('det', 1, [mkInsight()]) // reopen (processing time AFTER the paste's event time)
+    expect(store.reconcileFixSightings()).toBe(1)
+    expect(stateOf(db, id)).toBe('adopted')
+    const row = store.insights()[0]!
+    expect(row.fixSessions.map((f) => f.sessionId)).toEqual(['s2'])
+    expect(row.adoptedAt).toBe(rePaste)
+  })
+
+  it('a resolved insight keeps showing the fix that resolved it', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    sight(store, 's1', id, '2026-06-01T10:00:00Z')
+    store.reconcileFixSightings()
+    store.transitionInsight(id, 'resolved')
+
+    const row = store.insights({ state: 'resolved' })[0]!
+    expect(row.fixSessions.map((f) => f.sessionId)).toEqual(['s1'])
+    expect(row.adoptedAt).toBe('2026-06-01T10:00:00Z')
+  })
+
+  it('falls back to the state log for adoptedAt when the fix session was pruned', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+    sight(store, 's1', id)
+    store.reconcileFixSightings()
+
+    db.prepare('DELETE FROM sessions WHERE id = ?').run('s1') // transcript rotated → session pruned → sightings cascade away
+    const row = store.insights()[0]!
+    expect(row.state).toBe('adopted')
+    expect(row.fixSessions).toEqual([])
+    expect(row.adoptedAt).not.toBeNull() // processing time from the log — honest fallback
+  })
+
+  it('fix sessions and adoptedAt are cycle-scoped after a reopen', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight()])
+    const id = insightId('det', '*', 'k1')
+
+    // Cycle 1: fix applied long ago, insight resolved.
+    sight(store, 's1', id, '2020-01-01T00:00:00Z')
+    store.reconcileFixSightings()
+    expect(store.insights()[0]!.adoptedAt).toBe('2020-01-01T00:00:00Z')
+    store.transitionInsight(id, 'resolved')
+
+    // Recurrence → reopen. The old fix session is history, not the current fix.
+    store.persistInsights('det', 1, [mkInsight()])
+    let row = store.insights()[0]!
+    expect(row.state).toBe('surfaced')
+    expect(row.fixSessions).toEqual([])
+    expect(row.adoptedAt).toBeNull()
+
+    // Cycle 2: a new fix session (turn_at after the reopen) becomes the current fix.
+    sight(store, 's2', id, '2099-01-01T00:00:00Z', 2)
+    expect(store.reconcileFixSightings()).toBe(1)
+    row = store.insights()[0]!
+    expect(row.state).toBe('adopted')
+    expect(row.fixSessions.map((f) => f.sessionId)).toEqual(['s2'])
+    expect(row.adoptedAt).toBe('2099-01-01T00:00:00Z')
+  })
+})

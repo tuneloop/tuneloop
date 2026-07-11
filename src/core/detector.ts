@@ -1,6 +1,18 @@
+import { createHash } from 'node:crypto'
 import type { LlmClient } from '../llm/types'
 import type { Logger } from '../util/log'
 import type { Store } from '../store/store'
+
+/**
+ * Deterministic insight id: 16-hex sha256 of the (detector, repo, signalKey)
+ * identity triple — the same triple the insights table enforces UNIQUE on.
+ * Deterministic so that fix-prompt markers embedded in transcripts still point
+ * at the right insight after a store rebuild (ids re-mint identically).
+ * JSON-encoded to avoid concatenation-boundary collisions.
+ */
+export function insightId(detector: string, repo: string, signalKey: string): string {
+  return createHash('sha256').update(JSON.stringify([detector, repo, signalKey])).digest('hex').slice(0, 16)
+}
 
 /**
  * Detector compute tiers:
@@ -33,11 +45,22 @@ export interface DetectorContext {
 
 export interface EvidenceRef {
   sessionId: string
+  /**
+   * Position within the session: the main-thread event `seq` assigned by
+   * assignSeq() (core/blocks.ts) — the same coordinate blocks and the transcript
+   * viewer use. Omit for session-level evidence
+   */
   turnIdx?: number
 }
 
 export interface InsightInput {
-  /** Stable dedup key within this detector — same key on re-run updates the row, not duplicates it. */
+  /**
+   * Stable dedup key within this detector — same key on re-run updates the row,
+   * not duplicates it. The key FORMAT is part of the detector's public contract:
+   * the insight id is derived from it (see insightId), so changing the format
+   * orphans past fix-prompt markers users already ran. Change it only with a
+   * reason worth that cost.
+   */
   signalKey: string
   /**
    * Scoping for this insight:

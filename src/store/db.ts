@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 10
+const SCHEMA_VERSION = 11
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -377,6 +377,38 @@ CREATE TABLE IF NOT EXISTS detector_session_runs (
   PRIMARY KEY (detector, session_id),
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+-- Fix-marker sightings: facts recorded by the fix-marker processor (a real user
+-- turn contained a \`tuneloop-fix: <id>\` marker), interpreted by the reconcile
+-- step in analyze (which applies lifecycle transitions). Kept separate so a
+-- sighting scanned before its insight exists (store rebuild, same-run ordering)
+-- is never lost — it just stays unmatched and is retried next analyze.
+-- No FK on insight_id: the claimed id may not exist (yet, or ever).
+-- Single-writer table (fix-marker processor), so no \`producer\` column.
+CREATE TABLE IF NOT EXISTS fix_marker_sightings (
+  session_id  TEXT NOT NULL,
+  insight_id  TEXT NOT NULL,      -- as claimed by the marker
+  seq         INTEGER NOT NULL,   -- main-thread event seq of the sighted user turn
+  turn_at     TEXT NOT NULL,      -- EVENT time: transcript timestamp of that turn — the
+                                  --   "fix applied" date; measurement windows key off this
+  matched_at  TEXT,               -- processing time; NULL = reconcile hasn't resolved this
+                                  --   against an existing insight yet. Re-stamped on
+                                  --   re-scans — never use for cycle-scoping (use turn_at)
+  PRIMARY KEY (session_id, insight_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_fix_marker_sightings_insight ON fix_marker_sightings(insight_id);
+
+-- Append-only lifecycle history for insights. state_changed_at on the insights row
+-- only remembers the LAST transition; measurement ("fix applied Jul 25, recurrences
+-- since: 0") and reopen cycles need the full history. from_state NULL = first surface.
+CREATE TABLE IF NOT EXISTS insight_state_log (
+  insight_id  TEXT NOT NULL,
+  from_state  TEXT,
+  to_state    TEXT NOT NULL,
+  at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_insight_state_log_insight ON insight_state_log(insight_id);
 `
 
 export function openDb(path: string): DB {

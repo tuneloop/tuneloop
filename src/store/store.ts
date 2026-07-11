@@ -12,7 +12,8 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, DetectorRunRow, FeatureRevisionInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import { insightId } from '../core/detector'
 import type { InsightInput } from '../core/detector'
 import type { InsightRow } from './types'
 
@@ -487,6 +488,9 @@ export class Store {
         }
         insertBlockArtifact.run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
       }
+
+      // The table is single-writer (fix-marker), which always emits the field when it runs.
+      if (result.fixMarkerSightings) this.recordFixMarkerSightings(sessionId, result.fixMarkerSightings)
 
       this.db
         .prepare(
@@ -2905,6 +2909,12 @@ export class Store {
 
         if (existing && existing.state === 'dismissed') continue
 
+        // A fix-prompt that doesn't embed its own insight id can never adopt —
+        // a detector bug worth failing loudly on (the runner records the error).
+        if (input.fix.type === 'fix-prompt' && !input.fix.content.includes(insightId(detector, input.repo, input.signalKey))) {
+          throw new Error(`detector ${detector}: fix-prompt for "${input.signalKey}" does not embed its insight id`)
+        }
+
         if (existing) {
           // Re-detection of a resolved insight means the problem came back — reopen it.
           const reopened = existing.state === 'resolved'
@@ -2929,6 +2939,7 @@ export class Store {
               now,
               existing.id,
             )
+          if (reopened) this.logInsightState(existing.id, 'resolved', 'surfaced', now)
           this.db.prepare('DELETE FROM insight_evidence WHERE insight_id = ?').run(existing.id)
           for (const ev of input.evidence.slice(0, 10)) {
             this.db
@@ -2936,7 +2947,7 @@ export class Store {
               .run(existing.id, ev.sessionId, ev.turnIdx ?? -1, now)
           }
         } else {
-          const id = randomUUID()
+          const id = insightId(detector, input.repo, input.signalKey)
           this.db
             .prepare(
               `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count,
@@ -2964,6 +2975,7 @@ export class Store {
               .prepare('INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, added_at) VALUES (?, ?, ?, ?)')
               .run(id, ev.sessionId, ev.turnIdx ?? -1, now)
           }
+          this.logInsightState(id, null, 'surfaced', now)
         }
       }
       this.db
@@ -3027,6 +3039,17 @@ export class Store {
       const evidence = this.db
         .prepare('SELECT session_id, turn_idx FROM insight_evidence WHERE insight_id = ? ORDER BY added_at DESC LIMIT 10')
         .all(r.id) as Array<{ session_id: string; turn_idx: number }>
+      // Fix sessions are scoped to the current lifecycle cycle: after a reopen,
+      // the previous cycle's fix must read as history, not as the current fix.
+      // Same boundary reconcile gates on, so state and refs can't disagree.
+      const boundary = this.insightCycleBoundary(r.id)
+      const fixSessions = this.db
+        .prepare(
+          `SELECT session_id, seq, turn_at FROM fix_marker_sightings
+           WHERE insight_id = ? AND matched_at IS NOT NULL AND (? IS NULL OR turn_at > ?)
+           ORDER BY turn_at ASC`,
+        )
+        .all(r.id, boundary, boundary) as Array<{ session_id: string; seq: number; turn_at: string }>
       return {
         id: r.id,
         detector: r.detector,
@@ -3043,16 +3066,18 @@ export class Store {
         stateChangedAt: r.state_changed_at,
         detectorVersion: r.detector_version,
         evidence: evidence.map((e) => ({ sessionId: e.session_id, turnIdx: e.turn_idx === -1 ? null : e.turn_idx })),
+        // Event time of the first fix application in the current cycle. When the
+        // fix session was pruned (transcript rotated → sightings cascade away),
+        // fall back to the state log's adoption entry — processing time, but it
+        // keeps "recurrences since adoption" answerable.
+        adoptedAt: fixSessions[0]?.turn_at ?? this.adoptedAtFromLog(r.id, r.state as InsightState, boundary),
+        fixSessions: fixSessions.map((f) => ({ sessionId: f.session_id, seq: f.seq, turnAt: f.turn_at })),
       }
     })
   }
 
   dismissInsight(id: string): boolean {
-    const now = new Date().toISOString()
-    const result = this.db
-      .prepare("UPDATE insights SET state = 'dismissed', state_changed_at = ? WHERE id = ? AND state != 'dismissed'")
-      .run(now, id)
-    return result.changes > 0
+    return this.transitionInsight(id, 'dismissed')
   }
 
   transitionInsight(id: string, newState: InsightState): boolean {
@@ -3068,7 +3093,106 @@ export class Store {
     if (!allowed || !allowed.includes(newState)) return false
     const now = new Date().toISOString()
     this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run(newState, now, id)
+    this.logInsightState(id, row.state as InsightState, newState, now)
     return true
+  }
+
+  /** Append one row to the lifecycle history. from = null means first surface. */
+  private logInsightState(id: string, from: InsightState | null, to: InsightState, at: string): void {
+    this.db
+      .prepare('INSERT INTO insight_state_log (insight_id, from_state, to_state, at) VALUES (?, ?, ?, ?)')
+      .run(id, from, to, at)
+  }
+
+  /** Current-cycle adoption time from the state log — the fallback when the fix session's sightings were pruned with it. */
+  private adoptedAtFromLog(id: string, state: InsightState, boundary: string | null): string | null {
+    if (state !== 'adopted' && state !== 'resolved') return null
+    const row = this.db
+      .prepare(
+        `SELECT MAX(at) as at FROM insight_state_log
+         WHERE insight_id = ? AND to_state = 'adopted' AND (? IS NULL OR at > ?)`,
+      )
+      .get(id, boundary, boundary) as { at: string | null }
+    return row.at
+  }
+
+  /**
+   * Event-time lower bound of the insight's current cycle: the resolve that
+   * preceded the latest reopen (null when never reopened). A fix applied after
+   * that resolve can only belong to the current cycle; one applied before it is
+   * a previous cycle's fix. Deliberately NOT the reopen timestamp — reopens are
+   * logged at processing time, which can postdate a genuine re-fix's event time
+   * (paste yesterday, analyze today). Shared by reconcile and the read path so
+   * they can't disagree on what "current cycle" means.
+   */
+  private insightCycleBoundary(id: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(at) as at FROM insight_state_log
+         WHERE insight_id = ? AND to_state = 'resolved'
+           AND at <= (SELECT MAX(at) FROM insight_state_log
+                      WHERE insight_id = ? AND from_state = 'resolved' AND to_state = 'surfaced')`,
+      )
+      .get(id, id) as { at: string | null }
+    return row.at
+  }
+
+  /**
+   * Persist the fix-marker sightings for one session. matched_at is intentionally NOT preserved 
+   * across replaces: reconcile re-stamps it, since "the claimed id exists" is re-checkable.
+   */
+  recordFixMarkerSightings(sessionId: string, sightings: FixMarkerSightingInput[]): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM fix_marker_sightings WHERE session_id = ?').run(sessionId)
+      for (const s of sightings) {
+        this.db
+          .prepare('INSERT OR IGNORE INTO fix_marker_sightings (session_id, insight_id, seq, turn_at) VALUES (?, ?, ?, ?)')
+          .run(sessionId, s.insightId, s.seq, s.turnAt)
+      }
+    })()
+  }
+
+  /**
+   * Interpret unmatched sightings: a marker sighting whose claimed insight exists
+   * means the user ran that insight's fix-prompt — walk the insight to `adopted`
+   * (marker presence proves the fix was issued). Runs after the detector phase in
+   * analyze so insights created in the same run are visible. Idempotent: sightings
+   * on already-adopted/resolved/dismissed insights are matched without transitions;
+   * unknown ids stay unmatched and are retried next run (self-heals after rebuilds).
+   * Returns the number of insights newly flipped to adopted.
+   */
+  reconcileFixSightings(): number {
+    let adopted = 0
+    this.db.transaction(() => {
+      const pending = this.db
+        .prepare(
+          `SELECT f.session_id as sessionId, f.insight_id as insightId, f.turn_at as turnAt, i.state
+           FROM fix_marker_sightings f JOIN insights i ON i.id = f.insight_id
+           WHERE f.matched_at IS NULL`,
+        )
+        .all() as Array<{ sessionId: string; insightId: string; turnAt: string; state: InsightState }>
+      const now = new Date().toISOString()
+      for (const p of pending) {
+        // Only a current-cycle fix may transition: a previous cycle's fix session
+        // being re-scanned (wipe-and-replace on resume) must not re-adopt a
+        // reopened insight off stale evidence.
+        const boundary = this.insightCycleBoundary(p.insightId)
+        const currentCycle = boundary === null || p.turnAt > boundary
+        if (currentCycle) {
+          if (p.state === 'surfaced') this.transitionInsight(p.insightId, 'fix_issued')
+          if (p.state === 'surfaced' || p.state === 'fix_issued') {
+            if (this.transitionInsight(p.insightId, 'adopted')) adopted++
+          }
+        }
+        // Matched regardless of state or cycle — a re-scanned fix session keeps
+        // its link, dismissed means dead, and out-of-cycle sightings must not
+        // retry forever.
+        this.db
+          .prepare('UPDATE fix_marker_sightings SET matched_at = ? WHERE session_id = ? AND insight_id = ?')
+          .run(now, p.sessionId, p.insightId)
+      }
+    })()
+    return adopted
   }
 
   close() {

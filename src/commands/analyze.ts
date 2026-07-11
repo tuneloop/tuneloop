@@ -333,6 +333,13 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     await runDetectors({ detectors, store, log, llmEnabled, llm })
   }
 
+  // Interpret fix-marker sightings AFTER detectors, so sightings scanned before
+  // their insight existed (store rebuild) match in the same run. Unconditional
+  // and store-global: reconcile must run without detectors registered, and a
+  // --source scoped run still matches sightings across harnesses.
+  const adoptedCount = store.reconcileFixSightings()
+  if (adoptedCount > 0) log.info(`${adoptedCount} insight fix(es) marked adopted (fix session detected)`)
+
   log.info(
     `Scanned ${discovered} file(s), parsed ${parsed} session(s) into ${groups.size} unique session(s), ${reingested} new/changed.`,
   )
