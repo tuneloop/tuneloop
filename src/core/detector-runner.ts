@@ -35,8 +35,13 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
   for (const [i, result] of results.entries()) {
     const d = applicable[i]!
     if (result.status === 'fulfilled') {
-      store.persistInsights(d.name, d.version, result.value.insights)
-      log.debug(`detector ${d.name}: ${result.value.insights.length} insight(s)`)
+      try {
+        store.persistInsights(d.name, d.version, result.value.insights)
+        log.debug(`detector ${d.name}: ${result.value.insights.length} insight(s)`)
+      } catch (err) {
+        store.persistDetectorError(d.name, d.version)
+        log.warn(`detector ${d.name} persist failed: ${(err as Error).message}`)
+      }
     } else {
       store.persistDetectorError(d.name, d.version)
       log.warn(`detector ${d.name} failed: ${result.reason?.message ?? result.reason}`)

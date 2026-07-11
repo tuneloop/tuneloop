@@ -319,7 +319,6 @@ CREATE TABLE IF NOT EXISTS insights (
   title             TEXT NOT NULL,
   description       TEXT NOT NULL,
   count             INTEGER NOT NULL,
-  metric            REAL,
   fix_type          TEXT,
   fix_label         TEXT,
   fix_content       TEXT,
@@ -345,8 +344,21 @@ CREATE TABLE IF NOT EXISTS insight_evidence (
 CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(session_id);
 
 -- One row per detector: tracks when it last ran and at what version.
--- S-tier detectors always re-run (cheap SQL); P-tier uses this for cache skipping.
--- Token/cost columns are NULL for S-tier, populated for P-tier (LLM spend tracking).
+-- Two tables for detector execution tracking, at different grains:
+--
+-- detector_runs: one row per detector. Tracks the *invocation* — when it last ran,
+-- whether it succeeded, and aggregate LLM cost. Cost and status belong to the run
+-- as a whole (a cross-session LLM call can't be split across individual sessions).
+--
+-- detector_session_runs: one row per (detector × session). Tracks which sessions a
+-- detector has already seen and at what content hash. Enables incremental analysis
+-- for P/X-tier detectors: on re-run, only process sessions whose hash changed or
+-- that weren't seen before (the delta), instead of re-analyzing the full corpus.
+--
+-- S-tier detectors use neither table for skip logic (they always re-run, cheap SQL).
+-- P/X-tier detectors use detector_session_runs for delta computation and
+-- detector_runs for cost tracking.
+
 CREATE TABLE IF NOT EXISTS detector_runs (
   detector    TEXT PRIMARY KEY,  -- detector name (e.g. 'permission-friction')
   version     INTEGER NOT NULL,  -- detector version at time of run (for cache invalidation)
@@ -355,6 +367,15 @@ CREATE TABLE IF NOT EXISTS detector_runs (
   out_tokens  INTEGER,           -- LLM output tokens (NULL for S-tier)
   cost_usd    REAL,              -- LLM cost in USD (NULL for S-tier)
   ran_at      TEXT NOT NULL      -- ISO timestamp of last run
+);
+
+CREATE TABLE IF NOT EXISTS detector_session_runs (
+  detector      TEXT NOT NULL,
+  session_id    TEXT NOT NULL,
+  content_hash  TEXT NOT NULL,
+  ran_at        TEXT NOT NULL,
+  PRIMARY KEY (detector, session_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 `
 

@@ -32,16 +32,16 @@ The framework needs:
    question about one session. Detectors ask unpredictable questions across all data — each one
    runs different SQL. Pre-fetching is impossible without anticipating every future detector's
    needs. Instead, detectors get `store.queryAll(sql, ...params)` / `store.queryOne(sql, ...params)`
-   — read-only access that lets them ask any question without being able to mutate data.
+   — enforced read-only via a separate `readonly: true` SQLite handle. Any write attempt
+   (including `DELETE...RETURNING` or `PRAGMA` mutations) throws at the engine level.
    All writes go through the runner via `store.persistInsights()`.
 
 3. **Insights persist to a ledger with lifecycle states.** Unlike read-time computations
    (which would be always-fresh but stateless), persisted insights support:
    - **Dismiss** — "I don't care" is permanent; the insight never resurfaces.
-   - **Dedup** — same `(detector, signal_key)` on re-detection updates the existing row.
-   - **Lifecycle** — `surfaced → fix_issued → adopted → measured → resolved | dismissed`.
-     Intermediate states exist for future automated transitions (e.g. tuneloop detects the
-     config was changed → `fix_issued`; detects rejections dropped to zero → `measured`).
+   - **Dedup** — same `(detector, repo, signal_key)` on re-detection updates the existing row.
+   - **Lifecycle** — `surfaced → fix_issued → adopted → resolved | dismissed`.
+   - **Reopen** — a resolved insight that re-fires flips back to `surfaced`.
    - **Evidence** — which sessions triggered this finding, for drill-in links.
 
 4. **Per-detector versioning.** Each detector carries its own `version: number`. Bumping one
@@ -51,22 +51,29 @@ The framework needs:
 
 5. **S-tier detectors always re-run (no caching).** SQL queries are sub-millisecond on a
    local SQLite store. Caching them would add complexity for no wall-clock gain, and risks
-   stale insights when new sessions are ingested. P-tier (LLM) detectors will use
-   version-based caching when they arrive — the `detector_runs` table is ready for this.
+   stale insights when new sessions are ingested. P/X-tier (LLM) detectors use
+   `detector_session_runs` for incremental analysis — only process new/changed sessions.
 
-6. **Parallel execution.** Detectors are independent — no `requires` graph, no shared state.
-   The runner fires all applicable detectors concurrently via `Promise.allSettled`. S-tier
-   completes instantly; P-tier benefits from not waiting in sequence. A single detector's
-   failure does not block others.
+6. **Parallel execution with full error isolation.** Detectors are independent — no `requires`
+   graph, no shared state. The runner fires all applicable detectors concurrently via
+   `Promise.allSettled`. S-tier completes instantly; P-tier benefits from not waiting in
+   sequence. Both `run()` failures and persistence failures are caught per-detector —
+   a single detector's failure does not block others or abort the analyze run.
 
 7. **Dismissed = terminal.** Once a user dismisses an insight, `persistInsights` skips that
-   `(detector, signal_key)` on all future runs. The only recovery is manual (a future
+   `(detector, repo, signal_key)` on all future runs. The only recovery is manual (a future
    "un-dismiss" endpoint, not built). This is a deliberate product decision: dismissed
    findings are noise the user already evaluated and rejected.
 
-8. **The `database` getter is deliberately absent.** Detectors do not receive a raw
-   write-capable `DB` handle. They use `store.queryAll()` / `store.queryOne()` for read
-   access. This prevents accidental mutation while allowing arbitrary SELECT queries.
+8. **Enforced read-only access for detectors.** Detectors do not receive a write-capable DB
+   handle. `queryAll()` / `queryOne()` use a separate `new Database(path, { readonly: true })`
+   connection — SQLite enforces the constraint at the engine level, not just by convention.
+
+9. **Repo scoping on insights.** Insights carry a `repo` column for per-repo faceting:
+   - Repo name (e.g. `'tuneloop'`) — insight specific to that repo
+   - `'*'` — cross-repo insight (pattern spans multiple repos)
+   - cwd path — for sessions not in a git repo
+   - `'_unknown'` — fallback when neither repo nor cwd is available
 
 ## The Detector interface
 
@@ -74,14 +81,14 @@ The framework needs:
 interface Detector {
   name: string              // dedup namespace in the insights table
   version: number           // bump to force re-run (per-detector)
-  tier: 'S' | 'P'          // S=SQL-only, P=LLM-assisted
+  tier: 'S' | 'P' | 'X'   // S=SQL-only, P=per-session LLM, X=cross-session LLM
   needsLlm?: boolean       // runner skips when no provider configured
   applicable?(ctx): boolean // static pre-gate (avoid wasted LLM spend)
   run(ctx): Promise<InsightInput[]> | InsightInput[]
 }
 ```
 
-P-tier support is structural: a detector can declare `tier: 'P'`, `needsLlm: true`, and
+P/X-tier support is structural: a detector can declare `tier: 'P'`, `needsLlm: true`, and
 call `ctx.llm.completeStructured(...)` inside `run()` with its own prompt and output schema.
 The runner's LLM gate (`needsLlm && !llmEnabled → skip`) is already in place.
 
@@ -90,11 +97,11 @@ The runner's LLM gate (`needsLlm && !llmEnabled → skip`) is already in place.
 ```
 1. Filter: remove detectors that need LLM (when none configured) or fail applicable()
 2. Run:    fire all applicable detectors in parallel (Promise.allSettled)
-3. Persist: for each successful result, call store.persistInsights(name, version, insights[])
-4. Log:    failures are warned, not fatal — one broken detector doesn't kill the run
+3. Persist: for each result, try store.persistInsights(); catch failures per-detector
+4. Log:    both run() and persist failures are warned + recorded, never fatal
 ```
 
-## Schema (3 new tables, SCHEMA_VERSION 9 → 10)
+## Schema (4 tables, SCHEMA_VERSION 9 → 10)
 
 ### `insights` — one row per unique finding
 
@@ -103,21 +110,21 @@ The runner's LLM gate (`needsLlm && !llmEnabled → skip`) is already in place.
 | id | TEXT PK | UUID, generated on first detection |
 | detector | TEXT | Which detector produced this |
 | signal_key | TEXT | Dedup key within the detector |
+| repo | TEXT NOT NULL DEFAULT '_unknown' | Repo scope (name, '*', cwd, or '_unknown') |
 | severity | TEXT | 'high' \| 'medium' \| 'low' |
-| state | TEXT | Lifecycle: surfaced \| fix_issued \| adopted \| measured \| resolved \| dismissed |
+| state | TEXT | Lifecycle: surfaced \| fix_issued \| adopted \| resolved \| dismissed |
 | title | TEXT | One-line card heading |
 | description | TEXT | Explanation with evidence context |
 | count | INTEGER | Total occurrences |
-| metric | REAL | Optional numeric signal (e.g. wasted $) |
-| fix_type | TEXT | 'config-snippet' \| 'behavioral-nudge' \| 'install-command' |
+| fix_type | TEXT | 'config-snippet' \| 'behavioral-nudge' \| 'install-command' \| 'fix-prompt' |
 | fix_label | TEXT | Action button text |
-| fix_content | TEXT | The deliverable (JSON, prose, or command) |
+| fix_content | TEXT | The deliverable (JSON, prose, command, or prompt) |
 | first_seen_at | TEXT | ISO timestamp of first detection |
 | last_seen_at | TEXT | ISO timestamp of most recent detection |
 | state_changed_at | TEXT | When lifecycle state last transitioned |
 | detector_version | INTEGER | Version of detector that last wrote this |
 
-`UNIQUE(detector, signal_key)` enforces dedup at the DB level.
+`UNIQUE(detector, repo, signal_key)` enforces dedup at the DB level.
 
 ### `insight_evidence` — session/turn refs per insight
 
@@ -130,7 +137,7 @@ The runner's LLM gate (`needsLlm && !llmEnabled → skip`) is already in place.
 
 PK: `(insight_id, session_id, turn_idx)`. Capped at 10 per insight in the store method.
 
-### `detector_runs` — one row per detector (execution receipt)
+### `detector_runs` — one row per detector (invocation receipt)
 
 | Column | Type | Purpose |
 |--------|------|---------|
@@ -142,28 +149,46 @@ PK: `(insight_id, session_id, turn_idx)`. Capped at 10 per insight in the store 
 | cost_usd | REAL | LLM cost in USD (NULL for S-tier) |
 | ran_at | TEXT | ISO timestamp |
 
+### `detector_session_runs` — per-(detector × session) cache
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| detector | TEXT | Detector name |
+| session_id | TEXT | FK → sessions.id (CASCADE) |
+| content_hash | TEXT | Session content hash at time of processing |
+| ran_at | TEXT | ISO timestamp |
+
+PK: `(detector, session_id)`. Enables incremental analysis for P/X-tier: on re-run,
+`store.detectorUnseen(name)` returns only sessions whose hash changed or weren't seen before.
+
 ## Store persistence logic (`persistInsights`)
 
 For each `InsightInput` the detector returned:
 
-1. Look up `(detector, signal_key)` in the `insights` table.
+1. Look up `(detector, repo, signal_key)` in the `insights` table.
 2. **Exists + state = 'dismissed'** → skip. Dead means dead.
-3. **Exists + not dismissed** → UPDATE severity, title, description, count, metric, fix,
-   last_seen_at, detector_version. Replace evidence rows (DELETE + re-INSERT, capped at 10).
-4. **Not exists** → INSERT with state = 'surfaced', first_seen_at = now, new UUID.
+3. **Exists + state = 'resolved'** → reopen: flip state to 'surfaced', update state_changed_at.
+   Then UPDATE severity, title, description, count, fix, last_seen_at, detector_version.
+   Replace evidence rows (DELETE + re-INSERT, capped at 10).
+4. **Exists + other state** → UPDATE severity, title, description, count, fix,
+   last_seen_at, detector_version. Replace evidence rows (capped at 10). State unchanged.
+5. **Not exists** → INSERT with state = 'surfaced', first_seen_at = now, new UUID.
 
 Then upsert the `detector_runs` row. The entire operation is one transaction.
 
 ## Lifecycle state machine
 
 ```
-surfaced → fix_issued → adopted → measured → resolved
-    ↓           ↓           ↓          ↓
+surfaced → fix_issued → adopted → resolved
+    ↓           ↓           ↓         ↓
  dismissed   dismissed   dismissed  dismissed
+
+resolved → surfaced  (reopen: re-detection or manual)
 ```
 
-Transitions are forward-only (monotonic). `transitionInsight()` enforces valid moves;
-invalid transitions return false and do nothing. Any non-terminal state can reach `dismissed`.
+Any state can skip ahead to `resolved` (e.g. behavioral nudges with no intermediate steps).
+`resolved` can reopen to `surfaced` on re-detection or via API. `transitionInsight()` enforces
+valid moves; invalid transitions return false and do nothing.
 
 ## Pipeline placement
 
@@ -207,6 +232,7 @@ const myDetector: Detector = {
 
     return rows.map(row => ({
       signalKey: row.someKey,
+      repo: row.repo ?? '_unknown',
       severity: row.count >= 10 ? 'high' : 'medium',
       title: `...`,
       description: `...`,
@@ -224,9 +250,11 @@ Then add `import './my-detector'` to `src/detectors/index.ts`. Done.
 
 ## Explicitly deferred
 
-- **P-tier cache logic in the runner.** The `detector_runs` table and `store.detectorRun()`
-  exist, but the runner does not read them for skip decisions. Will add when the first P-tier
-  detector arrives — the cache key is `version + "any new sessions since last run?"`.
+- **P/X-tier cache logic in the runner.** The `detector_session_runs` table and
+  `store.detectorUnseen()` / `store.markDetectorSessionSeen()` exist, but the runner does
+  not call them automatically. P/X-tier detectors use them inside their own `run()` to
+  compute the delta. Will promote to automatic runner logic after patterns emerge from
+  the first LLM detectors.
 - **LLM cost passthrough.** `persistInsights` accepts a `cost` parameter, but `run()` does
   not return cost info. A P-tier detector would need to track its own token usage internally
   and the runner would surface it.
@@ -234,8 +262,12 @@ Then add `import './my-detector'` to `src/detectors/index.ts`. Done.
   and Store read methods (`insights()`, `dismissInsight()`, `transitionInsight()`) exist, but
   no HTTP endpoints or UI wiring. Shipped separately with the first detectors.
 - **Automated lifecycle transitions.** The state machine supports `fix_issued → adopted →
-  measured → resolved`, but nothing auto-advances today. Future: tuneloop detects config
-  changes or metric improvement and transitions automatically.
+  resolved`, but nothing auto-advances today. Future: tuneloop detects config changes or
+  metric improvement and transitions automatically.
+- **Measurement loop + metrics.** The `measured` state and per-insight metric columns are
+  deferred until we build the measurement loop alongside actual detectors — at that point
+  we'll know what metrics look like (single number vs. multiple signals) and when to
+  transition between states.
 - **Detector concurrency limits.** `Promise.allSettled` fires all at once. For a large number
   of P-tier detectors hitting rate-limited APIs, a concurrency cap (e.g. `p-limit`) would be
   needed. Not required for S-tier.

@@ -2,7 +2,18 @@ import type { LlmClient } from '../llm/types'
 import type { Logger } from '../util/log'
 import type { Store } from '../store/store'
 
-export type DetectorTier = 'S' | 'P'
+/**
+ * Detector compute tiers:
+ *  S — Static analysis. Data already in the store (or readable from local config).
+ *      Free to run, always re-runs on every analyze. Examples: permission friction,
+ *      cache misses, model-complexity mismatch.
+ *  P — Per-session LLM. Fits the existing one-call-per-session enrichment pattern.
+ *      Costs tokens, cached by (version + new sessions). Examples: verification gap,
+ *      kitchen-sink sessions, underspecified prompts.
+ *  X — Cross-session LLM. Rolling-window analysis over many sessions, new analysis
+ *      spend. Examples: repeated nudges / recurring pasted context clustering.
+ */
+export type DetectorTier = 'S' | 'P' | 'X'
 
 /** Everything a detector receives when it runs — the "bag of tools" passed into run(). */
 export interface DetectorContext {
@@ -45,8 +56,6 @@ export interface InsightInput {
   evidence: EvidenceRef[]
   /** Total occurrences — the real scale, independent of the evidence cap. */
   count: number
-  /** Optional numeric signal specific to this detector (e.g. wasted dollars, success-rate delta). */
-  metric?: number
   fix: {
     /** Controls rendering: snippet gets a copy button, nudge gets plain prose, command gets a run prompt, fix-prompt gets a paste-into-agent-config prompt. */
     type: 'config-snippet' | 'behavioral-nudge' | 'install-command' | 'fix-prompt'

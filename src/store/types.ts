@@ -157,7 +157,7 @@ export interface ProcessorRunRow {
 
 // ---- insight ledger types ---------------------------------------------------
 
-export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'measured' | 'resolved' | 'dismissed'
+export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'resolved' | 'dismissed'
 
 export interface InsightRow {
   id: string
@@ -169,7 +169,6 @@ export interface InsightRow {
   title: string
   description: string
   count: number
-  metric: number | null
   fix: {
     type: string
     label: string

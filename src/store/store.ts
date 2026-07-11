@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import type { CanonicalAction, Session, ToolCall } from '../core/model'
 import type { ProcessorResult, RefreshResult } from '../core/processor'
+import Database from 'better-sqlite3'
 import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
 import { deterministicBlocks } from '../core/blocks'
@@ -67,7 +68,22 @@ export interface Highlight {
 }
 
 export class Store {
+  private readonlyDb: DB | null = null
+
   constructor(private db: DB) {}
+
+  /**
+   * Returns a readonly DB handle for detector queries. Opens lazily on first use.
+   * SQLite enforces the read-only constraint at the engine level — any write attempt
+   * (including DELETE...RETURNING, UPDATE...RETURNING, PRAGMA mutations) throws.
+   * This is the handle detectors use via queryAll()/queryOne().
+   */
+  private getReadonlyDb(): DB {
+    if (!this.readonlyDb) {
+      this.readonlyDb = new Database(this.db.name, { readonly: true })
+    }
+    return this.readonlyDb
+  }
 
   /** Read a value from the key-value `meta` table (undefined when absent). */
   getMeta(key: string): string | undefined {
@@ -2829,17 +2845,16 @@ export class Store {
   // ---- Insight Ledger ---------------------------------------------------------
 
   /**
-   * Read-only query helper for detectors. Detectors need to ask arbitrary questions
-   * across all sessions (each one runs different SQL), but they should never write —
-   * all writes go through persistInsights(). This exposes SELECT access without
-   * handing out a write-capable DB connection.
+   * Read-only query helper for detectors. Uses a separate readonly DB handle so
+   * writes are rejected at the SQLite engine level — not just by convention.
+   * Detectors can ask any question across all sessions but cannot mutate data.
    */
   queryAll(sql: string, ...params: unknown[]): unknown[] {
-    return this.db.prepare(sql).all(...params)
+    return this.getReadonlyDb().prepare(sql).all(...params)
   }
 
   queryOne(sql: string, ...params: unknown[]): unknown {
-    return this.db.prepare(sql).get(...params)
+    return this.getReadonlyDb().prepare(sql).get(...params)
   }
 
   detectorRun(detector: string): DetectorRunRow | undefined {
@@ -2847,6 +2862,37 @@ export class Store {
       | { version: number; status: string | null; ranAt: string }
       | undefined
     return row ? { version: row.version, status: row.status, ranAt: row.ranAt } : undefined
+  }
+
+  /**
+   * Returns session IDs that a detector hasn't seen yet or whose content has changed
+   * since the detector last processed them. Used by P/X-tier detectors to compute
+   * the delta — only run expensive LLM analysis on new/changed sessions.
+   */
+  detectorUnseen(detector: string): Array<{ sessionId: string; contentHash: string }> {
+    return this.db.prepare(`
+      SELECT s.id as sessionId, s.content_hash as contentHash
+      FROM sessions s
+      LEFT JOIN detector_session_runs d ON d.detector = ? AND d.session_id = s.id
+      WHERE d.session_id IS NULL OR d.content_hash != s.content_hash
+    `).all(detector) as Array<{ sessionId: string; contentHash: string }>
+  }
+
+  /**
+   * Mark sessions as seen by a detector at their current content hash.
+   * Called after a P/X-tier detector has processed a session's data.
+   */
+  markDetectorSessionSeen(detector: string, sessions: Array<{ sessionId: string; contentHash: string }>): void {
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO detector_session_runs (detector, session_id, content_hash, ran_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const s of sessions) {
+        stmt.run(detector, s.sessionId, s.contentHash, now)
+      }
+    })()
   }
 
   persistInsights(detector: string, version: number, inputs: InsightInput[], cost?: { inTokens: number; outTokens: number; usd: number }): void {
@@ -2864,7 +2910,7 @@ export class Store {
           const reopened = existing.state === 'resolved'
           this.db
             .prepare(
-              `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?, metric = ?,
+              `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
                fix_type = ?, fix_label = ?, fix_content = ?, last_seen_at = ?, detector_version = ?,
                state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
                state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
@@ -2875,7 +2921,6 @@ export class Store {
               input.title,
               input.description,
               input.count,
-              input.metric ?? null,
               input.fix.type,
               input.fix.label,
               input.fix.content,
@@ -2894,9 +2939,9 @@ export class Store {
           const id = randomUUID()
           this.db
             .prepare(
-              `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count, metric,
+              `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count,
                fix_type, fix_label, fix_content, first_seen_at, last_seen_at, detector_version)
-               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -2907,7 +2952,6 @@ export class Store {
               input.title,
               input.description,
               input.count,
-              input.metric ?? null,
               input.fix.type,
               input.fix.label,
               input.fix.content,
@@ -2942,7 +2986,7 @@ export class Store {
   }
 
   insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {
-    let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count, metric,
+    let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count,
                fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version
                FROM insights WHERE state != 'dismissed'`
     const params: unknown[] = []
@@ -2970,7 +3014,6 @@ export class Store {
       title: string
       description: string
       count: number
-      metric: number | null
       fix_type: string | null
       fix_label: string | null
       fix_content: string | null
@@ -2994,7 +3037,6 @@ export class Store {
         title: r.title,
         description: r.description,
         count: r.count,
-        metric: r.metric,
         fix: { type: r.fix_type ?? '', label: r.fix_label ?? '', content: r.fix_content ?? '' },
         firstSeenAt: r.first_seen_at,
         lastSeenAt: r.last_seen_at,
@@ -3017,8 +3059,7 @@ export class Store {
     const VALID_TRANSITIONS: Record<string, string[]> = {
       surfaced: ['fix_issued', 'resolved', 'dismissed'],
       fix_issued: ['adopted', 'resolved', 'dismissed'],
-      adopted: ['measured', 'resolved', 'dismissed'],
-      measured: ['resolved', 'dismissed'],
+      adopted: ['resolved', 'dismissed'],
       resolved: ['surfaced', 'dismissed'],
     }
     const row = this.db.prepare('SELECT state FROM insights WHERE id = ?').get(id) as { state: string } | undefined
@@ -3031,6 +3072,7 @@ export class Store {
   }
 
   close() {
+    this.readonlyDb?.close()
     this.db.close()
   }
 }
