@@ -1,6 +1,6 @@
 {
   "name": "tuneloop",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
@@ -20,6 +20,8 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "extensions",
+    "skills",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -50,8 +52,13 @@
     "llm",
     "observability",
     "developer-tools",
-    "tuneloop"
+    "tuneloop",
+    "pi-package"
   ],
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.32.0",
     "@anthropic-ai/sdk": "^0.105.0",

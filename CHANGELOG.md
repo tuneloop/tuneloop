@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- Pi package support: `tuneloop` can now be installed directly into the Pi coding
+  agent with `pi install npm:tuneloop`. It ships the `tuneloop-query` skill plus a
+  new `/tuneloop-analyze` command that builds/refreshes the local store using the
+  bundled CLI — no separate global install required.
+
 ## [0.3.1] - 2026-07-13
 
 ### Fixed
@@ -47,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
+[0.4.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.0
 [0.3.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.1
 [0.3.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
