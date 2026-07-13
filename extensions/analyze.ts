@@ -285,7 +285,13 @@ export default function (pi: ExtensionAPI) {
     description: "Analyze your AI coding sessions and serve the local dashboard (analyze | open | stop | status). LLM enrichment optional, recommended.",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const pool = [...SUBCOMMANDS, ...FLAGS];
-      const matches = pool.filter((i) => i.value.trim().startsWith(prefix));
+      // Exclude exact matches so a fully-typed word (e.g. "open") closes the
+      // completion popup — otherwise Enter accepts the suggestion first and the
+      // command only submits on a second Enter.
+      const matches = pool.filter((i) => {
+        const value = i.value.trim();
+        return value.startsWith(prefix) && value !== prefix;
+      });
       return matches.length > 0 ? matches : null;
     },
     handler: async (args, ctx) => {
