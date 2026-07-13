@@ -11,8 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Pi package support: `tuneloop` can now be installed directly into the Pi coding
   agent with `pi install npm:tuneloop`. It ships the `tuneloop-query` skill plus a
-  new `/tuneloop-analyze` command that builds/refreshes the local store using the
-  bundled CLI — no separate global install required.
+  new `/tuneloop` command — `analyze | open | stop | status` — that builds the local
+  store and serves the dashboard as a background process (printing its URL in pi's
+  TUI), using the bundled CLI with no separate global install. LLM enrichment is
+  offered per run through pi's own dialogs and stays optional but recommended.
 
 ## [0.3.1] - 2026-07-13
 
