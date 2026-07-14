@@ -10,7 +10,7 @@ import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import { isSyntheticUser } from '../core/turns'
+import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
 
 export interface Dist {
@@ -127,14 +127,14 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO sessions (
-             id, session_id, source, provider, title, repo, branch, cwd,
+             id, session_id, source, provider, title, first_prompt, repo, branch, cwd,
              started_at, ended_at, n_turns, n_tool_calls, models,
              tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read,
              cost_usd, price_table_version, content_hash, parse_version, analyzed_at
            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
              session_id=excluded.session_id, source=excluded.source, provider=excluded.provider,
-             title=excluded.title, repo=excluded.repo, branch=excluded.branch, cwd=excluded.cwd,
+             title=excluded.title, first_prompt=excluded.first_prompt, repo=excluded.repo, branch=excluded.branch, cwd=excluded.cwd,
              started_at=excluded.started_at, ended_at=excluded.ended_at, n_turns=excluded.n_turns,
              n_tool_calls=excluded.n_tool_calls, models=excluded.models,
              tok_input=excluded.tok_input, tok_output=excluded.tok_output,
@@ -150,6 +150,7 @@ export class Store {
           session.source,
           session.provider,
           session.title ?? null,
+          firstUserPrompt(session),
           session.project.repo ?? null,
           session.project.branch ?? null,
           session.project.cwd ?? null,
@@ -3223,9 +3224,11 @@ function complexityWhere(bucket: string | undefined, alias: string, kind?: strin
   return `AND (${clauses.join(' OR ')})`
 }
 
-// Display title: the enrichment-derived `title` annotation, else the native adapter title
+// Display title: the enrichment-derived `title` annotation, else the native
+// adapter title, else the session's opening prompt (clipped for display at the
+// render site). NULLIF keeps an empty native title from masking the fallback.
 function titleExpr(alias: string): string {
-  return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), ${alias}.title)`
+  return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), NULLIF(${alias}.title, ''), NULLIF(${alias}.first_prompt, ''))`
 }
 
 function safeJson<T>(s: unknown, fallback: T): T {

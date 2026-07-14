@@ -691,7 +691,9 @@ export function openDetail(id, focus?: any) {
 
     // Sticky-header pieces (title+close, tab subnav, transcript nav) are assembled
     // into one .drawer-head at the end, so they pin together as you scroll.
-    var headTop = '<div class="drawer-head-top"><h2>' + esc(s.title || '(untitled)') + '</h2>' +
+    // A title may be the session's full opening prompt (the fallback when nothing
+    // else named it), so clip the unconstrained header and keep the full text on hover.
+    var headTop = '<div class="drawer-head-top"><h2 title="' + esc(s.title || '') + '">' + esc(clipLine(s.title, 120) || '(untitled)') + '</h2>' +
       '<button class="x" type="button" id="drawerCloseBtn">close</button></div>';
     var fileCount = (d.artifacts || []).filter(function (x) { return x.kind === 'file'; }).length;
     var tabs = '<div class="drawer-tabs">' +

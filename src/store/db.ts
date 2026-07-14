@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_id          TEXT,
   source              TEXT,
   provider            TEXT,
-  title               TEXT,
+  title               TEXT,        -- native adapter title (may be absent)
+  first_prompt        TEXT,        -- full opening human prompt; display-title fallback when no native/enriched title
   repo                TEXT,
   branch              TEXT,
   cwd                 TEXT,
@@ -349,6 +350,10 @@ function migrate(db: DB): void {
   if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
     db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')
   }
+  if (tableExists('sessions') && !has('sessions', 'first_prompt')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN first_prompt TEXT')
+  }
+
   // Split cache creation by TTL. The old `tok_cache_create` held the whole write
   // and was priced entirely at the 5m rate, so renaming it to `_5m` (rather than
   // adding a column beside it) states what those rows already meant, and leaves

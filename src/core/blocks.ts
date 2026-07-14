@@ -45,9 +45,8 @@ export interface BlockMembership {
  * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
  * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
  */
-// 4: TokenUsage splits cache creation by TTL (cacheCreate5m + cacheCreate1h),
-//    changing the shape every vendor's blob carries.
-export const NORMALIZE_VERSION = 4
+export const NORMALIZE_VERSION = 5 // 5: backfill sessions.first_prompt (opening-prompt title fallback)
+
 
 /**
  * Assign a dense ordinal `seq` to every MAIN-THREAD event, in order. Sidechain
