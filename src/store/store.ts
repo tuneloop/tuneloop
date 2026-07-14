@@ -12,7 +12,8 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, DetectorRunRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import { contentHash } from '../core/hash'
 import { insightId } from '../core/detector'
 import type { InsightInput } from '../core/detector'
 import type { InsightRow } from './types'
@@ -3195,9 +3196,99 @@ export class Store {
     return adopted
   }
 
+  // ---- environment reader (harness config snapshots) -----------------------
+
+  /**
+   * Append-on-change write of one category's config snapshot. Hashes the payload
+   * and compares to the latest stored state for (source, scope, scope_key,
+   * category): an unchanged hash just bumps `last_observed_at` (no new row), so a
+   * config that holds steady across many analyze runs stays one row; a changed
+   * hash appends a new row, building the dated change timeline. `captured_at` marks
+   * when a state first appeared; `last_observed_at` the most recent run that saw it.
+   *
+   * `now` defaults to the current time; callers (tests) may pass an explicit
+   * timestamp to control the timeline and keep `captured_at` unique across writes.
+   */
+  recordEnvSnapshot(input: EnvSnapshotInput, now: string = new Date().toISOString()): void {
+    const hash = contentHash(JSON.stringify(input.payload))
+    this.db.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT content_hash, captured_at FROM environment_snapshots
+           WHERE source = ? AND scope = ? AND scope_key = ? AND category = ?
+           ORDER BY captured_at DESC LIMIT 1`,
+        )
+        .get(input.source, input.scope, input.scopeKey, input.category) as
+        | { content_hash: string; captured_at: string }
+        | undefined
+      if (existing?.content_hash === hash) {
+        // Same state — confirm we still see it, no new row. Target the latest row by
+        // captured_at (its PK): a prior round-trip can leave the same hash on an
+        // earlier row, which must not be touched.
+        this.db
+          .prepare(
+            `UPDATE environment_snapshots SET last_observed_at = ?
+             WHERE source = ? AND scope = ? AND scope_key = ? AND category = ? AND captured_at = ?`,
+          )
+          .run(now, input.source, input.scope, input.scopeKey, input.category, existing.captured_at)
+        return
+      }
+      this.db
+        .prepare(
+          `INSERT INTO environment_snapshots
+             (source, scope, scope_key, category, content_hash, snapshot_json, captured_at, last_observed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(input.source, input.scope, input.scopeKey, input.category, hash, JSON.stringify(input.payload), now, now)
+    })()
+  }
+
+  /** The current config state for a key — the newest snapshot by captured_at, or null if none. */
+  envSnapshotCurrent(source: string, scope: string, scopeKey: string, category: string): EnvSnapshotRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT snapshot_json, captured_at, last_observed_at FROM environment_snapshots
+         WHERE source = ? AND scope = ? AND scope_key = ? AND category = ?
+         ORDER BY captured_at DESC LIMIT 1`,
+      )
+      .get(source, scope, scopeKey, category) as
+      | { snapshot_json: string; captured_at: string; last_observed_at: string }
+      | undefined
+    return row ? toEnvSnapshotRow(row) : null
+  }
+
+  /**
+   * Point-in-time read: the config state as of `at` (the newest snapshot with
+   * captured_at <= at). Per-session detectors MUST use this rather than "current",
+   * so an old session isn't judged against today's config. `stale` is true when no
+   * snapshot precedes `at` — we never observed the config that early, so the caller
+   * should abstain or down-weight rather than treat the (absent) result as fact.
+   */
+  envSnapshotAsOf(source: string, scope: string, scopeKey: string, category: string, at: string): EnvSnapshotAsOf {
+    const row = this.db
+      .prepare(
+        `SELECT snapshot_json, captured_at, last_observed_at FROM environment_snapshots
+         WHERE source = ? AND scope = ? AND scope_key = ? AND category = ? AND captured_at <= ?
+         ORDER BY captured_at DESC LIMIT 1`,
+      )
+      .get(source, scope, scopeKey, category, at) as
+      | { snapshot_json: string; captured_at: string; last_observed_at: string }
+      | undefined
+    return { row: row ? toEnvSnapshotRow(row) : null, stale: !row }
+  }
+
   close() {
     this.readonlyDb?.close()
     this.db.close()
+  }
+}
+
+/** Map a raw environment_snapshots row to the read-facing shape (parses snapshot_json). */
+function toEnvSnapshotRow(row: { snapshot_json: string; captured_at: string; last_observed_at: string }): EnvSnapshotRow {
+  return {
+    payload: JSON.parse(row.snapshot_json),
+    capturedAt: row.captured_at,
+    lastObservedAt: row.last_observed_at,
   }
 }
 
