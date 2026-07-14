@@ -57,3 +57,38 @@ describe('claude-code usage dedup (one API message = many transcript lines)', ()
     expect(facts[2]!.usd).toBeGreaterThan(0)
   })
 })
+
+// Subagent transcripts don't repeat identical usage: Claude Code streams
+// output_tokens UP across the message's blocks (input/cache stay fixed), so only
+// the LAST line carries the true output — earlier lines report a partial count.
+const STREAM_SID = 'bbbb0000-1111-2222-3333-444444444444'
+const FIXED = { input_tokens: 8, cache_creation_input_tokens: 17_903, cache_read_input_tokens: 9417 }
+const STREAM_LINES = [
+  { parentUuid: null, isSidechain: true, type: 'user', cwd: '/repo', sessionId: STREAM_SID, uuid: 'su0', timestamp: '2026-07-14T10:00:00.000Z', message: { role: 'user', content: 'scan the diff' } },
+  { parentUuid: 'su0', isSidechain: true, type: 'assistant', cwd: '/repo', sessionId: STREAM_SID, uuid: 'sa1', timestamp: '2026-07-14T10:00:01.000Z', message: { id: 'msg_s1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'thinking', thinking: '...' }], usage: { ...FIXED, output_tokens: 1 } } },
+  { parentUuid: 'sa1', isSidechain: true, type: 'assistant', cwd: '/repo', sessionId: STREAM_SID, uuid: 'sa2', timestamp: '2026-07-14T10:00:02.000Z', message: { id: 'msg_s1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'text', text: "I'll scan it." }], usage: { ...FIXED, output_tokens: 1 } } },
+  { parentUuid: 'sa2', isSidechain: true, type: 'assistant', cwd: '/repo', sessionId: STREAM_SID, uuid: 'sa3', timestamp: '2026-07-14T10:00:03.000Z', message: { id: 'msg_s1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'st1', name: 'Bash', input: { command: 'git diff' } }], usage: { ...FIXED, output_tokens: 17_655 } } },
+]
+
+async function parseStream() {
+  const path = join(dir, `${STREAM_SID}.jsonl`)
+  writeFileSync(path, STREAM_LINES.map((l) => JSON.stringify(l)).join('\n'))
+  const session = await parseClaudeCode(path)
+  expect(session).not.toBeNull()
+  return session!
+}
+
+describe('claude-code usage dedup (subagent output_tokens stream up across lines)', () => {
+  it('counts the final (last-line) output, not the partial first line', async () => {
+    const session = await parseStream()
+    // Not 1 (first line), not 1+1+17655 (per-line sum) — the message's final usage.
+    expect(session.tokens).toEqual({ input: 8, output: 17_655, cacheCreate: 17_903, cacheRead: 9417 })
+  })
+
+  it('attributes the full message usage to the first event; repeats carry zero', async () => {
+    const session = await parseStream()
+    const assistants = session.events.filter((e) => e.kind === 'assistant')
+    expect(assistants).toHaveLength(3)
+    expect(assistants.map((a) => (a.kind === 'assistant' ? a.usage.output : -1))).toEqual([17_655, 0, 0])
+  })
+})

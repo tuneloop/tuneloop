@@ -75,6 +75,7 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
   const models = new Set<string>()
   let tokens = emptyUsage()
   const usageCountedIds = new Set<string>()
+  const finalUsageById = lastUsageByMessageId(records)
   let title: string | undefined
   let cwd: string | undefined
   let branch: string | undefined
@@ -123,13 +124,20 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
 
       const model: string | undefined = typeof m.model === 'string' ? m.model : undefined
       if (model) models.add(model)
-      // Claude Code writes one transcript line per content block of the same
-      // API message, each repeating the message's full usage. Count the usage
-      // once per API message id — repeats keep their content but carry zero
-      // usage, so token totals and usage facts don't multiply per block.
+      // Claude Code writes one transcript line per content block of the same API
+      // message. Count each message's usage once, keyed by message id, taking it
+      // from the message's FINAL line: main-thread lines repeat the full usage,
+      // but subagent lines stream output_tokens up across blocks — only the last
+      // line holds the true figure. Attribute it to the first line; repeats keep
+      // their content but carry zero usage, so nothing multiplies per block.
       const msgId = typeof m.id === 'string' ? m.id : undefined
-      const usage = msgId && usageCountedIds.has(msgId) ? emptyUsage() : usageOf(m.usage)
-      if (msgId) usageCountedIds.add(msgId)
+      let usage: TokenUsage
+      if (msgId) {
+        usage = usageCountedIds.has(msgId) ? emptyUsage() : (finalUsageById.get(msgId) ?? usageOf(m.usage))
+        usageCountedIds.add(msgId)
+      } else {
+        usage = usageOf(m.usage)
+      }
       tokens = addUsage(tokens, usage)
 
       const blocks: ContentBlock[] = []
@@ -261,6 +269,24 @@ async function readAgentMeta(jsonlPath: string): Promise<Omit<SubagentMeta, 'age
   } catch {
     return {}
   }
+}
+
+/**
+ * The final usage snapshot per API `message.id`. Claude Code appends one
+ * transcript line per content block, each carrying that message's usage; later
+ * lines overwrite earlier here, so the map keeps the LAST (complete) figure.
+ * Main-thread lines repeat the full usage, but subagent lines report a growing
+ * output_tokens as blocks stream — only the last line is authoritative.
+ */
+function lastUsageByMessageId(records: Raw[]): Map<string, TokenUsage> {
+  const out = new Map<string, TokenUsage>()
+  for (const r of records) {
+    if (r.type !== 'assistant' || !r.message) continue
+    const m = r.message
+    if (m.model === '<synthetic>' || typeof m.id !== 'string') continue
+    out.set(m.id, usageOf(m.usage))
+  }
+  return out
 }
 
 function usageOf(u: Raw): TokenUsage {
