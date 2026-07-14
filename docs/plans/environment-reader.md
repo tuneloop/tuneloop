@@ -8,30 +8,48 @@ Jira: AL-71
 tuneloop derives per-session facts (cost, files, PRs, complexity) but has no visibility into
 the **harness configuration** that shaped those sessions. A developer who adds an MCP server,
 installs custom agents, changes permission rules, or enables a plugin — tuneloop can't see it.
-Config changes are an important adoption signal: did a config-snippet fix from a detector
-actually get applied? Did adding a new agent correlate with cost/time improvement?
+Config changes are the core adoption signal: did a config-snippet fix from a detector actually
+get applied? Did adding a new agent correlate with cost/time improvement?
 
-The environment reader captures a versioned snapshot of harness configuration on each
-`analyze` run, so config changes between runs are visible and diffable.
+The environment reader captures a versioned snapshot of harness configuration, so config
+changes are visible and diffable.
+
+## Design principle: minimal surface area
+
+We capture **only fields we know are useful today** and drop everything else. Two reasons:
+
+1. **LLM safety.** Snapshots are read during processing and detector runs, some of which send
+   data to an LLM. The less we store, the less can ever leak. We never store **secrets** — env
+   var values, MCP args/env/headers, hook command strings. We *do* store user-authored
+   instruction bodies (agent system prompts and skill/command bodies), because the body is the
+   substance and adoption detection needs it; the tradeoff is accepted for these non-secret
+   content fields.
+2. **Signal over noise.** Preference fields (theme, editor mode) and auth plumbing carry no
+   improvement-cycle signal. Start tight; add fields as concrete detectors need them.
+
+The rule is an **allowlist**: a field is stored only if it appears in the tables below. Anything
+else — including new keys a future harness version adds — is dropped by default.
 
 ## Goals
 
-1. Snapshot harness config on `analyze` — starting with Claude Code.
-2. Versioned: a content-hash change between runs records a new snapshot.
-3. Enable the "config adoption" signal: a detector-issued config-snippet fix can be confirmed
-   by observing the config diff in subsequent snapshots.
-4. Security: never capture secrets (API keys, tokens, internal URLs, auth commands).
+1. Snapshot harness config — starting with Claude Code.
+2. Prefer capture **at session-creation time** via an opt-in `SessionStart` hook (accurate per
+   session); fall back to **current state at `analyze` time** (approximation) when no per-session
+   snapshot exists.
+3. Versioned: a content-hash change records a new snapshot.
+4. Enable the "config adoption" signal — confirm a detector-issued fix was applied.
 
 ## Non-goals (for now)
 
-- Capturing config at the time a session was *created* (we only read current state at analyze).
 - Cross-harness comparison (one adapter at a time; CC first).
-- Full CLAUDE.md / skill / agent body content (proprietary instructions — hash only).
+- Storing any secret-bearing field (env values, MCP args/env/headers, hook commands).
 - Dashboard visualization of config diffs (separate ticket).
 
 ---
 
 ## What we capture — by category (Claude Code)
+
+Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 
 ### 1. Settings
 
@@ -43,27 +61,37 @@ The environment reader captures a versioned snapshot of harness configuration on
 | Project (shared) | `<repo>/.claude/settings.json` | Yes (committed) |
 | Project (local) | `<repo>/.claude/settings.local.json` | No (gitignored) |
 
-Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
+**Fields captured** (nothing else):
 
-**Fields captured vs redacted:**
+| Field | Capture | Signal |
+|-------|---------|--------|
+| `permissions.allow` | Yes (rule patterns) | Permission posture — core adoption signal |
+| `permissions.deny` | Yes | Security posture |
+| `enabledPlugins` | Yes (names + boolean) | Ecosystem adoption |
 
-| Field | Capture | Redaction | Signal |
-|-------|---------|-----------|--------|
-| `permissions.allow` | Yes | As-is (rule patterns) | Permission posture |
-| `permissions.deny` | Yes | As-is | Security posture |
-| `env` | Keys only | Strip values that look like tokens/keys | Which integrations wired |
-| `model` | Yes | As-is | Model preference |
-| `hooks` | Event types + commands | Strip env vars / headers with tokens | Automation sophistication |
-| `enabledPlugins` | Yes | Plugin names + boolean | Ecosystem adoption |
-| `effortLevel` | Yes | As-is | Usage pattern |
-| `permissionMode` | Yes | As-is | Trust posture |
-| `apiKeyHelper` | Command path | As-is | Auth method |
-| `awsCredentialExport` | Command path | As-is | Auth method |
-| `gcpAuthRefresh` | Command path | As-is | Auth method |
-| `autoMemoryEnabled` | Yes | As-is | Feature adoption |
-| `availableModels` | Yes | As-is | Model restrictions |
-| `theme` | Yes | As-is | Preference |
-| `editorMode` | Yes | As-is | Preference |
+`permissions.allow` captures only **persisted** allow rules (the "Yes, and don't ask again"
+choice, written to `settings.json`). Session-only allows ("allow for this session") live in
+session runtime and never touch disk, so they are correctly excluded — this field is exactly
+the durable, cross-session permission posture.
+
+**Deliberately dropped:**
+
+| Field | Why dropped |
+|-------|-------------|
+| `env` | Values are secrets |
+| `apiKeyHelper` / `awsCredentialExport` / `gcpAuthRefresh` | Auth plumbing, no signal |
+| `theme` / `editorMode` | Preferences, no signal |
+| `permissionMode` | Only the session *default*; actual mode is per-session and changes at runtime (shift-tab). Misleading as config; belongs in the adapter if we ever need per-session mode. |
+| `model` | Only the configured default; actual per-message model is already in `usage_facts`, and `/model` changes it mid-session. Redundant + misleading as config. |
+| `hooks` | Config hooks add little on their own; runtime hook execution (`hookEvent`/`hookCount`/`hookErrors`) is already in the transcript and is the better source. Revisit later if adoption detection needs it. |
+
+**Stored shape:**
+```json
+{
+  "permissions": { "allow": ["Bash(npm test *)"], "deny": [] },
+  "plugins": { "frontend-design@claude-plugins-official": true }
+}
+```
 
 ### 2. MCP Servers
 
@@ -74,40 +102,24 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | Per-project (local state) | `$CLAUDE_HOME/.claude.json` → `projects.<cwd>.mcpServers` | No |
 | Project (shared) | `<repo>/.mcp.json` | Yes (committed) |
 
-**Fields captured vs redacted:**
+**Fields captured** (only these three — nothing that carries secrets):
 
-| Field | Capture | Redaction | Signal |
-|-------|---------|-----------|--------|
-| Server names | Yes | As-is | What tools connected |
-| `type` (http/sse/stdio) | Yes | As-is | Transport choice |
-| `url` | Yes | As-is | Endpoint identity |
-| `command` | Yes | As-is | Which binary |
-| `args` | Yes | Redact values matching token/key patterns | Server config |
-| `timeout` | Yes | As-is | Config sophistication |
-| `alwaysLoad` | Yes | As-is | Eager vs deferred |
-| `env` | Keys only | Strip all values (likely secrets) | What env is passed |
-| `headers` | Keys only | Strip values (auth tokens) | What headers set |
-| `headersHelper` | Command path | As-is | Auth mechanism |
-| `oauth` | Scopes + presence | Strip clientId, tokens | OAuth in use |
+| Field | Capture | Signal |
+|-------|---------|--------|
+| Server name | Yes | What capability is wired up — the core signal |
+| `type` (http/sse/stdio) | Yes | Local (stdio) vs remote (http/sse) |
+| `url` | Yes | Endpoint identity (for http/sse servers) |
+
+Dropped: `command` (for a stdio server the user-chosen `name` already identifies it; `command`
+alone is just `npx`/`uvx`), `args`, `env`, `headers`, `headersHelper`, `oauth`, `timeout`,
+`alwaysLoad`. Everything dropped is either secret-bearing or a tuning knob with no signal.
 
 **Stored shape:**
 ```json
 {
   "servers": {
-    "atlassian": {
-      "type": "sse",
-      "url": "https://mcp.atlassian.com/v1/sse",
-      "timeout": null,
-      "alwaysLoad": false
-    },
-    "postgres": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "[REDACTED]"],
-      "envKeys": ["PG_PASSWORD", "PG_HOST"],
-      "timeout": 600000,
-      "alwaysLoad": true
-    }
+    "atlassian": { "type": "sse", "url": "https://mcp.atlassian.com/v1/sse" },
+    "postgres": { "type": "stdio" }
   },
   "count": 2
 }
@@ -122,19 +134,22 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | User (global) | `$CLAUDE_HOME/agents/*.md` |
 | Project | `<repo>/.claude/agents/*.md` |
 
-**Fields captured vs redacted:**
+**Fields captured:**
 
-| Field | Capture | Redaction | Signal |
-|-------|---------|-----------|--------|
-| Filenames / count | Yes | As-is | Number of custom agents |
-| Frontmatter `name` | Yes | As-is | Agent catalog |
-| Frontmatter `description` | Yes | As-is | Purpose |
-| Frontmatter `model` | Yes | As-is | Per-agent model preference |
-| Frontmatter `tools` / `disallowedTools` | Yes | As-is | Tool scoping |
-| Frontmatter `effort` | Yes | As-is | Budget allocation |
-| Frontmatter `isolation` | Yes | As-is | Worktree usage |
-| Frontmatter `hooks` | Yes | Strip token/key values from headers | Automation wiring |
-| Body content | Yes | Full text | Instruction content (adoption detection) |
+| Field | Capture | Signal |
+|-------|---------|--------|
+| Count | Yes | How many custom agents |
+| Frontmatter `name` | Yes | Agent catalog — always present (identity) |
+| Frontmatter `description` | Yes | Purpose — effectively always present |
+| Frontmatter `model` | If present | Per-agent model preference (often `inherit` / omitted) |
+| Frontmatter `tools` / `disallowedTools` | If present | Tool scoping (omitted = all tools) |
+| Body (system prompt) | Yes — full text + hash | Instruction content — enables true adoption detection + diff |
+
+The **agent body is the substance** (the system prompt IS the agent), so we store it in full,
+not just a hash. This lets a detector confirm instruction-level adoption ("did the user add the
+agent we suggested, with our instructions?") and diff an agent's definition across snapshots.
+`bodyHash` is kept alongside as a cheap change-detection / versioning key. UI-only fields
+(`color`) are dropped.
 
 **Stored shape:**
 ```json
@@ -145,10 +160,8 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
       "description": "Review PRs for correctness",
       "model": "sonnet",
       "tools": ["Read", "Bash"],
-      "effort": "high",
-      "isolation": null,
-      "body": "Review all changed files for...",
-      "bodyLines": 42
+      "body": "You are a code review specialist. For each changed file...",
+      "bodyHash": "a1b2c3..."
     }
   ],
   "count": 1
@@ -157,81 +170,48 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 
 ### 4. Skills / Commands
 
+Custom commands have been **merged into skills** — `.claude/commands/deploy.md` and
+`.claude/skills/deploy/SKILL.md` both create `/deploy` and behave the same. We capture both
+formats into **one merged list**; the skills-vs-legacy-command distinction is a dying
+implementation detail with no signal.
+
 **Sources by scope:**
 
 | Scope | Path |
 |-------|------|
-| User (global) | `$CLAUDE_HOME/skills/*/SKILL.md` |
-| Project | `<repo>/.claude/skills/*/SKILL.md` |
-| Legacy commands | `<repo>/.claude/commands/*.md` |
+| User (global) | `$CLAUDE_HOME/skills/*/SKILL.md` + `$CLAUDE_HOME/commands/*.md` |
+| Project | `<repo>/.claude/skills/*/SKILL.md` + `<repo>/.claude/commands/*.md` |
 
-**Fields captured vs redacted:**
+**Fields captured** (mirrors agents — body is the substance):
 
-| Field | Capture | Redaction | Signal |
-|-------|---------|-----------|--------|
-| Filenames / count | Yes | As-is | Customization depth |
-| Frontmatter `name` | Yes | As-is | Skill catalog |
-| Frontmatter `description` | Yes | As-is | Purpose |
-| Frontmatter `invocation` | Yes | As-is | manual/auto/both |
-| Frontmatter `allowedTools` / `disallowedTools` | Yes | As-is | Scoping |
-| Body content | Yes | Full text | Instruction content (adoption detection) |
+| Field | Capture | Signal |
+|-------|---------|--------|
+| Count | Yes | Customization depth |
+| Frontmatter `name` | Yes | Skill catalog (falls back to filename) |
+| Frontmatter `description` | If present | Purpose — always parse it; absent is fine (legacy commands often omit frontmatter) |
+| Body | Yes — full text + hash | Instruction content — adoption detection + diff |
+
+Other frontmatter fields (`disable-model-invocation`, `user-invocable`, `allowed-tools`,
+`disallowed-tools`) are dropped for now — add them if a detector needs the invocation posture.
 
 **Stored shape:**
 ```json
 {
   "skills": [
-    {
-      "name": "deploy",
-      "description": "Deploy to staging",
-      "invocation": "manual",
-      "allowedTools": ["Bash"],
-      "body": "Run the deploy script...",
-      "bodyLines": 18
-    }
+    { "name": "deploy", "description": "Deploy to staging", "body": "Run the deploy script...", "bodyHash": "d4e5f6..." },
+    { "name": "review", "body": "Review the current diff...", "bodyHash": "..." }
   ],
-  "legacyCommands": [
-    { "name": "review.md", "body": "Review the current...", "bodyLines": 12 }
-  ],
-  "count": 3
+  "count": 2
 }
 ```
+(`description` is omitted from an entry when the file has none — e.g. a bare legacy command.)
 
-### 5. Workflows
+### 5. CLAUDE.md
 
-**Sources by scope:**
-
-| Scope | Path |
-|-------|------|
-| User (global) | `$CLAUDE_HOME/workflows/*.js` |
-| Project | `<repo>/.claude/workflows/*.js` |
-
-**Fields captured vs redacted:**
-
-| Field | Capture | Redaction | Signal |
-|-------|---------|-----------|--------|
-| Filenames / count | Yes | As-is | Orchestration adoption |
-| `meta.name` (parsed from export) | Yes | As-is | Workflow catalog |
-| `meta.description` | Yes | As-is | Purpose |
-| `meta.phases` | Yes | As-is | Complexity |
-| Script body | Yes | Full text | Instruction content (adoption detection) |
-
-**Stored shape:**
-```json
-{
-  "workflows": [
-    {
-      "name": "review-changes",
-      "description": "Review changed files across dimensions",
-      "phases": ["Review", "Verify"],
-      "body": "export const meta = {...}\nconst results = ...",
-      "bodyLines": 55
-    }
-  ],
-  "count": 1
-}
-```
-
-### 6. CLAUDE.md / Rules
+Plain markdown, no frontmatter — the always-on instruction file. It is the single richest
+adoption target (detector nudges like "add a rule about X" land here), so we store the full
+body, mirroring agents/skills. `@import` references are stored **as-is, unexpanded** for v1
+(the import lines are visible in the raw text); resolving imports is deferred.
 
 **Sources by scope:**
 
@@ -240,61 +220,32 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | User | `$CLAUDE_HOME/CLAUDE.md` |
 | Project (shared) | `<repo>/CLAUDE.md` or `<repo>/.claude/CLAUDE.md` |
 | Project (local) | `<repo>/CLAUDE.local.md` |
-| Rules | `<repo>/.claude/rules/*.md` |
 
-**Fields captured vs redacted:**
+**Fields captured:**
 
-| Field | Capture | Redaction | Signal |
-|-------|---------|-----------|--------|
-| Existence (boolean) | Yes | As-is | Adoption signal |
-| Line count / byte size | Yes | As-is | Instruction depth |
-| Content hash | Yes | sha256 | Change detection |
-| Body content | Yes | Full text | Adoption detection, instruction diff |
-| Rules: file count | Yes | As-is | Conditional instruction usage |
-| Rules: `paths` globs | Yes | As-is | Which areas have rules |
-| Rules: body content | Yes | Full text | Rule content |
+| Field | Capture | Signal |
+|-------|---------|--------|
+| Existence | Yes (boolean) | Adoption signal (did they create one) |
+| Body | Yes — full text + hash | Instruction content — adoption detection + diff |
 
 **Stored shape:**
 ```json
 {
-  "claudeMd": {
-    "exists": true,
-    "lines": 87,
-    "bytes": 3421,
-    "hash": "j0k1l2...",
-    "body": "# CLAUDE.md\n\nThis file provides..."
-  },
-  "claudeLocalMd": {
-    "exists": true,
-    "lines": 12,
-    "body": "# Local overrides..."
-  },
-  "rules": [
-    { "file": "testing.md", "paths": ["src/**/*.test.ts"], "lines": 12, "body": "Always use vitest..." }
-  ],
-  "rulesCount": 1
+  "claudeMd": { "exists": true, "body": "# CLAUDE.md\n\nThis file provides...", "hash": "j0k1l2..." },
+  "claudeLocalMd": { "exists": false }
 }
 ```
 
-### 7. Plugins (from settings)
-
-Captured from `settings.json` → `enabledPlugins`:
-
-```json
-{
-  "plugins": {
-    "frontend-design@claude-plugins-official": true
-  },
-  "count": 1
-}
-```
+Rules (`.claude/rules/*.md`) are **dropped for v1** — a rule without `paths` is just CLAUDE.md
+by another name, and path-scoped rules add a `paths` signal we don't yet consume. Revisit when
+a detector needs path-scoped instruction data.
 
 ---
 
 ## Scope summary
 
 Each category has a **global** component (user-level, same across all repos) and a
-**project** component (varies per repo). The snapshot must distinguish these:
+**project** component (varies per repo). The snapshot distinguishes these:
 
 | Category | Global scope | Project scope |
 |----------|-------------|---------------|
@@ -302,59 +253,124 @@ Each category has a **global** component (user-level, same across all repos) and
 | MCP | `$CLAUDE_HOME/.claude.json` → per-project | `<repo>/.mcp.json` |
 | Agents | `$CLAUDE_HOME/agents/` | `<repo>/.claude/agents/` |
 | Skills | `$CLAUDE_HOME/skills/` | `<repo>/.claude/skills/` + `commands/` |
-| Workflows | `$CLAUDE_HOME/workflows/` | `<repo>/.claude/workflows/` |
-| CLAUDE.md | `$CLAUDE_HOME/CLAUDE.md` | `<repo>/CLAUDE.md` + `.local.md` + rules |
-| Plugins | `settings.json` → `enabledPlugins` | — |
+| CLAUDE.md | `$CLAUDE_HOME/CLAUDE.md` | `<repo>/CLAUDE.md` + `.local.md` |
 
 ---
 
 ## Mechanism
 
-_TBD — to be designed after scope discussion._
+### The core problem: when is config captured?
 
-Options under consideration:
-- **A.** Processor (per-session, cache-aware)
-- **B.** Standalone pipeline step in `analyze` (per-unique-cwd + once-global)
-- **C.** Hybrid (processor with cross-session dedup)
+Config is **ambient state that drifts over time**. A session that ran last week ran under
+whatever config existed *then*. By the time `analyze` runs, the config may have changed —
+permissions added, an MCP server removed, an agent edited. Reading current state at analyze
+time attributes *today's* config to *yesterday's* session. That's an approximation, and for
+the adoption signal (did config change between sessions?) it can be actively wrong.
 
-Key considerations:
-- Config is ambient state, not session-derived — cache key mismatch with processors.
-- Global config should be snapshotted once per run, not per session.
-- Project config should be snapshotted once per unique cwd, not per session in that cwd.
-- Need a content-hash-based versioning: only write a new row when config actually changed.
+The accurate answer is to capture config **at session-creation time**. Claude Code fires a
+`SessionStart` hook exactly then. So we offer two tiers.
+
+### Tier 1 (accurate): opt-in `SessionStart` hook
+
+tuneloop ships a small hook script users can install. On every session start, CC invokes it
+with the session id and cwd; the script reads the allowlisted config surface, and writes a
+snapshot to disk keyed by session id:
+
+```
+~/.tuneloop/env-snapshots/claude-code/<session-id>.json
+```
+
+One file per session, written once at the moment the session began — so it records the config
+that actually shaped that session, immune to later drift.
+
+Install is opt-in (a `tuneloop install-hook` command, exact name TBD) that adds a `SessionStart`
+entry to the user's `settings.json` pointing at the bundled script. Users who don't install it
+fall back to Tier 2.
+
+### Tier 2 (fallback): read current state at `analyze`
+
+When no per-session snapshot file exists for a session, `analyze` reads the current on-disk
+config and uses it as an approximation. This is the zero-setup default: works with no hook
+installed, at the cost of drift for older sessions.
+
+### Lookup order during analysis
+
+For each session:
+1. Look for `~/.tuneloop/env-snapshots/<source>/<session-id>.json` — use it if present.
+2. Else read current config from `$CLAUDE_HOME` + the session's `cwd`.
+
+### Shared reader module
+
+The read/extract logic is identical for Tier 1 (hook) and Tier 2 (analyze fallback), so it
+lives in one module callable from both. Per-harness: the paths and field extraction. The
+storage layer and the per-session snapshot file format are harness-agnostic.
+
+### Storage & versioning (open)
+
+A snapshot row is written only when its content hash differs from the last stored snapshot for
+the same (scope, scope-key, category) — so an unchanged config across many runs stores one row,
+and a real change appends a new one. Table shape TBD, likely:
+`environment_snapshots(source, scope, scope_key, category, hash, snapshot_json, captured_at)`
+where `scope ∈ {global, project}` and `scope_key` is the cwd/repo for project scope.
+
+Open: whether the analyze-time read is a standalone pipeline step, a processor, or folded into
+the adapter. Leaning standalone step keyed by (scope, scope-key) with hash versioning — global
+config read once per run, project config once per unique cwd — since config is not
+session-derived and a per-session processor would re-read the same files N times.
+
+---
+
+## Adoption detection
+
+Two kinds of fix, two detection paths:
+
+- **Structural fixes** (permissions, MCP servers, plugins) are captured in structured fields —
+  a detector confirms its exact fix appears in the next snapshot.
+- **Instruction-body fixes** (adding/editing an agent's system prompt, a skill's steps) are
+  captured as **full body text** plus a `bodyHash`. The hash detects *that* it changed cheaply;
+  the stored body lets a detector confirm *what* changed and diff the definition across
+  snapshots — no live-file re-read needed, and history is preserved.
+
+Bodies are stored for agents, skills/commands, and CLAUDE.md. The tradeoff — larger storage +
+these non-secret content fields present in snapshots read by detectors — is accepted for the
+adoption signal.
 
 ---
 
 ## Future harness support
 
-This design starts with Claude Code. Each harness will need its own reader:
-- **Codex**: TBD — likely `codex.json` or similar.
-- **OpenCode**: TBD — `opencode.json` config.
+This design starts with Claude Code. Each harness needs its own reader (and, ideally, its own
+session-start hook if the harness supports one):
+- **Codex**: TBD — `~/.codex/config.toml`, MCP config.
+- **OpenCode**: TBD — `opencode.json`.
 - **Pi**: TBD — investigate config surface.
-- **Cursor**: `.cursor/` directory, `.mcp.json`, rules, etc.
+- **Cursor**: `.cursor/` directory, `.mcp.json`, rules.
 
-The storage/mechanism should be harness-agnostic; only the reader logic is per-harness.
+The storage and per-session snapshot mechanism are harness-agnostic; only the reader logic
+(paths + field extraction) is per-harness.
 
 ---
 
 ## Security principles
 
-Capture everything **except passwords, API keys, and tokens**. Specifically:
+We store a **small, fixed allowlist** of structural fields. This is the primary defense —
+secrets are never read in the first place, so nothing can leak into an LLM prompt.
 
-1. **Redact env var values** — keys are safe, values often contain secrets (`API_KEY=sk-...`).
-2. **Redact header values** — `Authorization: Bearer ...` is always a token.
-3. **Redact args that match token patterns** — connection strings with passwords, `sk-*`, `Bearer *`.
-4. **Never capture `credentials.json`** or OAuth clientId/secret.
-5. **Capture everything else as-is** — commands, URLs, file paths, instruction bodies, configs.
-   These are important for adoption detection and config-diff signals.
+1. **Never store env var values** — `env` is dropped entirely (both settings and MCP).
+2. **Never store MCP secrets** — only name, type, url. Command, args, env, headers,
+   headersHelper, oauth, timeout, and alwaysLoad are dropped.
+3. **Never store hook command strings** — hooks are dropped from settings entirely.
+4. **Never touch `credentials.json`** or any auth token store.
+5. **Instruction bodies are stored** (agent system prompts, skill/command bodies). These are
+   user-authored content, not secrets — the adoption signal needs them. They are the one place
+   snapshot data is non-trivial in size; keep them out of any LLM prompt that doesn't
+   specifically need them.
+6. **Allowlist, not blocklist** — a field is captured only if it appears in the tables above.
 
-The redaction rule is simple: **if a value looks like a secret (token, key, password, connection
-string with credentials), replace it with `[REDACTED]`. Everything else is kept.**
+## Related future opportunity (not this ticket)
 
-Pattern matching for redaction:
-- Env var values → always strip (too risky to pattern-match reliably)
-- Header values → always strip
-- Args containing `://.*:.*@` (connection strings with passwords) → redact
-- Args matching `sk-*`, `key-*`, `token-*`, `Bearer *` patterns → redact
-- OAuth `clientId`, `clientSecret` → redact
-- Everything else → keep as-is
+CC records **hook execution** in the session transcript (`hookEvent`, `hookName`, `hookCount`,
+`hookErrors` — e.g. `"hookEvent":"Stop"` firing 11×, with error counts). The CC adapter does
+not parse this today. It is genuine runtime signal (did automation fire, how often, did it
+error) and likely belongs as session/tool data in the adapter — a separate piece of work from
+this config reader.
