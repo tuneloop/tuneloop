@@ -873,6 +873,20 @@ export function openDetail(id, focus?: any) {
     var errSink = null;    // the scope currently rendering: its error-id list (errPanelHtml pushes here)
     var CMD_COLLAPSE_LINES = 2;  // commands > this many lines get a collapse toggle
 
+    function toolDiffHtml(hunks) {
+      var diffRows = [];
+      hunks.forEach(function (h, hi) {
+        if (hi) diffRows.push({ t: '~', s: '' });
+        diffRows = diffRows.concat(diffLines(h.del, h.ins));
+      });
+      var diffHead = diffRows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
+      var diffRest = diffRows.length > DIFF_ROW_CAP
+        ? '<div class="dl-rest">' + diffRows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
+          '<button class="fc-rows-more" type="button">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</button>'
+        : '';
+      return '<div class="fc-diff">' + diffHead + diffRest + '</div>';
+    }
+
     function toolBlockHtml(tl) {
       var agent = tl.agentId && subMeta[tl.agentId];
       var go = agent ? '<span class="tool-chip-go">view →</span>' : '';
@@ -896,19 +910,16 @@ export function openDetail(id, focus?: any) {
       // Body: tool-specific output, collapsed by default behind an inline toggle
       var body = '';
       var toggle = '';
-      if (tl.hunks && tl.hunks.length) {
+      if (tl.fileDiffs && tl.fileDiffs.length) {
+        body = '<div class="tool-block-body"><div class="tool-file-diffs">' + tl.fileDiffs.map(function (file) {
+          return '<section class="tool-file-diff"><div class="tool-file-diff-path">' + esc(file.path) + '</div>' +
+            toolDiffHtml(file.hunks) + '</section>';
+        }).join('') + '</div></div>';
+        toggle = '<button class="tool-out-toggle" type="button">diff' +
+          (tl.fileDiffs.length > 1 ? ' · ' + tl.fileDiffs.length + ' files' : '') + '</button>';
+      } else if (tl.hunks && tl.hunks.length) {
         // Edit/Write: render as inline diff (same style as Files tab)
-        var diffRows = [];
-        tl.hunks.forEach(function (h, hi) {
-          if (hi) diffRows.push({ t: '~', s: '' });
-          diffRows = diffRows.concat(diffLines(h.del, h.ins));
-        });
-        var diffHead = diffRows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
-        var diffRest = diffRows.length > DIFF_ROW_CAP
-          ? '<div class="dl-rest">' + diffRows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
-            '<button class="fc-rows-more" type="button">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</button>'
-          : '';
-        body = '<div class="tool-block-body"><div class="fc-diff">' + diffHead + diffRest + '</div></div>';
+        body = '<div class="tool-block-body">' + toolDiffHtml(tl.hunks) + '</div>';
         toggle = '<button class="tool-out-toggle" type="button">diff</button>';
       } else if (tl.output && tl.ok) {
         // Generic tool output. Failed calls already surface their result in the error

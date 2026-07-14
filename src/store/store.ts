@@ -3097,6 +3097,8 @@ export interface TranscriptTool {
   output?: string
   /** For Edit/Write: old→new hunks for inline diff rendering. */
   hunks?: { del: string; ins: string }[]
+  /** For a multi-file apply_patch: preserve each file's identity and hunks. */
+  fileDiffs?: Array<{ path: string; hunks: { del: string; ins: string }[] }>
   error?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
@@ -3438,8 +3440,10 @@ function buildTranscriptCore(session: Session): {
             // OpenCode: oldString/newString).
             if (tc?.action === 'file_write' && typeof candidate.input === 'string') {
               const patchEdits = parseApplyPatch(candidate.input)
-              const hunks = patchEdits.flatMap((edit) => edit.hunks)
-              if (hunks.length) tool.hunks = hunks
+              if (patchEdits.length) {
+                tool.fileDiffs = patchEdits.map((edit) => ({ path: edit.path, hunks: edit.hunks }))
+                tool.command = patchEdits.length === 1 ? patchEdits[0]!.path : `${patchEdits.length} files changed`
+              }
             } else if (tc?.action === 'file_write' && input && typeof input === 'object') {
               if (Array.isArray(input.edits)) {
                 tool.hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({

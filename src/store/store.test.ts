@@ -84,7 +84,7 @@ describe('Codex semantic child persistence and display', () => {
     })
   })
 
-  it('renders string-shaped apply_patch input as transcript diff hunks', () => {
+  it('renders a multi-file apply_patch as separate named transcript diffs', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
     const patch = [
@@ -93,6 +93,13 @@ describe('Codex semantic child persistence and display', () => {
       '@@',
       '-const before = true',
       '+const after = true',
+      '*** Update File: /repo/src/adapters/codex/parse.ts',
+      '@@',
+      '-const mapped = mapAction(name, input)',
+      '+const mapped = operation.resolved ? mapAction(name, input) : fallback',
+      '*** Add File: /repo/src/adapters/codex/exec-envelope.test.ts',
+      '+import { describe, it } from \'vitest\'',
+      '+describe(\'exec envelope\', () => { it(\'parses\', () => {}) })',
       '*** End Patch',
     ].join('\n')
     const rawWrapper = `const patch = ${JSON.stringify(patch)}; text(await tools.apply_patch(patch));`
@@ -103,7 +110,13 @@ describe('Codex semantic child persistence and display', () => {
       name: 'apply_patch',
       action: 'file_write',
       input: patch,
-      target: { paths: ['/repo/src/store/store.test.ts'] },
+      target: {
+        paths: [
+          '/repo/src/store/store.test.ts',
+          '/repo/src/adapters/codex/parse.ts',
+          '/repo/src/adapters/codex/exec-envelope.test.ts',
+        ],
+      },
       result: { ok: true, isError: false, raw: '[{"type":"input_text","text":"{}"}]' },
       isSidechain: false,
     }
@@ -111,8 +124,31 @@ describe('Codex semantic child persistence and display', () => {
 
     expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
       name: 'apply_patch',
-      command: '/repo/src/store/store.test.ts',
-      hunks: [{ del: 'const before = true', ins: 'const after = true' }],
+      command: '3 files changed',
+      fileDiffs: [
+        {
+          path: '/repo/src/store/store.test.ts',
+          hunks: [{ del: 'const before = true', ins: 'const after = true' }],
+        },
+        {
+          path: '/repo/src/adapters/codex/parse.ts',
+          hunks: [
+            {
+              del: 'const mapped = mapAction(name, input)',
+              ins: 'const mapped = operation.resolved ? mapAction(name, input) : fallback',
+            },
+          ],
+        },
+        {
+          path: '/repo/src/adapters/codex/exec-envelope.test.ts',
+          hunks: [
+            {
+              del: '',
+              ins: "import { describe, it } from 'vitest'\ndescribe('exec envelope', () => { it('parses', () => {}) })",
+            },
+          ],
+        },
+      ],
       rawWrapper: { name: 'exec', input: rawWrapper },
     })
   })
