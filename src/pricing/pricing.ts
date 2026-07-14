@@ -11,7 +11,7 @@ export interface ModelPrice {
 }
 
 /** Bump when models.json rates change so stored costs can be recomputed. */
-export const PRICE_TABLE_VERSION = '2026-07-14'
+export const PRICE_TABLE_VERSION = '2026-07-14.1'
 
 type Table = Record<string, Record<string, ModelPrice>>
 const TABLE = models as unknown as Table

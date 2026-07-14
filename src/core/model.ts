@@ -24,8 +24,9 @@ export type CanonicalAction =
  * Cache creation is split by TTL because Anthropic bills the two differently: a
  * 1h write costs 2x input, a 5m write 1.25x. The two are DISJOINT — the total
  * cache-write is `cacheCreate5m + cacheCreate1h`, and neither contains the other.
- * Sources that expose no TTL report their whole write as 5m (the cheaper rate,
- * and what those harnesses use).
+ * Sources that expose no Anthropic TTL split report their whole write in the 5m
+ * bucket. Their price table mirrors the provider's single write rate to both slots
+ * (for example, OpenAI GPT-5.6 uses one write class with a 30m minimum lifetime).
  */
 export interface TokenUsage {
   input: number
