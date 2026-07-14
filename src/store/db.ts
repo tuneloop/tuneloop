@@ -46,7 +46,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   models              TEXT,        -- json array
   tok_input           INTEGER,
   tok_output          INTEGER,
-  tok_cache_create    INTEGER,
+  -- Cache creation split by TTL: DISJOINT, so total cache-write is the sum of the
+  -- two. They bill at different rates (1h = 2x input, 5m = 1.25x), which is why
+  -- cost needs them apart. Sources with no TTL report everything as 5m.
+  tok_cache_create_5m INTEGER,
+  tok_cache_create_1h INTEGER,
   tok_cache_read      INTEGER,
   cost_usd            REAL,
   price_table_version TEXT,
@@ -99,7 +103,8 @@ CREATE TABLE IF NOT EXISTS usage_facts (
   ts               TEXT,
   tok_input        INTEGER,
   tok_output       INTEGER,
-  tok_cache_create INTEGER,
+  tok_cache_create_5m INTEGER, -- disjoint from _1h; see sessions
+  tok_cache_create_1h INTEGER,
   tok_cache_read   INTEGER,
   cost_usd         REAL,
   PRIMARY KEY (session_id, idx),
@@ -347,5 +352,20 @@ function migrate(db: DB): void {
   }
   if (tableExists('sessions') && !has('sessions', 'first_prompt')) {
     db.exec('ALTER TABLE sessions ADD COLUMN first_prompt TEXT')
+  }
+
+  // Split cache creation by TTL. The old `tok_cache_create` held the whole write
+  // and was priced entirely at the 5m rate, so renaming it to `_5m` (rather than
+  // adding a column beside it) states what those rows already meant, and leaves
+  // no column whose meaning silently changed under existing queries. The real
+  // split arrives when the NORMALIZE_VERSION bump re-ingests every session.
+  for (const table of ['sessions', 'usage_facts']) {
+    if (!tableExists(table)) continue
+    if (has(table, 'tok_cache_create') && !has(table, 'tok_cache_create_5m')) {
+      db.exec(`ALTER TABLE ${table} RENAME COLUMN tok_cache_create TO tok_cache_create_5m`)
+    }
+    if (!has(table, 'tok_cache_create_1h')) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN tok_cache_create_1h INTEGER NOT NULL DEFAULT 0`)
+    }
   }
 }

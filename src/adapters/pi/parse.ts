@@ -318,7 +318,8 @@ function usageOf(u: Raw): TokenUsage {
   return {
     input: num(u.input),
     output: num(u.output),
-    cacheCreate: num(u.cacheWrite),
+    cacheCreate5m: num(u.cacheWrite), // Pi reports no cache TTL — treat as 5m
+    cacheCreate1h: 0,
     cacheRead: num(u.cacheRead),
   }
 }

@@ -20,7 +20,10 @@ import { mapAction } from './actions'
 // session.subagents from the sidechain `.meta.json`) for the tabbed transcript.
 // 5: assign main-thread `seq` (assignSeq) so the block partition + blob carry it.
 // 6: skip <synthetic> messages — emit api errors as SystemEvent, drop no-ops.
-export const PARSE_VERSION = 7
+// 7: count usage once per API message id, from the message's final line.
+// 8: capture the 1h-TTL share of cache creation (`cacheCreate1h`) so cache
+//    writes price at their real rate instead of all-5m.
+export const PARSE_VERSION = 8
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -291,11 +294,21 @@ function lastUsageByMessageId(records: Raw[]): Map<string, TokenUsage> {
 
 function usageOf(u: Raw): TokenUsage {
   if (!u || typeof u !== 'object') return emptyUsage()
+  const base = { input: num(u.input_tokens), output: num(u.output_tokens), cacheRead: num(u.cache_read_input_tokens) }
+  // `cache_creation` breaks the write total down by TTL, and the two bill at
+  // different rates — Claude Code puts most of its cache on the 1h TTL, so the
+  // split is the difference between a right and a ~7%-low cost.
+  const cc = u.cache_creation
+  if (!cc || typeof cc !== 'object') {
+    // Claude Code predating the breakdown: only the write total, all of it 5m.
+    // Must stay explicit — reading the ephemeral_* fields off a missing object
+    // would zero BOTH and drop the whole cache-write from tokens and cost.
+    return { ...base, cacheCreate5m: num(u.cache_creation_input_tokens), cacheCreate1h: 0 }
+  }
   return {
-    input: num(u.input_tokens),
-    output: num(u.output_tokens),
-    cacheCreate: num(u.cache_creation_input_tokens),
-    cacheRead: num(u.cache_read_input_tokens),
+    ...base,
+    cacheCreate5m: num(cc.ephemeral_5m_input_tokens),
+    cacheCreate1h: num(cc.ephemeral_1h_input_tokens),
   }
 }
 

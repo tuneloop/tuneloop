@@ -129,7 +129,7 @@ export class Store {
           `INSERT INTO sessions (
              id, session_id, source, provider, title, first_prompt, repo, branch, cwd,
              started_at, ended_at, n_turns, n_tool_calls, models,
-             tok_input, tok_output, tok_cache_create, tok_cache_read,
+             tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read,
              cost_usd, price_table_version, content_hash, parse_version, analyzed_at
            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
@@ -138,7 +138,8 @@ export class Store {
              started_at=excluded.started_at, ended_at=excluded.ended_at, n_turns=excluded.n_turns,
              n_tool_calls=excluded.n_tool_calls, models=excluded.models,
              tok_input=excluded.tok_input, tok_output=excluded.tok_output,
-             tok_cache_create=excluded.tok_cache_create, tok_cache_read=excluded.tok_cache_read,
+             tok_cache_create_5m=excluded.tok_cache_create_5m, tok_cache_create_1h=excluded.tok_cache_create_1h,
+             tok_cache_read=excluded.tok_cache_read,
              cost_usd=excluded.cost_usd, price_table_version=excluded.price_table_version,
              content_hash=excluded.content_hash, parse_version=excluded.parse_version,
              analyzed_at=excluded.analyzed_at`,
@@ -160,7 +161,8 @@ export class Store {
           JSON.stringify(session.models),
           session.tokens.input,
           session.tokens.output,
-          session.tokens.cacheCreate,
+          session.tokens.cacheCreate5m,
+          session.tokens.cacheCreate1h,
           session.tokens.cacheRead,
           costUsd,
           priceTableVersion,
@@ -206,8 +208,8 @@ export class Store {
       const insUsage = this.db.prepare(
         `INSERT INTO usage_facts
            (session_id, idx, model, is_sidechain, ts,
-            tok_input, tok_output, tok_cache_create, tok_cache_read, cost_usd)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+            tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       )
       for (const f of facts) {
         insUsage.run(
@@ -218,7 +220,8 @@ export class Store {
           f.ts ?? null,
           f.tokens.input,
           f.tokens.output,
-          f.tokens.cacheCreate,
+          f.tokens.cacheCreate5m,
+          f.tokens.cacheCreate1h,
           f.tokens.cacheRead,
           f.usd,
         )
@@ -237,7 +240,7 @@ export class Store {
         `SELECT model,
                 COUNT(DISTINCT session_id) AS sessions,
                 SUM(cost_usd)              AS costUsd,
-                SUM(tok_input + tok_output + tok_cache_create + tok_cache_read) AS tokens
+                SUM(tok_input + tok_output + tok_cache_create_5m + tok_cache_create_1h + tok_cache_read) AS tokens
          FROM usage_facts
          GROUP BY model
          ORDER BY costUsd DESC`,
@@ -633,7 +636,7 @@ export class Store {
       .prepare(
         `SELECT COUNT(*) AS sessions,
                 COALESCE(SUM(cost_usd),0) AS costUsd,
-                COALESCE(SUM(tok_input+tok_output+tok_cache_create+tok_cache_read),0) AS tokens,
+                COALESCE(SUM(tok_input+tok_output+tok_cache_create_5m+tok_cache_create_1h+tok_cache_read),0) AS tokens,
                 MIN(started_at) AS firstAt, MAX(started_at) AS lastAt
          FROM sessions`,
       )
@@ -2071,7 +2074,8 @@ export class Store {
       .prepare(
         `SELECT id, ${titleExpr('sessions')} AS title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
                 n_turns AS nTurns, n_tool_calls AS nToolCalls, models AS modelsJson, cost_usd AS costUsd,
-                tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create AS tokCacheCreate, tok_cache_read AS tokCacheRead
+                tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create_5m AS tokCacheCreate5m,
+                tok_cache_create_1h AS tokCacheCreate1h, tok_cache_read AS tokCacheRead
          FROM sessions WHERE id = ?`,
       )
       .get(id) as Record<string, any> | undefined
@@ -2136,7 +2140,8 @@ export class Store {
         tokens: {
           input: s.tokInput ?? 0,
           output: s.tokOutput ?? 0,
-          cacheCreate: s.tokCacheCreate ?? 0,
+          cacheCreate5m: s.tokCacheCreate5m ?? 0,
+          cacheCreate1h: s.tokCacheCreate1h ?? 0,
           cacheRead: s.tokCacheRead ?? 0,
         },
       },

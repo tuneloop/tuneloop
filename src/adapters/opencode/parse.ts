@@ -248,7 +248,9 @@ function usageOf(t: Raw): TokenUsage {
   return {
     input: num(t.input),
     output: num(t.output) + num(t.reasoning),
-    cacheCreate: num(cache.write),
+    // OpenCode reports no cache TTL (and bills its own cost anyway) — treat as 5m
+    cacheCreate5m: num(cache.write),
+    cacheCreate1h: 0,
     cacheRead: num(cache.read),
   }
 }
