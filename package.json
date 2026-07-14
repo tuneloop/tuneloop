@@ -1,6 +1,6 @@
 {
   "name": "tuneloop",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
