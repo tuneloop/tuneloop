@@ -157,7 +157,7 @@ export interface ProcessorRunRow {
 
 // ---- insight ledger types ---------------------------------------------------
 
-export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'measured' | 'resolved' | 'dismissed'
+export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'resolved' | 'dismissed'
 
 export interface InsightRow {
   id: string
@@ -169,7 +169,6 @@ export interface InsightRow {
   title: string
   description: string
   count: number
-  metric: number | null
   fix: {
     type: string
     label: string
@@ -180,10 +179,23 @@ export interface InsightRow {
   stateChangedAt: string | null
   detectorVersion: number
   evidence: Array<{ sessionId: string; turnIdx: number | null }>
+  /** Event time the fix was first applied in the current cycle (transcript timestamp), null if not adopted. */
+  adoptedAt: string | null
+  /** Sessions that ran this insight's fix-prompt, current cycle only (older cycles are history). */
+  fixSessions: Array<{ sessionId: string; seq: number; turnAt: string }>
 }
 
 export interface DetectorRunRow {
   version: number
   status: string | null
   ranAt: string
+}
+
+/** One fix-marker sighting: a real user turn in this session carried `tuneloop-fix: <insightId>`. */
+export interface FixMarkerSightingInput {
+  insightId: string
+  /** Main-thread event seq of the sighted user turn. */
+  seq: number
+  /** Transcript timestamp of that turn — event time, the "fix applied" date. */
+  turnAt: string
 }

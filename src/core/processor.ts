@@ -20,6 +20,7 @@ import type {
   BlockUsageInput,
   FeatureRevisionInput,
   FileIndexInput,
+  FixMarkerSightingInput,
   OutcomeInput,
   SessionArtifactInput,
 } from '../store/types'
@@ -105,6 +106,8 @@ export interface ProcessorResult {
   /** Per-block labels / links (use_case from enrich-session, PR/commit from outcomes-git, feature from enrich-session). */
   blockAnnotations?: BlockAnnotationInput[]
   blockArtifacts?: BlockArtifactInput[]
+  /** Fix-prompt markers sighted in user turns (owned by fix-marker; interpreted by reconcile in analyze). */
+  fixMarkerSightings?: FixMarkerSightingInput[]
   /** For enrichment processors: the LLM spend this processor incurred. */
   selfCost?: { tokens: TokenUsage; usd: number }
 }

@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 10
+const SCHEMA_VERSION = 11
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -319,7 +319,6 @@ CREATE TABLE IF NOT EXISTS insights (
   title             TEXT NOT NULL,
   description       TEXT NOT NULL,
   count             INTEGER NOT NULL,
-  metric            REAL,
   fix_type          TEXT,
   fix_label         TEXT,
   fix_content       TEXT,
@@ -345,8 +344,21 @@ CREATE TABLE IF NOT EXISTS insight_evidence (
 CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(session_id);
 
 -- One row per detector: tracks when it last ran and at what version.
--- S-tier detectors always re-run (cheap SQL); P-tier uses this for cache skipping.
--- Token/cost columns are NULL for S-tier, populated for P-tier (LLM spend tracking).
+-- Two tables for detector execution tracking, at different grains:
+--
+-- detector_runs: one row per detector. Tracks the *invocation* — when it last ran,
+-- whether it succeeded, and aggregate LLM cost. Cost and status belong to the run
+-- as a whole (a cross-session LLM call can't be split across individual sessions).
+--
+-- detector_session_runs: one row per (detector × session). Tracks which sessions a
+-- detector has already seen and at what content hash. Enables incremental analysis
+-- for P/X-tier detectors: on re-run, only process sessions whose hash changed or
+-- that weren't seen before (the delta), instead of re-analyzing the full corpus.
+--
+-- S-tier detectors use neither table for skip logic (they always re-run, cheap SQL).
+-- P/X-tier detectors use detector_session_runs for delta computation and
+-- detector_runs for cost tracking.
+
 CREATE TABLE IF NOT EXISTS detector_runs (
   detector    TEXT PRIMARY KEY,  -- detector name (e.g. 'permission-friction')
   version     INTEGER NOT NULL,  -- detector version at time of run (for cache invalidation)
@@ -356,6 +368,47 @@ CREATE TABLE IF NOT EXISTS detector_runs (
   cost_usd    REAL,              -- LLM cost in USD (NULL for S-tier)
   ran_at      TEXT NOT NULL      -- ISO timestamp of last run
 );
+
+CREATE TABLE IF NOT EXISTS detector_session_runs (
+  detector      TEXT NOT NULL,
+  session_id    TEXT NOT NULL,
+  content_hash  TEXT NOT NULL,
+  ran_at        TEXT NOT NULL,
+  PRIMARY KEY (detector, session_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+-- Fix-marker sightings: facts recorded by the fix-marker processor (a real user
+-- turn contained a \`tuneloop-fix: <id>\` marker), interpreted by the reconcile
+-- step in analyze (which applies lifecycle transitions). Kept separate so a
+-- sighting scanned before its insight exists (store rebuild, same-run ordering)
+-- is never lost — it just stays unmatched and is retried next analyze.
+-- No FK on insight_id: the claimed id may not exist (yet, or ever).
+-- Single-writer table (fix-marker processor), so no \`producer\` column.
+CREATE TABLE IF NOT EXISTS fix_marker_sightings (
+  session_id  TEXT NOT NULL,
+  insight_id  TEXT NOT NULL,      -- as claimed by the marker
+  seq         INTEGER NOT NULL,   -- main-thread event seq of the sighted user turn
+  turn_at     TEXT NOT NULL,      -- EVENT time: transcript timestamp of that turn — the
+                                  --   "fix applied" date; measurement windows key off this
+  matched_at  TEXT,               -- processing time; NULL = reconcile hasn't resolved this
+                                  --   against an existing insight yet. Re-stamped on
+                                  --   re-scans — never use for cycle-scoping (use turn_at)
+  PRIMARY KEY (session_id, insight_id),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_fix_marker_sightings_insight ON fix_marker_sightings(insight_id);
+
+-- Append-only lifecycle history for insights. state_changed_at on the insights row
+-- only remembers the LAST transition; measurement ("fix applied Jul 25, recurrences
+-- since: 0") and reopen cycles need the full history. from_state NULL = first surface.
+CREATE TABLE IF NOT EXISTS insight_state_log (
+  insight_id  TEXT NOT NULL,
+  from_state  TEXT,
+  to_state    TEXT NOT NULL,
+  at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_insight_state_log_insight ON insight_state_log(insight_id);
 `
 
 export function openDb(path: string): DB {

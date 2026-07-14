@@ -1,8 +1,31 @@
+import { createHash } from 'node:crypto'
 import type { LlmClient } from '../llm/types'
 import type { Logger } from '../util/log'
 import type { Store } from '../store/store'
 
-export type DetectorTier = 'S' | 'P'
+/**
+ * Deterministic insight id: 16-hex sha256 of the (detector, repo, signalKey)
+ * identity triple — the same triple the insights table enforces UNIQUE on.
+ * Deterministic so that fix-prompt markers embedded in transcripts still point
+ * at the right insight after a store rebuild (ids re-mint identically).
+ * JSON-encoded to avoid concatenation-boundary collisions.
+ */
+export function insightId(detector: string, repo: string, signalKey: string): string {
+  return createHash('sha256').update(JSON.stringify([detector, repo, signalKey])).digest('hex').slice(0, 16)
+}
+
+/**
+ * Detector compute tiers:
+ *  S — Static analysis. Data already in the store (or readable from local config).
+ *      Free to run, always re-runs on every analyze. Examples: permission friction,
+ *      cache misses, model-complexity mismatch.
+ *  P — Per-session LLM. Fits the existing one-call-per-session enrichment pattern.
+ *      Costs tokens, cached by (version + new sessions). Examples: verification gap,
+ *      kitchen-sink sessions, underspecified prompts.
+ *  X — Cross-session LLM. Rolling-window analysis over many sessions, new analysis
+ *      spend. Examples: repeated nudges / recurring pasted context clustering.
+ */
+export type DetectorTier = 'S' | 'P' | 'X'
 
 /** Everything a detector receives when it runs — the "bag of tools" passed into run(). */
 export interface DetectorContext {
@@ -22,11 +45,22 @@ export interface DetectorContext {
 
 export interface EvidenceRef {
   sessionId: string
+  /**
+   * Position within the session: the main-thread event `seq` assigned by
+   * assignSeq() (core/blocks.ts) — the same coordinate blocks and the transcript
+   * viewer use. Omit for session-level evidence
+   */
   turnIdx?: number
 }
 
 export interface InsightInput {
-  /** Stable dedup key within this detector — same key on re-run updates the row, not duplicates it. */
+  /**
+   * Stable dedup key within this detector — same key on re-run updates the row,
+   * not duplicates it. The key FORMAT is part of the detector's public contract:
+   * the insight id is derived from it (see insightId), so changing the format
+   * orphans past fix-prompt markers users already ran. Change it only with a
+   * reason worth that cost.
+   */
   signalKey: string
   /**
    * Scoping for this insight:
@@ -45,8 +79,6 @@ export interface InsightInput {
   evidence: EvidenceRef[]
   /** Total occurrences — the real scale, independent of the evidence cap. */
   count: number
-  /** Optional numeric signal specific to this detector (e.g. wasted dollars, success-rate delta). */
-  metric?: number
   fix: {
     /** Controls rendering: snippet gets a copy button, nudge gets plain prose, command gets a run prompt, fix-prompt gets a paste-into-agent-config prompt. */
     type: 'config-snippet' | 'behavioral-nudge' | 'install-command' | 'fix-prompt'
