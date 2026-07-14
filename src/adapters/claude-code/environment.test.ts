@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { claudeHome, splitFrontmatter, parseFrontmatter, toStringList, readClaudeCodeEnvironment } from './environment'
+import { claudeHome, claudeJsonPath, splitFrontmatter, parseFrontmatter, toStringList, readClaudeCodeEnvironment } from './environment'
 import type { EnvCategorySnapshot } from '../../store/types'
 
 /** Find one category's payload in a readEnvironment result. */
@@ -25,6 +25,25 @@ describe('claudeHome', () => {
   it('honors CLAUDE_CONFIG_DIR override', () => {
     process.env.CLAUDE_CONFIG_DIR = '/custom/claude-relvy'
     expect(claudeHome()).toBe('/custom/claude-relvy')
+  })
+})
+
+describe('claudeJsonPath', () => {
+  const original = process.env.CLAUDE_CONFIG_DIR
+  afterEach(() => {
+    if (original === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = original
+  })
+
+  it('defaults to ~/.claude.json (HOME sibling), NOT ~/.claude/.claude.json', () => {
+    delete process.env.CLAUDE_CONFIG_DIR
+    expect(claudeJsonPath()).toBe(join(homedir(), '.claude.json'))
+    expect(claudeJsonPath()).not.toBe(join(homedir(), '.claude', '.claude.json'))
+  })
+
+  it('lives inside CLAUDE_CONFIG_DIR when set', () => {
+    process.env.CLAUDE_CONFIG_DIR = '/custom/claude-relvy'
+    expect(claudeJsonPath()).toBe('/custom/claude-relvy/.claude.json')
   })
 })
 

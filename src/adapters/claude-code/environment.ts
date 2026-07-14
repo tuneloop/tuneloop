@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { contentHash } from '../../core/hash'
@@ -15,24 +15,11 @@ import type { EnvCategorySnapshot } from '../../store/types'
  * readers. A category that finds nothing simply omits its entry.
  */
 export async function readClaudeCodeEnvironment(projectPath?: string): Promise<EnvCategorySnapshot[]> {
+  const scope = projectPath === undefined ? 'global' : 'project'
   const out: EnvCategorySnapshot[] = []
-  const push = (cat: EnvCategorySnapshot | null) => {
+  for (const read of [readSettings, readMcp, readAgents, readSkills, readInstructions]) {
+    const cat = await read(scope, projectPath)
     if (cat) out.push(cat)
-  }
-  if (projectPath === undefined) {
-    // Global scope: $CLAUDE_HOME.
-    push(await readSettings('global'))
-    push(await readMcp('global'))
-    push(await readAgents('global'))
-    push(await readSkills('global'))
-    push(await readInstructions('global'))
-  } else {
-    // Project scope: the repo root.
-    push(await readSettings('project', projectPath))
-    push(await readMcp('project', projectPath))
-    push(await readAgents('project', projectPath))
-    push(await readSkills('project', projectPath))
-    push(await readInstructions('project', projectPath))
   }
   return out
 }
@@ -42,6 +29,17 @@ export async function readClaudeCodeEnvironment(projectPath?: string): Promise<E
 /** Claude Code's config home: `$CLAUDE_CONFIG_DIR`, else `~/.claude`. */
 export function claudeHome(): string {
   return process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+}
+
+/**
+ * Path to `.claude.json` (the MCP + project-state file). Its default sits at HOME
+ * (`~/.claude.json`) — a SIBLING of `~/.claude/`, not inside it — so it does NOT
+ * follow claudeHome()'s `.claude` default. It DOES follow `$CLAUDE_CONFIG_DIR` when
+ * set (a custom config dir holds its own `.claude.json`). So: config dir if set,
+ * else HOME — never `~/.claude/.claude.json`.
+ */
+export function claudeJsonPath(): string {
+  return join(process.env.CLAUDE_CONFIG_DIR ?? homedir(), '.claude.json')
 }
 
 /** Read + parse a JSON file; null if it's missing or unparseable (never throws). */
@@ -57,6 +55,27 @@ async function readJsonIfExists(path: string): Promise<unknown | null> {
   } catch {
     return null
   }
+}
+
+/**
+ * `.claude.json` is read once per global scope and once per project repo in a run;
+ * it's a single (potentially large) file, so cache its parse keyed by path + mtime.
+ * The mtime key means a config edit between analyze runs re-reads, and tests using
+ * distinct temp paths never collide — no stale reads.
+ */
+const claudeJsonCache = new Map<string, { mtimeMs: number; parsed: unknown | null }>()
+async function readClaudeJson(path: string): Promise<Record<string, unknown> | null> {
+  let mtimeMs: number
+  try {
+    mtimeMs = (await stat(path)).mtimeMs
+  } catch {
+    return null // missing file
+  }
+  const hit = claudeJsonCache.get(path)
+  if (hit && hit.mtimeMs === mtimeMs) return hit.parsed as Record<string, unknown> | null
+  const parsed = await readJsonIfExists(path)
+  claudeJsonCache.set(path, { mtimeMs, parsed })
+  return parsed as Record<string, unknown> | null
 }
 
 /**
@@ -191,8 +210,8 @@ function allowlistSettings(raw: Record<string, unknown>): Record<string, unknown
  * secret-bearing or signal-free.
  *
  * CC stores MCP at three scopes (docs: https://code.claude.com/docs/en/mcp-configuration.md):
- *   - user  (all projects) → `$CLAUDE_HOME/.claude.json` top-level `mcpServers`
- *   - local (per-project)  → `$CLAUDE_HOME/.claude.json` `projects["<cwd>"].mcpServers`
+ *   - user  (all projects) → `.claude.json` top-level `mcpServers` (see claudeJsonPath)
+ *   - local (per-project)  → `.claude.json` `projects["<cwd>"].mcpServers`
  *   - project (shared)     → `<repo>/.mcp.json` top-level `mcpServers`
  * We map user→global scope, and (project .mcp.json + local .claude.json) →project
  * scope. Local entries are keyed by EXACT cwd, so we union every `projects` entry
@@ -200,7 +219,7 @@ function allowlistSettings(raw: Record<string, unknown>): Record<string, unknown
  */
 async function readMcp(scope: 'global' | 'project', projectPath?: string): Promise<EnvCategorySnapshot | null> {
   const payload: Record<string, unknown> = {}
-  const claudeJson = (await readJsonIfExists(join(claudeHome(), '.claude.json'))) as Record<string, unknown> | null
+  const claudeJson = await readClaudeJson(claudeJsonPath())
 
   if (scope === 'global') {
     // User scope: top-level mcpServers in .claude.json.
