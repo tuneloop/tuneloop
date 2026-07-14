@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store and serves the dashboard as a background process (printing its URL in pi's
   TUI), using the bundled CLI with no separate global install. LLM enrichment is
   offered per run through pi's own dialogs and stays optional but recommended.
+- GPT-5.6 pricing, so sessions on the new model are costed correctly. ([#76])
+- Untitled sessions fall back to their opening prompt for a title instead of
+  showing no title. ([#72])
+
+### Fixed
+
+- Claude Code cache writes are now priced at their real TTL rate rather than a
+  flat rate. ([#73])
 
 ## [0.3.1] - 2026-07-13
 
@@ -64,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#76]: https://github.com/tuneloop/tuneloop/pull/76
+[#73]: https://github.com/tuneloop/tuneloop/pull/73
+[#72]: https://github.com/tuneloop/tuneloop/pull/72
 [#69]: https://github.com/tuneloop/tuneloop/pull/69
 [#62]: https://github.com/tuneloop/tuneloop/pull/62
 [#64]: https://github.com/tuneloop/tuneloop/pull/64
