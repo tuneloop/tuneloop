@@ -1,7 +1,7 @@
 {
   "name": "tuneloop",
-  "version": "0.3.1",
-  "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens.",
+  "version": "0.4.0",
+  "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens. Tuneloop turns the session transcripts your AI coding tools already write into a local dashboard of what you actually shipped, what it cost, and your work patterns.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
   "homepage": "https://github.com/tuneloop/tuneloop#readme",
@@ -20,6 +20,8 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "extensions",
+    "skills",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -50,8 +52,14 @@
     "llm",
     "observability",
     "developer-tools",
-    "tuneloop"
+    "tuneloop",
+    "pi-package"
   ],
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "image": "https://raw.githubusercontent.com/tuneloop/tuneloop/main/docs/img/cost_per_artifact.png"
+  },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.32.0",
     "@anthropic-ai/sdk": "^0.105.0",

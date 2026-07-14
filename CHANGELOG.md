@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-13
+
+### Added
+
+- Pi package support: `tuneloop` can now be installed directly into the Pi coding
+  agent with `pi install npm:tuneloop`. It ships the `tuneloop-query` skill plus a
+  new `/tuneloop` command — `analyze | open | stop | status` — that builds the local
+  store and serves the dashboard as a background process (printing its URL in pi's
+  TUI), using the bundled CLI with no separate global install. LLM enrichment is
+  offered per run through pi's own dialogs and stays optional but recommended.
+- GPT-5.6 pricing, so sessions on the new model are costed correctly. ([#76])
+- Untitled sessions fall back to their opening prompt for a title instead of
+  showing no title. ([#72])
+
+### Fixed
+
+- Claude Code cache writes are now priced at their real TTL rate rather than a
+  flat rate. ([#73])
+
 ## [0.3.1] - 2026-07-13
 
 ### Fixed
@@ -47,11 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
+[0.4.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.0
 [0.3.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.1
 [0.3.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#76]: https://github.com/tuneloop/tuneloop/pull/76
+[#73]: https://github.com/tuneloop/tuneloop/pull/73
+[#72]: https://github.com/tuneloop/tuneloop/pull/72
 [#69]: https://github.com/tuneloop/tuneloop/pull/69
 [#62]: https://github.com/tuneloop/tuneloop/pull/62
 [#64]: https://github.com/tuneloop/tuneloop/pull/64
