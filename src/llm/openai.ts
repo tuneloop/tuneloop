@@ -53,7 +53,8 @@ function usageOf(u: OpenAI.Completions.CompletionUsage | undefined) {
   return {
     input: Math.max(0, (u?.prompt_tokens ?? 0) - cached),
     output: u?.completion_tokens ?? 0,
-    cacheCreate: 0,
+    cacheCreate5m: 0,
+    cacheCreate1h: 0,
     cacheRead: cached,
   }
 }

@@ -20,7 +20,7 @@ function addSession(db: DB, id: string, cost: number) {
 }
 function addUsageBlock(db: DB, sid: string, blockIdx: number, usageIdx: number, cost: number) {
   db.prepare(
-    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create_5m, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?)',
   ).run(sid, usageIdx, 'm', 0, '2026-06-01T00:00:00Z', 0, 0, 0, 0, cost)
   db.prepare('INSERT OR IGNORE INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,?,?,?,?,?)')
     .run(sid, blockIdx, blockIdx, blockIdx, 'x', 'segment-blocks')

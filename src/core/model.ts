@@ -20,24 +20,38 @@ export type CanonicalAction =
   | 'skill'
   | 'other'
 
+/**
+ * Cache creation is split by TTL because Anthropic bills the two differently: a
+ * 1h write costs 2x input, a 5m write 1.25x. The two are DISJOINT — the total
+ * cache-write is `cacheCreate5m + cacheCreate1h`, and neither contains the other.
+ * Sources that expose no TTL report their whole write as 5m (the cheaper rate,
+ * and what those harnesses use).
+ */
 export interface TokenUsage {
   input: number
   output: number
-  cacheCreate: number
+  cacheCreate5m: number
+  cacheCreate1h: number
   cacheRead: number
 }
 
 export function emptyUsage(): TokenUsage {
-  return { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 }
+  return { input: 0, output: 0, cacheCreate5m: 0, cacheCreate1h: 0, cacheRead: 0 }
 }
 
 export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
     input: a.input + b.input,
     output: a.output + b.output,
-    cacheCreate: a.cacheCreate + b.cacheCreate,
+    cacheCreate5m: a.cacheCreate5m + b.cacheCreate5m,
+    cacheCreate1h: a.cacheCreate1h + b.cacheCreate1h,
     cacheRead: a.cacheRead + b.cacheRead,
   }
+}
+
+/** Total cache-creation tokens across both TTLs. */
+export function cacheCreateTotal(u: TokenUsage): number {
+  return u.cacheCreate5m + u.cacheCreate1h
 }
 
 export type ContentBlock =
