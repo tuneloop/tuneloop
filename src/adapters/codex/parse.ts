@@ -14,10 +14,12 @@ import type {
   UserMessage,
 } from '../../core/model'
 import { mapAction } from './actions'
+import { extractExecEnvelope } from './exec-envelope'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (composed with NORMALIZE_VERSION in analyze.ts). 1: initial Codex adapter.
-export const PARSE_VERSION = 2
+// 3: expand unified `exec` JavaScript envelopes into canonical child tool calls.
+export const PARSE_VERSION = 3
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -75,6 +77,31 @@ export async function parseCodex(path: string): Promise<Session | null> {
     } else if (r.type === 'event_msg' && p.type === 'user_message' && typeof p.message === 'string') {
       humanPrompts.add(p.message.trim())
     }
+  }
+
+  // Unified exec may yield before its nested command finishes. The follow-up is
+  // a separate `wait(cell_id=...)` call, but analytically it is the originating
+  // operation's result (not another tool invocation). Join those bytes up front;
+  // keep the raw wait block in the event stream below for transcript fidelity.
+  const deferredByCell = new Map<string, string>()
+  const consumedWaits = new Set<string>()
+  for (const r of records) {
+    const p = r.payload as Raw
+    if (r.type !== 'response_item' || p?.type !== 'custom_tool_call' || p.name !== 'exec' || typeof p.call_id !== 'string') continue
+    const out = resultById.get(p.call_id)
+    const cell = out && /Script running with cell ID\s+([^\s]+)/.exec(out)?.[1]
+    if (cell) deferredByCell.set(cell, p.call_id)
+  }
+  for (const r of records) {
+    const p = r.payload as Raw
+    if (r.type !== 'response_item' || p?.type !== 'function_call' || p.name !== 'wait' || typeof p.call_id !== 'string') continue
+    const args = parseArgs(p.arguments) as Record<string, unknown>
+    const cell = typeof args?.cell_id === 'string' || typeof args?.cell_id === 'number' ? String(args.cell_id) : null
+    const origin = cell ? deferredByCell.get(cell) : undefined
+    const waited = resultById.get(p.call_id)
+    if (!origin || waited == null) continue
+    resultById.set(origin, `${resultById.get(origin) ?? ''}\n${waited}`)
+    consumedWaits.add(p.call_id)
   }
 
   const events: Event[] = []
@@ -184,6 +211,42 @@ export async function parseCodex(path: string): Promise<Session | null> {
       // function_call: `arguments` is a JSON STRING. custom_tool_call (apply_patch): `input`
       // is the raw patch text. tool_search_call: `arguments` is an object.
       const input = p.type === 'function_call' ? parseArgs(p.arguments) : (p.input ?? p.arguments)
+      // A consumed wait remains visible as raw transport in the transcript but is
+      // not a second analytics operation; its output was joined to the exec above.
+      if (consumedWaits.has(callId)) {
+        pending.push({ type: 'tool_use', id: callId, name, input })
+        continue
+      }
+      if (p.type === 'custom_tool_call' && name === 'exec' && typeof input === 'string') {
+        const envelope = extractExecEnvelope(input)
+        const { operations } = envelope
+        if (operations.length) {
+          const out = resultById.get(callId)
+          const childOutputs = execChildOutputs(out, operations.length, envelope.emitsResultsInOrder)
+          pending.push({ type: 'tool_use', id: callId, name, input })
+          operations.forEach((operation, ordinal) => {
+            const mapped = operation.resolved
+              ? mapAction(operation.name, operation.input)
+              : { action: 'other' as const, target: {} }
+            const childOut = childOutputs[ordinal]
+            const statusOut = childOut ?? out
+            const code = exitCodeOf(statusOut)
+            const isError = code != null ? code !== 0 : toolCallFailed(statusOut)
+            toolCalls.push({
+              id: `${callId}:${ordinal}`,
+              parentId: callId,
+              name: mapped.name ?? operation.name,
+              action: mapped.action,
+              input: operation.input,
+              target: mapped.target,
+              result: { ok: !isError, isError, raw: childOut },
+              isSidechain: isSubagent,
+              ts,
+            })
+          })
+          continue
+        }
+      }
       // `namespace` (function_call only) tags MCP tools as `mcp__<server>`.
       const namespace = typeof p.namespace === 'string' ? p.namespace : undefined
       const mapped = mapAction(name, input, namespace)
@@ -314,6 +377,30 @@ function summaryText(summary: unknown): string {
 
 function outputString(output: unknown): string {
   return typeof output === 'string' ? output : JSON.stringify(output ?? '')
+}
+
+/**
+ * Attribute an exec envelope's emitted text to its semantic children only when
+ * the shape is unambiguous. Functions.exec prepends one generic completion block;
+ * Promise.all wrappers then emit one block per result in source order. A mismatch
+ * (typically output truncation or a combined custom rendering) intentionally
+ * yields no per-child raw output rather than leaking one command's URL/error into
+ * another command's analytics.
+ */
+function execChildOutputs(out: string | undefined, count: number, emitsResultsInOrder: boolean): Array<string | undefined> {
+  if (count === 1) return [out]
+  if (out == null || !emitsResultsInOrder) return new Array(count).fill(undefined)
+  try {
+    const parsed = JSON.parse(out)
+    if (!Array.isArray(parsed)) return new Array(count).fill(undefined)
+    const texts = parsed
+      .map((b) => (b && typeof b === 'object' && typeof (b as Raw).text === 'string' ? (b as Raw).text as string : null))
+      .filter((s): s is string => s != null)
+    const payloads = texts.length && /^Script completed\b/.test(texts[0]!) ? texts.slice(1) : texts
+    return payloads.length === count ? payloads : new Array(count).fill(undefined)
+  } catch {
+    return new Array(count).fill(undefined)
+  }
 }
 
 function parseArgs(args: unknown): unknown {

@@ -30,6 +30,9 @@ export function mapAction(name: string, input: unknown, namespace?: string): Map
   if (namespace?.startsWith('mcp__')) {
     return { action: 'mcp_call', name: `${namespace}__${name}`, target: {} }
   }
+  // Unified `exec` envelopes expose namespaced tools as JavaScript properties,
+  // so there is no separate `namespace` field to rebuild in that format.
+  if (name.startsWith('mcp__')) return { action: 'mcp_call', name, target: {} }
   switch (name) {
     case 'exec_command':
     case 'shell_command': {
@@ -50,6 +53,8 @@ export function mapAction(name: string, input: unknown, namespace?: string): Map
       return { action: 'todo', target: {} }
     case 'view_image':
       return { action: 'file_read', target: {} }
+    case 'web__run':
+      return { action: 'web', target: {} }
     default:
       return { action: 'other', target: {} }
   }

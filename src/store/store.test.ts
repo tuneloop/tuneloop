@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { emptyUsage, type Session } from '../core/model'
 import { openDb } from './db'
 import { Store } from './store'
 import type { ArtifactInput } from './types'
@@ -30,6 +31,105 @@ const stubPr: ArtifactInput = {
   externalId: 'https://github.com/o/r/pull/5',
   source: 'github',
   status: 'open', // an offline reviewer only knows it's a PR, optimistically "open"
+}
+
+describe('Codex semantic child persistence and display', () => {
+  it('preserves literal event names for direct non-envelope tool calls', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const session = codexSemanticSession('unused')
+    session.id = 'claude-code:direct'
+    session.sessionId = 'direct'
+    session.source = 'claude-code'
+    session.provider = 'anthropic'
+    session.events[0] = {
+      kind: 'assistant',
+      blocks: [{ type: 'tool_use', id: 'direct-tool', name: 'Skill', input: { skill: 'review' } }],
+      usage: emptyUsage(),
+      isSidechain: false,
+      seq: 0,
+    }
+    session.toolCalls[0] = {
+      id: 'direct-tool',
+      name: 'review',
+      action: 'skill',
+      input: { skill: 'review' },
+      target: {},
+      result: { ok: true, isError: false },
+      isSidechain: false,
+    }
+    store.ingestSession(session, 0, [], 'test', 8005)
+
+    expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
+      name: 'Skill',
+      action: '',
+      command: 'review',
+    })
+  })
+
+  it('renders semantic children first while retaining the raw exec wrapper', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const rawWrapper = 'const r = await tools.exec_command({cmd:"gh pr create --fill"}); text(r.output);'
+    const session = codexSemanticSession(rawWrapper)
+    store.ingestSession(session, 0, [], 'test', 3005)
+
+    const transcript = store.sessionDetail(session.id)?.transcript
+    expect(transcript?.turns).toHaveLength(1)
+    expect(transcript?.turns[0]?.tools).toHaveLength(1)
+    expect(transcript?.turns[0]?.tools[0]).toMatchObject({
+      name: 'exec_command',
+      command: 'gh pr create --fill',
+      rawWrapper: { name: 'exec', input: rawWrapper },
+    })
+  })
+
+  it('invalidates processor runs when normalized parsing changes over unchanged bytes', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const session = codexSemanticSession('wrapper')
+    store.ingestSession(session, 0, [], 'test', 2005)
+    store.persistResult(session.id, 'files-touched', 1, session.raw.contentHash, null, {})
+    expect(store.processorRun(session.id, 'files-touched')?.invalidated).toBe(false)
+
+    store.ingestSession(session, 0, [], 'test', 3005)
+    expect(store.processorRun(session.id, 'files-touched')?.invalidated).toBe(true)
+  })
+})
+
+function codexSemanticSession(rawWrapper: string): Session {
+  const parentId = 'outer'
+  return {
+    id: 'codex:semantic',
+    sessionId: 'semantic',
+    source: 'codex',
+    provider: 'openai',
+    project: { cwd: '/repo', repo: 'o/r' },
+    models: [],
+    tokens: emptyUsage(),
+    events: [
+      {
+        kind: 'assistant',
+        blocks: [{ type: 'tool_use', id: parentId, name: 'exec', input: rawWrapper }],
+        usage: emptyUsage(),
+        isSidechain: false,
+        seq: 0,
+      },
+    ],
+    toolCalls: [
+      {
+        id: `${parentId}:0`,
+        parentId,
+        name: 'exec_command',
+        action: 'shell',
+        input: { cmd: 'gh pr create --fill' },
+        target: { command: 'gh pr create --fill' },
+        result: { ok: true, isError: false, raw: 'https://github.com/o/r/pull/1' },
+        isSidechain: false,
+      },
+    ],
+    raw: { path: '/tmp/rollout.jsonl', contentHash: 'same-bytes' },
+  } as Session
 }
 
 describe('artifact upsert (PR clobber safety)', () => {
