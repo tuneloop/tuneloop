@@ -286,7 +286,8 @@ function mapUsage(last: Raw): TokenUsage {
   return {
     input: Math.max(0, num(last.input_tokens) - cached), // input_tokens INCLUDES cached
     output: num(last.output_tokens), // INCLUDES reasoning_output_tokens
-    cacheCreate: 0, // OpenAI has no cache-write charge
+    cacheCreate5m: 0, // OpenAI has no cache-write charge
+    cacheCreate1h: 0,
     cacheRead: cached,
   }
 }

@@ -152,7 +152,7 @@ describe('pi adapter — linear session', () => {
   })
 
   it('sums tokens across all assistant messages', () => {
-    expect(session!.tokens).toEqual({ input: 1100, output: 180, cacheCreate: 200, cacheRead: 150 })
+    expect(session!.tokens).toEqual({ input: 1100, output: 180, cacheCreate5m: 200, cacheCreate1h: 0, cacheRead: 150 })
   })
 
   it('emits events in correct order (skips model_change/thinking_level_change)', () => {
@@ -266,12 +266,12 @@ describe('pi adapter — branched session (multi-leaf split)', () => {
 
   it('primary tokens are from its full path only', () => {
     // Primary path: b3 (in300+out50+cw100) + b8 (in350+out40)
-    expect(sessions[0]!.tokens).toEqual({ input: 650, output: 90, cacheCreate: 100, cacheRead: 0 })
+    expect(sessions[0]!.tokens).toEqual({ input: 650, output: 90, cacheCreate5m: 100, cacheCreate1h: 0, cacheRead: 0 })
   })
 
   it('non-primary tokens are from its full path only', () => {
     // Non-primary path: b3 (in300+out50+cw100) + b5 (in400+out60)
-    expect(sessions[1]!.tokens).toEqual({ input: 700, output: 110, cacheCreate: 100, cacheRead: 0 })
+    expect(sessions[1]!.tokens).toEqual({ input: 700, output: 110, cacheCreate5m: 100, cacheCreate1h: 0, cacheRead: 0 })
   })
 
   it('no double-counting: shared prefix counted on both (trimInheritedPrefix handles dedup later)', () => {
@@ -495,8 +495,8 @@ describe('pi adapter — trimInheritedPrefix integration', () => {
 
     trimInheritedPrefix(child, primary)
 
-    // Only b5's tokens remain: input=400, output=60, cacheCreate=0, cacheRead=0
-    expect(child.tokens).toEqual({ input: 400, output: 60, cacheCreate: 0, cacheRead: 0 })
+    // Only b5's tokens remain: input=400, output=60, cacheCreate5m=0, cacheRead=0
+    expect(child.tokens).toEqual({ input: 400, output: 60, cacheCreate5m: 0, cacheCreate1h: 0, cacheRead: 0 })
   })
 
   it('no double-counting after trim', () => {

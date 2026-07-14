@@ -11,7 +11,7 @@ export interface ModelPrice {
 }
 
 /** Bump when models.json rates change so stored costs can be recomputed. */
-export const PRICE_TABLE_VERSION = '2026-07-09'
+export const PRICE_TABLE_VERSION = '2026-07-14'
 
 type Table = Record<string, Record<string, ModelPrice>>
 const TABLE = models as unknown as Table
@@ -50,15 +50,17 @@ export function priceFor(provider: string, model: string, opts?: { backfill?: bo
   return opts?.backfill ? backfillPrice(provider, model) : undefined
 }
 
+/** Cache-creation cost — the two TTLs are disjoint and bill at their own rates. */
+function cacheWriteCost(u: TokenUsage, p: ModelPrice): number {
+  return u.cacheCreate5m * p.cache_write_5m + u.cacheCreate1h * p.cache_write_1h
+}
+
 /** Cost of a single usage record at a given model's rates (0 if unpriced). */
 export function costOfUsage(provider: string, model: string, u: TokenUsage): number {
   // Enrichment self-cost: opt into the backfill to price non-table providers
   const p = priceFor(provider, model, { backfill: true })
   if (!p) return 0
-  return (
-    (u.input * p.input + u.output * p.output + u.cacheCreate * p.cache_write_5m + u.cacheRead * p.cache_read) /
-    1_000_000
-  )
+  return (u.input * p.input + u.output * p.output + cacheWriteCost(u, p) + u.cacheRead * p.cache_read) / 1_000_000
 }
 
 /**
@@ -85,8 +87,9 @@ export interface CostResult {
 
 /**
  * Cost of a session, priced per assistant message at that message's model, with
- * the per-message breakdown retained. Cache-creation tokens are priced at the
- * 5-minute rate (Claude Code's default).
+ * the per-message breakdown retained. Cache-creation tokens are priced per TTL:
+ * Claude Code writes much of its cache at the 1-hour rate (2x input), which is
+ * 1.6x the 5-minute rate — pricing it all at 5m under-counts real spend.
  */
 export function computeSessionCost(session: Session): CostResult {
   let usd = 0
@@ -109,7 +112,7 @@ export function computeSessionCost(session: Session): CostResult {
         cost =
           (u.input * price.input +
             u.output * price.output +
-            u.cacheCreate * price.cache_write_5m +
+            cacheWriteCost(u, price) +
             u.cacheRead * price.cache_read) /
           1_000_000
       } else {
