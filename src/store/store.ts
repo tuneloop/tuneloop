@@ -3436,7 +3436,11 @@ function buildTranscriptCore(session: Session): {
             // normalized target, so read them from the raw input here; field names
             // differ across harnesses (Claude Code: old_string/new_string;
             // OpenCode: oldString/newString).
-            if (tc?.action === 'file_write' && input && typeof input === 'object') {
+            if (tc?.action === 'file_write' && typeof candidate.input === 'string') {
+              const patchEdits = parseApplyPatch(candidate.input)
+              const hunks = patchEdits.flatMap((edit) => edit.hunks)
+              if (hunks.length) tool.hunks = hunks
+            } else if (tc?.action === 'file_write' && input && typeof input === 'object') {
               if (Array.isArray(input.edits)) {
                 tool.hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
                   del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),

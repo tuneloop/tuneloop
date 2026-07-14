@@ -84,6 +84,39 @@ describe('Codex semantic child persistence and display', () => {
     })
   })
 
+  it('renders string-shaped apply_patch input as transcript diff hunks', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /repo/src/store/store.test.ts',
+      '@@',
+      '-const before = true',
+      '+const after = true',
+      '*** End Patch',
+    ].join('\n')
+    const rawWrapper = `const patch = ${JSON.stringify(patch)}; text(await tools.apply_patch(patch));`
+    const session = codexSemanticSession(rawWrapper)
+    session.toolCalls[0] = {
+      id: 'outer:0',
+      parentId: 'outer',
+      name: 'apply_patch',
+      action: 'file_write',
+      input: patch,
+      target: { paths: ['/repo/src/store/store.test.ts'] },
+      result: { ok: true, isError: false, raw: '[{"type":"input_text","text":"{}"}]' },
+      isSidechain: false,
+    }
+    store.ingestSession(session, 0, [], 'test', 3005)
+
+    expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
+      name: 'apply_patch',
+      command: '/repo/src/store/store.test.ts',
+      hunks: [{ del: 'const before = true', ins: 'const after = true' }],
+      rawWrapper: { name: 'exec', input: rawWrapper },
+    })
+  })
+
   it('invalidates processor runs when normalized parsing changes over unchanged bytes', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
