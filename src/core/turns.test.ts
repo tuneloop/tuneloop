@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { emptyUsage, type Event, type Session } from './model'
 import { firstUserPrompt } from './turns'
-import type { Event, Session } from './model'
 
 function session(events: Event[]): Session {
   return {
@@ -10,7 +10,7 @@ function session(events: Event[]): Session {
     provider: 'anthropic',
     project: {},
     models: [],
-    tokens: { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 },
+    tokens: emptyUsage(),
     events,
     toolCalls: [],
     raw: { path: '/x', contentHash: 'h' },
@@ -52,7 +52,9 @@ describe('firstUserPrompt', () => {
   })
 
   it('returns null when there is no genuine human prompt', () => {
-    const s = session([{ kind: 'assistant', blocks: [], usage: { input: 0, output: 0, cacheCreate: 0, cacheRead: 0 }, isSidechain: false } as Event])
+    const s = session([
+      { kind: 'assistant', blocks: [], usage: emptyUsage(), isSidechain: false },
+    ])
     expect(firstUserPrompt(s)).toBeNull()
   })
 })

@@ -131,7 +131,7 @@ export class Store {
              started_at, ended_at, n_turns, n_tool_calls, models,
              tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read,
              cost_usd, price_table_version, content_hash, parse_version, analyzed_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
              session_id=excluded.session_id, source=excluded.source, provider=excluded.provider,
              title=excluded.title, first_prompt=excluded.first_prompt, repo=excluded.repo, branch=excluded.branch, cwd=excluded.cwd,
