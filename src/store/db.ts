@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 9
+const SCHEMA_VERSION = 10
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   session_id          TEXT,
   source              TEXT,
   provider            TEXT,
-  title               TEXT,
+  title               TEXT,        -- native adapter title (may be absent)
+  first_prompt        TEXT,        -- full opening human prompt; display-title fallback when no native/enriched title
   repo                TEXT,
   branch              TEXT,
   cwd                 TEXT,
@@ -343,5 +344,8 @@ function migrate(db: DB): void {
   }
   if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
     db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')
+  }
+  if (tableExists('sessions') && !has('sessions', 'first_prompt')) {
+    db.exec('ALTER TABLE sessions ADD COLUMN first_prompt TEXT')
   }
 }

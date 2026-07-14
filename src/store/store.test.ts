@@ -404,3 +404,45 @@ describe('summary.lastAnalyzedAt', () => {
     expect(store.summary().lastAnalyzedAt).toBe('2026-06-30T12:00:00.000Z')
   })
 })
+
+describe('display title fallback (first_prompt)', () => {
+  // Seed one session row with explicit title / first_prompt and an optional
+  // enrichment `title` annotation, then read it back through BOTH the list and
+  // the detail query — they share titleExpr, so this asserts the whole chain.
+  function seed(db: ReturnType<typeof openDb>, id: string, cols: { title?: string; first_prompt?: string; enriched?: string }) {
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, title, first_prompt, started_at) VALUES (?,?,?,?,?,?,?)')
+      .run(id, id, 'claude-code', 'anthropic', cols.title ?? null, cols.first_prompt ?? null, '2026-06-30T00:00:00Z')
+    if (cols.enriched != null) {
+      db.prepare("INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'enrich-session', 'title', ?)")
+        .run(id, JSON.stringify(cols.enriched))
+    }
+  }
+
+  it('falls back to the opening prompt when no native/enriched title, in list AND detail', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-fallback', { first_prompt: 'Fix the login redirect loop' })
+
+    const listed = store.sessionList({}).find((r) => r.id === 's-fallback')
+    expect(listed?.title).toBe('Fix the login redirect loop')
+    expect(store.sessionDetail('s-fallback')?.session.title).toBe('Fix the login redirect loop')
+  })
+
+  it('prefers enriched title, then native title, over the opening prompt', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-enriched', { enriched: 'Auth Redirect Fix', title: 'native', first_prompt: 'Fix the login redirect loop' })
+    seed(db, 's-native', { title: 'Native Session Title', first_prompt: 'Fix the login redirect loop' })
+
+    const list = store.sessionList({})
+    expect(list.find((r) => r.id === 's-enriched')?.title).toBe('Auth Redirect Fix')
+    expect(list.find((r) => r.id === 's-native')?.title).toBe('Native Session Title')
+  })
+
+  it('still shows (untitled) in the list when there is no prompt at all', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-empty', {})
+    expect(store.sessionList({}).find((r) => r.id === 's-empty')?.title).toBe('(untitled)')
+  })
+})
