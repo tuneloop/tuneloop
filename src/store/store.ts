@@ -3102,8 +3102,6 @@ export interface TranscriptTool {
   error?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
-  /** Verbatim transport envelope retained behind a disclosure for semantic child calls. */
-  rawWrapper?: { name: string; input: string }
 }
 
 export interface TranscriptTurn {
@@ -3399,17 +3397,11 @@ function buildTranscriptCore(session: Session): {
         else if (b.type === 'tool_use') {
           const direct = tcById.get(b.id)
           const children = childrenByParent.get(b.id) ?? []
-          const candidates: Array<{ tc?: ToolCall; name: string; input: unknown; semantic?: boolean; rawWrapper?: TranscriptTool['rawWrapper'] }> =
+          const candidates: Array<{ tc?: ToolCall; name: string; input: unknown; semantic?: boolean }> =
             direct
               ? [{ tc: direct, name: b.name, input: b.input }]
               : children.length
-                ? children.map((tc, i) => ({
-                  tc,
-                  name: tc.name,
-                  input: tc.input,
-                  semantic: true,
-                  rawWrapper: i === 0 && typeof b.input === 'string' ? { name: b.name, input: b.input } : undefined,
-                }))
+                ? children.map((tc) => ({ tc, name: tc.name, input: tc.input, semantic: true }))
                 : [{ name: b.name, input: b.input }]
 
           for (const candidate of candidates) {
@@ -3430,7 +3422,6 @@ function buildTranscriptCore(session: Session): {
               ok,
               idx: tc ? idxById.get(tc.id) : undefined,
               target: clip(target, 1500),
-              rawWrapper: candidate.rawWrapper,
             }
             if (command) tool.command = command
             if (output) tool.output = output

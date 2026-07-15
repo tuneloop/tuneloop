@@ -20,7 +20,8 @@ import { extractExecEnvelope } from './exec-envelope'
 // same bytes (composed with NORMALIZE_VERSION in analyze.ts). 1: initial Codex adapter.
 // 3: expand unified `exec` JavaScript envelopes into canonical child tool calls.
 // 4: reclassify shell `apply_patch <<'PATCH'` commands as file_write with the patch body.
-export const PARSE_VERSION = 4
+// 5: split exec-envelope outputs by block count (any JS shape) + strip runtime preamble.
+export const PARSE_VERSION = 5
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -219,11 +220,10 @@ export async function parseCodex(path: string): Promise<Session | null> {
         continue
       }
       if (p.type === 'custom_tool_call' && name === 'exec' && typeof input === 'string') {
-        const envelope = extractExecEnvelope(input)
-        const { operations } = envelope
+        const { operations } = extractExecEnvelope(input)
         if (operations.length) {
           const out = resultById.get(callId)
-          const childOutputs = execChildOutputs(out, operations.length, envelope.emitsResultsInOrder)
+          const childOutputs = execChildOutputs(out, operations.length)
           pending.push({ type: 'tool_use', id: callId, name, input })
           operations.forEach((operation, ordinal) => {
             const mapped = operation.resolved
@@ -386,28 +386,39 @@ function outputString(output: unknown): string {
   return typeof output === 'string' ? output : JSON.stringify(output ?? '')
 }
 
+// The code-mode runtime frames every exec output as `Script completed|running\nWall
+// time …\nOutput:\n` in the first text block; the real per-command output follows in
+// later blocks. This framing is runtime noise (a native exec_command carries none),
+// so it is stripped uniformly below.
+const EXEC_PREAMBLE = /^Script (?:completed|running)\b/
+
 /**
- * Attribute an exec envelope's emitted text to its semantic children only when
- * the shape is unambiguous. Functions.exec prepends one generic completion block;
- * Promise.all wrappers then emit one block per result in source order. A mismatch
- * (typically output truncation or a combined custom rendering) intentionally
- * yields no per-child raw output rather than leaking one command's URL/error into
- * another command's analytics.
+ * Split an exec envelope's emitted output across its semantic children. The runtime
+ * emits one preamble block plus one text block per `text(...)` call, in source order —
+ * true regardless of how the JS emitted them (sequential `await`s, `Promise.all` + loop,
+ * etc.), so we key on that block structure, NOT the JS shape.
+ *
+ *   - payload-block count === child count  → map 1:1 in source order.
+ *   - single child                         → join all payload blocks into it.
+ *   - any other mismatch (truncation, a command that printed nothing, multiple emits
+ *     from one command) → no per-child output, so one command's URL/error never leaks
+ *     into another's analytics. Correctness over coverage.
  */
-function execChildOutputs(out: string | undefined, count: number, emitsResultsInOrder: boolean): Array<string | undefined> {
-  if (count === 1) return [out]
-  if (out == null || !emitsResultsInOrder) return new Array(count).fill(undefined)
+function execChildOutputs(out: string | undefined, count: number): Array<string | undefined> {
+  if (out == null) return new Array(count).fill(undefined)
+  let payloads: string[]
   try {
     const parsed = JSON.parse(out)
-    if (!Array.isArray(parsed)) return new Array(count).fill(undefined)
+    if (!Array.isArray(parsed)) return count === 1 ? [out] : new Array(count).fill(undefined)
     const texts = parsed
       .map((b) => (b && typeof b === 'object' && typeof (b as Raw).text === 'string' ? (b as Raw).text as string : null))
       .filter((s): s is string => s != null)
-    const payloads = texts.length && /^Script completed\b/.test(texts[0]!) ? texts.slice(1) : texts
-    return payloads.length === count ? payloads : new Array(count).fill(undefined)
+    payloads = texts.length && EXEC_PREAMBLE.test(texts[0]!) ? texts.slice(1) : texts
   } catch {
-    return new Array(count).fill(undefined)
+    return count === 1 ? [out] : new Array(count).fill(undefined)
   }
+  if (count === 1) return [payloads.join('\n')]
+  return payloads.length === count ? payloads : new Array(count).fill(undefined)
 }
 
 function parseArgs(args: unknown): unknown {

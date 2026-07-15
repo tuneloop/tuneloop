@@ -932,13 +932,6 @@ export function openDetail(id, focus?: any) {
       var row = '<div class="tool-block-row"' + attr + '>' +
         '<span class="tool-block-name">' + esc(tl.name) + '</span>' +
         errBadge + cmd + go + toggle + '</div>';
-      // Semantic-first for transport envelopes: the nested operation is the normal
-      // row above; the exact Codex JavaScript remains available without dominating
-      // the transcript or being counted as another analytics tool call.
-      var rawWrapper = tl.rawWrapper
-        ? '<details class="tool-raw-wrapper"><summary>Raw ' + esc(tl.rawWrapper.name) + ' wrapper</summary>' +
-          '<pre>' + esc(tl.rawWrapper.input) + '</pre></details>'
-        : '';
       // Error panel for failed calls (stepper jump target)
       var errPanel = '';
       if (!tl.ok && tl.error) {
@@ -950,7 +943,7 @@ export function openDetail(id, focus?: any) {
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
       return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '">' +
-        row + rawWrapper + body + errPanel + '</div>';
+        row + body + errPanel + '</div>';
     }
 
     function toolsHtml(tools) {

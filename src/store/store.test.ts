@@ -67,21 +67,19 @@ describe('Codex semantic child persistence and display', () => {
     })
   })
 
-  it('renders semantic children first while retaining the raw exec wrapper', () => {
+  it('renders the semantic child of an exec envelope, not the raw JS wrapper', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
-    const rawWrapper = 'const r = await tools.exec_command({cmd:"gh pr create --fill"}); text(r.output);'
-    const session = codexSemanticSession(rawWrapper)
+    const session = codexSemanticSession('const r = await tools.exec_command({cmd:"gh pr create --fill"}); text(r.output);')
     store.ingestSession(session, 0, [], 'test', 3005)
 
     const transcript = store.sessionDetail(session.id)?.transcript
     expect(transcript?.turns).toHaveLength(1)
     expect(transcript?.turns[0]?.tools).toHaveLength(1)
-    expect(transcript?.turns[0]?.tools[0]).toMatchObject({
-      name: 'exec_command',
-      command: 'gh pr create --fill',
-      rawWrapper: { name: 'exec', input: rawWrapper },
-    })
+    const tool = transcript?.turns[0]?.tools[0] as Record<string, unknown> | undefined
+    expect(tool).toMatchObject({ name: 'exec_command', command: 'gh pr create --fill' })
+    // The raw exec JavaScript is intentionally not surfaced — the child row is the view.
+    expect(tool).not.toHaveProperty('rawWrapper')
   })
 
   it('renders a multi-file apply_patch as separate named transcript diffs', () => {
@@ -102,8 +100,8 @@ describe('Codex semantic child persistence and display', () => {
       '+describe(\'exec envelope\', () => { it(\'parses\', () => {}) })',
       '*** End Patch',
     ].join('\n')
-    const rawWrapper = `const patch = ${JSON.stringify(patch)}; text(await tools.apply_patch(patch));`
-    const session = codexSemanticSession(rawWrapper)
+    const envelope = `const patch = ${JSON.stringify(patch)}; text(await tools.apply_patch(patch));`
+    const session = codexSemanticSession(envelope)
     session.toolCalls[0] = {
       id: 'outer:0',
       parentId: 'outer',
@@ -149,7 +147,6 @@ describe('Codex semantic child persistence and display', () => {
           ],
         },
       ],
-      rawWrapper: { name: 'exec', input: rawWrapper },
     })
   })
 
@@ -212,7 +209,7 @@ describe('Codex semantic child persistence and display', () => {
   })
 })
 
-function codexSemanticSession(rawWrapper: string): Session {
+function codexSemanticSession(envelope: string): Session {
   const parentId = 'outer'
   return {
     id: 'codex:semantic',
@@ -225,7 +222,7 @@ function codexSemanticSession(rawWrapper: string): Session {
     events: [
       {
         kind: 'assistant',
-        blocks: [{ type: 'tool_use', id: parentId, name: 'exec', input: rawWrapper }],
+        blocks: [{ type: 'tool_use', id: parentId, name: 'exec', input: envelope }],
         usage: emptyUsage(),
         isSidechain: false,
         seq: 0,

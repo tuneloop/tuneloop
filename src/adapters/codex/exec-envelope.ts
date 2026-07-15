@@ -12,8 +12,6 @@ export interface ExecOperation {
 
 export interface ExecEnvelope {
   operations: ExecOperation[]
-  /** True only for `for (const x of <Promise.all result>) text(x...)`. */
-  emitsResultsInOrder: boolean
 }
 
 /* Acorn's precise union is intentionally hidden behind this local traversal type. */
@@ -40,7 +38,7 @@ export function extractExecEnvelope(source: string): ExecEnvelope {
       allowAwaitOutsideFunction: true,
     })
   } catch {
-    return { operations: [], emitsResultsInOrder: false }
+    return { operations: [] }
   }
 
   const env = new Map<string, unknown>()
@@ -70,60 +68,7 @@ export function extractExecEnvelope(source: string): ExecEnvelope {
     })
   })
   operations.sort((a, b) => a.start - b.start)
-  return { operations, emitsResultsInOrder: orderedPromiseEmission(program as RawNode, operations) }
-}
-
-function orderedPromiseEmission(program: RawNode, operations: ExecOperation[]): boolean {
-  if (operations.length < 2) return false
-  const promiseRanges = new Map<string, { start: number; end: number }>()
-  walk(program, (node) => {
-    if (node.type !== 'VariableDeclarator') return
-    const id = node.id as RawNode | undefined
-    let init = node.init as RawNode | null | undefined
-    if (id?.type !== 'Identifier' || !init) return
-    if (init.type === 'AwaitExpression') init = init.argument as RawNode
-    if (!isPromiseAll(init)) return
-    promiseRanges.set(String(id.name), { start: init.start, end: init.end })
-  })
-
-  let ordered = false
-  walk(program, (node) => {
-    if (ordered || node.type !== 'ForOfStatement') return
-    const right = node.right as RawNode | undefined
-    const left = node.left as RawNode | undefined
-    if (right?.type !== 'Identifier' || left?.type !== 'VariableDeclaration') return
-    const range = promiseRanges.get(String(right.name))
-    const declaration = (left.declarations as RawNode[] | undefined)?.[0]
-    const item = declaration?.id as RawNode | undefined
-    if (!range || item?.type !== 'Identifier') return
-    if (!operations.every((op) => op.start >= range.start && op.start <= range.end)) return
-    const body = node.body as RawNode | undefined
-    if (body && containsTextEmission(body, String(item.name))) ordered = true
-  })
-  return ordered
-}
-
-function isPromiseAll(node: RawNode): boolean {
-  if (node.type !== 'CallExpression') return false
-  const callee = node.callee as RawNode | undefined
-  const object = callee?.object as RawNode | undefined
-  const property = callee?.property as RawNode | undefined
-  return callee?.type === 'MemberExpression' && object?.type === 'Identifier' && object.name === 'Promise' && property?.type === 'Identifier' && property.name === 'all'
-}
-
-function containsTextEmission(body: RawNode, item: string): boolean {
-  let found = false
-  walk(body, (node) => {
-    if (found || node.type !== 'CallExpression') return
-    const callee = node.callee as RawNode | undefined
-    if (callee?.type !== 'Identifier' || callee.name !== 'text') return
-    const first = (node.arguments as RawNode[] | undefined)?.[0]
-    if (!first) return
-    walk(first, (part) => {
-      if (part.type === 'Identifier' && part.name === item) found = true
-    })
-  })
-  return found
+  return { operations }
 }
 
 function toolMethod(callee: RawNode | undefined): string | null {

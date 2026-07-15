@@ -242,6 +242,57 @@ describe('Codex unified exec envelopes', () => {
     expect(session.toolCalls.some((t) => t.name === 'apply_patch')).toBe(false)
   })
 
+  it('maps sequential (non-Promise.all) awaits to their outputs by block order', async () => {
+    // gpt-5.6-sol writes plain sequential awaits, not a Promise.all + for-loop. Output is
+    // still one preamble block + one block per text() call, so each child gets its own.
+    const session = await parseRecords([
+      meta('sequential'),
+      customExec(
+        'seq-outer',
+        'const status = await tools.exec_command({cmd:"git status",workdir:"/repo"});\ntext(status.output);\n' +
+          'const test = await tools.exec_command({cmd:"pytest -q",workdir:"/repo"});\ntext(test.output);\n',
+      ),
+      customOutput('seq-outer', outputBlocks('On branch main\nnothing to commit', '6 passed in 0.01s')),
+    ])
+
+    expect(session.toolCalls.map((t) => t.id)).toEqual(['seq-outer:0', 'seq-outer:1'])
+    expect(session.toolCalls[0]?.target.command).toBe('git status')
+    expect(String(session.toolCalls[0]?.result.raw)).toBe('On branch main\nnothing to commit')
+    expect(String(session.toolCalls[1]?.result.raw)).toBe('6 passed in 0.01s')
+    // The runtime preamble ("Script completed / Wall time … / Output:") is stripped.
+    expect(String(session.toolCalls[0]?.result.raw)).not.toContain('Script completed')
+  })
+
+  it('strips the runtime preamble from a single-child exec output', async () => {
+    const session = await parseRecords([
+      meta('single-out'),
+      customExec('one-outer', 'const r = await tools.exec_command({cmd:"git diff",workdir:"/repo"});\ntext(r.output);\n'),
+      customOutput('one-outer', outputBlocks('diff --git a/x b/x\n+added line')),
+    ])
+
+    expect(session.toolCalls).toHaveLength(1)
+    expect(String(session.toolCalls[0]?.result.raw)).toBe('diff --git a/x b/x\n+added line')
+    expect(String(session.toolCalls[0]?.result.raw)).not.toContain('Wall time')
+  })
+
+  it('drops per-child output when block count does not match child count', async () => {
+    // Two commands but only one payload block (one printed nothing / was truncated):
+    // no per-child attribution rather than leaking command 0's output onto both.
+    const session = await parseRecords([
+      meta('mismatch'),
+      customExec(
+        'mm-outer',
+        'const a = await tools.exec_command({cmd:"true",workdir:"/repo"});\ntext(a.output);\n' +
+          'const b = await tools.exec_command({cmd:"false",workdir:"/repo"});\ntext(b.output);\n',
+      ),
+      customOutput('mm-outer', outputBlocks('only one block')),
+    ])
+
+    expect(session.toolCalls).toHaveLength(2)
+    expect(session.toolCalls[0]?.result.raw).toBeUndefined()
+    expect(session.toolCalls[1]?.result.raw).toBeUndefined()
+  })
+
   it('joins a deferred exec result from wait back to the originating shell call', async () => {
     const session = await parseRecords([
       meta('deferred'),

@@ -395,10 +395,6 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tool-block-body .fc-diff { margin: 0; }
 .tool-file-diff + .tool-file-diff { margin-top: 8px; }
 .tool-file-diff-path { margin-bottom: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; font-weight: 600; color: var(--muted); word-break: break-all; }
-.tool-raw-wrapper { border-top: 1px solid var(--line); padding: 5px 10px; color: var(--muted); font-size: 10px; }
-.tool-raw-wrapper summary { cursor: pointer; user-select: none; }
-.tool-raw-wrapper summary:hover { color: var(--emerald); }
-.tool-raw-wrapper pre { margin: 6px 0 1px; padding: 6px 8px; max-height: 300px; overflow: auto; border-radius: 5px; background: var(--track); color: var(--ink); font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 /* Tool overflow (>TOOLCAP) */
 .tool-rest { display: none; }
 .tool-rest.on { display: block; }
