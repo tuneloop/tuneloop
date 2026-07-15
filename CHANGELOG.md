@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-15
+
+### Fixed
+
+- Codex exec tool envelopes are now parsed: outputs are split per command, and
+  shell `apply_patch` invocations (including heredocs) are rendered as file
+  writes with diffs instead of raw shell payloads. ([#79])
+- Codex patches render as proper transcript diffs, with multi-file patches
+  split per file and transcript tool controls aligned. ([#79])
+- Codex guardian approval sessions are now linked to their parent session
+  instead of appearing as standalone sessions. ([#80])
+
 ## [0.4.0] - 2026-07-13
 
 ### Added
@@ -66,12 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
+[0.4.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.1
 [0.4.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.0
 [0.3.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.1
 [0.3.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#80]: https://github.com/tuneloop/tuneloop/pull/80
+[#79]: https://github.com/tuneloop/tuneloop/pull/79
 [#76]: https://github.com/tuneloop/tuneloop/pull/76
 [#73]: https://github.com/tuneloop/tuneloop/pull/73
 [#72]: https://github.com/tuneloop/tuneloop/pull/72
