@@ -13,13 +13,14 @@ import type {
   ToolCall,
   UserMessage,
 } from '../../core/model'
-import { mapAction } from './actions'
+import { mapAction, shellPatchBody } from './actions'
 import { extractExecEnvelope } from './exec-envelope'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (composed with NORMALIZE_VERSION in analyze.ts). 1: initial Codex adapter.
 // 3: expand unified `exec` JavaScript envelopes into canonical child tool calls.
-export const PARSE_VERSION = 3
+// 4: reclassify shell `apply_patch <<'PATCH'` commands as file_write with the patch body.
+export const PARSE_VERSION = 4
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -257,13 +258,19 @@ export async function parseCodex(path: string): Promise<Session | null> {
       // No signal at all → assume ok.
       const code = exitCodeOf(out)
       const isError = code != null ? code !== 0 : toolCallFailed(out)
-      pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name
+      pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name + raw command
+      // A shell `apply_patch <<'PATCH'` reclassified to file_write: carry the patch body
+      // as `input` (not the {cmd} object) so file-diff and PR content-match — which key on
+      // a string patch input — treat it like the native tool.
+      const cmd = input && typeof input === 'object' ? (input as Record<string, unknown>).cmd : undefined
+      const analyticsInput =
+        mapped.action === 'file_write' && typeof cmd === 'string' ? shellPatchBody(cmd) ?? input : input
       toolCalls.push({
         id: callId,
         // Analytics identity: refined for skills (the specific skill name), raw tool name otherwise.
         name: mapped.name ?? name,
         action: mapped.action,
-        input,
+        input: analyticsInput,
         target: mapped.target,
         result: { ok: !isError, isError, raw: out },
         isSidechain: isSubagent,

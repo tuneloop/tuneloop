@@ -114,6 +114,52 @@ describe('Codex unified exec envelopes', () => {
     })
   })
 
+  it('reclassifies a shell `apply_patch <<PATCH` heredoc as a file_write with the patch body', async () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: src/calculator/operations/floor_divide.py',
+      '+def floor_divide(a, b):',
+      '+    return a // b',
+      '*** Update File: src/calculator/operations/__init__.py',
+      '@@',
+      '-__all__ = ["add"]',
+      '+__all__ = ["add", "floor_divide"]',
+      '*** End Patch',
+    ].join('\n')
+    const cmd = `apply_patch <<'PATCH'\n${patch}\nPATCH`
+    const session = await parseRecords([
+      meta('heredoc'),
+      call('patch-cmd', 'exec_command', JSON.stringify({ cmd, workdir: '/repo' })),
+      functionOutput('patch-cmd', { output: 'Success', metadata: { exit_code: 0 } }),
+    ])
+
+    expect(session.toolCalls).toHaveLength(1)
+    expect(session.toolCalls[0]).toMatchObject({
+      id: 'patch-cmd',
+      action: 'file_write',
+      target: { paths: ['src/calculator/operations/floor_divide.py', 'src/calculator/operations/__init__.py'] },
+    })
+    // input is the raw patch body (not the {cmd} object) so file-diff/PR consumers see
+    // exactly what the native apply_patch tool carries.
+    expect(session.toolCalls[0]?.input).toBe(patch)
+
+    const fileResult = await filesTouched.run(processorContext(session))
+    expect(fileResult.files?.map((f) => f.path)).toEqual([
+      'src/calculator/operations/floor_divide.py',
+      'src/calculator/operations/__init__.py',
+    ])
+  })
+
+  it('does not treat a mention of apply_patch inside another command as a patch', async () => {
+    const session = await parseRecords([
+      meta('mention'),
+      call('echo-cmd', 'exec_command', JSON.stringify({ cmd: 'echo "run apply_patch to edit files"', workdir: '/repo' })),
+      functionOutput('echo-cmd', { output: '', metadata: { exit_code: 0 } }),
+    ])
+
+    expect(session.toolCalls[0]).toMatchObject({ action: 'shell' })
+  })
+
   it('expands single shell and bound apply_patch calls into semantic children', async () => {
     const patch = [
       '*** Begin Patch',

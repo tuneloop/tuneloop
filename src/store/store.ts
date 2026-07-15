@@ -3434,28 +3434,30 @@ function buildTranscriptCore(session: Session): {
             }
             if (command) tool.command = command
             if (output) tool.output = output
-            // file_write → inline diff. The before/after strings aren't in the
-            // normalized target, so read them from the raw input here; field names
-            // differ across harnesses (Claude Code: old_string/new_string;
-            // OpenCode: oldString/newString).
-            if (tc?.action === 'file_write' && typeof candidate.input === 'string') {
-              const patchEdits = parseApplyPatch(candidate.input)
+            // file_write → inline diff, read from the normalized tc.input (not the block's
+            // raw input): a Codex shell `apply_patch <<'PATCH'` keeps the {cmd} object on the
+            // block but carries the patch string on tc.input. Identical for other harnesses.
+            // Field names differ (Claude: old_string/new_string; OpenCode: camelCase).
+            const fileInput = tc?.action === 'file_write' ? tc.input : candidate.input
+            if (tc?.action === 'file_write' && typeof fileInput === 'string') {
+              const patchEdits = parseApplyPatch(fileInput)
               if (patchEdits.length) {
                 tool.fileDiffs = patchEdits.map((edit) => ({ path: edit.path, hunks: edit.hunks }))
                 tool.command = patchEdits.length === 1 ? patchEdits[0]!.path : `${patchEdits.length} files changed`
               }
-            } else if (tc?.action === 'file_write' && input && typeof input === 'object') {
-              if (Array.isArray(input.edits)) {
-                tool.hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
+            } else if (tc?.action === 'file_write' && fileInput && typeof fileInput === 'object') {
+              const fi = fileInput as Record<string, unknown>
+              if (Array.isArray(fi.edits)) {
+                tool.hunks = (fi.edits as Array<Record<string, unknown>>).map((e) => ({
                   del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
                   ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
                 }))
               } else {
-                const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
-                const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
+                const old_s = clip(String(fi.old_string ?? fi.oldString ?? ''), 2000)
+                const new_s = clip(String(fi.new_string ?? fi.newString ?? ''), 2000)
                 if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
                 else {
-                  const content = clip(String(input.content ?? ''), 2000)
+                  const content = clip(String(fi.content ?? ''), 2000)
                   if (content) tool.hunks = [{ del: '', ins: content }]
                 }
               }

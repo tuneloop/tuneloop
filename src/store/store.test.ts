@@ -153,6 +153,52 @@ describe('Codex semantic child persistence and display', () => {
     })
   })
 
+  it('renders a file diff for a shell `apply_patch` heredoc from tc.input, not the raw {cmd} block', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: src/calculator/operations/floor_divide.py',
+      '+def floor_divide(a, b):',
+      '+    return a // b',
+      '*** End Patch',
+    ].join('\n')
+    // The transcript block keeps the literal shell command ({cmd} object); the tool call
+    // carries the extracted patch string. The diff must come from tc.input.
+    const session = codexSemanticSession('unused')
+    session.id = 'codex:heredoc'
+    session.events[0] = {
+      kind: 'assistant',
+      blocks: [{ type: 'tool_use', id: 'heredoc-tool', name: 'exec_command', input: { cmd: `apply_patch <<'PATCH'\n${patch}\nPATCH` } }],
+      usage: emptyUsage(),
+      isSidechain: false,
+      seq: 0,
+    }
+    session.toolCalls = [
+      {
+        id: 'heredoc-tool',
+        name: 'exec_command',
+        action: 'file_write',
+        input: patch,
+        target: { paths: ['src/calculator/operations/floor_divide.py'] },
+        result: { ok: true, isError: false, raw: 'Success. Updated the following files:\nA src/calculator/operations/floor_divide.py' },
+        isSidechain: false,
+      },
+    ]
+    store.ingestSession(session, 0, [], 'test', 4005)
+
+    expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
+      name: 'exec_command',
+      command: 'src/calculator/operations/floor_divide.py',
+      fileDiffs: [
+        {
+          path: 'src/calculator/operations/floor_divide.py',
+          hunks: [{ del: '', ins: 'def floor_divide(a, b):\n    return a // b' }],
+        },
+      ],
+    })
+  })
+
   it('invalidates processor runs when normalized parsing changes over unchanged bytes', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
