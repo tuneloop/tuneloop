@@ -11,6 +11,32 @@ import type { ProcessorContext, ShResult } from '../../core/processor'
 import type { Session } from '../../core/model'
 import { parseCodex } from './parse'
 
+describe('Codex session relationships', () => {
+  it('links guardian approval sidechains through top-level parent_thread_id', async () => {
+    const session = await parseRecords([
+      {
+        timestamp: '2026-07-14T20:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'guardian-review',
+          session_id: 'parent-session',
+          parent_thread_id: 'parent-session',
+          thread_source: 'subagent',
+          source: { subagent: { other: 'guardian' } },
+          cwd: '/repo',
+        },
+      },
+    ])
+
+    expect(session).toMatchObject({
+      id: 'codex:guardian-review',
+      sessionId: 'guardian-review',
+      isSubagent: true,
+      forkedFromId: 'parent-session',
+    })
+  })
+})
+
 describe('Codex token usage and cost', () => {
   it('splits cached input and ignores repeated cumulative-total events', async () => {
     const firstUsage = {
