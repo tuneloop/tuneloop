@@ -21,7 +21,8 @@ import { extractExecEnvelope } from './exec-envelope'
 // 3: expand unified `exec` JavaScript envelopes into canonical child tool calls.
 // 4: reclassify shell `apply_patch <<'PATCH'` commands as file_write with the patch body.
 // 5: split exec-envelope outputs by block count (any JS shape) + strip runtime preamble.
-export const PARSE_VERSION = 5
+// 6: extract the patch body for a shell `apply_patch` inside an exec envelope too.
+export const PARSE_VERSION = 6
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -238,7 +239,7 @@ export async function parseCodex(path: string): Promise<Session | null> {
               parentId: callId,
               name: mapped.name ?? operation.name,
               action: mapped.action,
-              input: operation.input,
+              input: patchInput(mapped.action, operation.input),
               target: mapped.target,
               result: { ok: !isError, isError, raw: childOut },
               isSidechain: isSubagent,
@@ -259,18 +260,12 @@ export async function parseCodex(path: string): Promise<Session | null> {
       const code = exitCodeOf(out)
       const isError = code != null ? code !== 0 : toolCallFailed(out)
       pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name + raw command
-      // A shell `apply_patch <<'PATCH'` reclassified to file_write: carry the patch body
-      // as `input` (not the {cmd} object) so file-diff and PR content-match — which key on
-      // a string patch input — treat it like the native tool.
-      const cmd = input && typeof input === 'object' ? (input as Record<string, unknown>).cmd : undefined
-      const analyticsInput =
-        mapped.action === 'file_write' && typeof cmd === 'string' ? shellPatchBody(cmd) ?? input : input
       toolCalls.push({
         id: callId,
         // Analytics identity: refined for skills (the specific skill name), raw tool name otherwise.
         name: mapped.name ?? name,
         action: mapped.action,
-        input: analyticsInput,
+        input: patchInput(mapped.action, input),
         target: mapped.target,
         result: { ok: !isError, isError, raw: out },
         isSidechain: isSubagent,
@@ -384,6 +379,17 @@ function summaryText(summary: unknown): string {
 
 function outputString(output: unknown): string {
   return typeof output === 'string' ? output : JSON.stringify(output ?? '')
+}
+
+/**
+ * For a shell `apply_patch <<'PATCH'` reclassified to file_write, carry the patch body as
+ * `input` (not the {cmd} object) so file-diff rendering and PR content-match — which key on
+ * a string patch input — treat it like the native tool. Applies on both the direct
+ * function_call path and the exec-envelope child path. Any other input passes through.
+ */
+function patchInput(action: string, input: unknown): unknown {
+  const cmd = input && typeof input === 'object' ? (input as Record<string, unknown>).cmd : undefined
+  return action === 'file_write' && typeof cmd === 'string' ? shellPatchBody(cmd) ?? input : input
 }
 
 // The code-mode runtime frames every exec output as `Script completed|running\nWall

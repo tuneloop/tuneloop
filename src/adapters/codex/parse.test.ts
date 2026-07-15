@@ -150,6 +150,36 @@ describe('Codex unified exec envelopes', () => {
     ])
   })
 
+  it('extracts the patch body for a shell `apply_patch` heredoc nested in an exec envelope', async () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: src/calculator/operations/floor_divide.py',
+      '+def floor_divide(a, b):',
+      '+    return a // b',
+      '*** End Patch',
+    ].join('\n')
+    const cmd = `apply_patch <<'PATCH'\n${patch}\nPATCH`
+    const session = await parseRecords([
+      meta('env-heredoc'),
+      customExec('env-outer', `const r = await tools.exec_command(${JSON.stringify({ cmd, workdir: '/repo' })});\ntext(r.output);\n`),
+      customOutput('env-outer', outputBlocks('Success')),
+    ])
+
+    expect(session.toolCalls).toHaveLength(1)
+    expect(session.toolCalls[0]).toMatchObject({
+      id: 'env-outer:0',
+      parentId: 'env-outer',
+      action: 'file_write',
+      target: { paths: ['src/calculator/operations/floor_divide.py'] },
+    })
+    // Same as the direct path: the child carries the patch body string, not the {cmd} object,
+    // so file-diff rendering and PR content-match treat it like the native apply_patch tool.
+    expect(session.toolCalls[0]?.input).toBe(patch)
+
+    const fileResult = await filesTouched.run(processorContext(session))
+    expect(fileResult.files?.map((f) => f.path)).toEqual(['src/calculator/operations/floor_divide.py'])
+  })
+
   it('does not treat a mention of apply_patch inside another command as a patch', async () => {
     const session = await parseRecords([
       meta('mention'),
