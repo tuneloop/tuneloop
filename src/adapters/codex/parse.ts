@@ -22,7 +22,8 @@ import { extractExecEnvelope } from './exec-envelope'
 // 4: reclassify shell `apply_patch <<'PATCH'` commands as file_write with the patch body.
 // 5: split exec-envelope outputs by block count (any JS shape) + strip runtime preamble.
 // 6: extract the patch body for a shell `apply_patch` inside an exec envelope too.
-export const PARSE_VERSION = 6
+// 7: link guardian approval sidechains that report a top-level `parent_thread_id`.
+export const PARSE_VERSION = 7
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -59,9 +60,11 @@ export async function parseCodex(path: string): Promise<Session | null> {
   const forkedFromId: string | undefined =
     typeof meta.forked_from_id === 'string'
       ? meta.forked_from_id
-      : typeof meta?.source?.subagent?.thread_spawn?.parent_thread_id === 'string'
-        ? meta.source.subagent.thread_spawn.parent_thread_id
-        : undefined
+      : typeof meta.parent_thread_id === 'string'
+        ? meta.parent_thread_id
+        : typeof meta?.source?.subagent?.thread_spawn?.parent_thread_id === 'string'
+          ? meta.source.subagent.thread_spawn.parent_thread_id
+          : undefined
 
   // Two things gathered up front (some trail what they describe in file order):
   //  - tool call_id -> output string, so a call joins its result regardless of order.
