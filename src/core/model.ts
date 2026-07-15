@@ -112,6 +112,11 @@ export type Event = UserMessage | AssistantMessage | SystemEvent
 /** A tool_use joined to its tool_result, classified into a canonical action. */
 export interface ToolCall {
   id: string
+  /**
+   * Raw event-level tool_use id when this semantic operation was recovered from
+   * a transport envelope (for example Codex's JavaScript `exec` wrapper).
+   */
+  parentId?: string
   name: string
   action: CanonicalAction
   input: unknown

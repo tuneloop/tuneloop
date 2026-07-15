@@ -100,8 +100,14 @@ export function deterministicBlocks(session: Session): Block[] {
   const m = main.length
   if (m === 0) return []
 
-  const idToTool = new Map<string, ToolCall>()
-  for (const tc of session.toolCalls) idToTool.set(tc.id, tc)
+  const idToTools = new Map<string, ToolCall[]>()
+  for (const tc of session.toolCalls) {
+    for (const id of [tc.id, tc.parentId].filter((x): x is string => !!x)) {
+      const arr = idToTools.get(id) ?? []
+      arr.push(tc)
+      idToTools.set(id, arr)
+    }
+  }
 
   // Per main event: does it START a block (real user turn), and does a boundary
   // tool call CLOSE it (cut after)?
@@ -114,12 +120,13 @@ export function deterministicBlocks(session: Session): Block[] {
       let bk: BoundaryKind | null = null
       for (const b of ev.blocks) {
         if (b.type !== 'tool_use') continue
-        const tc = idToTool.get(b.id)
-        if (!tc) continue
-        const k = boundaryKind(tc)
-        if (k === 'pr_merge' || k === 'pr_create') { bk = k; break } // producing a PR dominates a same-message review/commit
-        if (k === 'pr_review') bk = 'pr_review' // a review outranks a bare commit in the same message
-        else if (k === 'commit' && bk !== 'pr_review') bk = 'commit'
+        for (const tc of idToTools.get(b.id) ?? []) {
+          const k = boundaryKind(tc)
+          if (k === 'pr_merge' || k === 'pr_create') { bk = k; break } // producing a PR dominates a same-message review/commit
+          if (k === 'pr_review') bk = 'pr_review' // a review outranks a bare commit in the same message
+          else if (k === 'commit' && bk !== 'pr_review') bk = 'commit'
+        }
+        if (bk === 'pr_merge' || bk === 'pr_create') break
       }
       closeKind[i] = bk
     }
@@ -231,10 +238,10 @@ export function blockMembership(session: Session, blocks: Block[]): BlockMembers
   }
 
   for (const tc of session.toolCalls) {
-    const seq = idToSeq.get(tc.id)
+    const seq = idToSeq.get(tc.id) ?? (tc.parentId ? idToSeq.get(tc.parentId) : undefined)
     if (seq != null) tool.push(seqToBlock[seq]!)
     else {
-      const agent = idToAgent.get(tc.id)
+      const agent = idToAgent.get(tc.id) ?? (tc.parentId ? idToAgent.get(tc.parentId) : undefined)
       tool.push((agent ? agentToBlock.get(agent) : undefined) ?? nearestByTs(tc.ts))
     }
   }

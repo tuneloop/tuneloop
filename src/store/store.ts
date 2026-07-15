@@ -120,6 +120,11 @@ export class Store {
   ) {
     const nTurns = session.events.filter((e) => e.kind === 'user').length
     const tx = this.db.transaction(() => {
+      const prior = this.db
+        .prepare('SELECT content_hash AS hash, parse_version AS parseVersion FROM sessions WHERE id = ?')
+        .get(session.id) as { hash: string | null; parseVersion: number | null } | undefined
+      const normalizationChanged =
+        prior != null && prior.hash === session.raw.contentHash && (prior.parseVersion ?? 0) < parseVersion
       // Upsert (NOT INSERT OR REPLACE): replacing the row would fire ON DELETE
       // CASCADE and wipe processor-owned children (annotations, outcomes,
       // session_artifacts) that a cache-hit processor then won't recreate. Update
@@ -225,6 +230,12 @@ export class Store {
           f.tokens.cacheRead,
           f.usd,
         )
+      }
+      // Parser upgrades can change the normalized blob/tool rows while the raw
+      // transcript hash stays identical. Processor caches key on that raw hash,
+      // so explicitly stale them and rebuild files, PRs, blocks, and enrichment.
+      if (normalizationChanged) {
+        this.db.prepare('UPDATE processor_runs SET invalidated = 1 WHERE session_id = ?').run(session.id)
       }
     })
     tx()
@@ -3086,6 +3097,8 @@ export interface TranscriptTool {
   output?: string
   /** For Edit/Write: old→new hunks for inline diff rendering. */
   hunks?: { del: string; ins: string }[]
+  /** For a multi-file apply_patch: preserve each file's identity and hunks. */
+  fileDiffs?: Array<{ path: string; hunks: { del: string; ins: string }[] }>
   error?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
@@ -3360,6 +3373,13 @@ function buildTranscriptCore(session: Session): {
 } {
   const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
   const idxById = new Map(session.toolCalls.map((t, i) => [t.id, i]))
+  const childrenByParent = new Map<string, ToolCall[]>()
+  for (const tc of session.toolCalls) {
+    if (!tc.parentId) continue
+    const children = childrenByParent.get(tc.parentId) ?? []
+    children.push(tc)
+    childrenByParent.set(tc.parentId, children)
+  }
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -3375,43 +3395,69 @@ function buildTranscriptCore(session: Session): {
       for (const b of ev.blocks) {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
         else if (b.type === 'tool_use') {
-          ids.push(b.id)
-          const tc = tcById.get(b.id)
-          const input = b.input as Record<string, unknown> | undefined
-          // Prefer the adapter-normalized target (paths/command) over re-parsing the
-          // raw input blob, so per-vendor field spellings live in the adapter.
-          const target = tc?.target.paths?.[0] ?? tc?.target.command
-          const res = tc?.result
-          const ok = res ? res.ok : true
-          const command = toolCommandText(tc, input)
-          const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
-          const tool: TranscriptTool = { name: b.name, action: '', ok, idx: idxById.get(b.id), target: clip(target, 1500) }
-          if (command) tool.command = command
-          if (output) tool.output = output
-          // file_write → inline diff. The before/after strings aren't in the
-          // normalized target, so read them from the raw input here; field names
-          // differ across harnesses (Claude Code: old_string/new_string;
-          // OpenCode: oldString/newString).
-          if (tc?.action === 'file_write' && input) {
-            if (Array.isArray(input.edits)) {
-              tool.hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
-                del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
-                ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
-              }))
-            } else {
-              const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
-              const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
-              if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
-              else {
-                const content = clip(String(input.content ?? ''), 2000)
-                if (content) tool.hunks = [{ del: '', ins: content }]
+          const direct = tcById.get(b.id)
+          const children = childrenByParent.get(b.id) ?? []
+          const candidates: Array<{ tc?: ToolCall; name: string; input: unknown; semantic?: boolean }> =
+            direct
+              ? [{ tc: direct, name: b.name, input: b.input }]
+              : children.length
+                ? children.map((tc) => ({ tc, name: tc.name, input: tc.input, semantic: true }))
+                : [{ name: b.name, input: b.input }]
+
+          for (const candidate of candidates) {
+            const tc = candidate.tc
+            const input = candidate.input as Record<string, unknown> | undefined
+            if (tc) ids.push(tc.id)
+            else ids.push(b.id)
+            // Prefer the adapter-normalized target (paths/command) over re-parsing the
+            // raw input blob, so per-vendor field spellings live in the adapter.
+            const target = tc?.target.paths?.[0] ?? tc?.target.command
+            const res = tc?.result
+            const ok = res ? res.ok : true
+            const command = toolCommandText(tc, input)
+            const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
+            const tool: TranscriptTool = {
+              name: candidate.name,
+              action: candidate.semantic ? tc?.action ?? '' : '',
+              ok,
+              idx: tc ? idxById.get(tc.id) : undefined,
+              target: clip(target, 1500),
+            }
+            if (command) tool.command = command
+            if (output) tool.output = output
+            // file_write → inline diff, read from the normalized tc.input (not the block's
+            // raw input): a Codex shell `apply_patch <<'PATCH'` keeps the {cmd} object on the
+            // block but carries the patch string on tc.input. Identical for other harnesses.
+            // Field names differ (Claude: old_string/new_string; OpenCode: camelCase).
+            const fileInput = tc?.action === 'file_write' ? tc.input : candidate.input
+            if (tc?.action === 'file_write' && typeof fileInput === 'string') {
+              const patchEdits = parseApplyPatch(fileInput)
+              if (patchEdits.length) {
+                tool.fileDiffs = patchEdits.map((edit) => ({ path: edit.path, hunks: edit.hunks }))
+                tool.command = patchEdits.length === 1 ? patchEdits[0]!.path : `${patchEdits.length} files changed`
+              }
+            } else if (tc?.action === 'file_write' && fileInput && typeof fileInput === 'object') {
+              const fi = fileInput as Record<string, unknown>
+              if (Array.isArray(fi.edits)) {
+                tool.hunks = (fi.edits as Array<Record<string, unknown>>).map((e) => ({
+                  del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
+                  ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
+                }))
+              } else {
+                const old_s = clip(String(fi.old_string ?? fi.oldString ?? ''), 2000)
+                const new_s = clip(String(fi.new_string ?? fi.newString ?? ''), 2000)
+                if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
+                else {
+                  const content = clip(String(fi.content ?? ''), 2000)
+                  if (content) tool.hunks = [{ del: '', ins: content }]
+                }
               }
             }
+            if (!ok) tool.error = clipError(resultText(res?.raw))
+            const spawned = spawnToAgent.get(tc?.id ?? b.id) ?? spawnToAgent.get(b.id)
+            if (spawned) tool.agentId = spawned
+            tools.push(tool)
           }
-          if (!ok) tool.error = clipError(resultText(res?.raw))
-          const spawned = spawnToAgent.get(b.id)
-          if (spawned) tool.agentId = spawned
-          tools.push(tool)
         }
       }
       if (!text && tools.length === 0) continue
