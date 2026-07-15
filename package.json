@@ -1,6 +1,6 @@
 {
   "name": "tuneloop",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens. Tuneloop turns the session transcripts your AI coding tools already write into a local dashboard of what you actually shipped, what it cost, and your work patterns.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
@@ -56,8 +56,12 @@
     "pi-package"
   ],
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"],
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
     "image": "https://raw.githubusercontent.com/tuneloop/tuneloop/main/docs/img/cost_per_artifact.png"
   },
   "dependencies": {
