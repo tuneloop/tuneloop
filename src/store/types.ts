@@ -179,10 +179,23 @@ export interface InsightRow {
   stateChangedAt: string | null
   detectorVersion: number
   evidence: Array<{ sessionId: string; turnIdx: number | null }>
+  /** Event time the fix was first applied in the current cycle (transcript timestamp), null if not adopted. */
+  adoptedAt: string | null
+  /** Sessions that ran this insight's fix-prompt, current cycle only (older cycles are history). */
+  fixSessions: Array<{ sessionId: string; seq: number; turnAt: string }>
 }
 
 export interface DetectorRunRow {
   version: number
   status: string | null
   ranAt: string
+}
+
+/** One fix-marker sighting: a real user turn in this session carried `tuneloop-fix: <insightId>`. */
+export interface FixMarkerSightingInput {
+  insightId: string
+  /** Main-thread event seq of the sighted user turn. */
+  seq: number
+  /** Transcript timestamp of that turn — event time, the "fix applied" date. */
+  turnAt: string
 }
