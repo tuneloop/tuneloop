@@ -34,6 +34,7 @@ interface UsageSpec {
   input?: number
   output?: number
   creates?: number
+  creates1h?: number
   reads?: number
   sidechain?: boolean
 }
@@ -49,10 +50,10 @@ function seedSession(
     id, id, 'claude-code', over.provider ?? 'anthropic', over.repo ?? 'o/r', '/repo', new Date(startMs).toISOString(),
   )
   const ins = db.prepare(
-    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,0)',
+    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,0)',
   )
   usage.forEach((u, idx) => {
-    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(startMs + u.atMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.reads ?? 0)
+    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(startMs + u.atMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.creates1h ?? 0, u.reads ?? 0)
   })
 }
 
@@ -218,6 +219,20 @@ describe('cache-miss detector', () => {
     // premium = min(prevCtx 105k, input 120k) = 105k × $2.25/Mtok ≈ $0.236 × 10 sessions ≈ $2.36
     expect(insights[0]!).toMatchObject({ severity: 'low', count: 10 })
     expect(insights[0]!.description).toContain('$2.36')
+  })
+
+  it('prices the re-buy at the write TTL mix: a 1h-heavy miss costs more than a 5m one', () => {
+    const { db, ctx } = setup()
+    for (let i = 0; i < 10; i++)
+      seedSession(db, `s${i}`, [
+        { atMs: 0, creates1h: 200_000 },
+        { atMs: 10 * MIN, creates1h: 220_000 },
+        { atMs: 11 * MIN, reads: 220_000, creates1h: 5_000 },
+      ])
+    const insights = cacheMiss.run(ctx) as InsightInput[]
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.count).toBe(10)
+    expect(insights[0]!.description).toContain('$38.00') // 10 × $3.80, priced at the 1h rate
   })
 
   it('scopes per repo: two cold repos → two insights, a warm one stays out', () => {

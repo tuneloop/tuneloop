@@ -37,7 +37,8 @@ interface FactRow {
   ts: string | null
   input: number
   output: number // not cached (see prevCtx) — used only for the zero-row check
-  creates: number
+  creates5m: number // cache-write tokens, split by TTL (disjoint)
+  creates1h: number
   reads: number
 }
 
@@ -65,7 +66,8 @@ export const cacheMiss: Detector = {
               s.provider, u.model, u.ts,
               COALESCE(u.tok_input, 0) AS input,
               COALESCE(u.tok_output, 0) AS output,
-              COALESCE(u.tok_cache_create, 0) AS creates,
+              COALESCE(u.tok_cache_create_5m, 0) AS creates5m,
+              COALESCE(u.tok_cache_create_1h, 0) AS creates1h,
               COALESCE(u.tok_cache_read, 0) AS reads
        FROM usage_facts u JOIN sessions s ON s.id = u.session_id
        WHERE u.is_sidechain = 0 AND s.started_at >= ?
@@ -83,7 +85,7 @@ export const cacheMiss: Detector = {
     const repos = new Map<string, RepoAgg>()
     for (const facts of bySession.values()) {
       // No cache tokens anywhere → provider doesn't report caching, indistinguishable from cold.
-      if (!facts.some((f) => f.creates > 0 || f.reads > 0)) continue
+      if (!facts.some((f) => f.creates5m > 0 || f.creates1h > 0 || f.reads > 0)) continue
 
       let classified = 0
       let misses = 0
@@ -92,15 +94,17 @@ export const cacheMiss: Detector = {
       let prevCtx = 0 // what a warm turn would read back
       let prevTs: number | null = null
       for (const f of facts) {
+        // Whole cache write, both TTLs — a turn's context is cached across both.
+        const creates = f.creates5m + f.creates1h
         // All-zero rows aren't API calls (content flushes, ingest-deduped repeat lines).
-        if (f.input + f.output + f.creates + f.reads === 0) continue
+        if (f.input + f.output + creates + f.reads === 0) continue
 
         const ts = f.ts ? Date.parse(f.ts) : NaN
         // What the next warm turn would read back: reads plus what this turn
         // cached (creates, or billed input under read-discount caching). Output
         // and any uncached input tail aren't cached yet — paid next turn either
         // way, so they belong in neither the expectation nor the waste.
-        const newCtx = f.reads + (f.creates > 0 ? f.creates : f.input)
+        const newCtx = f.reads + (creates > 0 ? creates : f.input)
         if (prevCtx >= MIN_CONTEXT_TOKENS && newCtx >= prevCtx * SHRUNK_CTX_SHARE) {
           classified++
           if (f.reads < prevCtx * HIT_READ_SHARE) {
@@ -108,11 +112,15 @@ export const cacheMiss: Detector = {
             if (prevTs !== null && !Number.isNaN(ts) && ts - prevTs > LONG_BREAK_MS) breakMisses++
             // Premium actually paid: un-read prior context re-bought at uncached
             // rates, capped at what this turn really paid. Unpriced model → miss counts, $0.
-            const rePaid = f.creates > 0 ? f.creates : f.input
+            const rePaid = creates > 0 ? creates : f.input
             const avoidable = Math.min(prevCtx - f.reads, rePaid)
             const price = f.model ? priceFor(f.provider, f.model) : undefined
             if (price && avoidable > 0) {
-              const paidRate = f.creates > 0 ? price.cache_write_5m : price.input
+              // Rate the re-buy at what it was actually paid at
+              const paidRate =
+                creates > 0
+                  ? (f.creates5m * price.cache_write_5m + f.creates1h * price.cache_write_1h) / creates
+                  : price.input
               wasteUsd += (avoidable * (paidRate - price.cache_read)) / 1_000_000
             }
           }
