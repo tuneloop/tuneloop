@@ -9,6 +9,7 @@ import { loadFacets } from './facets'
 import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
+import { renderInsights } from './insights'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams } from './sessions'
@@ -45,6 +46,7 @@ function init() {
     renderArtKindSeg();
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail
     renderHighlights(); // pre-render the Highlights tab so it's ready whether we land there or tab in later
+    renderInsights(); // same for the Insights tab (refetches only after its own mutations)
     setView(landHighlights ? 'highlights' : route.view);
     if (route.session) openDetail(route.session); // deep-linked drawer
   });
