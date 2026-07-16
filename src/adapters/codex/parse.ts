@@ -13,11 +13,17 @@ import type {
   ToolCall,
   UserMessage,
 } from '../../core/model'
-import { mapAction } from './actions'
+import { mapAction, shellPatchBody } from './actions'
+import { extractExecEnvelope } from './exec-envelope'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (composed with NORMALIZE_VERSION in analyze.ts). 1: initial Codex adapter.
-export const PARSE_VERSION = 2
+// 3: expand unified `exec` JavaScript envelopes into canonical child tool calls.
+// 4: reclassify shell `apply_patch <<'PATCH'` commands as file_write with the patch body.
+// 5: split exec-envelope outputs by block count (any JS shape) + strip runtime preamble.
+// 6: extract the patch body for a shell `apply_patch` inside an exec envelope too.
+// 7: link guardian approval sidechains that report a top-level `parent_thread_id`.
+export const PARSE_VERSION = 7
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -54,9 +60,11 @@ export async function parseCodex(path: string): Promise<Session | null> {
   const forkedFromId: string | undefined =
     typeof meta.forked_from_id === 'string'
       ? meta.forked_from_id
-      : typeof meta?.source?.subagent?.thread_spawn?.parent_thread_id === 'string'
-        ? meta.source.subagent.thread_spawn.parent_thread_id
-        : undefined
+      : typeof meta.parent_thread_id === 'string'
+        ? meta.parent_thread_id
+        : typeof meta?.source?.subagent?.thread_spawn?.parent_thread_id === 'string'
+          ? meta.source.subagent.thread_spawn.parent_thread_id
+          : undefined
 
   // Two things gathered up front (some trail what they describe in file order):
   //  - tool call_id -> output string, so a call joins its result regardless of order.
@@ -75,6 +83,31 @@ export async function parseCodex(path: string): Promise<Session | null> {
     } else if (r.type === 'event_msg' && p.type === 'user_message' && typeof p.message === 'string') {
       humanPrompts.add(p.message.trim())
     }
+  }
+
+  // Unified exec may yield before its nested command finishes. The follow-up is
+  // a separate `wait(cell_id=...)` call, but analytically it is the originating
+  // operation's result (not another tool invocation). Join those bytes up front;
+  // keep the raw wait block in the event stream below for transcript fidelity.
+  const deferredByCell = new Map<string, string>()
+  const consumedWaits = new Set<string>()
+  for (const r of records) {
+    const p = r.payload as Raw
+    if (r.type !== 'response_item' || p?.type !== 'custom_tool_call' || p.name !== 'exec' || typeof p.call_id !== 'string') continue
+    const out = resultById.get(p.call_id)
+    const cell = out && /Script running with cell ID\s+([^\s]+)/.exec(out)?.[1]
+    if (cell) deferredByCell.set(cell, p.call_id)
+  }
+  for (const r of records) {
+    const p = r.payload as Raw
+    if (r.type !== 'response_item' || p?.type !== 'function_call' || p.name !== 'wait' || typeof p.call_id !== 'string') continue
+    const args = parseArgs(p.arguments) as Record<string, unknown>
+    const cell = typeof args?.cell_id === 'string' || typeof args?.cell_id === 'number' ? String(args.cell_id) : null
+    const origin = cell ? deferredByCell.get(cell) : undefined
+    const waited = resultById.get(p.call_id)
+    if (!origin || waited == null) continue
+    resultById.set(origin, `${resultById.get(origin) ?? ''}\n${waited}`)
+    consumedWaits.add(p.call_id)
   }
 
   const events: Event[] = []
@@ -184,6 +217,41 @@ export async function parseCodex(path: string): Promise<Session | null> {
       // function_call: `arguments` is a JSON STRING. custom_tool_call (apply_patch): `input`
       // is the raw patch text. tool_search_call: `arguments` is an object.
       const input = p.type === 'function_call' ? parseArgs(p.arguments) : (p.input ?? p.arguments)
+      // A consumed wait remains visible as raw transport in the transcript but is
+      // not a second analytics operation; its output was joined to the exec above.
+      if (consumedWaits.has(callId)) {
+        pending.push({ type: 'tool_use', id: callId, name, input })
+        continue
+      }
+      if (p.type === 'custom_tool_call' && name === 'exec' && typeof input === 'string') {
+        const { operations } = extractExecEnvelope(input)
+        if (operations.length) {
+          const out = resultById.get(callId)
+          const childOutputs = execChildOutputs(out, operations.length)
+          pending.push({ type: 'tool_use', id: callId, name, input })
+          operations.forEach((operation, ordinal) => {
+            const mapped = operation.resolved
+              ? mapAction(operation.name, operation.input)
+              : { action: 'other' as const, target: {} }
+            const childOut = childOutputs[ordinal]
+            const statusOut = childOut ?? out
+            const code = exitCodeOf(statusOut)
+            const isError = code != null ? code !== 0 : toolCallFailed(statusOut)
+            toolCalls.push({
+              id: `${callId}:${ordinal}`,
+              parentId: callId,
+              name: mapped.name ?? operation.name,
+              action: mapped.action,
+              input: patchInput(mapped.action, operation.input),
+              target: mapped.target,
+              result: { ok: !isError, isError, raw: childOut },
+              isSidechain: isSubagent,
+              ts,
+            })
+          })
+          continue
+        }
+      }
       // `namespace` (function_call only) tags MCP tools as `mcp__<server>`.
       const namespace = typeof p.namespace === 'string' ? p.namespace : undefined
       const mapped = mapAction(name, input, namespace)
@@ -194,13 +262,13 @@ export async function parseCodex(path: string): Promise<Session | null> {
       // No signal at all → assume ok.
       const code = exitCodeOf(out)
       const isError = code != null ? code !== 0 : toolCallFailed(out)
-      pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name
+      pending.push({ type: 'tool_use', id: callId, name, input }) // transcript block keeps the literal tool name + raw command
       toolCalls.push({
         id: callId,
         // Analytics identity: refined for skills (the specific skill name), raw tool name otherwise.
         name: mapped.name ?? name,
         action: mapped.action,
-        input,
+        input: patchInput(mapped.action, input),
         target: mapped.target,
         result: { ok: !isError, isError, raw: out },
         isSidechain: isSubagent,
@@ -286,7 +354,8 @@ function mapUsage(last: Raw): TokenUsage {
   return {
     input: Math.max(0, num(last.input_tokens) - cached), // input_tokens INCLUDES cached
     output: num(last.output_tokens), // INCLUDES reasoning_output_tokens
-    cacheCreate: 0, // OpenAI has no cache-write charge
+    cacheCreate5m: 0, // Codex transcripts do not expose cache-write tokens
+    cacheCreate1h: 0,
     cacheRead: cached,
   }
 }
@@ -313,6 +382,52 @@ function summaryText(summary: unknown): string {
 
 function outputString(output: unknown): string {
   return typeof output === 'string' ? output : JSON.stringify(output ?? '')
+}
+
+/**
+ * For a shell `apply_patch <<'PATCH'` reclassified to file_write, carry the patch body as
+ * `input` (not the {cmd} object) so file-diff rendering and PR content-match — which key on
+ * a string patch input — treat it like the native tool. Applies on both the direct
+ * function_call path and the exec-envelope child path. Any other input passes through.
+ */
+function patchInput(action: string, input: unknown): unknown {
+  const cmd = input && typeof input === 'object' ? (input as Record<string, unknown>).cmd : undefined
+  return action === 'file_write' && typeof cmd === 'string' ? shellPatchBody(cmd) ?? input : input
+}
+
+// The code-mode runtime frames every exec output as `Script completed|running\nWall
+// time …\nOutput:\n` in the first text block; the real per-command output follows in
+// later blocks. This framing is runtime noise (a native exec_command carries none),
+// so it is stripped uniformly below.
+const EXEC_PREAMBLE = /^Script (?:completed|running)\b/
+
+/**
+ * Split an exec envelope's emitted output across its semantic children. The runtime
+ * emits one preamble block plus one text block per `text(...)` call, in source order —
+ * true regardless of how the JS emitted them (sequential `await`s, `Promise.all` + loop,
+ * etc.), so we key on that block structure, NOT the JS shape.
+ *
+ *   - payload-block count === child count  → map 1:1 in source order.
+ *   - single child                         → join all payload blocks into it.
+ *   - any other mismatch (truncation, a command that printed nothing, multiple emits
+ *     from one command) → no per-child output, so one command's URL/error never leaks
+ *     into another's analytics. Correctness over coverage.
+ */
+function execChildOutputs(out: string | undefined, count: number): Array<string | undefined> {
+  if (out == null) return new Array(count).fill(undefined)
+  let payloads: string[]
+  try {
+    const parsed = JSON.parse(out)
+    if (!Array.isArray(parsed)) return count === 1 ? [out] : new Array(count).fill(undefined)
+    const texts = parsed
+      .map((b) => (b && typeof b === 'object' && typeof (b as Raw).text === 'string' ? (b as Raw).text as string : null))
+      .filter((s): s is string => s != null)
+    payloads = texts.length && EXEC_PREAMBLE.test(texts[0]!) ? texts.slice(1) : texts
+  } catch {
+    return count === 1 ? [out] : new Array(count).fill(undefined)
+  }
+  if (count === 1) return [payloads.join('\n')]
+  return payloads.length === count ? payloads : new Array(count).fill(undefined)
 }
 
 function parseArgs(args: unknown): unknown {

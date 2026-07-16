@@ -41,7 +41,7 @@ export const INTRINSIC_MEASURES: MeasureSpec[] = [
     key: 'tokens',
     label: 'Tokens',
     source: 'usage',
-    expr: 'u.tok_input + u.tok_output + u.tok_cache_create + u.tok_cache_read',
+    expr: 'u.tok_input + u.tok_output + u.tok_cache_create_5m + u.tok_cache_create_1h + u.tok_cache_read',
     agg: 'sum',
     format: 'int',
   },

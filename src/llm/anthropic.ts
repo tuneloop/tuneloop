@@ -51,10 +51,15 @@ function textOf(content: Anthropic.ContentBlock[]): string {
 }
 
 function usageOf(u: Anthropic.Usage) {
+  const base = { input: u.input_tokens ?? 0, output: u.output_tokens ?? 0, cacheRead: u.cache_read_input_tokens ?? 0 }
+  // Same shape as the claude-code adapter: take the per-TTL breakdown when the
+  // API returns one, else the write total is all 5m. Falling back per-field
+  // instead would double-count the 1h share against the total.
+  const cc = u.cache_creation
+  if (!cc) return { ...base, cacheCreate5m: u.cache_creation_input_tokens ?? 0, cacheCreate1h: 0 }
   return {
-    input: u.input_tokens ?? 0,
-    output: u.output_tokens ?? 0,
-    cacheCreate: u.cache_creation_input_tokens ?? 0,
-    cacheRead: u.cache_read_input_tokens ?? 0,
+    ...base,
+    cacheCreate5m: cc.ephemeral_5m_input_tokens ?? 0,
+    cacheCreate1h: cc.ephemeral_1h_input_tokens ?? 0,
   }
 }

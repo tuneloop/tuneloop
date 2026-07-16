@@ -371,8 +371,8 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tool-block.err { border-color: #e6c3b8; }
 .tool-block.agent .tool-block-row { cursor: pointer; }
 .tool-block.agent .tool-block-row:hover { background: #e7eef6; }
-.tool-block-row { display: flex; align-items: flex-start; gap: 8px; padding: 5px 10px; }
-.tool-block-name { flex: none; min-width: 40px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 600; color: var(--ink); padding-top: 1px; }
+.tool-block-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; }
+.tool-block-name { flex: none; min-width: 40px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 600; color: var(--ink); }
 .tool-badge.err { flex: none; font-size: 10px; font-weight: 500; color: var(--red); background: #f4ddd6; border-radius: 4px; padding: 1px 5px; }
 .tool-chip-go { flex: none; opacity: .8; font-size: 11px; color: var(--emerald); white-space: nowrap; }
 /* Command/input — inline, grows to fill the row */
@@ -393,6 +393,8 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tool-block-body.on { display: block; }
 .tool-output-pre { margin: 0; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--track); border-radius: 5px; padding: 6px 8px; max-height: 300px; overflow-y: auto; }
 .tool-block-body .fc-diff { margin: 0; }
+.tool-file-diff + .tool-file-diff { margin-top: 8px; }
+.tool-file-diff-path { margin-bottom: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; font-weight: 600; color: var(--muted); word-break: break-all; }
 /* Tool overflow (>TOOLCAP) */
 .tool-rest { display: none; }
 .tool-rest.on { display: block; }
