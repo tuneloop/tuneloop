@@ -5,6 +5,8 @@
  * Files-changed view (so an edit links to the prompt that actually caused it).
  */
 
+import type { Session } from './model'
+
 // Claude-injected "user" turns that aren't the human's intent: slash-command
 // echoes and their args/output (`<command-name>`, `<command-args>`,
 // `<local-command-stdout>`, `<local-command-caveat>`, …), the local-command
@@ -30,4 +32,22 @@ export function stripReminders(text: string): string {
 export function isRealUserText(text: string): boolean {
   const t = stripReminders(text)
   return !!t && !isSyntheticUser(t)
+}
+
+/**
+ * The session's first REAL human turn, in full — the fallback session title
+ * when neither the adapter nor LLM enrichment supplied one. Skips sidechain and
+ * injected/machinery turns and collapses whitespace to a single line, but does
+ * NOT clip: length-trimming + ellipsis are a presentation concern (see the
+ * client `clipLine` helper). Null when the session has no genuine human prompt.
+ */
+export function firstUserPrompt(s: Session): string | null {
+  for (const ev of s.events) {
+    if (ev.kind !== 'user' || ev.isSidechain) continue
+    const t = stripReminders(ev.text)
+    if (!t || isSyntheticUser(t)) continue
+    const clean = t.replace(/\s+/g, ' ').trim()
+    if (clean) return clean
+  }
+  return null
 }

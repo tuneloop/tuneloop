@@ -1,5 +1,5 @@
 import { contentHash } from './hash'
-import { addUsage, emptyUsage } from './model'
+import { addUsage, cacheCreateTotal, emptyUsage } from './model'
 import type { AssistantMessage, Event, Session, SubagentMeta, TokenUsage, ToolCall } from './model'
 
 /**
@@ -46,11 +46,17 @@ export function trimInheritedPrefix(child: Session, parent: Session): void {
 }
 
 function usageEq(a: TokenUsage, b: TokenUsage): boolean {
-  return a.input === b.input && a.output === b.output && a.cacheCreate === b.cacheCreate && a.cacheRead === b.cacheRead
+  return (
+    a.input === b.input &&
+    a.output === b.output &&
+    a.cacheCreate5m === b.cacheCreate5m &&
+    a.cacheCreate1h === b.cacheCreate1h &&
+    a.cacheRead === b.cacheRead
+  )
 }
 
 function isZeroUsage(u: TokenUsage): boolean {
-  return u.input === 0 && u.output === 0 && u.cacheCreate === 0 && u.cacheRead === 0
+  return u.input === 0 && u.output === 0 && cacheCreateTotal(u) === 0 && u.cacheRead === 0
 }
 
 /**

@@ -142,7 +142,7 @@ describe('opencode adapter', () => {
   it('folds subagent tokens (reasoning into output) across parent + child', () => {
     const s = sessions[0]!
     // parent: in100 out20+reason5 cacheRead10 ; child: in200 out40
-    expect(s.tokens).toEqual({ input: 300, output: 65, cacheCreate: 0, cacheRead: 10 })
+    expect(s.tokens).toEqual({ input: 300, output: 65, cacheCreate5m: 0, cacheCreate1h: 0, cacheRead: 10 })
   })
 
   it('maps tool actions and marks sidechain tool calls', () => {

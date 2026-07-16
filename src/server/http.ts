@@ -11,9 +11,10 @@ export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
 /**
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
- * time; POST endpoints write user curation only (features + session↔artifact
- * links), stamped user-authored so `analyze` never clobbers them. Deriving facts
- * from transcripts stays in the `analyze` path.
+ * time; POST endpoints write user judgment only — curation (features +
+ * session↔artifact links, stamped user-authored so `analyze` never clobbers
+ * them) and insight lifecycle (dismiss / fix-issued). Deriving facts from
+ * transcripts stays in the `analyze` path.
  */
 export function createDashboardServer(store: Store, dbPath: string, sh?: ShFn): Server {
   return createServer((req, res) => {
@@ -112,6 +113,27 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       sendJson(res, ok ? 200 : 404, { ok })
       return
     }
+    if (path === '/api/insights/dismiss') {
+      const id = String(body.id ?? '')
+      if (!id) {
+        sendJson(res, 400, { error: 'id required' })
+        return
+      }
+      const ok = store.dismissInsight(id)
+      sendJson(res, ok ? 200 : 404, { ok })
+      return
+    }
+    if (path === '/api/insights/fix-issued') {
+      const id = String(body.id ?? '')
+      if (!id) {
+        sendJson(res, 400, { error: 'id required' })
+        return
+      }
+      // Copying a fix marks it issued. Always 200: re-copying after the state
+      // moved on (fix_issued/adopted) is normal, not an error.
+      sendJson(res, 200, { ok: store.transitionInsight(id, 'fix_issued') })
+      return
+    }
     sendJson(res, 404, { error: 'not found' })
     return
   }
@@ -137,6 +159,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
 
   if (path === '/api/overview') {
     sendJson(res, 200, { ...store.summary(), dbPath })
+    return
+  }
+  if (path === '/api/insights') {
+    // The insight ledger read model (dismissed excluded, severity → recency).
+    sendJson(res, 200, store.insights())
     return
   }
   if (path === '/api/facets') {

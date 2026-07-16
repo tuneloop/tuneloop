@@ -31,3 +31,4 @@ skills/*-workspace/
 
 # Local prototype/experiment scratch
 experiments/
+.gstack/

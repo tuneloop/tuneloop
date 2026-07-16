@@ -58,6 +58,30 @@ describe('priceFor backfill gating', () => {
   })
 })
 
+describe('GPT-5.6 pricing', () => {
+  it.each([
+    ['gpt-5.6-sol', 5, 30, 6.25, 0.5],
+    ['gpt-5.6-terra', 2.5, 15, 3.125, 0.25],
+    ['gpt-5.6-luna', 1, 6, 1.25, 0.1],
+  ])('prices %s at its standard API rate', (model, input, output, cacheWrite, cacheRead) => {
+    expect(priceFor('openai', model)).toEqual({
+      input,
+      output,
+      cache_write_5m: cacheWrite,
+      cache_write_1h: cacheWrite,
+      cache_read: cacheRead,
+    })
+  })
+
+  it('prices the gpt-5.6 alias as Sol', () => {
+    expect(priceFor('openai', 'gpt-5.6')).toEqual(priceFor('openai', 'gpt-5.6-sol'))
+  })
+
+  it('prices dated tier snapshots at the matching tier rate', () => {
+    expect(priceFor('openai', 'gpt-5.6-terra-20260709')).toEqual(priceFor('openai', 'gpt-5.6-terra'))
+  })
+})
+
 describe('bedrock model-id unwrapping', () => {
   it('prices a full inference-profile id at the vendor rate', () => {
     // geo prefix + vendor + date snapshot + version suffix → anthropic/claude-haiku-4-5

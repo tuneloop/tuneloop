@@ -49,11 +49,15 @@ export function createOpenAiClient(apiKey: string, model: string, opts?: ClientO
 }
 
 function usageOf(u: OpenAI.Completions.CompletionUsage | undefined) {
-  const cached = u?.prompt_tokens_details?.cached_tokens ?? 0
+  // cache_write_tokens was introduced after the SDK's current usage type.
+  const details = u?.prompt_tokens_details as { cached_tokens?: number; cache_write_tokens?: number } | undefined
+  const cached = details?.cached_tokens ?? 0
+  const cacheWrite = details?.cache_write_tokens ?? 0
   return {
-    input: Math.max(0, (u?.prompt_tokens ?? 0) - cached),
+    input: Math.max(0, (u?.prompt_tokens ?? 0) - cached - cacheWrite),
     output: u?.completion_tokens ?? 0,
-    cacheCreate: 0,
+    cacheCreate5m: cacheWrite,
+    cacheCreate1h: 0,
     cacheRead: cached,
   }
 }

@@ -14,7 +14,7 @@ FROM usage_facts GROUP BY is_sidechain;
 Cost per model (at usage grain):
 ```sql
 SELECT model, ROUND(SUM(cost_usd), 2) AS cost,
-       SUM(tok_input + tok_output + tok_cache_create + tok_cache_read) AS tokens
+       SUM(tok_input + tok_output + tok_cache_create_5m + tok_cache_create_1h + tok_cache_read) AS tokens
 FROM usage_facts GROUP BY model ORDER BY cost DESC;
 ```
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { emptyUsage, type Session } from '../core/model'
 import { openDb } from './db'
 import { Store } from './store'
 import type { ArtifactInput } from './types'
@@ -30,6 +31,217 @@ const stubPr: ArtifactInput = {
   externalId: 'https://github.com/o/r/pull/5',
   source: 'github',
   status: 'open', // an offline reviewer only knows it's a PR, optimistically "open"
+}
+
+describe('Codex semantic child persistence and display', () => {
+  it('preserves literal event names for direct non-envelope tool calls', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const session = codexSemanticSession('unused')
+    session.id = 'claude-code:direct'
+    session.sessionId = 'direct'
+    session.source = 'claude-code'
+    session.provider = 'anthropic'
+    session.events[0] = {
+      kind: 'assistant',
+      blocks: [{ type: 'tool_use', id: 'direct-tool', name: 'Skill', input: { skill: 'review' } }],
+      usage: emptyUsage(),
+      isSidechain: false,
+      seq: 0,
+    }
+    session.toolCalls[0] = {
+      id: 'direct-tool',
+      name: 'review',
+      action: 'skill',
+      input: { skill: 'review' },
+      target: {},
+      result: { ok: true, isError: false },
+      isSidechain: false,
+    }
+    store.ingestSession(session, 0, [], 'test', 8005)
+
+    expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
+      name: 'Skill',
+      action: '',
+      command: 'review',
+    })
+  })
+
+  it('renders the semantic child of an exec envelope, not the raw JS wrapper', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const session = codexSemanticSession('const r = await tools.exec_command({cmd:"gh pr create --fill"}); text(r.output);')
+    store.ingestSession(session, 0, [], 'test', 3005)
+
+    const transcript = store.sessionDetail(session.id)?.transcript
+    expect(transcript?.turns).toHaveLength(1)
+    expect(transcript?.turns[0]?.tools).toHaveLength(1)
+    const tool = transcript?.turns[0]?.tools[0] as Record<string, unknown> | undefined
+    expect(tool).toMatchObject({ name: 'exec_command', command: 'gh pr create --fill' })
+    // The raw exec JavaScript is intentionally not surfaced — the child row is the view.
+    expect(tool).not.toHaveProperty('rawWrapper')
+  })
+
+  it('renders a multi-file apply_patch as separate named transcript diffs', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /repo/src/store/store.test.ts',
+      '@@',
+      '-const before = true',
+      '+const after = true',
+      '*** Update File: /repo/src/adapters/codex/parse.ts',
+      '@@',
+      '-const mapped = mapAction(name, input)',
+      '+const mapped = operation.resolved ? mapAction(name, input) : fallback',
+      '*** Add File: /repo/src/adapters/codex/exec-envelope.test.ts',
+      '+import { describe, it } from \'vitest\'',
+      '+describe(\'exec envelope\', () => { it(\'parses\', () => {}) })',
+      '*** End Patch',
+    ].join('\n')
+    const envelope = `const patch = ${JSON.stringify(patch)}; text(await tools.apply_patch(patch));`
+    const session = codexSemanticSession(envelope)
+    session.toolCalls[0] = {
+      id: 'outer:0',
+      parentId: 'outer',
+      name: 'apply_patch',
+      action: 'file_write',
+      input: patch,
+      target: {
+        paths: [
+          '/repo/src/store/store.test.ts',
+          '/repo/src/adapters/codex/parse.ts',
+          '/repo/src/adapters/codex/exec-envelope.test.ts',
+        ],
+      },
+      result: { ok: true, isError: false, raw: '[{"type":"input_text","text":"{}"}]' },
+      isSidechain: false,
+    }
+    store.ingestSession(session, 0, [], 'test', 3005)
+
+    expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
+      name: 'apply_patch',
+      command: '3 files changed',
+      fileDiffs: [
+        {
+          path: '/repo/src/store/store.test.ts',
+          hunks: [{ del: 'const before = true', ins: 'const after = true' }],
+        },
+        {
+          path: '/repo/src/adapters/codex/parse.ts',
+          hunks: [
+            {
+              del: 'const mapped = mapAction(name, input)',
+              ins: 'const mapped = operation.resolved ? mapAction(name, input) : fallback',
+            },
+          ],
+        },
+        {
+          path: '/repo/src/adapters/codex/exec-envelope.test.ts',
+          hunks: [
+            {
+              del: '',
+              ins: "import { describe, it } from 'vitest'\ndescribe('exec envelope', () => { it('parses', () => {}) })",
+            },
+          ],
+        },
+      ],
+    })
+  })
+
+  it('renders a file diff for a shell `apply_patch` heredoc from tc.input, not the raw {cmd} block', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: src/calculator/operations/floor_divide.py',
+      '+def floor_divide(a, b):',
+      '+    return a // b',
+      '*** End Patch',
+    ].join('\n')
+    // The transcript block keeps the literal shell command ({cmd} object); the tool call
+    // carries the extracted patch string. The diff must come from tc.input.
+    const session = codexSemanticSession('unused')
+    session.id = 'codex:heredoc'
+    session.events[0] = {
+      kind: 'assistant',
+      blocks: [{ type: 'tool_use', id: 'heredoc-tool', name: 'exec_command', input: { cmd: `apply_patch <<'PATCH'\n${patch}\nPATCH` } }],
+      usage: emptyUsage(),
+      isSidechain: false,
+      seq: 0,
+    }
+    session.toolCalls = [
+      {
+        id: 'heredoc-tool',
+        name: 'exec_command',
+        action: 'file_write',
+        input: patch,
+        target: { paths: ['src/calculator/operations/floor_divide.py'] },
+        result: { ok: true, isError: false, raw: 'Success. Updated the following files:\nA src/calculator/operations/floor_divide.py' },
+        isSidechain: false,
+      },
+    ]
+    store.ingestSession(session, 0, [], 'test', 4005)
+
+    expect(store.sessionDetail(session.id)?.transcript.turns[0]?.tools[0]).toMatchObject({
+      name: 'exec_command',
+      command: 'src/calculator/operations/floor_divide.py',
+      fileDiffs: [
+        {
+          path: 'src/calculator/operations/floor_divide.py',
+          hunks: [{ del: '', ins: 'def floor_divide(a, b):\n    return a // b' }],
+        },
+      ],
+    })
+  })
+
+  it('invalidates processor runs when normalized parsing changes over unchanged bytes', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const session = codexSemanticSession('wrapper')
+    store.ingestSession(session, 0, [], 'test', 2005)
+    store.persistResult(session.id, 'files-touched', 1, session.raw.contentHash, null, {})
+    expect(store.processorRun(session.id, 'files-touched')?.invalidated).toBe(false)
+
+    store.ingestSession(session, 0, [], 'test', 3005)
+    expect(store.processorRun(session.id, 'files-touched')?.invalidated).toBe(true)
+  })
+})
+
+function codexSemanticSession(envelope: string): Session {
+  const parentId = 'outer'
+  return {
+    id: 'codex:semantic',
+    sessionId: 'semantic',
+    source: 'codex',
+    provider: 'openai',
+    project: { cwd: '/repo', repo: 'o/r' },
+    models: [],
+    tokens: emptyUsage(),
+    events: [
+      {
+        kind: 'assistant',
+        blocks: [{ type: 'tool_use', id: parentId, name: 'exec', input: envelope }],
+        usage: emptyUsage(),
+        isSidechain: false,
+        seq: 0,
+      },
+    ],
+    toolCalls: [
+      {
+        id: `${parentId}:0`,
+        parentId,
+        name: 'exec_command',
+        action: 'shell',
+        input: { cmd: 'gh pr create --fill' },
+        target: { command: 'gh pr create --fill' },
+        result: { ok: true, isError: false, raw: 'https://github.com/o/r/pull/1' },
+        isSidechain: false,
+      },
+    ],
+    raw: { path: '/tmp/rollout.jsonl', contentHash: 'same-bytes' },
+  } as Session
 }
 
 describe('artifact upsert (PR clobber safety)', () => {
@@ -402,5 +614,47 @@ describe('summary.lastAnalyzedAt', () => {
     expect(store.summary().lastAnalyzedAt).toBe(null)
     store.setMeta('last_analyze_at', '2026-06-30T12:00:00.000Z')
     expect(store.summary().lastAnalyzedAt).toBe('2026-06-30T12:00:00.000Z')
+  })
+})
+
+describe('display title fallback (first_prompt)', () => {
+  // Seed one session row with explicit title / first_prompt and an optional
+  // enrichment `title` annotation, then read it back through BOTH the list and
+  // the detail query — they share titleExpr, so this asserts the whole chain.
+  function seed(db: ReturnType<typeof openDb>, id: string, cols: { title?: string; first_prompt?: string; enriched?: string }) {
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, title, first_prompt, started_at) VALUES (?,?,?,?,?,?,?)')
+      .run(id, id, 'claude-code', 'anthropic', cols.title ?? null, cols.first_prompt ?? null, '2026-06-30T00:00:00Z')
+    if (cols.enriched != null) {
+      db.prepare("INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'enrich-session', 'title', ?)")
+        .run(id, JSON.stringify(cols.enriched))
+    }
+  }
+
+  it('falls back to the opening prompt when no native/enriched title, in list AND detail', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-fallback', { first_prompt: 'Fix the login redirect loop' })
+
+    const listed = store.sessionList({}).find((r) => r.id === 's-fallback')
+    expect(listed?.title).toBe('Fix the login redirect loop')
+    expect(store.sessionDetail('s-fallback')?.session.title).toBe('Fix the login redirect loop')
+  })
+
+  it('prefers enriched title, then native title, over the opening prompt', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-enriched', { enriched: 'Auth Redirect Fix', title: 'native', first_prompt: 'Fix the login redirect loop' })
+    seed(db, 's-native', { title: 'Native Session Title', first_prompt: 'Fix the login redirect loop' })
+
+    const list = store.sessionList({})
+    expect(list.find((r) => r.id === 's-enriched')?.title).toBe('Auth Redirect Fix')
+    expect(list.find((r) => r.id === 's-native')?.title).toBe('Native Session Title')
+  })
+
+  it('still shows (untitled) in the list when there is no prompt at all', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-empty', {})
+    expect(store.sessionList({}).find((r) => r.id === 's-empty')?.title).toBe('(untitled)')
   })
 })

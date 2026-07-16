@@ -11,9 +11,9 @@ import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import { isSyntheticUser } from '../core/turns'
 import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
+import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
 import type { InsightInput } from '../core/detector'
 import type { InsightRow } from './types'
@@ -140,6 +140,11 @@ export class Store {
   ) {
     const nTurns = session.events.filter((e) => e.kind === 'user').length
     const tx = this.db.transaction(() => {
+      const prior = this.db
+        .prepare('SELECT content_hash AS hash, parse_version AS parseVersion FROM sessions WHERE id = ?')
+        .get(session.id) as { hash: string | null; parseVersion: number | null } | undefined
+      const normalizationChanged =
+        prior != null && prior.hash === session.raw.contentHash && (prior.parseVersion ?? 0) < parseVersion
       // Upsert (NOT INSERT OR REPLACE): replacing the row would fire ON DELETE
       // CASCADE and wipe processor-owned children (annotations, outcomes,
       // session_artifacts) that a cache-hit processor then won't recreate. Update
@@ -147,18 +152,19 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO sessions (
-             id, session_id, source, provider, title, repo, branch, cwd,
+             id, session_id, source, provider, title, first_prompt, repo, branch, cwd,
              started_at, ended_at, n_turns, n_tool_calls, models,
-             tok_input, tok_output, tok_cache_create, tok_cache_read,
+             tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read,
              cost_usd, price_table_version, content_hash, parse_version, analyzed_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET
              session_id=excluded.session_id, source=excluded.source, provider=excluded.provider,
-             title=excluded.title, repo=excluded.repo, branch=excluded.branch, cwd=excluded.cwd,
+             title=excluded.title, first_prompt=excluded.first_prompt, repo=excluded.repo, branch=excluded.branch, cwd=excluded.cwd,
              started_at=excluded.started_at, ended_at=excluded.ended_at, n_turns=excluded.n_turns,
              n_tool_calls=excluded.n_tool_calls, models=excluded.models,
              tok_input=excluded.tok_input, tok_output=excluded.tok_output,
-             tok_cache_create=excluded.tok_cache_create, tok_cache_read=excluded.tok_cache_read,
+             tok_cache_create_5m=excluded.tok_cache_create_5m, tok_cache_create_1h=excluded.tok_cache_create_1h,
+             tok_cache_read=excluded.tok_cache_read,
              cost_usd=excluded.cost_usd, price_table_version=excluded.price_table_version,
              content_hash=excluded.content_hash, parse_version=excluded.parse_version,
              analyzed_at=excluded.analyzed_at`,
@@ -169,6 +175,7 @@ export class Store {
           session.source,
           session.provider,
           session.title ?? null,
+          firstUserPrompt(session),
           session.project.repo ?? null,
           session.project.branch ?? null,
           session.project.cwd ?? null,
@@ -179,7 +186,8 @@ export class Store {
           JSON.stringify(session.models),
           session.tokens.input,
           session.tokens.output,
-          session.tokens.cacheCreate,
+          session.tokens.cacheCreate5m,
+          session.tokens.cacheCreate1h,
           session.tokens.cacheRead,
           costUsd,
           priceTableVersion,
@@ -225,8 +233,8 @@ export class Store {
       const insUsage = this.db.prepare(
         `INSERT INTO usage_facts
            (session_id, idx, model, is_sidechain, ts,
-            tok_input, tok_output, tok_cache_create, tok_cache_read, cost_usd)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+            tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       )
       for (const f of facts) {
         insUsage.run(
@@ -237,10 +245,17 @@ export class Store {
           f.ts ?? null,
           f.tokens.input,
           f.tokens.output,
-          f.tokens.cacheCreate,
+          f.tokens.cacheCreate5m,
+          f.tokens.cacheCreate1h,
           f.tokens.cacheRead,
           f.usd,
         )
+      }
+      // Parser upgrades can change the normalized blob/tool rows while the raw
+      // transcript hash stays identical. Processor caches key on that raw hash,
+      // so explicitly stale them and rebuild files, PRs, blocks, and enrichment.
+      if (normalizationChanged) {
+        this.db.prepare('UPDATE processor_runs SET invalidated = 1 WHERE session_id = ?').run(session.id)
       }
     })
     tx()
@@ -256,7 +271,7 @@ export class Store {
         `SELECT model,
                 COUNT(DISTINCT session_id) AS sessions,
                 SUM(cost_usd)              AS costUsd,
-                SUM(tok_input + tok_output + tok_cache_create + tok_cache_read) AS tokens
+                SUM(tok_input + tok_output + tok_cache_create_5m + tok_cache_create_1h + tok_cache_read) AS tokens
          FROM usage_facts
          GROUP BY model
          ORDER BY costUsd DESC`,
@@ -655,7 +670,7 @@ export class Store {
       .prepare(
         `SELECT COUNT(*) AS sessions,
                 COALESCE(SUM(cost_usd),0) AS costUsd,
-                COALESCE(SUM(tok_input+tok_output+tok_cache_create+tok_cache_read),0) AS tokens,
+                COALESCE(SUM(tok_input+tok_output+tok_cache_create_5m+tok_cache_create_1h+tok_cache_read),0) AS tokens,
                 MIN(started_at) AS firstAt, MAX(started_at) AS lastAt
          FROM sessions`,
       )
@@ -2093,7 +2108,8 @@ export class Store {
       .prepare(
         `SELECT id, ${titleExpr('sessions')} AS title, source, provider, repo, branch, started_at AS startedAt, ended_at AS endedAt,
                 n_turns AS nTurns, n_tool_calls AS nToolCalls, models AS modelsJson, cost_usd AS costUsd,
-                tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create AS tokCacheCreate, tok_cache_read AS tokCacheRead
+                tok_input AS tokInput, tok_output AS tokOutput, tok_cache_create_5m AS tokCacheCreate5m,
+                tok_cache_create_1h AS tokCacheCreate1h, tok_cache_read AS tokCacheRead
          FROM sessions WHERE id = ?`,
       )
       .get(id) as Record<string, any> | undefined
@@ -2158,7 +2174,8 @@ export class Store {
         tokens: {
           input: s.tokInput ?? 0,
           output: s.tokOutput ?? 0,
-          cacheCreate: s.tokCacheCreate ?? 0,
+          cacheCreate5m: s.tokCacheCreate5m ?? 0,
+          cacheCreate1h: s.tokCacheCreate1h ?? 0,
           cacheRead: s.tokCacheRead ?? 0,
         },
       },
@@ -3566,6 +3583,8 @@ export interface TranscriptTool {
   output?: string
   /** For Edit/Write: old→new hunks for inline diff rendering. */
   hunks?: { del: string; ins: string }[]
+  /** For a multi-file apply_patch: preserve each file's identity and hunks. */
+  fileDiffs?: Array<{ path: string; hunks: { del: string; ins: string }[] }>
   error?: string
   /** For a subagent-spawning call (`Task`/`Agent`), the agentId it links to. */
   agentId?: string
@@ -3704,9 +3723,11 @@ function complexityWhere(bucket: string | undefined, alias: string, kind?: strin
   return `AND (${clauses.join(' OR ')})`
 }
 
-// Display title: the enrichment-derived `title` annotation, else the native adapter title
+// Display title: the enrichment-derived `title` annotation, else the native
+// adapter title, else the session's opening prompt (clipped for display at the
+// render site). NULLIF keeps an empty native title from masking the fallback.
 function titleExpr(alias: string): string {
-  return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), ${alias}.title)`
+  return `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=${alias}.id AND key='title'), NULLIF(${alias}.title, ''), NULLIF(${alias}.first_prompt, ''))`
 }
 
 function safeJson<T>(s: unknown, fallback: T): T {
@@ -3838,6 +3859,13 @@ function buildTranscriptCore(session: Session): {
 } {
   const tcById = new Map(session.toolCalls.map((t) => [t.id, t]))
   const idxById = new Map(session.toolCalls.map((t, i) => [t.id, i]))
+  const childrenByParent = new Map<string, ToolCall[]>()
+  for (const tc of session.toolCalls) {
+    if (!tc.parentId) continue
+    const children = childrenByParent.get(tc.parentId) ?? []
+    children.push(tc)
+    childrenByParent.set(tc.parentId, children)
+  }
   // toolUseId of a spawning call → the subagent it spawned, so the main-thread
   // chip can link to that subagent's transcript tab.
   const spawnToAgent = new Map<string, string>()
@@ -3853,43 +3881,69 @@ function buildTranscriptCore(session: Session): {
       for (const b of ev.blocks) {
         if (b.type === 'text') text += (text ? '\n' : '') + b.text
         else if (b.type === 'tool_use') {
-          ids.push(b.id)
-          const tc = tcById.get(b.id)
-          const input = b.input as Record<string, unknown> | undefined
-          // Prefer the adapter-normalized target (paths/command) over re-parsing the
-          // raw input blob, so per-vendor field spellings live in the adapter.
-          const target = tc?.target.paths?.[0] ?? tc?.target.command
-          const res = tc?.result
-          const ok = res ? res.ok : true
-          const command = toolCommandText(tc, input)
-          const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
-          const tool: TranscriptTool = { name: b.name, action: '', ok, idx: idxById.get(b.id), target: clip(target, 1500) }
-          if (command) tool.command = command
-          if (output) tool.output = output
-          // file_write → inline diff. The before/after strings aren't in the
-          // normalized target, so read them from the raw input here; field names
-          // differ across harnesses (Claude Code: old_string/new_string;
-          // OpenCode: oldString/newString).
-          if (tc?.action === 'file_write' && input) {
-            if (Array.isArray(input.edits)) {
-              tool.hunks = (input.edits as Array<Record<string, unknown>>).map((e) => ({
-                del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
-                ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
-              }))
-            } else {
-              const old_s = clip(String(input.old_string ?? input.oldString ?? ''), 2000)
-              const new_s = clip(String(input.new_string ?? input.newString ?? ''), 2000)
-              if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
-              else {
-                const content = clip(String(input.content ?? ''), 2000)
-                if (content) tool.hunks = [{ del: '', ins: content }]
+          const direct = tcById.get(b.id)
+          const children = childrenByParent.get(b.id) ?? []
+          const candidates: Array<{ tc?: ToolCall; name: string; input: unknown; semantic?: boolean }> =
+            direct
+              ? [{ tc: direct, name: b.name, input: b.input }]
+              : children.length
+                ? children.map((tc) => ({ tc, name: tc.name, input: tc.input, semantic: true }))
+                : [{ name: b.name, input: b.input }]
+
+          for (const candidate of candidates) {
+            const tc = candidate.tc
+            const input = candidate.input as Record<string, unknown> | undefined
+            if (tc) ids.push(tc.id)
+            else ids.push(b.id)
+            // Prefer the adapter-normalized target (paths/command) over re-parsing the
+            // raw input blob, so per-vendor field spellings live in the adapter.
+            const target = tc?.target.paths?.[0] ?? tc?.target.command
+            const res = tc?.result
+            const ok = res ? res.ok : true
+            const command = toolCommandText(tc, input)
+            const output = res?.raw != null ? clipOutput(readableOutput(tc?.action, res.raw)) : undefined
+            const tool: TranscriptTool = {
+              name: candidate.name,
+              action: candidate.semantic ? tc?.action ?? '' : '',
+              ok,
+              idx: tc ? idxById.get(tc.id) : undefined,
+              target: clip(target, 1500),
+            }
+            if (command) tool.command = command
+            if (output) tool.output = output
+            // file_write → inline diff, read from the normalized tc.input (not the block's
+            // raw input): a Codex shell `apply_patch <<'PATCH'` keeps the {cmd} object on the
+            // block but carries the patch string on tc.input. Identical for other harnesses.
+            // Field names differ (Claude: old_string/new_string; OpenCode: camelCase).
+            const fileInput = tc?.action === 'file_write' ? tc.input : candidate.input
+            if (tc?.action === 'file_write' && typeof fileInput === 'string') {
+              const patchEdits = parseApplyPatch(fileInput)
+              if (patchEdits.length) {
+                tool.fileDiffs = patchEdits.map((edit) => ({ path: edit.path, hunks: edit.hunks }))
+                tool.command = patchEdits.length === 1 ? patchEdits[0]!.path : `${patchEdits.length} files changed`
+              }
+            } else if (tc?.action === 'file_write' && fileInput && typeof fileInput === 'object') {
+              const fi = fileInput as Record<string, unknown>
+              if (Array.isArray(fi.edits)) {
+                tool.hunks = (fi.edits as Array<Record<string, unknown>>).map((e) => ({
+                  del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
+                  ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
+                }))
+              } else {
+                const old_s = clip(String(fi.old_string ?? fi.oldString ?? ''), 2000)
+                const new_s = clip(String(fi.new_string ?? fi.newString ?? ''), 2000)
+                if (old_s || new_s) tool.hunks = [{ del: old_s, ins: new_s }]
+                else {
+                  const content = clip(String(fi.content ?? ''), 2000)
+                  if (content) tool.hunks = [{ del: '', ins: content }]
+                }
               }
             }
+            if (!ok) tool.error = clipError(resultText(res?.raw))
+            const spawned = spawnToAgent.get(tc?.id ?? b.id) ?? spawnToAgent.get(b.id)
+            if (spawned) tool.agentId = spawned
+            tools.push(tool)
           }
-          if (!ok) tool.error = clipError(resultText(res?.raw))
-          const spawned = spawnToAgent.get(b.id)
-          if (spawned) tool.agentId = spawned
-          tools.push(tool)
         }
       }
       if (!text && tools.length === 0) continue
