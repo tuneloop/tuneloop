@@ -18,10 +18,7 @@ export async function readClaudeCodeEnvironment(projectPath?: string): Promise<E
   const scope = projectPath === undefined ? 'global' : 'project'
   // Scan the repo tree once and share it across readers: `.claude/` dirs feed
   // settings/agents/skills; CLAUDE.md files feed instructions.
-  const scan: ProjectScan | undefined =
-    projectPath === undefined
-      ? undefined
-      : { claudeDirs: await findClaudeDirs(projectPath), instructionFiles: await findFilesByName(projectPath, INSTRUCTION_FILES) }
+  const scan: ProjectScan | undefined = projectPath === undefined ? undefined : await scanProject(projectPath)
   const out: EnvCategorySnapshot[] = []
   for (const read of [readSettings, readMcp, readAgents, readSkills, readInstructions]) {
     const cat = await read(scope, projectPath, scan)
@@ -30,11 +27,11 @@ export async function readClaudeCodeEnvironment(projectPath?: string): Promise<E
   return out
 }
 
-/** Repo-tree scan results, computed once per project and shared across readers. */
-interface ProjectScan {
-  /** Every `.claude/` dir under the repo (repo-relative) — findClaudeDirs. */
+/** Repo-tree scan results, computed once per project (scanProject) and shared across readers. */
+export interface ProjectScan {
+  /** Every `.claude/` dir under the repo (repo-relative). */
   claudeDirs: string[]
-  /** Every CLAUDE.md / CLAUDE.local.md under the repo (repo-relative) — findFilesByName. */
+  /** Every CLAUDE.md / CLAUDE.local.md under the repo (repo-relative). */
   instructionFiles: string[]
 }
 
@@ -418,6 +415,12 @@ async function readSkills(scope: 'global' | 'project', projectPath?: string, sca
         if (entry) skills.push(tag(entry))
       }
     }
+    // skillRoots: the location's own SKILL.md is one skill (single-skill plugin or a
+    // manifest path like "./"). Frontmatter `name` wins here, dir basename fallback.
+    for (const skillRoot of plugin.skillRoots) {
+      const entry = await readSkillFile(join(skillRoot, 'SKILL.md'), basename(skillRoot), true)
+      if (entry) skills.push(tag(entry))
+    }
     // commandDirs: flat `.md` files (dir walked, or an explicit file from a manifest override).
     for (const path of (await collectMdFiles(plugin.commandDirs)).sort()) {
       const entry = await readSkillFile(path, basename(path, '.md'))
@@ -426,6 +429,16 @@ async function readSkills(scope: 'global' | 'project', projectPath?: string, sca
   }
 
   return skills.length > 0 ? { category: 'skills', payload: { skills, count: skills.length } } : null
+}
+
+/** True when a file or directory exists at `path`. */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** Immediate child directory names of `dir` (non-recursive); [] if `dir` is missing. */
@@ -437,23 +450,32 @@ async function listDirs(dir: string): Promise<string[]> {
   }
 }
 
-/** Directory names we never descend into when hunting for nested `.claude/` dirs. */
-const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build'])
+/** Directory names we never descend into when scanning a repo for config. */
+const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'vendor', 'venv', 'target'])
+
+/** Filenames collected as `instructions` by scanProject. */
+const INSTRUCTION_FILES = new Set(['CLAUDE.md', 'CLAUDE.local.md'])
 
 /**
- * Every `.claude/` directory under `repoRoot`, as repo-relative paths (the root's
- * own `.claude` is included as `.claude`). CC reads config from nested `.claude/`
- * dirs in monorepo sub-packages, not just the root; this finds them all so the
- * category readers can key each config file by where it lives.
+ * One walk of the repo tree collecting everything the category readers need:
+ *   - every `.claude/` dir, as repo-relative paths (the root's own is `.claude`) —
+ *     CC reads config from nested `.claude/` dirs in monorepo sub-packages, not just
+ *     the root, and the readers key each config file by where it lives.
+ *   - every `CLAUDE.md` / `CLAUDE.local.md`, repo-relative — unlike settings these
+ *     can live directly in any directory (`packages/frontend/CLAUDE.md`) with no
+ *     `.claude/` beside them, so they're found by filename. A `.claude/CLAUDE.md`
+ *     is valid too, so the walk descends into `.claude/` dirs — but only for
+ *     instruction files (a `.claude` subtree isn't more `.claude` dirs).
  *
- * Bounded by a minimal skip-list (node_modules/.git/dist/build) plus all other
- * dot-directories — vendored/build trees can ship their own `.claude/` that is not
- * the user's config. No depth cap: pruning those trees keeps the walk cheap.
- * Returns [] when repoRoot is missing or has no `.claude/` anywhere.
+ * Bounded by a skip-list (node_modules/.git/dist/build/vendor/venv/target) plus all
+ * other dot-directories — vendored/build trees can ship their own `.claude/` that is
+ * not the user's config. No depth cap: pruning those trees keeps the walk cheap.
+ * Returns empty lists when repoRoot is missing or has no config anywhere.
  */
-export async function findClaudeDirs(repoRoot: string): Promise<string[]> {
-  const found: string[] = []
-  const walk = async (dir: string, rel: string): Promise<void> => {
+export async function scanProject(repoRoot: string): Promise<ProjectScan> {
+  const claudeDirs: string[] = []
+  const instructionFiles: string[] = []
+  const walk = async (dir: string, rel: string, insideClaude: boolean): Promise<void> => {
     let entries
     try {
       entries = await readdir(dir, { withFileTypes: true })
@@ -461,18 +483,23 @@ export async function findClaudeDirs(repoRoot: string): Promise<string[]> {
       return
     }
     for (const e of entries) {
-      if (!e.isDirectory()) continue
       const childRel = rel ? `${rel}/${e.name}` : e.name
+      if (e.isFile()) {
+        if (INSTRUCTION_FILES.has(e.name)) instructionFiles.push(childRel)
+        continue
+      }
+      if (!e.isDirectory()) continue
       if (e.name === '.claude') {
-        found.push(childRel)
-        continue // don't descend into a .claude dir (its subtree isn't more .claude dirs)
+        if (!insideClaude) claudeDirs.push(childRel)
+        await walk(join(dir, e.name), childRel, true)
+        continue
       }
       if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue
-      await walk(join(dir, e.name), childRel)
+      await walk(join(dir, e.name), childRel, insideClaude)
     }
   }
-  await walk(repoRoot, '')
-  return found.sort()
+  await walk(repoRoot, '', false)
+  return { claudeDirs: claudeDirs.sort(), instructionFiles: instructionFiles.sort() }
 }
 
 /** A resolved plugin's contributed config locations (absolute paths). */
@@ -480,6 +507,13 @@ export interface PluginDirs {
   id: string
   /** Dirs to scan for `<name>/SKILL.md`. */
   skillDirs: string[]
+  /**
+   * Dirs whose OWN `SKILL.md` is a single skill: a manifest `skills` path that
+   * contains SKILL.md directly (e.g. `"./"`), or the plugin root of a single-skill
+   * plugin (root SKILL.md, no `skills/` dir, no manifest field — auto-loaded per
+   * docs since CC v2.1.142). Naming there is frontmatter-`name`-first.
+   */
+  skillRoots: string[]
   /** Dirs to scan for flat `.md` commands, and individual command files. */
   commandDirs: string[]
   /** Dirs to scan for agent `*.md`, and individual agent files. */
@@ -492,10 +526,13 @@ export interface PluginDirs {
  * its install entries (scope + installPath); a missing or unreadable file yields [].
  * Maps each enabled id to its install entry whose `scope` matches, then resolves dirs
  * from `.claude-plugin/plugin.json`:
- *   - `skills`   (string|array) ADDS to the default `skills/` dir.
+ *   - `skills`   (string|array) ADDS to the default `skills/` dir. A listed path that
+ *     contains `SKILL.md` DIRECTLY (e.g. `"./"`) is itself one skill → skillRoots.
  *   - `commands` (string|array) REPLACES the default `commands/` dir.
  *   - `agents`   (string|array) REPLACES the default `agents/` dir.
  * Paths in the manifest are relative to the plugin root. Absent field → default dir.
+ * Single-skill auto-load (docs, CC v2.1.142+): a root `SKILL.md` with no `skills/`
+ * dir and no manifest `skills` field loads the plugin root itself as one skill.
  */
 export async function resolvePluginDirs(enabledIds: string[], scope: 'user' | 'project' | 'local'): Promise<PluginDirs[]> {
   if (enabledIds.length === 0) return []
@@ -515,12 +552,23 @@ export async function resolvePluginDirs(enabledIds: string[], scope: 'user' | 'p
     const manifest = (await readJsonIfExists(join(root, '.claude-plugin', 'plugin.json'))) as Record<string, unknown> | null
 
     // `skills` adds to default skills/; `commands`/`agents` replace their defaults.
-    const skillDirs = [join(root, 'skills'), ...toPaths(manifest?.skills, root)]
+    const skillDirs = [join(root, 'skills')]
+    const skillRoots: string[] = []
+    for (const p of toPaths(manifest?.skills, root)) {
+      // A manifest skill path whose SKILL.md sits directly in it IS one skill;
+      // otherwise it's a dir of <name>/SKILL.md skills like the default.
+      if (await pathExists(join(p, 'SKILL.md'))) skillRoots.push(p)
+      else skillDirs.push(p)
+    }
+    if (manifest?.skills === undefined && !(await pathExists(join(root, 'skills'))) && (await pathExists(join(root, 'SKILL.md')))) {
+      skillRoots.push(root) // single-skill plugin auto-load
+    }
     const commandOverride = toPaths(manifest?.commands, root)
     const agentOverride = toPaths(manifest?.agents, root)
     out.push({
       id,
       skillDirs,
+      skillRoots,
       commandDirs: commandOverride.length > 0 ? commandOverride : [join(root, 'commands')],
       agentDirs: agentOverride.length > 0 ? agentOverride : [join(root, 'agents')],
     })
@@ -578,44 +626,18 @@ async function enabledPluginDirs(scope: 'global' | 'project', projectPath?: stri
 }
 
 /**
- * Every file named one of `names` under `repoRoot`, as repo-relative paths. Used for
- * `CLAUDE.md`/`CLAUDE.local.md`, which — unlike settings — can live directly in any
- * directory (`packages/frontend/CLAUDE.md`) with no `.claude/` folder, so they can't
- * be found via findClaudeDirs. Descends into `.claude/` too (a `.claude/CLAUDE.md` is
- * valid). Same skip-list + dot-dir pruning as findClaudeDirs.
- */
-export async function findFilesByName(repoRoot: string, names: Set<string>): Promise<string[]> {
-  const found: string[] = []
-  const walk = async (dir: string, rel: string): Promise<void> => {
-    let entries
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      return
-    }
-    for (const e of entries) {
-      const childRel = rel ? `${rel}/${e.name}` : e.name
-      if (e.isFile() && names.has(e.name)) {
-        found.push(childRel)
-      } else if (e.isDirectory() && e.name !== '.claude' && (SKIP_DIRS.has(e.name) || e.name.startsWith('.'))) {
-        continue // prune vendored/build/dot dirs — but always descend into .claude
-      } else if (e.isDirectory()) {
-        await walk(join(dir, e.name), childRel)
-      }
-    }
-  }
-  await walk(repoRoot, '')
-  return found.sort()
-}
-
-/**
  * Read one skill/command file into a { name, description?, body, bodyHash } entry.
  * `name` is the INVOKABLE identity (directory name for a SKILL.md, filename for a
  * command) — NOT the frontmatter `name`, which is display-only and per docs defaults
  * to the directory name anyway. Using the invokable name keeps it aligned with the
  * `/name` an adoption fix would reference.
+ *
+ * EXCEPTION — `preferFrontmatterName`: for a single-skill location (a skillRoot,
+ * where SKILL.md sits directly in the dir), docs invert the precedence: frontmatter
+ * `name` determines the invocation name (stable regardless of the install dir), and
+ * the passed `name` (dir basename) is only the fallback.
  */
-async function readSkillFile(path: string, name: string): Promise<Record<string, unknown> | null> {
+async function readSkillFile(path: string, name: string, preferFrontmatterName = false): Promise<Record<string, unknown> | null> {
   let text: string
   try {
     text = await readFile(path, 'utf8')
@@ -624,7 +646,8 @@ async function readSkillFile(path: string, name: string): Promise<Record<string,
   }
   const { frontmatter, body } = splitFrontmatter(text)
   const fm = parseFrontmatter(frontmatter)
-  const entry: Record<string, unknown> = { name, body, bodyHash: contentHash(body) }
+  const resolvedName = preferFrontmatterName && typeof fm.name === 'string' ? fm.name : name
+  const entry: Record<string, unknown> = { name: resolvedName, body, bodyHash: contentHash(body) }
   if (typeof fm.description === 'string') entry.description = fm.description
   return entry
 }
@@ -640,12 +663,11 @@ async function readSkillFile(path: string, name: string): Promise<Record<string,
  *   - project: every `CLAUDE.md` / `CLAUDE.local.md` under the repo — at the root,
  *              in nested monorepo packages (`packages/x/CLAUDE.md`), and inside any
  *              `.claude/` (`<dir>/.claude/CLAUDE.md`). Unlike settings these can sit
- *              directly in a dir with no `.claude/`, so we file-walk (findFilesByName)
- *              rather than key off findClaudeDirs. Keyed by repo-relative path.
+ *              directly in a dir with no `.claude/`, so scanProject finds them by
+ *              filename rather than via `.claude/` dirs. Keyed by repo-relative path.
  * Empty files are omitted (an empty CLAUDE.md carries no instruction signal).
  * Null when no non-empty instructions file exists in the scope.
  */
-const INSTRUCTION_FILES = new Set(['CLAUDE.md', 'CLAUDE.local.md'])
 async function readInstructions(scope: 'global' | 'project', projectPath?: string, scan?: ProjectScan): Promise<EnvCategorySnapshot | null> {
   const files: Array<{ key: string; path: string }> =
     scope === 'global'

@@ -518,10 +518,10 @@ payload is richer. A change in any package's config re-snapshots that one per-re
 ### Discovery
 
 A single downward walk from the repo root finds every `.claude/` dir (shared across
-settings/agents/skills), and a second walk finds every `CLAUDE.md` / `CLAUDE.local.md` (for
-instructions — these can live in a directory with no `.claude/`, so they're found by filename).
-Both walks skip `node_modules`, `.git`, `dist`, `build`, and other dot-directories (never the
-user's config), and run once per repo, shared across the readers.
+settings/agents/skills) and every `CLAUDE.md` / `CLAUDE.local.md` (for instructions — these
+can live in a directory with no `.claude/`, so they're found by filename). The walk skips
+`node_modules`, `.git`, `dist`, `build`, `vendor`, `venv`, `target`, and other dot-directories
+(never the user's config), and runs once per repo, shared across the readers.
 
 Skills stay **depth-1** within each `skills/` dir — a skill is `skills/<name>/SKILL.md`; a
 `SKILL.md` nested deeper (a skill's own `examples/`) is a supporting file, not a skill.
