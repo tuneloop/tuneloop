@@ -3210,7 +3210,11 @@ export class Store {
    * timestamp to control the timeline and keep `captured_at` unique across writes.
    */
   recordEnvSnapshot(input: EnvSnapshotInput, now: string = new Date().toISOString()): void {
-    const hash = contentHash(JSON.stringify(input.payload))
+    // Hash a canonical serialization (object keys sorted at every level; array order
+    // preserved) so a meaning-preserving key reorder in the source config doesn't read
+    // as a change. Arrays aren't sorted — element order can be meaningful (e.g. the
+    // order of permission rules) and is already consistent across reads.
+    const hash = contentHash(canonicalJson(input.payload))
     this.db.transaction(() => {
       const existing = this.db
         .prepare(
@@ -3281,6 +3285,25 @@ export class Store {
     this.readonlyDb?.close()
     this.db.close()
   }
+}
+
+/**
+ * Deterministic JSON for hashing: object keys sorted recursively, array order kept.
+ * So `{a:1,b:2}` and `{b:2,a:1}` hash identically, but `[1,2]` and `[2,1]` do not.
+ */
+function canonicalJson(value: unknown): string {
+  const canon = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canon)
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.keys(v as Record<string, unknown>)
+          .sort()
+          .map((k) => [k, canon((v as Record<string, unknown>)[k])]),
+      )
+    }
+    return v
+  }
+  return JSON.stringify(canon(value))
 }
 
 /** Map a raw environment_snapshots row to the read-facing shape (parses snapshot_json). */

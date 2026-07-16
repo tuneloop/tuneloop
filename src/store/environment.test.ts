@@ -62,13 +62,22 @@ describe('recordEnvSnapshot — append-on-change', () => {
     expect(cur?.capturedAt).toBe('2026-02-01T00:00:00Z')
   })
 
-  it('payload key order does not trigger a spurious change', () => {
+  it('object key order does not trigger a spurious change (canonical hash)', () => {
     const { db, store } = setup()
-    snap(store, { allow: ['a'], deny: [] }, '2026-01-01T00:00:00Z')
-    // Same content, but the writer hashes the JSON string — assert our serialization
-    // is stable for an identical object literal (documents the equality contract).
-    snap(store, { allow: ['a'], deny: [] }, '2026-01-02T00:00:00Z')
+    snap(store, { allow: ['a'], deny: [], ask: [] }, '2026-01-01T00:00:00Z')
+    // Same content, keys in a DIFFERENT order → canonical hash matches → no new row.
+    snap(store, { ask: [], deny: [], allow: ['a'] }, '2026-01-02T00:00:00Z')
     expect(rowCount(db)).toBe(1)
+    // Nested objects are canonicalized too.
+    snap(store, { deny: [], allow: ['a'], ask: [] }, '2026-01-03T00:00:00Z')
+    expect(rowCount(db)).toBe(1)
+  })
+
+  it('array element order IS a change (arrays are not sorted)', () => {
+    const { db, store } = setup()
+    snap(store, { allow: ['a', 'b'] }, '2026-01-01T00:00:00Z')
+    snap(store, { allow: ['b', 'a'] }, '2026-02-01T00:00:00Z') // reordered array → real change
+    expect(rowCount(db)).toBe(2)
   })
 
   it('round-trip A -> B -> A records a new A row and reports A as current', () => {

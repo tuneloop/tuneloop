@@ -69,11 +69,14 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 **Sources by scope:**
 
 
-| Scope            | Path                                 | Shared?         |
-| ---------------- | ------------------------------------ | --------------- |
-| User (global)    | `$CLAUDE_HOME/settings.json`         | No              |
-| Project (shared) | `<repo>/.claude/settings.json`       | Yes (committed) |
-| Project (local)  | `<repo>/.claude/settings.local.json` | No (gitignored) |
+| Scope            | Path                                                              | Shared?         |
+| ---------------- | ----------------------------------------------------------------- | --------------- |
+| User (global)    | `$CLAUDE_HOME/settings.json`                                      | No              |
+| Project (shared) | `settings.json` in every `.claude/` under the repo               | Yes (committed) |
+| Project (local)  | `settings.local.json` in every `.claude/` under the repo         | No (gitignored) |
+
+Project scope reads these in **every `.claude/` directory** under the repo (root + nested
+monorepo packages — see Nested `.claude/` directories), keyed by repo-relative path.
 
 
 **Fields captured** (nothing else):
@@ -100,12 +103,15 @@ Where `$CLAUDE_HOME` = `process.env.CLAUDE_CONFIG_DIR ?? ~/.claude`.
 | `hooks`                                                   | Config hooks add little on their own; runtime hook execution (`hookEvent`/`hookCount`/`hookErrors`) is already in the transcript and is the better source. Revisit later if adoption detection needs it. |
 
 
-**Stored shape:**
+**Stored shape** (keyed per settings file by repo-relative path; a file whose whole content
+is dropped by the allowlist is omitted):
 
 ```json
 {
-  "permissions": { "allow": ["Bash(npm test *)"], "deny": [] },
-  "plugins": { "frontend-design@claude-plugins-official": true }
+  ".claude/settings.json": {
+    "permissions": { "allow": ["Bash(npm test *)"], "deny": [], "ask": [] },
+    "plugins": { "frontend-design@claude-plugins-official": true }
+  }
 }
 ```
 
@@ -154,11 +160,15 @@ top-level `mcpServers`, at project scope the repo-root union of `projects.*` ent
 **Sources by scope:**
 
 
-| Scope         | Path                         |
-| ------------- | ---------------------------- |
-| User (global) | `$CLAUDE_HOME/agents/*.md`   |
-| Project       | `<repo>/.claude/agents/*.md` |
+| Scope         | Path                                                          |
+| ------------- | ------------------------------------------------------------- |
+| User (global) | `$CLAUDE_HOME/agents/*.md`                                    |
+| Project       | `agents/*.md` in every `.claude/` under the repo             |
 
+Project scope scans the `agents/` dir in every `.claude/` under the repo; each entry carries a
+repo-relative `dir` so same-named agents in different packages coexist (see Nested `.claude/`
+directories). Plugin-contributed agents also join this list, tagged `source` (see
+Plugin-provided skills & agents).
 
 **Fields captured:**
 
@@ -166,8 +176,8 @@ top-level `mcpServers`, at project scope the repo-root union of `projects.*` ent
 | Field                                   | Capture                | Signal                                                       |
 | --------------------------------------- | ---------------------- | ------------------------------------------------------------ |
 | Count                                   | Yes                    | How many custom agents                                       |
-| Frontmatter `name`                      | Yes                    | Agent catalog — always present (identity)                    |
-| Frontmatter `description`               | Yes                    | Purpose — effectively always present                         |
+| Frontmatter `name`                      | Yes (else filename)    | Agent catalog                                                |
+| Frontmatter `description`               | If present             | Purpose                                                      |
 | Frontmatter `model`                     | If present             | Per-agent model preference (often `inherit` / omitted)       |
 | Frontmatter `tools` / `disallowedTools` | If present             | Tool scoping (omitted = all tools)                           |
 | Body (system prompt)                    | Yes — full text + hash | Instruction content — enables true adoption detection + diff |
@@ -179,7 +189,7 @@ agent we suggested, with our instructions?") and diff an agent's definition acro
 `bodyHash` is kept alongside as a cheap change-detection / versioning key. UI-only fields
 (`color`) are dropped.
 
-**Stored shape:**
+**Stored shape** (`dir` on project entries, `source` on plugin entries; neither on global):
 
 ```json
 {
@@ -190,7 +200,8 @@ agent we suggested, with our instructions?") and diff an agent's definition acro
       "model": "sonnet",
       "tools": ["Read", "Bash"],
       "body": "You are a code review specialist. For each changed file...",
-      "bodyHash": "a1b2c3..."
+      "bodyHash": "a1b2c3...",
+      "dir": ".claude/agents"
     }
   ],
   "count": 1
@@ -207,11 +218,15 @@ implementation detail with no signal.
 **Sources by scope:**
 
 
-| Scope         | Path                                                                |
-| ------------- | ------------------------------------------------------------------- |
-| User (global) | `$CLAUDE_HOME/skills/*/SKILL.md` + `$CLAUDE_HOME/commands/*.md`     |
-| Project       | `<repo>/.claude/skills/*/SKILL.md` + `<repo>/.claude/commands/*.md` |
+| Scope         | Path                                                            |
+| ------------- | --------------------------------------------------------------- |
+| User (global) | `$CLAUDE_HOME/skills/*/SKILL.md` + `$CLAUDE_HOME/commands/*.md` |
+| Project       | `skills/*/SKILL.md` + `commands/*.md` in every `.claude/` under the repo |
 
+Project scope scans every `.claude/` under the repo; each entry carries a repo-relative `dir`
+(see Nested `.claude/` directories). Plugin-contributed skills also join this list, tagged
+`source` (see Plugin-provided skills & agents). A skill's name is the **directory name** for a
+`SKILL.md` (invokable identity, not the frontmatter `name`) and the **filename** for a command.
 
 **Fields captured** (mirrors agents — body is the substance):
 
@@ -219,21 +234,23 @@ implementation detail with no signal.
 | Field                     | Capture                | Signal                                                                             |
 | ------------------------- | ---------------------- | ---------------------------------------------------------------------------------- |
 | Count                     | Yes                    | Customization depth                                                                |
-| Frontmatter `name`        | Yes                    | Skill catalog (falls back to filename)                                             |
+| Name                      | Yes                    | Skill catalog (SKILL.md → directory name; command → filename)                      |
 | Frontmatter `description` | If present             | Purpose — always parse it; absent is fine (legacy commands often omit frontmatter) |
 | Body                      | Yes — full text + hash | Instruction content — adoption detection + diff                                    |
 
 
-Other frontmatter fields (`disable-model-invocation`, `user-invocable`, `allowed-tools`,
-`disallowed-tools`) are dropped for now — add them if a detector needs the invocation posture.
+Only `SKILL.md` files exactly one level deep (`skills/<name>/SKILL.md`) are skills; a `SKILL.md`
+nested deeper (a skill's own supporting files) is not. Other frontmatter fields
+(`disable-model-invocation`, `user-invocable`, `allowed-tools`, `disallowed-tools`) are dropped
+for now — add them if a detector needs the invocation posture.
 
-**Stored shape:**
+**Stored shape** (`dir` on project entries, `source` on plugin entries):
 
 ```json
 {
   "skills": [
-    { "name": "deploy", "description": "Deploy to staging", "body": "Run the deploy script...", "bodyHash": "d4e5f6..." },
-    { "name": "review", "body": "Review the current diff...", "bodyHash": "..." }
+    { "name": "deploy", "description": "Deploy to staging", "body": "Run the deploy script...", "bodyHash": "d4e5f6...", "dir": ".claude/skills" },
+    { "name": "review", "body": "Review the current diff...", "bodyHash": "...", "dir": ".claude/commands" }
   ],
   "count": 2
 }
@@ -251,11 +268,15 @@ unexpanded** for v1 (the import lines are visible in the raw text); resolving im
 **Sources by scope:**
 
 
-| Scope            | Path                                             |
-| ---------------- | ------------------------------------------------ |
-| User             | `$CLAUDE_HOME/CLAUDE.md`                         |
-| Project (shared) | `<repo>/CLAUDE.md` or `<repo>/.claude/CLAUDE.md` |
-| Project (local)  | `<repo>/CLAUDE.local.md`                         |
+| Scope   | Path                                                        |
+| ------- | ----------------------------------------------------------- |
+| User    | `$CLAUDE_HOME/CLAUDE.md`                                    |
+| Project | every `CLAUDE.md` / `CLAUDE.local.md` under the repo        |
+
+Project scope finds every `CLAUDE.md` / `CLAUDE.local.md` in the repo by filename — at the root,
+in nested packages (`packages/x/CLAUDE.md`), and inside any `.claude/` (`<dir>/.claude/CLAUDE.md`).
+Unlike settings, these can sit directly in a directory with no `.claude/`, so they're found by a
+filename walk (see Nested `.claude/` directories).
 
 
 **Fields captured** (per file, keyed by relative path like settings/mcp):
@@ -292,13 +313,16 @@ Each category has a **global** component (user-level, same across all repos) and
 **project** component (varies per repo). The snapshot distinguishes these:
 
 
-| Category       | Global scope                              | Project scope                                          |
-| -------------- | ----------------------------------------- | ------------------------------------------------------ |
-| `settings`     | `$CLAUDE_HOME/settings.json`              | `<repo>/.claude/settings.json` + `settings.local.json` |
-| `mcp`          | `$CLAUDE_HOME/.claude.json` → per-project | `<repo>/.mcp.json`                                     |
-| `agents`       | `$CLAUDE_HOME/agents/`                    | `<repo>/.claude/agents/`                               |
-| `skills`       | `$CLAUDE_HOME/skills/` + `commands/`      | `<repo>/.claude/skills/` + `commands/`                 |
-| `instructions` | `$CLAUDE_HOME/CLAUDE.md`                  | `<repo>/CLAUDE.md` + `.local.md`                       |
+Except `mcp`, project scope reads from **every `.claude/` under the repo** (root + nested
+packages), not just the root.
+
+| Category       | Global scope                              | Project scope                                                  |
+| -------------- | ----------------------------------------- | -------------------------------------------------------------- |
+| `settings`     | `$CLAUDE_HOME/settings.json`              | `settings.json` + `settings.local.json` in each `.claude/`     |
+| `mcp`          | `$CLAUDE_HOME/.claude.json` → per-project | `<repo>/.mcp.json` + `.claude.json` entries under the repo     |
+| `agents`       | `$CLAUDE_HOME/agents/`                    | `agents/` in each `.claude/`                                   |
+| `skills`       | `$CLAUDE_HOME/skills/` + `commands/`      | `skills/` + `commands/` in each `.claude/`                     |
+| `instructions` | `$CLAUDE_HOME/CLAUDE.md`                  | every `CLAUDE.md` / `CLAUDE.local.md` under the repo           |
 
 
 ---
@@ -324,8 +348,10 @@ repo roots across all sessions *is* the project list — no separate discovery p
 `scope_key='_global'` snapshots for each category present.
 
 **Phase B — per unique project (once per repo root, not per session):** for each distinct repo
-root, read that repo's `.claude/`, `.mcp.json`, `CLAUDE.md`, plus the `~/.claude.json` MCP
-entries under it → write `scope='project'`, `scope_key=<repo root>` snapshots.
+root, read its config across every `.claude/` under the repo (settings/agents/skills), every
+`CLAUDE.md`/`CLAUDE.local.md`, `.mcp.json`, and the `~/.claude.json` MCP entries under it → write
+`scope='project'`, `scope_key=<repo root>` snapshots (one row per category; nested config lives
+inside the payload).
 
 Only repos with **sessions this run** are snapshotted — a configured-but-unused repo won't
 appear. That's fine for adoption (adoption cares about repos with activity).
@@ -450,6 +476,75 @@ subdirectory the user worked in. v1 simplification: key everything on **repo roo
 **union** the MCP servers from every `~/.claude.json` entry under that repo into one repo-level
 `mcp` snapshot. Lossy (drops per-subdirectory precision), but rare in practice — most users run
 from the repo root or share one MCP config. Revisit if subdir-scoped MCP proves to matter.
+
+---
+
+## Nested `.claude/` directories (monorepo sub-packages)
+
+CC reads config from **every `.claude/` directory** in a repo — the root and each monorepo
+sub-package (`packages/frontend/.claude/…`), plus `CLAUDE.md` files that can sit directly in any
+directory. The project-scope readers capture all of them. (`mcp` is exempt — it has no
+nested-`.claude/` concept; its per-cwd config lives in `.claude.json` and is unioned per repo.)
+
+### Multiple dirs live inside the per-repo payload
+
+The several dirs are represented **inside the one per-repo snapshot**, not as extra rows — the
+same "key by source path, don't merge, keep collisions visible" pattern `settings` and `mcp`
+already use. `scope_key` stays the repo root, so there is still one snapshot row per
+(repo, category); the append-on-change timeline and every consumer are unchanged, only the
+payload is richer. A change in any package's config re-snapshots that one per-repo row.
+
+- **settings / instructions** — keyed by each file's **repo-relative path**.
+- **agents / skills** — a list, each entry carrying a repo-relative **`dir`**, so same-named
+  entries in different packages coexist instead of colliding.
+
+**Payload shape** (settings by path; agents by `dir`):
+```json
+{
+  ".claude/settings.json":                   { "permissions": {…} },
+  "packages/frontend/.claude/settings.json": { "permissions": {…} }
+}
+```
+```json
+{
+  "agents": [
+    { "name": "reviewer", "dir": ".claude/agents", "body": "…", "bodyHash": "…" },
+    { "name": "reviewer", "dir": "packages/web/.claude/agents", "body": "…", "bodyHash": "…" }
+  ],
+  "count": 2
+}
+```
+
+### Discovery
+
+A single downward walk from the repo root finds every `.claude/` dir (shared across
+settings/agents/skills), and a second walk finds every `CLAUDE.md` / `CLAUDE.local.md` (for
+instructions — these can live in a directory with no `.claude/`, so they're found by filename).
+Both walks skip `node_modules`, `.git`, `dist`, `build`, and other dot-directories (never the
+user's config), and run once per repo, shared across the readers.
+
+Skills stay **depth-1** within each `skills/` dir — a skill is `skills/<name>/SKILL.md`; a
+`SKILL.md` nested deeper (a skill's own `examples/`) is a supporting file, not a skill.
+
+The snapshot records config **presence** (the config exists in the repo), matching the reader's
+current-state model — not which sub-package a given session happened to work in.
+
+---
+
+## Plugin-provided skills & agents
+
+An enabled plugin contributes its own skills and agents (e.g. `frontend-design` ships a
+`frontend-design` skill). The `skills` and `agents` categories include these alongside the
+user/project ones, each tagged `source: "plugin:<id>"` (parallel to the `dir` used for nested
+project config) — complementing the plugin *names*, which `settings` already captures via
+`enabledPlugins`.
+
+**Resolution**, run per scope: read enabled plugin ids from `enabledPlugins` at that scope →
+map each id through `$CLAUDE_HOME/plugins/installed_plugins.json` to the install entry whose
+scope matches → its `installPath` → read `.claude-plugin/plugin.json` for skill/agent dirs
+(`skills` adds to the default `skills/`; `commands`/`agents` replace their defaults) → read
+those dirs and tag with the plugin id. `user` installs feed the global snapshot;
+`project`/`local` installs feed the repo's.
 
 ---
 
