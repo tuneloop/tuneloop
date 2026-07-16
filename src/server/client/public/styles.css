@@ -699,31 +699,64 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .site-footer a:hover { text-decoration: underline; }
 .site-footer .dot { color: var(--line); }
 
-/* Insights tab — the detector ledger. One card per insight. */
-.ins-card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
-.ins-head { display: flex; align-items: center; gap: 10px; }
-.ins-title { font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 600; }
-.sev-high { background: #f4ddd6; color: var(--red); }
-.sev-medium { background: #f6ecd2; color: var(--amber); }
-.sev-low { background: #ece9e1; color: var(--gray); }
+/* Insights tab — the detector ledger. Standalone cells (no wrapping panel),
+   mirroring the dashboard headline-metric tiles: an uppercase label row, the
+   theme title as the prominent line, then a sub line. Full fix + occurrences
+   live in the drawer detail (openInsight). */
+.ins-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.ins-cell { text-align: left; background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 18px; cursor: pointer; display: flex; flex-direction: column; gap: 8px; transition: border-color .12s, box-shadow .12s; }
+.ins-cell:hover { border-color: var(--emerald); box-shadow: 0 1px 6px rgba(0,0,0,.05); }
+/* Label row — same treatment as .tile .label (uppercase sans, tracked). */
+.ins-cell-label { display: flex; align-items: center; gap: 7px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--muted); }
+.ins-cell-type { font-weight: 600; }
+.ins-cell-title { font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 600;
+  line-height: 1.3; color: var(--ink); }
+.ins-cell-sub { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--muted); margin-top: auto; }
+.ins-count { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--gray); }
+
+/* Severity dot (cell label row + detail header). */
+.ins-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+.ins-dot.sev-high { background: var(--red); }
+.ins-dot.sev-medium { background: var(--amber); }
+.ins-dot.sev-low { background: var(--gray); }
+
+/* Lifecycle state (grid + detail). */
 .ins-state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .ins-state.st-fix_issued { color: var(--amber); }
 .ins-state.st-adopted, .ins-state.st-resolved { color: var(--emerald); }
-.ins-head .ins-dismiss { margin-left: auto; }
+
+/* ---- insight detail (rendered into the shared right drawer) ---- */
+.ins-detail-head .drawer-head-top h2 { display: flex; align-items: center; gap: 9px; }
+.ins-detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+.ins-detail-body { padding-top: 4px; }
+.ins-desc { font-size: 14px; margin: 8px 0 14px; }
+.ins-section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 18px 0 8px; }
 .ins-btn { border: 1px solid var(--line); background: var(--paper); border-radius: 6px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .ins-btn:hover { border-color: var(--emerald); color: var(--emerald); }
-.ins-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
-.ins-desc { font-size: 14px; margin-top: 8px; max-width: 860px; }
-.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 12px; max-width: 860px; }
+.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 4px; }
 .ins-fix-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .ins-fix-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .ins-fix-prose { font-size: 13px; }
-/* Code blocks in cards live outside the transcript's .text.md scope, so they need
-   their own base treatment; paper bg inside the track-colored fix box for contrast. */
 .ins-desc pre.md-code, .ins-fix pre.md-code { margin: 6px 0; padding: 8px 10px; background: var(--track); border-radius: 6px; overflow-x: auto; }
 .ins-fix pre.md-code { margin: 0; background: var(--paper); }
 .ins-desc pre.md-code code, .ins-fix pre.md-code code { background: none; padding: 0; font-size: 11.5px; line-height: 1.45; word-break: normal; }
-.ins-evidence { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.ins-ev-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
-.ins-ev { border: 0; background: var(--track); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer; }
-.ins-ev:hover { background: #dfe9e0; color: var(--emerald); }
+
+/* Occurrences: one clickable row per stored event → its transcript turn. */
+.ins-occ-list { display: flex; flex-direction: column; gap: 8px; }
+.ins-occ { text-align: left; width: 100%; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; transition: border-color .12s, background .12s; }
+.ins-occ:hover { border-color: var(--emerald); background: var(--track); }
+.ins-occ-note { font-size: 13px; line-height: 1.4; }
+.ins-occ-src { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.ins-occ-arrow { color: var(--emerald); }
+.ins-occ-turn { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; background: var(--track); border-radius: 4px; padding: 0 5px; }
+.ins-occ:hover .ins-occ-turn { background: var(--paper); }
+.ins-detail-actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ins-detail-actions .ins-dismiss:hover { border-color: var(--red); color: var(--red); }
+
+/* "← Insights" back link in the transcript drawer header (opened from an occurrence). */
+.drawer-back { flex: none; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
+  padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; margin-right: 4px; }
+.drawer-back:hover { border-color: var(--emerald); color: var(--emerald); }

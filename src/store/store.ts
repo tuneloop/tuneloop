@@ -12,10 +12,13 @@ import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, DetectorRunRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { insightId } from '../core/detector'
-import type { InsightInput } from '../core/detector'
+import type { EvidenceRef, InsightInput } from '../core/detector'
 import type { InsightRow } from './types'
+
+/** How many evidence occurrences to retain per insight (detail view lists them all). */
+const EVIDENCE_CAP = 50
 
 export interface Dist {
   value: string
@@ -2878,6 +2881,14 @@ export class Store {
     return this.getReadonlyDb().prepare(sql).get(...params)
   }
 
+  /**
+   * Hydrate a full `Session` from its stored blob for a P/X-tier detector — the
+   * content SQL-only detectors can't reach. Null when the blob is absent/corrupt.
+   */
+  hydrateSession(id: string): Session | null {
+    return this.loadSession(id)
+  }
+
   detectorRun(detector: string): DetectorRunRow | undefined {
     const row = this.db.prepare('SELECT version, status, ran_at as ranAt FROM detector_runs WHERE detector = ?').get(detector) as
       | { version: number; status: string | null; ranAt: string }
@@ -2914,6 +2925,180 @@ export class Store {
         stmt.run(detector, s.sessionId, s.contentHash, now)
       }
     })()
+  }
+
+  /**
+   * Forget a detector's per-session tracking so its whole corpus counts as unseen
+   * again. The runner calls this when a P/X-tier detector's version changed since
+   * its last run: a new prompt/schema must re-extract every session, not just the
+   * content-hash delta. Themes themselves are untouched — re-extraction re-matches
+   * against them (stable ids), it doesn't wipe the taxonomy.
+   */
+  resetDetectorSessionRuns(detector: string): void {
+    this.db.prepare('DELETE FROM detector_session_runs WHERE detector = ?').run(detector)
+  }
+
+  // ---- Recurring-theme mining -------------------------------------------------
+
+  /**
+   * Themes visible to a session's extraction: its repo's themes + globals (repo
+   * NULL). Fed into the prompt as the existing-theme list so the model matches
+   * before minting (assign-at-extraction). Ordered oldest-first so the merge
+   * pass's "keep the older id" rule has a stable reference.
+   */
+  listThemes(repo: string | null): ThemeRef[] {
+    return this.db
+      .prepare(
+        `SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, repo
+         FROM theme WHERE repo IS NULL OR repo = ? ORDER BY first_seen`,
+      )
+      .all(repo ?? '') as ThemeRef[]
+  }
+
+  /** Every theme (all repos + globals) — the merge pass's input. */
+  allThemes(): ThemeRef[] {
+    return this.db
+      .prepare(`SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, repo, source FROM theme ORDER BY first_seen`)
+      .all() as ThemeRef[]
+  }
+
+  /**
+   * Persist one session's extraction: upsert referenced themes (OR IGNORE keeps
+   * identity stable — re-minting an existing id never renames/retypes it), replace
+   * that session's events, then prune derived themes left with no member events.
+   * All-in-one transaction so a session's events and their themes commit together.
+   */
+  persistThemeExtraction(sessionId: string, themes: ThemeInput[], events: ThemeEventInput[]): void {
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const t of themes) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO theme (id, label, description, type, remedy, repo, source, first_seen)
+             VALUES (?,?,?,?,?,?,'derived',?)`,
+          )
+          .run(t.id, t.label, t.description ?? null, t.type, t.remedy ?? null, t.repo ?? null, t.firstSeen ?? now)
+      }
+      this.db.prepare('DELETE FROM theme_events WHERE session_id = ?').run(sessionId)
+      for (const e of events) {
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO theme_events (session_id, idx, turn_seq, type, trigger, description, theme_id, added_at)
+             VALUES (?,?,?,?,?,?,?,?)`,
+          )
+          .run(sessionId, e.idx, e.turnSeq ?? null, e.type, e.trigger, e.description, e.themeId ?? null, now)
+      }
+      // Prune derived themes with no surviving member events (a re-extraction may
+      // have moved the last event off a theme). Resolved themes are kept so a
+      // recurrence can reopen them; user themes (if ever added) are never pruned.
+      this.db
+        .prepare(
+          `DELETE FROM theme WHERE source = 'derived' AND resolved = 0
+             AND id NOT IN (SELECT DISTINCT theme_id FROM theme_events WHERE theme_id IS NOT NULL)`,
+        )
+        .run()
+    })()
+  }
+
+  /**
+   * Apply one theme merge: re-point every member event of `dropId` to `keepId`,
+   * then delete the absorbed theme. Only derived themes are absorbed. Returns
+   * false if either id is missing or they're equal.
+   */
+  applyThemeMerge(keepId: string, dropId: string): boolean {
+    return this.db.transaction(() => {
+      const keep = this.db.prepare('SELECT id FROM theme WHERE id = ?').get(keepId)
+      const drop = this.db.prepare("SELECT id FROM theme WHERE id = ? AND source <> 'user'").get(dropId)
+      if (!keep || !drop || keepId === dropId) return false
+      this.db.prepare('UPDATE theme_events SET theme_id = ? WHERE theme_id = ?').run(keepId, dropId)
+      this.db.prepare('DELETE FROM theme WHERE id = ?').run(dropId)
+      return true
+    })()
+  }
+
+  /**
+   * Every theme with its member events aggregated — the surfacing step's input.
+   * `sessionCount` and `eventCount` drive the recurrence threshold; `descriptions`
+   * and `evidence` feed the insight's copy + drill-in pointers.
+   */
+  themesWithEvents(): Array<{
+    id: string
+    label: string
+    description: string | null
+    type: string
+    remedy: string | null
+    repo: string | null
+    resolved: number
+    fixType: string | null
+    fixContent: string | null
+    fixHash: string | null
+    eventCount: number
+    sessionCount: number
+    evidence: Array<{ sessionId: string; turnSeq: number | null; description: string }>
+    descriptions: string[]
+  }> {
+    const themes = this.db
+      .prepare(
+        `SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, remedy, repo, resolved,
+                fix_type AS fixType, fix_content AS fixContent, fix_hash AS fixHash
+         FROM theme ORDER BY first_seen`,
+      )
+      .all() as Array<{
+        id: string; label: string; description: string | null; type: string; remedy: string | null; repo: string | null
+        resolved: number; fixType: string | null; fixContent: string | null; fixHash: string | null
+      }>
+    const evStmt = this.db.prepare(
+      `SELECT session_id AS sessionId, turn_seq AS turnSeq, description
+       FROM theme_events WHERE theme_id = ? ORDER BY added_at DESC, session_id, idx`,
+    )
+    return themes.map((t) => {
+      const evs = evStmt.all(t.id) as Array<{ sessionId: string; turnSeq: number | null; description: string }>
+      const sessions = new Set(evs.map((e) => e.sessionId))
+      return {
+        ...t,
+        eventCount: evs.length,
+        sessionCount: sessions.size,
+        evidence: evs.map((e) => ({ sessionId: e.sessionId, turnSeq: e.turnSeq, description: e.description })),
+        descriptions: evs.map((e) => e.description),
+      }
+    })
+  }
+
+  /** Flag/unflag a theme resolved — keeps it in the extraction feed after its insight resolves. */
+  setThemeResolved(id: string, resolved: boolean): void {
+    this.db.prepare('UPDATE theme SET resolved = ? WHERE id = ?').run(resolved ? 1 : 0, id)
+  }
+
+  /** Cache a theme's LLM-generated fix + the hash of the occurrence set it was built from. */
+  setThemeFix(id: string, fixType: string, fixContent: string, fixHash: string): void {
+    this.db.prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_hash = ? WHERE id = ?').run(fixType, fixContent, fixHash, id)
+  }
+
+  /**
+   * Fetch the actual user-turn text for a set of (sessionId, seq) evidence
+   * pointers, live from the session blobs — so merge/fix prompts can show the
+   * user's real words without storing a snippet copy. Hydrates each session once.
+   * Missing/pruned turns are simply omitted. Text is returned verbatim (callers clip).
+   */
+  turnTexts(refs: Array<{ sessionId: string; seq: number | null }>): Map<string, string> {
+    const out = new Map<string, string>() // key: `${sessionId}:${seq}`
+    const bySession = new Map<string, number[]>()
+    for (const r of refs) {
+      if (r.seq == null) continue
+      const list = bySession.get(r.sessionId) ?? []
+      list.push(r.seq)
+      bySession.set(r.sessionId, list)
+    }
+    for (const [sessionId, seqs] of bySession) {
+      const session = this.loadSession(sessionId)
+      if (!session) continue
+      const want = new Set(seqs)
+      for (const ev of session.events) {
+        if (ev.kind !== 'user' || ev.isSidechain || ev.seq == null || !want.has(ev.seq)) continue
+        out.set(`${sessionId}:${ev.seq}`, ev.text.replace(/\s+/g, ' ').trim())
+      }
+    }
+    return out
   }
 
   persistInsights(detector: string, version: number, inputs: InsightInput[], cost?: { inTokens: number; outTokens: number; usd: number }): void {
@@ -2958,11 +3143,7 @@ export class Store {
             )
           if (reopened) this.logInsightState(existing.id, 'resolved', 'surfaced', now)
           this.db.prepare('DELETE FROM insight_evidence WHERE insight_id = ?').run(existing.id)
-          for (const ev of input.evidence.slice(0, 10)) {
-            this.db
-              .prepare('INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, added_at) VALUES (?, ?, ?, ?)')
-              .run(existing.id, ev.sessionId, ev.turnIdx ?? -1, now)
-          }
+          this.writeEvidence(existing.id, input.evidence, now)
         } else {
           const id = insightId(detector, input.repo, input.signalKey)
           this.db
@@ -2987,11 +3168,7 @@ export class Store {
               now,
               version,
             )
-          for (const ev of input.evidence.slice(0, 10)) {
-            this.db
-              .prepare('INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, added_at) VALUES (?, ?, ?, ?)')
-              .run(id, ev.sessionId, ev.turnIdx ?? -1, now)
-          }
+          this.writeEvidence(id, input.evidence, now)
           this.logInsightState(id, null, 'surfaced', now)
         }
       }
@@ -3012,6 +3189,38 @@ export class Store {
          VALUES (?, ?, 'error', NULL, NULL, NULL, ?)`,
       )
       .run(detector, version, now)
+  }
+
+  /**
+   * Write an insight's evidence rows (assumes any prior rows were cleared).
+   * Capped generously: the insight card shows a few chips, but the detail view
+   * lists every occurrence, so we keep enough to be useful without unbounded rows.
+   */
+  private writeEvidence(insightId: string, evidence: EvidenceRef[], now: string): void {
+    const stmt = this.db.prepare(
+      'INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, note, added_at) VALUES (?, ?, ?, ?, ?)',
+    )
+    for (const ev of evidence.slice(0, EVIDENCE_CAP)) {
+      stmt.run(insightId, ev.sessionId, ev.turnIdx ?? -1, ev.note ?? null, now)
+    }
+  }
+
+  /**
+   * Every stored occurrence for an insight — the detail view's drill-in list.
+   * Joins the session's display title so each row reads as "what happened, in
+   * which session" and links to the transcript turn (turn_idx = main-thread seq).
+   */
+  insightEvidence(insightId: string): Array<{ sessionId: string; turnIdx: number | null; note: string | null; sessionTitle: string | null }> {
+    return (
+      this.db
+        .prepare(
+          `SELECT e.session_id AS sessionId, e.turn_idx AS turnIdx, e.note AS note,
+                  COALESCE(NULLIF(s.title, ''), NULLIF(s.first_prompt, '')) AS sessionTitle
+           FROM insight_evidence e LEFT JOIN sessions s ON s.id = e.session_id
+           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.session_id, e.turn_idx`,
+        )
+        .all(insightId) as Array<{ sessionId: string; turnIdx: number; note: string | null; sessionTitle: string | null }>
+    ).map((r) => ({ ...r, turnIdx: r.turnIdx === -1 ? null : r.turnIdx }))
   }
 
   insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {

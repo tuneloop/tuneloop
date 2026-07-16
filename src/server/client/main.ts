@@ -9,10 +9,10 @@ import { loadFacets } from './facets'
 import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
-import { renderInsights } from './insights'
+import { renderInsights, reopenInsight } from './insights'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
-import { buildFilters, closeDrawer, setView, openDetail, applySessionParams } from './sessions'
+import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
 
 function init() {
@@ -22,6 +22,9 @@ function init() {
   // The drawer's close button is rendered per-open inside the sticky header
   // (wired in openDetail); the overlay click still closes from anywhere.
   $('#overlay').onclick = closeDrawer;
+  // Let the transcript drawer's "← Insights" back button reopen the insight detail
+  // (registered here to avoid a sessions↔insights import cycle).
+  setBackToInsight(reopenInsight);
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     // Manual tab nav drops any question-grounding banner.
     b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); };

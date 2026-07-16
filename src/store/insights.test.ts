@@ -258,3 +258,33 @@ describe('reconcileFixSightings', () => {
     expect(row.adoptedAt).toBe('2099-01-01T00:00:00Z')
   })
 })
+
+describe('insightEvidence', () => {
+  it('returns each occurrence with its note, turn, and session title', () => {
+    const { db, store } = setup()
+    db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run('Add codex adapter', 's1')
+    store.persistInsights('det', 1, [
+      mkInsight({
+        evidence: [
+          { sessionId: 's1', turnIdx: 12, note: 'user had to point at the db config' },
+          { sessionId: 's2', note: 'user re-supplied the deploy steps' }, // no turn
+        ],
+      }),
+    ])
+    const id = insightId('det', '*', 'k1')
+    const ev = store.insightEvidence(id)
+    expect(ev).toHaveLength(2)
+    const s1 = ev.find((e) => e.sessionId === 's1')!
+    expect(s1).toMatchObject({ turnIdx: 12, note: 'user had to point at the db config', sessionTitle: 'Add codex adapter' })
+    // A -1 turn_idx (session-level evidence) reads back as null.
+    expect(ev.find((e) => e.sessionId === 's2')!.turnIdx).toBeNull()
+  })
+
+  it('re-detection replaces evidence notes (no stale rows)', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight({ evidence: [{ sessionId: 's1', note: 'first' }] })])
+    store.persistInsights('det', 1, [mkInsight({ evidence: [{ sessionId: 's2', note: 'second' }] })])
+    const ev = store.insightEvidence(insightId('det', '*', 'k1'))
+    expect(ev.map((e) => e.note)).toEqual(['second'])
+  })
+})

@@ -166,6 +166,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, store.insights())
     return
   }
+  if (path === '/api/insight/evidence') {
+    // Every occurrence of one insight (with per-turn notes + session titles) — the
+    // detail drawer's drill-in list. Compact grid cards don't need this.
+    const id = url.searchParams.get('id') ?? ''
+    if (!id) {
+      sendJson(res, 400, { error: 'id required' })
+      return
+    }
+    sendJson(res, 200, store.insightEvidence(id))
+    return
+  }
   if (path === '/api/facets') {
     sendJson(res, 200, store.facetList())
     return

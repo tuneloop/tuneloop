@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { LlmClient } from '../llm/types'
 import type { Logger } from '../util/log'
+import type { Session } from './model'
 import type { Store } from '../store/store'
 
 /**
@@ -39,8 +40,20 @@ export interface DetectorContext {
   log: Logger
   /** Whether an LLM provider is configured this run. */
   llmEnabled: boolean
-  /** The LLM client (null when no provider is configured). P-tier detectors use this. */
+  /** The LLM client (null when no provider is configured). P/X-tier detectors use this. */
   llm: LlmClient | null
+  /**
+   * Sessions this detector hasn't seen, or whose content changed since it last
+   * ran (the incremental delta). P/X-tier detectors extract only these, then
+   * report them back as `DetectorResult.seen`. Keyed by the detector's own name.
+   */
+  unseenSessions(): Array<{ sessionId: string; contentHash: string }>
+  /**
+   * Hydrate a full `Session` (events, tool calls, subagents) from its stored
+   * blob — the content SQL-only detectors can't reach. Null if the blob is
+   * missing/corrupt. Read-only; detectors never mutate the returned object.
+   */
+  loadSession(id: string): Session | null
 }
 
 export interface EvidenceRef {
@@ -51,6 +64,12 @@ export interface EvidenceRef {
    * viewer use. Omit for session-level evidence
    */
   turnIdx?: number
+  /**
+   * Optional one-line, human-readable note for this occurrence (e.g. what
+   * happened at this turn). Shown in the insight detail so each evidence row
+   * reads as a specific occurrence, not just a session link.
+   */
+  note?: string
 }
 
 export interface InsightInput {
@@ -89,17 +108,43 @@ export interface InsightInput {
   }
 }
 
+/**
+ * What a P/X-tier detector reports back beyond its insights. S-tier detectors
+ * return a bare `InsightInput[]` (no LLM cost, no per-session tracking); the
+ * runner normalizes either shape via `normalizeDetectorResult`.
+ */
+export interface DetectorResult {
+  insights: InsightInput[]
+  /** LLM spend this run incurred — recorded on `detector_runs` for per-detector cost accounting. */
+  cost?: { inTokens: number; outTokens: number; usd: number }
+  /**
+   * Sessions this run actually processed, at the content hash it saw them at.
+   * The runner marks them seen (detector_session_runs) ONLY if the persist
+   * succeeds, so a failed run re-processes the same delta next analyze.
+   */
+  seen?: Array<{ sessionId: string; contentHash: string }>
+}
+
 export interface Detector {
   /** Unique identifier — used as the dedup namespace in the insights table. */
   name: string
   /** Bump to force re-run; per-detector, so bumping one doesn't invalidate others. */
   version: number
-  /** S = SQL-only (free, always re-run). P = per-session LLM (costs tokens, cached). */
+  /** S = SQL-only (free, always re-run). P/X = LLM (costs tokens, delta-cached). */
   tier: DetectorTier
   /** When true, the runner skips this detector if no LLM provider is configured. */
   needsLlm?: boolean
-  /** Static pre-gate: return false to skip entirely. Avoids wasted work (especially LLM spend for P-tier). */
+  /** Static pre-gate: return false to skip entirely. Avoids wasted work (especially LLM spend for P/X-tier). */
   applicable?(ctx: DetectorContext): boolean
-  /** Find the pattern, return zero or more insights. Can be sync (S-tier SQL) or async (P-tier LLM). */
-  run(ctx: DetectorContext): Promise<InsightInput[]> | InsightInput[]
+  /**
+   * Find the pattern. S-tier returns a bare `InsightInput[]` (sync SQL); P/X-tier
+   * returns a `DetectorResult` (async) so it can also report LLM cost + the
+   * sessions it processed. The runner accepts either.
+   */
+  run(ctx: DetectorContext): Promise<InsightInput[] | DetectorResult> | InsightInput[] | DetectorResult
+}
+
+/** Normalize either `run()` return shape into a `DetectorResult`. */
+export function normalizeDetectorResult(r: InsightInput[] | DetectorResult): DetectorResult {
+  return Array.isArray(r) ? { insights: r } : r
 }

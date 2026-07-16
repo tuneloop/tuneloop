@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 12
+const SCHEMA_VERSION = 15
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -342,6 +342,10 @@ CREATE TABLE IF NOT EXISTS insight_evidence (
   insight_id  TEXT NOT NULL,
   session_id  TEXT NOT NULL,
   turn_idx    INTEGER NOT NULL DEFAULT -1,
+  -- Optional per-occurrence human-readable note (e.g. the recurring-themes event
+  -- description). Lets the insight detail show WHAT happened at each evidence
+  -- turn, not just a session chip. Generic — any detector may set it.
+  note        TEXT,
   added_at    TEXT NOT NULL,
   PRIMARY KEY (insight_id, session_id, turn_idx),
   FOREIGN KEY(insight_id) REFERENCES insights(id) ON DELETE CASCADE,
@@ -405,6 +409,44 @@ CREATE TABLE IF NOT EXISTS fix_marker_sightings (
 );
 CREATE INDEX IF NOT EXISTS ix_fix_marker_sightings_insight ON fix_marker_sightings(insight_id);
 
+-- Recurring-theme mining (recurring-themes detector, tier X). A THEME is a
+-- persistent, emergent friction pattern (its identity IS its LLM-minted label);
+-- theme_events are its member occurrences across sessions. Kept separate from the
+-- insights ledger because a theme must OUTLIVE its insight: dismiss/resolve must
+-- not erase it from the extraction feed, and themes accumulate events below the
+-- surfacing threshold where no insight yet exists. The insight is a projection of
+-- a theme once it crosses the recurrence bar.
+CREATE TABLE IF NOT EXISTS theme (
+  id          TEXT PRIMARY KEY,   -- permanent; INSERT OR IGNORE, never renamed (a rename mislabels past members)
+  label       TEXT NOT NULL,
+  description TEXT,               -- one-sentence gap explanation (minted with the label); feeds merge + fix prompts
+  type        TEXT NOT NULL,      -- frozen enum: re-steer|context-supply|tool-gap|rework|preference|other
+  remedy      TEXT,               -- remedy-class hint: add_doc|add_skill|add_tool|model_or_prompt|none
+  repo        TEXT,               -- NULL = global (spans repos); set only when the LLM marks a theme project-specific
+  source      TEXT NOT NULL DEFAULT 'derived',
+  first_seen  TEXT NOT NULL,
+  resolved    INTEGER NOT NULL DEFAULT 0, -- 1 keeps the theme in the extraction feed after its insight resolved
+  -- LLM-generated fix, cached + hash-gated on the theme's occurrence set so a
+  -- quiet re-analyze reuses it. fix_type is the InsightInput fix.type the LLM chose.
+  fix_type    TEXT,
+  fix_content TEXT,
+  fix_hash    TEXT                -- hash of the occurrence set the current fix was generated from
+);
+
+CREATE TABLE IF NOT EXISTS theme_events (
+  session_id  TEXT NOT NULL,
+  idx         INTEGER NOT NULL,   -- 0-based within the session's extraction
+  turn_seq    INTEGER,            -- main-thread seq of the user turn (evidence pointer); NULL if unknown
+  type        TEXT NOT NULL,
+  trigger     TEXT NOT NULL,      -- unprompted|after_tool_error|after_review|agent_stated
+  description TEXT NOT NULL,      -- one abstract sentence; recurrences read the same
+  theme_id    TEXT,              -- NULL = event survived but its proposed label was junk (topicless)
+  added_at    TEXT NOT NULL,
+  PRIMARY KEY (session_id, idx),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_theme_events_theme ON theme_events(theme_id);
+
 -- Append-only lifecycle history for insights. state_changed_at on the insights row
 -- only remembers the LAST transition; measurement ("fix applied Jul 25, recurrences
 -- since: 0") and reopen cycles need the full history. from_state NULL = first surface.
@@ -454,6 +496,13 @@ function migrate(db: DB): void {
   }
   if (tableExists('sessions') && !has('sessions', 'first_prompt')) {
     db.exec('ALTER TABLE sessions ADD COLUMN first_prompt TEXT')
+  }
+  if (tableExists('insight_evidence') && !has('insight_evidence', 'note')) {
+    db.exec('ALTER TABLE insight_evidence ADD COLUMN note TEXT')
+  }
+  // recurring-themes v2: themes gained a description + a cached LLM-generated fix.
+  for (const col of ['description', 'fix_type', 'fix_content', 'fix_hash']) {
+    if (tableExists('theme') && !has('theme', col)) db.exec(`ALTER TABLE theme ADD COLUMN ${col} TEXT`)
   }
 
   // Split cache creation by TTL. The old `tok_cache_create` held the whole write

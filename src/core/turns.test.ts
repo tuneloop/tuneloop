@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { emptyUsage, type Event, type Session } from './model'
-import { firstUserPrompt } from './turns'
+import { firstUserPrompt, followupTurns, isApproval, userTurnEvents } from './turns'
 
 function session(events: Event[]): Session {
   return {
@@ -56,5 +56,55 @@ describe('firstUserPrompt', () => {
       { kind: 'assistant', blocks: [], usage: emptyUsage(), isSidechain: false },
     ])
     expect(firstUserPrompt(s)).toBeNull()
+  })
+})
+
+describe('isApproval', () => {
+  it('treats bare affirmations/continuations as approvals (case- and punctuation-insensitive)', () => {
+    for (const t of ['yes', 'Yes!', 'ok', 'sure, go ahead', 'lgtm', 'looks good', 'ship it', 'continue', 'thanks']) {
+      expect(isApproval(t)).toBe(true)
+    }
+  })
+
+  it('empty / whitespace-only turns are approvals (nothing to steer with)', () => {
+    expect(isApproval('')).toBe(true)
+    expect(isApproval('   ')).toBe(true)
+  })
+
+  it('substantive turns are not approvals', () => {
+    for (const t of ['no, use postgres instead', 'that broke the build', 'why did you delete that file']) {
+      expect(isApproval(t)).toBe(false)
+    }
+  })
+
+  it('a long turn is never a bare approval even if it opens with an approval word', () => {
+    expect(isApproval('yes but also please refactor the parser and add tests')).toBe(false)
+  })
+})
+
+describe('followupTurns', () => {
+  it('drops the opener and bare approvals, keeps substantive follow-ups', () => {
+    const turns = ['fix the bug', 'yes', 'no, the other file', 'lgtm', 'now add a test']
+    expect(followupTurns(turns)).toEqual(['no, the other file', 'now add a test'])
+  })
+
+  it('an opener with no follow-ups yields nothing', () => {
+    expect(followupTurns(['just the opener'])).toEqual([])
+    expect(followupTurns([])).toEqual([])
+  })
+})
+
+describe('userTurnEvents', () => {
+  it('keeps each real turn with its seq; skips sidechain and synthetic turns', () => {
+    const s = session([
+      user('opener', { seq: 0 }),
+      user('subagent', { seq: 1, isSidechain: true }),
+      user('<command-name>/compact</command-name>', { seq: 2 }),
+      user('real follow-up', { seq: 3 }),
+    ])
+    expect(userTurnEvents(s)).toEqual([
+      { text: 'opener', seq: 0 },
+      { text: 'real follow-up', seq: 3 },
+    ])
   })
 })
