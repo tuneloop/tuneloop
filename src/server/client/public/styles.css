@@ -696,3 +696,32 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .site-footer a { color: var(--emerald); text-decoration: none; }
 .site-footer a:hover { text-decoration: underline; }
 .site-footer .dot { color: var(--line); }
+
+/* Insights tab — the detector ledger. One card per insight. */
+.ins-card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
+.ins-head { display: flex; align-items: center; gap: 10px; }
+.ins-title { font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 600; }
+.sev-high { background: #f4ddd6; color: var(--red); }
+.sev-medium { background: #f6ecd2; color: var(--amber); }
+.sev-low { background: #ece9e1; color: var(--gray); }
+.ins-state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.ins-state.st-fix_issued { color: var(--amber); }
+.ins-state.st-adopted, .ins-state.st-resolved { color: var(--emerald); }
+.ins-head .ins-dismiss { margin-left: auto; }
+.ins-btn { border: 1px solid var(--line); background: var(--paper); border-radius: 6px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.ins-btn:hover { border-color: var(--emerald); color: var(--emerald); }
+.ins-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.ins-desc { font-size: 14px; margin-top: 8px; max-width: 860px; }
+.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 12px; max-width: 860px; }
+.ins-fix-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.ins-fix-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.ins-fix-prose { font-size: 13px; }
+/* Code blocks in cards live outside the transcript's .text.md scope, so they need
+   their own base treatment; paper bg inside the track-colored fix box for contrast. */
+.ins-desc pre.md-code, .ins-fix pre.md-code { margin: 6px 0; padding: 8px 10px; background: var(--track); border-radius: 6px; overflow-x: auto; }
+.ins-fix pre.md-code { margin: 0; background: var(--paper); }
+.ins-desc pre.md-code code, .ins-fix pre.md-code code { background: none; padding: 0; font-size: 11.5px; line-height: 1.45; word-break: normal; }
+.ins-evidence { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.ins-ev-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
+.ins-ev { border: 0; background: var(--track); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer; }
+.ins-ev:hover { background: #dfe9e0; color: var(--emerald); }
