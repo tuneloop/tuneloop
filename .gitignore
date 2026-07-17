@@ -10,6 +10,8 @@ coverage/
 *.sqlite-shm
 *.sqlite-wal
 *.db
+*.db-shm
+*.db-wal
 
 # skill-creator eval workspaces (transient benchmark artifacts)
 skills/*-workspace/
