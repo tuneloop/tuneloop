@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { buildCards, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
+import { buildCards, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
+import type { DetectorContext, InsightInput } from '../core/detector'
 
 const DAY_MS = 86_400_000
 
@@ -401,5 +402,131 @@ describe('buildCards', () => {
       const text = `${c.title} ${c.description} ${c.fix.label} ${c.fix.content}`
       expect(text).not.toMatch(/\$|\btokens?\b|\d+\s*(k|K|tok)/)
     }
+  })
+})
+
+describe('unusedCapabilities.run (end to end)', () => {
+  const ctxFor = (store: Store): DetectorContext =>
+    ({ store, log: { debug() {}, info() {}, warn() {} }, llmEnabled: false, llm: null }) as unknown as DetectorContext
+  const run = (store: Store) => unusedCapabilities.run(ctxFor(store)) as InsightInput[]
+
+  // Seed N sessions in a repo, each optionally invoking some capabilities.
+  // `invocations`: [{ action, name }] applied to EVERY seeded session.
+  function seedRepo(
+    db: ReturnType<typeof openDb>,
+    repo: string | null,
+    count: number,
+    invocations: Array<{ action: 'mcp_call' | 'skill'; name: string }> = [],
+    idPrefix = repo ?? 'norepo',
+  ) {
+    const startMs = Date.now() - DAY_MS
+    const sIns = db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+    const tIns = db.prepare('INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,0,?)')
+    for (let i = 0; i < count; i++) {
+      const id = `${idPrefix}-${i}`
+      sIns.run(id, id, 'claude-code', 'anthropic', repo, '/repo', new Date(startMs).toISOString())
+      invocations.forEach((iv, idx) => tIns.run(id, idx, iv.name, iv.action, new Date(startMs).toISOString()))
+    }
+  }
+
+  const installGlobalMcp = (store: Store, ...servers: string[]) =>
+    store.recordEnvSnapshot({
+      source: 'claude-code', scope: 'global', scopeKey: '_global', category: 'mcp',
+      payload: { '.claude.json': { servers: Object.fromEntries(servers.map((s) => [s, { type: 'stdio' }])) } },
+    })
+  const installGlobalSkills = (store: Store, ...names: string[]) =>
+    store.recordEnvSnapshot({
+      source: 'claude-code', scope: 'global', scopeKey: '_global', category: 'skills',
+      payload: { skills: names.map((n) => ({ name: n, body: 'x', bodyHash: 'h' })), count: names.length },
+    })
+  const installProjectMcp = (store: Store, rootPath: string, ...servers: string[]) =>
+    store.recordEnvSnapshot({
+      source: 'claude-code', scope: 'project', scopeKey: rootPath, category: 'mcp',
+      payload: { '.mcp.json': { servers: Object.fromEntries(servers.map((s) => [s, { type: 'stdio' }])) } },
+    })
+
+  it('returns nothing when no config snapshots have been captured', () => {
+    const { db, store } = setupDb()
+    seedRepo(db, 'web', 20)
+    expect(run(store)).toEqual([])
+  })
+
+  it('flags a global server never used, once past the session minimum', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, 'sentry')
+    seedRepo(db, 'web', 12) // ≥ MIN_SESSIONS
+    const cards = run(store)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ repo: '*', signalKey: 'unused-caps', count: 1 })
+    expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
+  })
+
+  it('stays silent when the global server is unused but sessions are too few', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, 'sentry')
+    seedRepo(db, 'web', 5) // < MIN_SESSIONS
+    expect(run(store)).toEqual([])
+  })
+
+  it('scopes a global server used in a minority of repos to those repos', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, 'sentry')
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__issues' }])
+    seedRepo(db, 'api', 8)
+    seedRepo(db, 'cli', 8)
+    seedRepo(db, 'docs', 8) // used in 1 of 4 repos → minority
+    const global = run(store).find((c) => c.repo === '*')!
+    expect(global.fix.content).toContain('- MCP server: sentry → move to web')
+  })
+
+  it('keeps a global server used across most repos', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, 'sentry')
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    seedRepo(db, 'api', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }]) // 2 of 2 → shared
+    expect(run(store)).toEqual([])
+  })
+
+  it('matches a plugin-namespaced skill invocation, so a used skill is not flagged', () => {
+    const { db, store } = setupDb()
+    installGlobalSkills(store, 'frontend-design')
+    // Used everywhere (both repos) via the plugin-namespaced name → shared, no card.
+    seedRepo(db, 'web', 8, [{ action: 'skill', name: 'frontend-design:frontend-design' }])
+    seedRepo(db, 'api', 8, [{ action: 'skill', name: 'frontend-design:frontend-design' }])
+    expect(run(store)).toEqual([])
+  })
+
+  it('routes a project-scoped unused server to its own repo card', () => {
+    const { db, store } = setupDb()
+    installProjectMcp(store, '/Users/x/git/web', 'pg')
+    seedRepo(db, 'web', 12) // pg never used in web
+    const cards = run(store)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ repo: 'web', count: 1 })
+    expect(cards[0]!.fix.content).toContain('- MCP server: pg')
+  })
+
+  it('skips a project repo whose basename collides with another root', () => {
+    const { db, store } = setupDb()
+    // Two distinct roots, same basename 'api' → ambiguous, both skipped.
+    installProjectMcp(store, '/Users/x/work/api', 'pg')
+    installProjectMcp(store, '/Users/x/personal/api', 'redis')
+    seedRepo(db, 'api', 12)
+    expect(run(store)).toEqual([])
+  })
+
+  it('does not read another harness’s sessions (source scoping)', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, 'sentry')
+    // A codex session that uses sentry must not count as claude-code usage.
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+      .run('cx-1', 'cx-1', 'codex', 'openai', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+    db.prepare('INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,0,?)')
+      .run('cx-1', 0, 'mcp__sentry__x', 'mcp_call', new Date(Date.now() - DAY_MS).toISOString())
+    seedRepo(db, 'web', 12) // 12 claude-code sessions, none using sentry
+    // sentry still reads as never-used for claude-code → remove card.
+    const cards = run(store)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
   })
 })

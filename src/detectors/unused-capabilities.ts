@@ -14,8 +14,14 @@
  */
 
 import { basename } from 'node:path'
-import type { EvidenceRef, InsightInput } from '../core/detector'
+import type { Detector, DetectorContext, EvidenceRef, InsightInput } from '../core/detector'
+import { registerDetector } from '../core/registry'
 import type { Store } from '../store/store'
+
+/** The harness this detector reads: MCP-name grammar + config layout are CC-specific. */
+const SOURCE = 'claude-code'
+/** Evidence pointers to keep per repo — feeds the store-capped card evidence. */
+const SAMPLE_SESSIONS_PER_REPO = 10
 
 /** How far back invoked-capability usage is counted. */
 export const WINDOW_DAYS = 30
@@ -72,9 +78,10 @@ export interface InvokedCap {
  *
  * Grouped by (kind, name, repo) with a DISTINCT-session count, since "used in N
  * sessions" (not "called N times") is the signal — one chatty session shouldn't
- * look like broad adoption.
+ * look like broad adoption. `source` restricts to one harness's sessions (the MCP
+ * name grammar and skill action are harness-specific); omitted counts every source.
  */
-export function queryInvoked(store: Store, sinceIso: string): InvokedCap[] {
+export function queryInvoked(store: Store, sinceIso: string, source?: string): InvokedCap[] {
   // The (kind, name) derivation happens in an inner SELECT so the outer GROUP BY
   // keys on the DERIVED name, not tool_calls.name — an alias named `name` would
   // otherwise bind to the real column and split servers back into their per-tool rows.
@@ -99,9 +106,12 @@ export function queryInvoked(store: Store, sinceIso: string): InvokedCap[] {
        WHERE t.is_sidechain = 0
          AND t.action IN ('mcp_call', 'skill')
          AND s.started_at >= ?
+         AND (? IS NULL OR s.source = ?)
      )
      GROUP BY kind, name, repo`,
     sinceIso,
+    source ?? null,
+    source ?? null,
   ) as Array<{ kind: 'mcp' | 'skill'; name: string; repo: string | null; sessions: number }>
   // A malformed mcp name (no 2nd '__') yields an empty server segment — drop it
   // rather than emit a phantom "" capability.
@@ -149,7 +159,7 @@ export interface Classified {
 
 /**
  * Turn (installed, invoked) into per-capability verdicts. The one place the
- * remove-vs-scope-vs-keep policy lives; formatting (Task 6) only groups the results.
+ * remove-vs-scope-vs-keep policy lives; buildCards only groups the results.
  *
  * For each installed capability we find the repos it was actually invoked in (MCP by
  * exact server name, skills via skillMatches). Then, by scope:
@@ -263,11 +273,10 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
       signalKey: 'unused-caps',
       repo: '*',
       severity: globals.length >= SEVERITY_MEDIUM_COUNT ? 'medium' : 'low',
-      title: `${globals.length} globally-installed ${plural(globals.length, 'capability', 'capabilities')} adding to startup overhead`,
+      title: `${globals.length} global ${plural(globals.length, 'capability', 'capabilities')} inflating startup`,
       description:
-        `${globals.length} ${plural(globals.length, 'capability', 'capabilities')} wired into your global harness config ` +
-        `${plural(globals.length, 'is', 'are')} unused (or barely used) across your sessions in the last ${WINDOW_DAYS} days. ` +
-        `Everything installed globally loads into every session's startup, adding to its overhead. ${globalActionSummary(globals)}`,
+        `${globalProblem(globals)} Each one loads into every session's startup across all your repos, ` +
+        `adding to its overhead. Apply the fix below to trim your global config.`,
       evidence,
       count: globals.length,
       fix: {
@@ -278,7 +287,8 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
     })
   }
 
-  for (const [repo, items] of byRepo) {
+  for (const repo of [...byRepo.keys()].sort()) {
+    const items = byRepo.get(repo)!
     const names = items.map((c) => c.cap)
     cards.push({
       signalKey: 'unused-caps',
@@ -288,7 +298,8 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
       description:
         `${items.length} ${plural(items.length, 'capability', 'capabilities')} configured in ${repo} ` +
         `${plural(items.length, 'was', 'were')} never invoked there in the last ${WINDOW_DAYS} days. ` +
-        `${plural(items.length, 'It loads', 'They load')} into every session's startup in this repo, adding to its overhead. Remove what you don't use.`,
+        `${plural(items.length, 'It loads', 'They load')} into every session's startup in this repo, ` +
+        `adding to its overhead. Apply the fix below to remove them.`,
       evidence: sampleEvidence(new Set([repo]), sampleSessionsByRepo),
       count: items.length,
       fix: {
@@ -314,20 +325,36 @@ function sampleEvidence(repos: Set<string>, sampleSessionsByRepo: Map<string, st
   return out
 }
 
-/** One "- kind: name" line per capability, kind-labelled, grouped for a readable snippet. */
+/**
+ * One "- kind: name" line per capability, kind-labelled. Sorted by (kind, name) so
+ * the snippet text is identical run-to-run regardless of the (unordered) SQL/Set
+ * order the caps arrive in — no spurious churn in the stored fix content.
+ */
 function capList(caps: InstalledCap[]): string {
   const label = (c: InstalledCap) => `- ${c.kind === 'mcp' ? 'MCP server' : 'skill'}: ${c.name}`
-  return caps.map(label).join('\n')
+  const sorted = [...caps].sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name))
+  return sorted.map(label).join('\n')
 }
 
-/** One-line prose telling the user what to do, split by verdict. */
-function globalActionSummary(globals: Classified[]): string {
-  const removes = globals.filter((c) => c.verdict === 'remove').length
-  const scopes = globals.filter((c) => c.verdict === 'scope').length
+/** A precise statement of the problem, split by verdict — no vague "barely used". */
+function globalProblem(globals: Classified[]): string {
+  const scoped = globals.filter((c) => c.verdict === 'scope')
+  const never = globals.length - scoped.length
+  const few = scoped.length
   const parts: string[] = []
-  if (removes > 0) parts.push(`remove the ${removes} you never use`)
-  if (scopes > 0) parts.push(`scope the ${scopes} used in only a few repos to those repos`)
-  return parts.length > 0 ? `Consider: ${parts.join('; ')}.` : ''
+  if (never > 0) {
+    parts.push(`${never} global ${plural(never, 'capability is', 'capabilities are')} never invoked in the last ${WINDOW_DAYS} days`)
+  }
+  if (few > 0) {
+    // "a few of your repos" only reads right when the scope actually spans >1 repo;
+    // a capability used in a single repo is "just one of your repos".
+    const oneRepo = scoped.every((c) => (c.scopeToRepos ?? []).length <= 1)
+    const where = oneRepo ? 'just one of your repos' : 'only a few of your repos'
+    parts.push(`${few} global ${plural(few, 'capability is', 'capabilities are')} used in ${where}`)
+  }
+  // Capitalize the first word of the assembled sentence.
+  const s = parts.join(', and ')
+  return s.charAt(0).toUpperCase() + s.slice(1) + '.'
 }
 
 /** The copy-paste snippet body for the global card: removals then scoping moves. */
@@ -335,7 +362,9 @@ function globalFixContent(globals: Classified[]): string {
   const sections: string[] = []
   const removes = globals.filter((c) => c.verdict === 'remove').map((c) => c.cap)
   if (removes.length > 0) sections.push(`Remove from your global config:\n${capList(removes)}`)
-  const scopes = globals.filter((c) => c.verdict === 'scope')
+  const scopes = globals
+    .filter((c) => c.verdict === 'scope')
+    .sort((a, b) => a.cap.kind.localeCompare(b.cap.kind) || a.cap.name.localeCompare(b.cap.name))
   if (scopes.length > 0) {
     const lines = scopes.map((c) => {
       const label = c.cap.kind === 'mcp' ? 'MCP server' : 'skill'
@@ -400,3 +429,89 @@ export function parseInstalledSkills(payload: unknown): string[] {
   }
   return names
 }
+
+// ---- run() wiring ----------------------------------------------------------
+
+/**
+ * Load the installed capability set from the current config snapshots. Global scope
+ * (scope_key '_global') contributes global caps; every project scope_key contributes
+ * repo-scoped caps, keyed by the basename of its git-root path. Ambiguous basenames
+ * (two roots, same name) are skipped so their caps are never misattributed — the
+ * skipped names are returned for logging.
+ */
+function loadInstalled(store: Store): { installed: InstalledCap[]; ambiguous: Set<string> } {
+  const installed: InstalledCap[] = []
+
+  // Global: one well-known scope_key.
+  const gMcp = store.envSnapshotCurrent(SOURCE, 'global', '_global', 'mcp')
+  for (const name of gMcp ? parseInstalledMcp(gMcp.payload) : []) installed.push({ kind: 'mcp', name, scope: 'global' })
+  const gSkill = store.envSnapshotCurrent(SOURCE, 'global', '_global', 'skills')
+  for (const name of gSkill ? parseInstalledSkills(gSkill.payload) : []) installed.push({ kind: 'skill', name, scope: 'global' })
+
+  // Project: every distinct scope_key path recorded for this source, mapped to a repo name.
+  const projectKeys = (
+    store.queryAll(
+      `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
+      SOURCE,
+    ) as Array<{ scope_key: string }>
+  ).map((r) => r.scope_key)
+  const { byRepo, ambiguous } = mapScopeKeysToRepos(projectKeys)
+  for (const [repo, scopeKey] of byRepo) {
+    const pMcp = store.envSnapshotCurrent(SOURCE, 'project', scopeKey, 'mcp')
+    for (const name of pMcp ? parseInstalledMcp(pMcp.payload) : []) installed.push({ kind: 'mcp', name, scope: 'project', repo })
+    const pSkill = store.envSnapshotCurrent(SOURCE, 'project', scopeKey, 'skills')
+    for (const name of pSkill ? parseInstalledSkills(pSkill.payload) : []) installed.push({ kind: 'skill', name, scope: 'project', repo })
+  }
+  return { installed, ambiguous }
+}
+
+/** Distinct-session count per repo in the window (null-repo sessions excluded — they name no repo). */
+function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> {
+  const rows = store.queryAll(
+    `SELECT repo, COUNT(*) AS n FROM sessions
+     WHERE source = ? AND started_at >= ? AND repo IS NOT NULL
+     GROUP BY repo`,
+    SOURCE,
+    sinceIso,
+  ) as Array<{ repo: string; n: number }>
+  return new Map(rows.map((r) => [r.repo, r.n]))
+}
+
+/** A few recent session ids per repo, for card evidence pointers. */
+function loadSampleSessions(store: Store, sinceIso: string): Map<string, string[]> {
+  const rows = store.queryAll(
+    `SELECT id, repo FROM sessions
+     WHERE source = ? AND started_at >= ? AND repo IS NOT NULL
+     ORDER BY started_at DESC`,
+    SOURCE,
+    sinceIso,
+  ) as Array<{ id: string; repo: string }>
+  const out = new Map<string, string[]>()
+  for (const { id, repo } of rows) {
+    const list = out.get(repo) ?? []
+    if (list.length < SAMPLE_SESSIONS_PER_REPO) list.push(id)
+    out.set(repo, list)
+  }
+  return out
+}
+
+export const unusedCapabilities: Detector = {
+  name: 'unused-capabilities',
+  version: 1,
+  tier: 'S',
+  run(ctx: DetectorContext): InsightInput[] {
+    const sinceIso = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
+    const { installed, ambiguous } = loadInstalled(ctx.store)
+    if (ambiguous.size > 0) {
+      ctx.log.debug(`unused-capabilities: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
+    }
+    if (installed.length === 0) return [] // no config snapshots captured yet — nothing to judge
+
+    const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
+    const sessionCounts = loadSessionCounts(ctx.store, sinceIso)
+    const classified = classify(installed, invoked, sessionCounts)
+    return buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
+  },
+}
+
+registerDetector(unusedCapabilities)
