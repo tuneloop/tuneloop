@@ -134,7 +134,7 @@ is dropped by the allowlist is omitted):
 | ----------------------- | ------- | --------------------------------------------- |
 | Server name             | Yes     | What capability is wired up — the core signal |
 | `type` (http/sse/stdio) | Yes     | Local (stdio) vs remote (http/sse)            |
-| `url`                   | Yes     | Endpoint identity (for http/sse servers)      |
+| `url`                   | Yes     | Endpoint identity (for http/sse servers) — stored credential-stripped: protocol + host + path only; userinfo, query, and fragment are dropped, and an unparseable URL is not stored |
 
 
 Dropped: `command` (for a stdio server the user-chosen `name` already identifies it; `command`
@@ -433,6 +433,12 @@ else:
     INSERT new row (captured_at = last_observed_at = now)
 ```
 
+**Deletions are tombstoned.** A category with stored history that a *successful* read no
+longer returns was removed from disk; capture writes a `null`-payload snapshot through the
+same gate, so current/asOf reflect the deletion ("remove X" fixes are confirmable adoptions
+too). A *failed* read never tombstones — no evidence the config is gone, only that we
+couldn't look.
+
 ### Reading
 
 **Current state** (adoption "is the fix present now"):
@@ -518,10 +524,10 @@ payload is richer. A change in any package's config re-snapshots that one per-re
 ### Discovery
 
 A single downward walk from the repo root finds every `.claude/` dir (shared across
-settings/agents/skills), and a second walk finds every `CLAUDE.md` / `CLAUDE.local.md` (for
-instructions — these can live in a directory with no `.claude/`, so they're found by filename).
-Both walks skip `node_modules`, `.git`, `dist`, `build`, and other dot-directories (never the
-user's config), and run once per repo, shared across the readers.
+settings/agents/skills) and every `CLAUDE.md` / `CLAUDE.local.md` (for instructions — these
+can live in a directory with no `.claude/`, so they're found by filename). The walk skips
+`node_modules`, `.git`, `dist`, `build`, `vendor`, `venv`, `target`, and other dot-directories
+(never the user's config), and runs once per repo, shared across the readers.
 
 Skills stay **depth-1** within each `skills/` dir — a skill is `skills/<name>/SKILL.md`; a
 `SKILL.md` nested deeper (a skill's own `examples/`) is a supporting file, not a skill.
@@ -539,12 +545,14 @@ user/project ones, each tagged `source: "plugin:<id>"` (parallel to the `dir` us
 project config) — complementing the plugin *names*, which `settings` already captures via
 `enabledPlugins`.
 
-**Resolution**, run per scope: read enabled plugin ids from `enabledPlugins` at that scope →
-map each id through `$CLAUDE_HOME/plugins/installed_plugins.json` to the install entry whose
-scope matches → its `installPath` → read `.claude-plugin/plugin.json` for skill/agent dirs
-(`skills` adds to the default `skills/`; `commands`/`agents` replace their defaults) → read
-those dirs and tag with the plugin id. `user` installs feed the global snapshot;
-`project`/`local` installs feed the repo's.
+**Resolution**, run per scope: compute EFFECTIVE enablement first — for the project snapshot,
+`settings.local.json` overrides `settings.json` per plugin id (a local `false` is how CC
+disables a project-enabled plugin for one user) — then map each enabled id through
+`$CLAUDE_HOME/plugins/installed_plugins.json` to the install entry whose scope matches → its
+`installPath` → read `.claude-plugin/plugin.json` for skill/agent dirs (`skills` adds to the
+default `skills/`; `commands`/`agents` replace their defaults; a manifest path that escapes
+the install root is dropped) → read those dirs and tag with the plugin id. `user` installs
+feed the global snapshot; `project`/`local` installs feed the repo's.
 
 ---
 
@@ -556,7 +564,8 @@ config-diff adoption check).
 
 1. **Never store env var values** — `env` is dropped entirely (both settings and MCP).
 2. **Never store MCP secrets** — only name, type, url. Command, args, env, headers,
-  headersHelper, oauth, timeout, and alwaysLoad are dropped.
+  headersHelper, oauth, timeout, and alwaysLoad are dropped. URLs are stored
+   credential-stripped (no userinfo, query, or fragment); an unparseable URL is dropped.
 3. **Never store hook command strings** — hooks are dropped from settings entirely.
 4. **Never touch** `credentials.json` or any auth token store.
 5. **Instruction bodies are stored** (agent system prompts, skill/command bodies, CLAUDE.md).

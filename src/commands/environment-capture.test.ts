@@ -74,6 +74,40 @@ describe('captureEnvironment', () => {
     expect(seen).toEqual([undefined, '/repo-a']) // global call first, then the repo
   })
 
+  it('records a null tombstone when a previously-present category disappears', async () => {
+    const store = setup()
+    let present = true
+    const adapter = stubAdapter('claude-code', () =>
+      present ? [{ category: 'settings' as const, payload: { allow: ['a'] } }] : [],
+    )
+    await captureEnvironment(adapter, store, new Set(), log)
+    expect(store.envSnapshotCurrent('claude-code', 'global', '_global', 'settings')?.payload).toEqual({ allow: ['a'] })
+
+    present = false // user deleted the config
+    await new Promise((r) => setTimeout(r, 2)) // distinct captured_at (it's part of the PK)
+    await captureEnvironment(adapter, store, new Set(), log)
+    expect(store.envSnapshotCurrent('claude-code', 'global', '_global', 'settings')?.payload).toBeNull()
+
+    present = true // and re-created it — delete round-trips like any other change
+    await new Promise((r) => setTimeout(r, 2))
+    await captureEnvironment(adapter, store, new Set(), log)
+    expect(store.envSnapshotCurrent('claude-code', 'global', '_global', 'settings')?.payload).toEqual({ allow: ['a'] })
+  })
+
+  it('does NOT tombstone when the read fails — a transient error must not erase config', async () => {
+    const store = setup()
+    let fail = false
+    const adapter = stubAdapter('claude-code', () => {
+      if (fail) throw new Error('boom')
+      return [{ category: 'settings' as const, payload: { allow: ['a'] } }]
+    })
+    await captureEnvironment(adapter, store, new Set(), log)
+    fail = true
+    await new Promise((r) => setTimeout(r, 2))
+    await captureEnvironment(adapter, store, new Set(), log)
+    expect(store.envSnapshotCurrent('claude-code', 'global', '_global', 'settings')?.payload).toEqual({ allow: ['a'] })
+  })
+
   it('a read failure for one scope is skipped, not fatal', async () => {
     const store = setup()
     const adapter = stubAdapter('claude-code', (p) => {

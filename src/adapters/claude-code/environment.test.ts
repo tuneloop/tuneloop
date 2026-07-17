@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { claudeHome, claudeJsonPath, splitFrontmatter, parseFrontmatter, toStringList, findClaudeDirs, findFilesByName, resolvePluginDirs, readClaudeCodeEnvironment } from './environment'
+import { claudeHome, claudeJsonPath, splitFrontmatter, parseFrontmatter, toStringList, scanProject, resolvePluginDirs, readClaudeCodeEnvironment } from './environment'
 import { openDb } from '../../store/db'
 import { Store } from '../../store/store'
 import type { EnvCategorySnapshot } from '../../store/types'
@@ -105,7 +105,7 @@ describe('readClaudeCodeEnvironment — empty', () => {
   })
 })
 
-describe('findClaudeDirs', () => {
+describe('scanProject', () => {
   let repo: string
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'cc-find-'))
@@ -113,54 +113,47 @@ describe('findClaudeDirs', () => {
   afterEach(() => rmSync(repo, { recursive: true, force: true }))
 
   const mkdir = (rel: string) => mkdirSync(join(repo, rel), { recursive: true })
-
-  it('finds the root and nested .claude dirs, excluding vendored/build/dot trees', () => {
-    mkdir('.claude')
-    mkdir('packages/frontend/.claude')
-    mkdir('packages/backend/.claude')
-    mkdir('node_modules/some-pkg/.claude') // vendored — excluded
-    mkdir('dist/.claude') // build output — excluded
-    mkdir('.hidden/.claude') // other dot-dir — excluded
-    return findClaudeDirs(repo).then((dirs) => {
-      expect(dirs).toEqual(['.claude', 'packages/backend/.claude', 'packages/frontend/.claude'])
-    })
-  })
-
-  it('returns [] for a repo with no .claude anywhere', async () => {
-    mkdir('src')
-    expect(await findClaudeDirs(repo)).toEqual([])
-  })
-
-  it('returns [] for a missing root', async () => {
-    expect(await findClaudeDirs(join(repo, 'does-not-exist'))).toEqual([])
-  })
-
-  it('does not descend into a .claude dir looking for more .claude dirs', async () => {
-    mkdir('.claude/skills/deploy') // a .claude subtree, not a nested .claude dir
-    expect(await findClaudeDirs(repo)).toEqual(['.claude'])
-  })
-})
-
-describe('findFilesByName', () => {
-  let repo: string
-  beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), 'cc-findf-'))
-  })
-  afterEach(() => rmSync(repo, { recursive: true, force: true }))
-
   const write = (rel: string) => {
     mkdirSync(join(repo, rel, '..'), { recursive: true })
     writeFileSync(join(repo, rel), 'x')
   }
 
-  it('finds files at root, nested dirs, and inside .claude/, excluding vendored trees', async () => {
+  it('finds the root and nested .claude dirs, excluding vendored/build/dot trees', async () => {
+    mkdir('.claude')
+    mkdir('packages/frontend/.claude')
+    mkdir('packages/backend/.claude')
+    mkdir('node_modules/some-pkg/.claude') // vendored — excluded
+    mkdir('dist/.claude') // build output — excluded
+    mkdir('vendor/lib/.claude') // vendored — excluded
+    mkdir('.hidden/.claude') // other dot-dir — excluded
+    const { claudeDirs } = await scanProject(repo)
+    expect(claudeDirs).toEqual(['.claude', 'packages/backend/.claude', 'packages/frontend/.claude'])
+  })
+
+  it('returns empty lists for a repo with no config anywhere', async () => {
+    mkdir('src')
+    expect(await scanProject(repo)).toEqual({ claudeDirs: [], instructionFiles: [] })
+  })
+
+  it('returns empty lists for a missing root', async () => {
+    expect(await scanProject(join(repo, 'does-not-exist'))).toEqual({ claudeDirs: [], instructionFiles: [] })
+  })
+
+  it('does not descend into a .claude dir looking for more .claude dirs', async () => {
+    mkdir('.claude/skills/deploy') // a .claude subtree, not a nested .claude dir
+    mkdir('.claude/nested/.claude') // even a literal .claude inside .claude is not config
+    const { claudeDirs } = await scanProject(repo)
+    expect(claudeDirs).toEqual(['.claude'])
+  })
+
+  it('finds instruction files at root, nested dirs, and inside .claude/, excluding vendored trees', async () => {
     write('CLAUDE.md')
     write('.claude/CLAUDE.md')
     write('packages/frontend/CLAUDE.md') // nested, no .claude/ beside it
     write('CLAUDE.local.md')
     write('node_modules/dep/CLAUDE.md') // excluded
-    const found = await findFilesByName(repo, new Set(['CLAUDE.md', 'CLAUDE.local.md']))
-    expect(found).toEqual([
+    const { instructionFiles } = await scanProject(repo)
+    expect(instructionFiles).toEqual([
       '.claude/CLAUDE.md',
       'CLAUDE.local.md',
       'CLAUDE.md',
@@ -198,8 +191,38 @@ describe('resolvePluginDirs', () => {
     const p = (await resolvePluginDirs(['fd@mkt'], 'user'))[0]!
     expect(p.id).toBe('fd@mkt')
     expect(p.skillDirs).toEqual([join(ip, 'skills')])
+    expect(p.skillRoots).toEqual([]) // no root SKILL.md → no single-skill location
     expect(p.commandDirs).toEqual([join(ip, 'commands')])
     expect(p.agentDirs).toEqual([join(ip, 'agents')])
+  })
+
+  it('auto-loads a single-skill plugin: root SKILL.md, no skills/ dir, no manifest field', async () => {
+    const ip = join(home, 'plugins', 'cache', 'single')
+    writeInstalled({ plugins: { 'single@mkt': [{ scope: 'user', installPath: ip }] } })
+    writeManifest(ip, { name: 'single' })
+    writeFileSync(join(ip, 'SKILL.md'), '---\nname: my-skill\n---\nbody\n')
+    const p = (await resolvePluginDirs(['single@mkt'], 'user'))[0]!
+    expect(p.skillRoots).toEqual([ip]) // the plugin root itself is the skill
+  })
+
+  it('does NOT auto-load a root SKILL.md when a skills/ dir exists', async () => {
+    const ip = join(home, 'plugins', 'cache', 'both')
+    writeInstalled({ plugins: { 'both@mkt': [{ scope: 'user', installPath: ip }] } })
+    writeManifest(ip, { name: 'both' })
+    writeFileSync(join(ip, 'SKILL.md'), 'root skill\n')
+    mkdirSync(join(ip, 'skills', 'real'), { recursive: true })
+    const p = (await resolvePluginDirs(['both@mkt'], 'user'))[0]!
+    expect(p.skillRoots).toEqual([]) // skills/ present → auto-load layout doesn't apply
+  })
+
+  it('classifies a manifest skill path with a direct SKILL.md as a skillRoot', async () => {
+    const ip = join(home, 'plugins', 'cache', 'dot')
+    writeInstalled({ plugins: { 'dot@mkt': [{ scope: 'user', installPath: ip }] } })
+    writeManifest(ip, { name: 'dot', skills: './' }) // "skills": "./" — the root IS the skill
+    writeFileSync(join(ip, 'SKILL.md'), '---\nname: dot-skill\n---\nbody\n')
+    const p = (await resolvePluginDirs(['dot@mkt'], 'user'))[0]!
+    expect(p.skillRoots).toEqual([ip])
+    expect(p.skillDirs).toEqual([join(ip, 'skills')]) // default scan kept, "./" not added as a dir-of-skills
   })
 
   it('honors manifest overrides: skills adds, agents/commands replace', async () => {
@@ -218,6 +241,27 @@ describe('resolvePluginDirs', () => {
     writeManifest(ip, { name: 'y' })
     expect(await resolvePluginDirs(['y@mkt'], 'user')).toEqual([])
     expect((await resolvePluginDirs(['y@mkt'], 'project'))[0]?.id).toBe('y@mkt')
+  })
+
+  it('drops manifest paths that escape the plugin install root', async () => {
+    const ip = join(home, 'plugins', 'cache', 'esc')
+    const outside = join(home, 'outside')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, 'notes.md'), 'private notes, not plugin content')
+    writeFileSync(join(outside, 'SKILL.md'), 'not a plugin skill')
+    writeInstalled({ plugins: { 'esc@mkt': [{ scope: 'user', installPath: ip }] } })
+    writeManifest(ip, {
+      name: 'esc',
+      agents: '../../../outside',
+      commands: ['../../../outside/notes.md'],
+      skills: '../../../outside',
+    })
+    const p = (await resolvePluginDirs(['esc@mkt'], 'user'))[0]!
+    // Every escaping path is dropped; agents/commands fall back to their defaults.
+    expect(p.agentDirs).toEqual([join(ip, 'agents')])
+    expect(p.commandDirs).toEqual([join(ip, 'commands')])
+    expect(p.skillDirs).toEqual([join(ip, 'skills')])
+    expect(p.skillRoots).toEqual([])
   })
 
   it('returns [] when installed_plugins.json is missing or has no matching id', async () => {
@@ -381,13 +425,13 @@ describe('mcp reader', () => {
   it('unions .claude.json entries from subdirectories under the repo root', async () => {
     writeJson(join(home, '.claude.json'), {
       projects: {
-        [repo]: { mcpServers: { root: { type: 'sse', url: 'u1' } } },
+        [repo]: { mcpServers: { root: { type: 'sse', url: 'https://mcp.example.com/sse' } } },
         [join(repo, 'frontend')]: { mcpServers: { fe: { type: 'stdio' } } },
         ['/some/other/repo']: { mcpServers: { nope: { type: 'stdio' } } }, // not under repo — excluded
       },
     })
     const payload = cat(await readClaudeCodeEnvironment(repo), 'mcp') as Record<string, any>
-    expect(payload['.claude.json'].servers).toEqual({ root: { type: 'sse', url: 'u1' }, fe: { type: 'stdio' } })
+    expect(payload['.claude.json'].servers).toEqual({ root: { type: 'sse', url: 'https://mcp.example.com/sse' }, fe: { type: 'stdio' } })
     expect(payload['.claude.json'].servers.nope).toBeUndefined()
   })
 
@@ -412,6 +456,28 @@ describe('mcp reader', () => {
     expect(serialized).not.toContain('client-abc')
     expect(serialized).not.toContain('postgresql://')
     expect(serialized).not.toContain('npx')
+  })
+
+  it('strips credentials from MCP URLs: userinfo, query, and fragment never stored', async () => {
+    writeJson(join(repo, '.mcp.json'), {
+      mcpServers: {
+        corp: { type: 'sse', url: 'https://svc:hunter2@mcp.example.com:8443/v1/sse?api_key=sk-secret#frag' },
+      },
+    })
+    const payload = cat(await readClaudeCodeEnvironment(repo), 'mcp') as Record<string, any>
+    // Endpoint identity survives (host, port, path); credentials do not.
+    expect(payload['.mcp.json'].servers.corp).toEqual({ type: 'sse', url: 'https://mcp.example.com:8443/v1/sse' })
+    const serialized = JSON.stringify(payload)
+    expect(serialized).not.toContain('hunter2')
+    expect(serialized).not.toContain('sk-secret')
+  })
+
+  it('drops an unparseable MCP url rather than storing it verbatim', async () => {
+    writeJson(join(repo, '.mcp.json'), {
+      mcpServers: { odd: { type: 'sse', url: 'not a url, maybe with a token' } },
+    })
+    const payload = cat(await readClaudeCodeEnvironment(repo), 'mcp') as Record<string, any>
+    expect(payload['.mcp.json'].servers.odd).toEqual({ type: 'sse' })
   })
 
   it('infers type:stdio for a type-less entry that has a command', async () => {
@@ -615,6 +681,30 @@ describe('skills reader', () => {
     expect(fd.body).toBe('Design guidance.\n')
   })
 
+  it('captures a single-skill plugin (root SKILL.md), named by frontmatter with basename fallback', async () => {
+    const named = join(home, 'plugins', 'cache', 'named-install')
+    const bare = join(home, 'plugins', 'cache', 'bare-install')
+    writeFile(join(home, 'settings.json'), JSON.stringify({ enabledPlugins: { 'named@mkt': true, 'bare@mkt': true } }))
+    writeFile(
+      join(home, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        plugins: {
+          'named@mkt': [{ scope: 'user', installPath: named }],
+          'bare@mkt': [{ scope: 'user', installPath: bare }],
+        },
+      }),
+    )
+    // Docs: frontmatter `name` determines the invocation name for this layout
+    // (stable regardless of install dir); the dir basename is only the fallback.
+    writeFile(join(named, 'SKILL.md'), '---\nname: pdf-processor\ndescription: Process PDFs\n---\nProcess.\n')
+    writeFile(join(bare, 'SKILL.md'), 'No frontmatter here.\n')
+    const payload = cat(await readClaudeCodeEnvironment(), 'skills') as { skills: any[] }
+    const names = Object.fromEntries(payload.skills.map((s) => [s.name, s.source]))
+    expect(names['pdf-processor']).toBe('plugin:named@mkt') // frontmatter name, not 'named-install'
+    expect(names['bare-install']).toBe('plugin:bare@mkt') // fallback: install-dir basename
+    expect(payload.skills.find((s) => s.name === 'pdf-processor').description).toBe('Process PDFs')
+  })
+
   it('only reads skills/<dir>/SKILL.md at depth 1, ignoring nested supporting SKILL.md files', async () => {
     // Real skill at depth 1, plus a supporting file named SKILL.md nested inside it.
     writeFile(join(repo, '.claude', 'skills', 'deploy', 'SKILL.md'), 'Deploy the app.\n')
@@ -658,6 +748,20 @@ describe('skills reader', () => {
     const bySource = Object.fromEntries(payload.skills.map((s) => [s.name, s.source]))
     expect(bySource['proj-skill']).toBe('plugin:proj@mkt')
     expect(bySource['local-skill']).toBe('plugin:local@mkt') // local-scope plugin now captured
+  })
+
+  it('a local-settings false override disables a project-enabled plugin', async () => {
+    const ip = join(home, 'plugins', 'cache', 'ov')
+    // CC's own disable flow: project settings enable it, the user's local settings
+    // write a false override — the plugin is OFF for this user.
+    writeFile(join(repo, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'ov@mkt': true } }))
+    writeFile(join(repo, '.claude', 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'ov@mkt': false } }))
+    writeFile(
+      join(home, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ plugins: { 'ov@mkt': [{ scope: 'project', installPath: ip }] } }),
+    )
+    writeFile(join(ip, 'skills', 'ov-skill', 'SKILL.md'), 'disabled by local override\n')
+    expect(cat(await readClaudeCodeEnvironment(repo), 'skills')).toBeUndefined()
   })
 
   it('returns no skills category when neither dir has files', async () => {
@@ -707,8 +811,8 @@ describe('instructions reader', () => {
   })
 
   it('captures a nested CLAUDE.md that has NO .claude/ dir beside it', async () => {
-    // A monorepo package with CLAUDE.md directly (no .claude/) — findClaudeDirs would
-    // miss it, so the instructions reader must file-walk.
+    // A monorepo package with CLAUDE.md directly (no .claude/) — keying off .claude/
+    // dirs would miss it, so scanProject finds instruction files by filename.
     writeFile(join(repo, 'CLAUDE.md'), 'root\n')
     writeFile(join(repo, 'packages', 'frontend', 'CLAUDE.md'), 'frontend instructions\n')
     writeFile(join(repo, 'node_modules', 'dep', 'CLAUDE.md'), 'vendored\n') // excluded
