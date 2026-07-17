@@ -38,7 +38,7 @@ function stubLlm(byLabelOrder: Canned[], fix?: { fix_type: string; content: stri
     model: 'claude-fable-5',
     async completeStructured(req: StructuredRequest): Promise<LlmResult> {
       calls.push(req.toolName)
-      if (req.toolName === 'propose_theme_merges') return { data: { merges: [] }, usage: emptyUsage() }
+      if (req.toolName === 'reconcile_taxonomy') return { data: { themes: [] }, usage: emptyUsage() }
       if (req.toolName === 'draft_fix') {
         return { data: (fix ?? { fix_type: 'fix-prompt', content: 'Add a CLAUDE.md section documenting the db config path.' }) as unknown as Record<string, unknown>, usage: emptyUsage() }
       }
@@ -164,15 +164,22 @@ describe('recurring-themes detector', () => {
     expect(rows[0]!.theme_id).toBeNull()
   })
 
-  it('rejects a junk (run-on) label: theme dropped, event survives', async () => {
+  it('keeps a verbose label (clustered, trimmed to 80 chars) rather than dropping the event topicless', async () => {
     const { db, store } = setup()
     seedSession(db, store, 'j1')
+    const longLabel = 'this label is a whole run-on sentence, with commas, far too long to be a clean name'
     const { llm } = stubLlm([
-      { events: [{ turn: 1, type: 'other', description: 'friction', new_theme_label: 'this label is a whole run-on sentence, with commas, far too long to be a name' }] },
+      { events: [{ turn: 1, type: 'other', description: 'friction', new_theme_label: longLabel }] },
     ])
     await recurringThemes.run(ctx(store, llm))
-    expect(store.allThemes()).toHaveLength(0)
-    expect(store.queryAll('SELECT 1 FROM theme_events')).toHaveLength(1)
+    // A verbose label is no longer rejected: minting it keeps the event clustered
+    // (droppping the label would leave the event topicless and unable to recur).
+    const themes = store.allThemes()
+    expect(themes).toHaveLength(1)
+    expect(themes[0]!.label.length).toBeLessThanOrEqual(80)
+    const ev = store.queryAll('SELECT theme_id FROM theme_events') as Array<{ theme_id: string | null }>
+    expect(ev).toHaveLength(1)
+    expect(ev[0]!.theme_id).toBe(themes[0]!.id)
   })
 
   // Helper: seed 3 sessions of one theme, surface + persist the insight, resolve it.

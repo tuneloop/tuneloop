@@ -35,14 +35,38 @@ function seedTheme(db: ReturnType<typeof openDb>, id: string, label: string, rep
     .run(sid, 0, 'context-supply', 'unprompted', `event for ${id}`, id, new Date().toISOString())
 }
 
-function mergeLlm(merges: Array<{ keep_id: string; drop_id: string }>): LlmClient {
+// One canonical-gap cluster in the unified reconcile_taxonomy output shape.
+interface Cluster {
+  merge_ids?: string[]
+  keep_id?: string
+  label?: string
+  description?: string
+  project_specific?: boolean
+  orphan_refs?: string[]
+}
+
+/** LLM stub returning canned reconcile clusters. */
+function themeLlm(clusters: Cluster[] = []): LlmClient {
   return {
     provider: 'anthropic',
     model: 'claude-fable-5',
     async completeStructured(_req: StructuredRequest): Promise<LlmResult> {
-      return { data: { merges }, usage: emptyUsage() }
+      return { data: { themes: clusters }, usage: emptyUsage() }
     },
   }
+}
+
+/** Sugar for the common "merge two themes" cluster. */
+function mergeLlm(pairs: Array<{ keep_id: string; drop_id: string }>): LlmClient {
+  return themeLlm(pairs.map((p) => ({ keep_id: p.keep_id, merge_ids: [p.keep_id, p.drop_id] })))
+}
+
+/** Seed a topicless (theme_id NULL) friction event on a session with a repo. */
+function seedOrphan(db: ReturnType<typeof openDb>, sid: string, idx: number, repo: string | null, description: string) {
+  db.prepare('INSERT OR IGNORE INTO sessions (id, session_id, source, provider, started_at, content_hash, repo) VALUES (?,?,?,?,?,?,?)')
+    .run(sid, sid, 'claude-code', 'anthropic', new Date().toISOString(), `h-${sid}`, repo)
+  db.prepare('INSERT INTO theme_events (session_id, idx, type, trigger, description, theme_id, added_at) VALUES (?,?,?,?,?,?,?)')
+    .run(sid, idx, 'context-supply', 'unprompted', description, null, new Date().toISOString())
 }
 
 describe('runThemeMerge', () => {
@@ -105,12 +129,137 @@ describe('runThemeMerge', () => {
     let calls = 0
     const countingLlm: LlmClient = {
       provider: 'anthropic', model: 'claude-fable-5',
-      async completeStructured() { calls++; return { data: { merges: [] }, usage: emptyUsage() } },
+      async completeStructured() { calls++; return { data: { themes: [] }, usage: emptyUsage() } },
     }
     await runThemeMerge(store, countingLlm, noopLog)
     const afterFirst = calls
     expect(afterFirst).toBeGreaterThan(0)
     await runThemeMerge(store, countingLlm, noopLog) // unchanged set → gated
     expect(calls).toBe(afterFirst)
+  })
+
+  it('rewrites the kept theme label + description when the cluster proposes better wording', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:o-r:db-config-path', 'Db Config Path', 'o/r', 's1')
+    seedTheme(db, 'recurring-themes:o-r:where-is-db-config', 'Where Is Db Config', 'o/r', 's2')
+    const llm = themeLlm([{
+      merge_ids: ['recurring-themes:o-r:db-config-path', 'recurring-themes:o-r:where-is-db-config'],
+      keep_id: 'recurring-themes:o-r:db-config-path',
+      label: 'Database Config Location Unknown',
+      description: 'Agent cannot locate the file holding the database connection config.',
+    }])
+    await runThemeMerge(store, llm, noopLog)
+    const kept = store.allThemes().find((t) => t.id === 'recurring-themes:o-r:db-config-path')!
+    expect(kept.label).toBe('Database Config Location Unknown')
+    expect(kept.description).toBe('Agent cannot locate the file holding the database connection config.')
+  })
+
+  it('clamps a reworded keeper label to the max length (same bound as minting)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:a', 'A', null, 's1')
+    seedTheme(db, 'recurring-themes:global:b', 'B', null, 's2')
+    const longLabel = 'X'.repeat(200)
+    const llm = themeLlm([{ merge_ids: ['recurring-themes:global:a', 'recurring-themes:global:b'], keep_id: 'recurring-themes:global:a', label: longLabel }])
+    await runThemeMerge(store, llm, noopLog)
+    const kept = store.allThemes().find((t) => t.id === 'recurring-themes:global:a')!
+    expect(kept.label.length).toBeLessThanOrEqual(80)
+  })
+
+  it('merges 3 themes into one keeper in a single cluster', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:t1', 'T1', null, 's1')
+    seedTheme(db, 'recurring-themes:global:t2', 'T2', null, 's2')
+    seedTheme(db, 'recurring-themes:global:t3', 'T3', null, 's3')
+    const llm = themeLlm([{
+      merge_ids: ['recurring-themes:global:t1', 'recurring-themes:global:t2', 'recurring-themes:global:t3'],
+      keep_id: 'recurring-themes:global:t1',
+    }])
+    const { applied } = await runThemeMerge(store, llm, noopLog)
+    expect(applied).toBe(2) // two absorbed into the keeper
+    expect(store.allThemes().map((t) => t.id)).toEqual(['recurring-themes:global:t1'])
+    expect(store.themesWithEvents().find((t) => t.id === 'recurring-themes:global:t1')!.eventCount).toBe(3)
+  })
+
+  it('assigns an orphan event onto an existing theme via orphan_refs', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:self-review-misses-bugs', 'Self-Review Misses Bugs', null, 's1')
+    seedOrphan(db, 's2', 0, 'o/r', 'a code review caught a real bug the agent shipped')
+    const llm = themeLlm([{
+      keep_id: 'recurring-themes:global:self-review-misses-bugs',
+      orphan_refs: ['s2#0'],
+    }])
+    const { applied } = await runThemeMerge(store, llm, noopLog)
+    expect(applied).toBe(1)
+    const rows = store.queryAll('SELECT theme_id FROM theme_events WHERE session_id = ?', 's2') as Array<{ theme_id: string | null }>
+    expect(rows[0]!.theme_id).toBe('recurring-themes:global:self-review-misses-bugs')
+  })
+
+  it('mints a new theme from orphans when none match (one cluster, both events attached)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:o-r:unrelated', 'Unrelated', 'o/r', 's0')
+    seedOrphan(db, 's1', 0, 'o/a', 'user had to restate the changelog format')
+    seedOrphan(db, 's2', 0, 'o/b', 'user again had to restate the changelog format')
+    const llm = themeLlm([{
+      label: 'Changelog Format Not Followed',
+      description: 'Agent keeps missing the changelog format.',
+      project_specific: false,
+      orphan_refs: ['s1#0', 's2#0'],
+    }])
+    const { applied } = await runThemeMerge(store, llm, noopLog)
+    expect(applied).toBe(2) // both orphans attached
+    const minted = store.allThemes().find((t) => t.id === 'recurring-themes:global:changelog-format-not-followed')
+    expect(minted).toBeDefined()
+    expect(minted!.repo).toBeNull() // project_specific=false → global
+    const twe = store.themesWithEvents().find((t) => t.id === minted!.id)!
+    expect(twe.eventCount).toBe(2)
+    expect(twe.sessionCount).toBe(2)
+  })
+
+  it('scopes a minted theme to the repo when project_specific and orphans share one repo', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:o-r:unrelated', 'Unrelated', 'o/r', 's0')
+    seedOrphan(db, 's1', 0, 'acme/app', 'agent did not know this app\'s deploy sequence')
+    const llm = themeLlm([{
+      label: 'Deploy Sequence Unknown',
+      description: 'Agent does not know this project\'s deploy steps.',
+      project_specific: true,
+      orphan_refs: ['s1#0'],
+    }])
+    await runThemeMerge(store, llm, noopLog)
+    const minted = store.allThemes().find((t) => t.label === 'Deploy Sequence Unknown')!
+    expect(minted.repo).toBe('acme/app')
+  })
+
+  it('leaves a genuine one-off orphan unassigned (no cluster references it)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:x', 'X', null, 's0')
+    seedTheme(db, 'recurring-themes:global:y', 'Y', null, 's3')
+    seedOrphan(db, 's1', 0, 'o/r', 'a truly one-off friction that fits nothing')
+    const llm = themeLlm([]) // nothing to consolidate
+    await runThemeMerge(store, llm, noopLog)
+    const rows = store.queryAll('SELECT theme_id FROM theme_events WHERE session_id = ?', 's1') as Array<{ theme_id: string | null }>
+    expect(rows[0]!.theme_id).toBeNull()
+  })
+
+  it('runs even when the theme set is unchanged (orphans present), then gates once they are consumed', async () => {
+    const { db, store } = setup()
+    // Two themes remain after the orphan is assigned, so the SECOND call is gated by
+    // the hash (not the "<2 themes && no orphans" short-circuit) — the real path.
+    seedTheme(db, 'recurring-themes:global:known', 'Known', null, 's0')
+    seedTheme(db, 'recurring-themes:global:other', 'Other', null, 's2')
+    seedOrphan(db, 's1', 0, 'o/r', 'an occurrence of the known gap')
+    let calls = 0
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured() {
+        calls++
+        return { data: { themes: [{ keep_id: 'recurring-themes:global:known', orphan_refs: ['s1#0'] }] }, usage: emptyUsage() }
+      },
+    }
+    await runThemeMerge(store, llm, noopLog)
+    expect(calls).toBe(1)
+    // Orphan now assigned; a second pass sees an unchanged theme+orphan signature → hash-gated.
+    await runThemeMerge(store, llm, noopLog)
+    expect(calls).toBe(1)
   })
 })

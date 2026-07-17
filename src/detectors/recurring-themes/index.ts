@@ -4,6 +4,7 @@ import { insightId } from '../../core/detector'
 import { costOfUsage } from '../../pricing/pricing'
 import { mapPool } from '../../util/pool'
 import { collectFollowups } from './followups'
+import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
 import { buildPrompt, extractionSchema, REMEDIES, TOOL_NAME, TRIGGERS, TYPES } from './prompt'
 import { runThemeMerge } from './merge'
 import { ensureThemeFix, type FixOccurrence } from './fix'
@@ -11,7 +12,6 @@ import { maybeSummarizeFollowups } from './summarize'
 import type { Detector, DetectorContext, DetectorResult, InsightInput } from '../../core/detector'
 import type { ThemeEventInput, ThemeInput, ThemeRef, ThemeRemedy, ThemeTrigger } from '../../store/types'
 
-const DETECTOR = 'recurring-themes'
 const CONCURRENCY = 6 // LLM calls in flight across the session delta
 const MAX_TURNS_GATE = 0 // pre-gate: a session needs > this many substantive follow-ups (steered) to extract
 
@@ -31,10 +31,11 @@ const SEVERITY_EVENTS = { high: 8, medium: 4 }
  * S/P-tier detectors, not this one.
  *
  * Flow: pre-gate to steered sessions in the delta → one extraction call per
- * session (assign-at-extraction against the existing theme list) → cross-session
- * merge of duplicate themes → surface themes past the recurrence threshold.
- * Themes persist in their own tables so they outlive their insights (a resolved
- * theme stays in the extraction feed and can reopen on recurrence).
+ * session (assign-at-extraction against the existing theme list) → one taxonomy-
+ * reconcile call (merge duplicate themes + re-home still-unclustered events) →
+ * surface themes past the recurrence threshold. Themes persist in their own tables
+ * so they outlive their insights (a resolved theme stays in the extraction feed and
+ * can reopen on recurrence).
  */
 export const recurringThemes: Detector = {
   name: DETECTOR,
@@ -98,7 +99,8 @@ export const recurringThemes: Detector = {
     })
     for (const u of perSessionUsage) usage = addUsage(usage, u)
 
-    // 3. Cross-session merge of duplicate themes (hash-gated; no-op when unchanged).
+    // 3. Reconcile the taxonomy: one call that both merges duplicate themes and
+    // re-homes still-unclustered events (hash-gated; no-op when nothing changed).
     const merge = await runThemeMerge(store, llm, log)
     usage = addUsage(usage, merge.usage)
 
@@ -171,7 +173,7 @@ function postprocess(
         // Global by default; repo-scoped only when the LLM marks the gap inherent
         // to this project (and we actually have a repo to scope it to).
         const projectSpecific = e?.new_theme_project_specific === true && repo != null
-        themeId = `${DETECTOR}:${projectSpecific ? slug(repo!) : 'global'}:${slug(label)}`
+        themeId = makeThemeId(label, repo, projectSpecific)
         if (!visible.has(themeId) && !themes.has(themeId)) {
           themes.set(themeId, {
             id: themeId,
@@ -305,14 +307,14 @@ function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T)
   return allowed.includes(s) ? s : fallback
 }
 
-/** Accept a proposed label only if it reads like a short concrete gap name. */
+/**
+ * Accept a proposed label if it's a non-empty gap name, trimmed to a sane length.
+ * We deliberately DON'T reject on word count / commas — the prompt already asks for
+ * a concise Title-Case name, and a slightly-verbose one is far better clustered than
+ * dropped (a dropped label leaves the event topicless, unable to ever recur).
+ */
 function themeLabel(raw: unknown): string | null {
   const t = str(raw)
   if (!t) return null
-  if (t.length > 60 || t.split(/\s+/).length > 8 || t.includes(',')) return null
-  return t
-}
-
-function slug(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled'
+  return clampLabel(t)
 }

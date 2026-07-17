@@ -3007,7 +3007,8 @@ export class Store {
   /**
    * Apply one theme merge: re-point every member event of `dropId` to `keepId`,
    * then delete the absorbed theme. Only derived themes are absorbed. Returns
-   * false if either id is missing or they're equal.
+   * false if either id is missing or they're equal. (Rewording the keeper is a
+   * separate step — see retitleTheme.)
    */
   applyThemeMerge(keepId: string, dropId: string): boolean {
     return this.db.transaction(() => {
@@ -3018,6 +3019,47 @@ export class Store {
       this.db.prepare('DELETE FROM theme WHERE id = ?').run(dropId)
       return true
     })()
+  }
+
+  /**
+   * Friction events the extractor recorded but couldn't confidently attach to a
+   * theme (varied wording, or a sibling session minted the theme concurrently so
+   * it wasn't yet visible). Grouped by session repo so the reconcile pass can scope
+   * a minted theme correctly. Most recent first.
+   */
+  orphanThemeEvents(): Array<{ sessionId: string; idx: number; repo: string | null; type: string; description: string }> {
+    return this.db
+      .prepare(
+        `SELECT e.session_id AS sessionId, e.idx, s.repo, e.type, e.description
+         FROM theme_events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.theme_id IS NULL ORDER BY e.added_at DESC, e.session_id, e.idx`,
+      )
+      .all() as Array<{ sessionId: string; idx: number; repo: string | null; type: string; description: string }>
+  }
+
+  /** Attach a previously-orphaned event to a theme (the reconcile pass's write). */
+  assignThemeEvent(sessionId: string, idx: number, themeId: string): void {
+    this.db.prepare('UPDATE theme_events SET theme_id = ? WHERE session_id = ? AND idx = ?').run(themeId, sessionId, idx)
+  }
+
+  /** Mint a derived theme if absent (INSERT OR IGNORE — never renames an existing id). */
+  ensureTheme(input: ThemeInput): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO theme (id, label, description, type, remedy, repo, source, first_seen)
+         VALUES (?,?,?,?,?,?,'derived',?)`,
+      )
+      .run(input.id, input.label, input.description ?? null, input.type, input.remedy ?? null, input.repo ?? null, input.firstSeen ?? now)
+  }
+
+  /** Rewrite a derived theme's wording (label/description). Never touches a user theme. */
+  retitleTheme(id: string, label?: string, description?: string): void {
+    if (!label && !description) return
+    const row = this.db.prepare("SELECT source FROM theme WHERE id = ?").get(id) as { source: string } | undefined
+    if (!row || row.source === 'user') return
+    if (label) this.db.prepare('UPDATE theme SET label = ? WHERE id = ?').run(label, id)
+    if (description) this.db.prepare('UPDATE theme SET description = ? WHERE id = ?').run(description, id)
   }
 
   /**

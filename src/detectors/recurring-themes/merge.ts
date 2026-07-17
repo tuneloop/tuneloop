@@ -4,20 +4,31 @@ import type { Logger } from '../../util/log'
 import type { Store } from '../../store/store'
 import type { ThemeRef } from '../../store/types'
 import { addUsage, emptyUsage, type TokenUsage } from '../../core/model'
+import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
+import { TYPES } from './prompt'
 
-const MERGE_HASH_KEY = 'recurring_themes_merge_hash'
-const TOOL_NAME = 'propose_theme_merges'
+const HASH_KEY = 'recurring_themes_merge_hash'
+const TOOL_NAME = 'reconcile_taxonomy'
+// Runaway guard on orphan events per call (each is ~one sentence, so this is a
+// small prompt). On overflow the NEWEST go first and the rest are logged, not
+// dropped — later runs drain them as clustered orphans leave the pool.
+const MAX_ORPHANS = 1000
 
 /**
- * The cross-session MERGE pass: the only step that looks at all themes at once.
- * Per repo-group (repo themes + visible globals, plus a globals-only group), ask
- * the LLM to propose merges of DUPLICATE themes only, re-point the absorbed
- * theme's events, and delete it. Gated on a hash of the theme-id set so a re-run
- * with no new themes is a no-op. Legality: same repo, or a global keeper
- * absorbing a repo-scoped duplicate — never the reverse, never across repos. A
- * failed call leaves the gate unstamped so the pass retries next analyze.
+ * The taxonomy-reconcile pass: the only step that sees ALL themes and all
+ * still-unclustered ("orphan") friction events at once. One LLM call decides, per
+ * canonical gap: which existing themes are duplicates to fuse, the surviving label/
+ * description, and which orphan events belong to it (matching an existing theme or
+ * minting a new one). Merging + orphan-assignment are the same judgment — an orphan
+ * can be the evidence that two themes are one — so they share a call.
  *
- * Returns the token usage it spent and the number of themes absorbed.
+ * Gated on a hash of the theme-id set AND the orphan set: a re-run that changed
+ * neither is a no-op. Legality: a merge is same-repo, or a GLOBAL keeper absorbing
+ * a repo-scoped duplicate — never the reverse, never across repos. A failed call
+ * leaves the gate unstamped so the pass retries next analyze.
+ *
+ * Returns the token usage it spent and the number of themes absorbed + orphans
+ * assigned (the "applied" count, for logging).
  */
 export async function runThemeMerge(
   store: Store,
@@ -26,94 +37,206 @@ export async function runThemeMerge(
 ): Promise<{ usage: TokenUsage; applied: number }> {
   let usage = emptyUsage()
   const themes = store.allThemes()
-  if (themes.length < 2) return { usage, applied: 0 }
+  const allOrphans = store.orphanThemeEvents()
+  if (themes.length < 2 && allOrphans.length === 0) return { usage, applied: 0 }
 
-  const hashOf = (ts: ThemeRef[]) => contentHash(ts.map((t) => t.id).sort().join('|'))
-  if (store.getMeta(MERGE_HASH_KEY) === hashOf(themes)) return { usage, applied: 0 } // unchanged since last pass
+  const sigOf = (ts: ThemeRef[], os: Array<{ sessionId: string; idx: number }>) =>
+    contentHash(ts.map((t) => t.id).sort().join('|') + '#' + os.map((o) => `${o.sessionId}:${o.idx}`).sort().join('|'))
+  if (store.getMeta(HASH_KEY) === sigOf(themes, allOrphans)) return { usage, applied: 0 } // unchanged since last pass
 
-  // Repo groups (repo themes + visible globals) plus a globals-only group.
-  const groups = new Map<string, ThemeRef[]>()
-  const globals = themes.filter((t) => t.repo == null)
-  if (globals.length > 1) groups.set('(global)', globals)
-  for (const t of themes) {
-    if (t.repo == null) continue
-    if (!groups.has(t.repo)) groups.set(t.repo, [...globals])
-    groups.get(t.repo)!.push(t)
+  // Cap orphans per call (runaway guard); the rest drain on later runs.
+  const orphans = allOrphans.slice(0, MAX_ORPHANS)
+  if (allOrphans.length > orphans.length) {
+    log.warn(`recurring-themes: ${allOrphans.length} orphan events; reconciling ${orphans.length} this run, rest deferred`)
+  }
+
+  const byId = new Map(themes.map((t) => [t.id, t]))
+  const byRef = new Map(orphans.map((o) => [`${o.sessionId}#${o.idx}`, o]))
+
+  let clusters: Array<Cluster> = []
+  try {
+    const { data, usage: u } = await llm.completeStructured({
+      system:
+        'You maintain a taxonomy of "friction themes" — recurring patterns of AI-agent friction mined from ' +
+        'coding sessions. You are given the current themes and friction events not yet attached to any theme. ' +
+        `Consolidate the taxonomy via the ${TOOL_NAME} tool.`,
+      user: buildUser(themes, orphans),
+      schema: reconcileSchema,
+      toolName: TOOL_NAME,
+      maxTokens: 4096,
+    })
+    usage = addUsage(usage, u)
+    clusters = Array.isArray((data as { themes?: unknown }).themes) ? (data as { themes: Array<Cluster> }).themes : []
+  } catch (err) {
+    log.warn(`theme reconcile pass failed: ${(err as Error).message}`)
+    return { usage, applied: 0 } // gate unstamped → retried next analyze
   }
 
   let applied = 0
-  let anyFailed = false
-  for (const [groupName, group] of groups) {
-    if (group.length < 2) continue
-    const byId = new Map(group.map((t) => [t.id, t]))
-    let proposals: Array<{ keep_id?: unknown; drop_id?: unknown }> = []
-    try {
-      const { data, usage: u } = await llm.completeStructured({
-        system:
-          'You maintain a taxonomy of "friction themes" — recurring patterns of AI-agent friction mined from ' +
-          `coding sessions. Propose merges of DUPLICATE themes via the ${TOOL_NAME} tool.`,
-        user: [
-          `Friction themes for ${groupName}:`,
-          ...group.map((t) => `- [${t.id}] ${t.label}${t.description ? ` — ${t.description}` : ''} (${t.type})`),
-          '',
-          'Propose a merge ONLY for themes that name the SAME specific gap in different words — duplicates or',
-          'near-duplicates. Do NOT merge themes that are merely related, in the same area, or one broader than',
-          'the other. When in doubt, do not merge. An empty list is the common, correct answer.',
-          'keep_id should be the better-named (more concrete, actionable) theme of the pair; when both names',
-          'are adequate, keep the OLDER theme (themes are listed oldest first) — a stable id keeps past',
-          'sessions grouped the way they were originally reported.',
-        ].join('\n'),
-        schema: mergeSchema,
-        toolName: TOOL_NAME,
-        maxTokens: 1024,
-      })
-      usage = addUsage(usage, u)
-      proposals = Array.isArray((data as { merges?: unknown }).merges)
-        ? (data as { merges: Array<{ keep_id?: unknown; drop_id?: unknown }> }).merges
-        : []
-    } catch (err) {
-      log.warn(`theme merge pass failed for ${groupName}: ${(err as Error).message}`)
-      anyFailed = true
-      continue
-    }
-
-    for (const m of proposals) {
-      const keep = typeof m.keep_id === 'string' ? byId.get(m.keep_id) : undefined
-      const drop = typeof m.drop_id === 'string' ? byId.get(m.drop_id) : undefined
-      if (!keep || !drop || keep.id === drop.id) continue
-      // Same-repo merges only, except a GLOBAL keeper absorbing a repo duplicate.
-      const legal = keep.repo === drop.repo || keep.repo == null
-      if (!legal) continue
-      if (store.applyThemeMerge(keep.id, drop.id)) {
-        byId.delete(drop.id)
-        applied++
-        // The dropped theme's id is gone, so its insight (if it had surfaced) can
-        // never re-surface — retire it so it doesn't linger as a frozen duplicate.
-        store.retireInsightForMergedTheme('recurring-themes', drop.id)
-      }
-    }
+  for (const c of clusters) {
+    applied += applyCluster(store, c, byId, byRef)
   }
 
-  // Stamp the POST-merge theme set so the next no-op analyze skips. Never stamp
-  // after a failure — the unchanged set would suppress retries forever.
-  if (!anyFailed) store.setMeta(MERGE_HASH_KEY, hashOf(store.allThemes()))
-  if (applied > 0) log.info(`theme merge pass: ${applied} theme(s) absorbed`)
+  // Stamp the POST-pass signature so the next no-op analyze skips. (Reached only on
+  // a successful call — a throw returns above, leaving the gate unstamped.)
+  store.setMeta(HASH_KEY, sigOf(store.allThemes(), store.orphanThemeEvents()))
+  if (applied > 0) log.info(`theme reconcile pass: ${applied} change(s) (merges + orphan assignments)`)
   return { usage, applied }
 }
 
-const mergeSchema: JsonSchema = {
+/**
+ * Apply one canonical-gap cluster: pick/mint the keeper, fold duplicate themes into
+ * it, rewrite its wording, and attach the orphan events. Returns how many discrete
+ * changes it made (merges + assignments), for the run's "applied" tally. Every
+ * mutation is guarded — an illegal merge or a stale id is skipped, never fatal.
+ */
+function applyCluster(
+  store: Store,
+  c: Cluster,
+  byId: Map<string, ThemeRef>,
+  byRef: Map<string, { sessionId: string; idx: number; repo: string | null; type: string }>,
+): number {
+  let applied = 0
+  const label = str(c.label)
+  const description = str(c.description)
+  const mergeIds = (Array.isArray(c.merge_ids) ? c.merge_ids : []).filter((x): x is string => typeof x === 'string' && byId.has(x))
+  const orphanRefs = (Array.isArray(c.orphan_refs) ? c.orphan_refs : []).filter((x): x is string => typeof x === 'string' && byRef.has(x))
+
+  // Resolve the keeper: an explicit valid keep_id, else the first merge id the LLM
+  // listed (the prompt asks it to name the better/older survivor first), else mint a
+  // new theme from the label. Nothing to key on → skip the cluster.
+  let keeper: ThemeRef | undefined
+  const keepId = str(c.keep_id)
+  if (keepId && byId.has(keepId)) keeper = byId.get(keepId)
+  else if (mergeIds.length) keeper = byId.get(mergeIds[0]!)
+  else if (label) {
+    keeper = mintTheme(store, byId, label, description, c.project_specific === true, orphanRefs, byRef)
+  }
+  if (!keeper) return 0
+
+  // Fold every other referenced theme into the keeper (legality-guarded per drop).
+  for (const dropId of mergeIds) {
+    if (dropId === keeper.id) continue
+    const drop = byId.get(dropId)
+    if (!drop) continue
+    const legal = keeper.repo === drop.repo || keeper.repo == null // same repo, or global keeper absorbs repo-scoped
+    if (!legal) continue
+    if (store.applyThemeMerge(keeper.id, dropId)) {
+      byId.delete(dropId)
+      applied++
+      // The dropped id is gone; retire its insight so it doesn't linger as a frozen duplicate.
+      store.retireInsightForMergedTheme(DETECTOR, dropId)
+    }
+  }
+
+  // Reword an EXISTING keeper if the pass proposed clearer text; a freshly-minted
+  // theme already carries this label/description.
+  const minted = !keepId && !mergeIds.length
+  if (!minted && (label || description)) {
+    store.retitleTheme(keeper.id, label ? clampLabel(label) : undefined, description || undefined)
+  }
+
+  // Attach the orphan events to the keeper.
+  for (const ref of orphanRefs) {
+    const o = byRef.get(ref)!
+    store.assignThemeEvent(o.sessionId, o.idx, keeper.id)
+    byRef.delete(ref)
+    applied++
+  }
+
+  return applied
+}
+
+/** Mint a new derived theme for an orphan cluster and register it in `byId`. */
+function mintTheme(
+  store: Store,
+  byId: Map<string, ThemeRef>,
+  label: string,
+  description: string,
+  projectSpecific: boolean,
+  orphanRefs: string[],
+  byRef: Map<string, { sessionId: string; idx: number; repo: string | null; type: string }>,
+): ThemeRef {
+  // Repo scope for a project-specific theme: the orphans' shared repo (only when
+  // they all agree — a cross-repo cluster is inherently global). Else global.
+  const repos = new Set(orphanRefs.map((r) => byRef.get(r)?.repo).filter((x): x is string => x != null))
+  const repo = projectSpecific && repos.size === 1 ? [...repos][0]! : null
+  const clean = clampLabel(label)
+  const id = makeThemeId(clean, repo, repo != null)
+  if (!byId.has(id)) {
+    // Type/remedy: inherit the first orphan's type; remedy left unset (fix pass infers).
+    const firstType = orphanRefs.map((r) => byRef.get(r)?.type).find(Boolean)
+    store.ensureTheme({
+      id,
+      label: clean,
+      description: description || undefined,
+      type: oneOf(firstType, TYPES, 'other'),
+      repo: repo ?? undefined,
+    })
+    byId.set(id, { id, label: clean, description: description || null, type: oneOf(firstType, TYPES, 'other'), repo })
+  }
+  return byId.get(id)!
+}
+
+function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: number; type: string; description: string }>): string {
+  return [
+    'Existing friction themes (oldest first):',
+    themes.length ? themes.map((t) => `- [${t.id}] ${t.label}${t.description ? ` — ${t.description}` : ''} (${t.type}${t.repo ? `, repo ${t.repo}` : ', global'})`).join('\n') : '(none yet)',
+    '',
+    'Unassigned friction events (event_ref is opaque — echo it back exactly):',
+    orphans.length ? orphans.map((o) => `- event_ref=${o.sessionId}#${o.idx} (${o.type}): ${o.description}`).join('\n') : '(none)',
+    '',
+    'Return one entry per CANONICAL gap you want to act on (skip gaps that need no change):',
+    '- merge_ids: two or more existing theme ids that name the SAME specific gap in different words — duplicates',
+    '  to fuse into one. Merge ONLY true duplicates; do NOT merge themes that are merely related, in the same',
+    '  area, or one broader than the other. When in doubt, do not merge.',
+    '- keep_id: which existing id survives a merge (the better-named/older one). Omit to let the oldest win.',
+    '- label / description: for a NEW theme (required) or to REWORD the kept theme so it best captures its',
+    '  members (optional — omit to keep the survivor\'s own wording).',
+    '- project_specific: TRUE only if the gap is inherent to ONE project; FALSE (default) for general gaps.',
+    '- orphan_refs: the unassigned event_refs that belong to this gap. Attach an orphan ONLY when it is genuinely',
+    '  another occurrence of that same specific gap — a fresh theme is better than a wrong match. Leave a true',
+    '  one-off unreferenced (it stays unassigned).',
+    'An entry may do any combination: merge alone, assign orphans to an existing theme, or mint a new theme from',
+    'orphans. An empty list is valid when nothing needs consolidating.',
+  ].join('\n')
+}
+
+interface Cluster {
+  merge_ids?: unknown
+  keep_id?: unknown
+  label?: unknown
+  description?: unknown
+  project_specific?: unknown
+  orphan_refs?: unknown
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T): T {
+  const s = (typeof v === 'string' ? v.trim().toLowerCase() : '') as T
+  return allowed.includes(s) ? s : fallback
+}
+
+const reconcileSchema: JsonSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['merges'],
+  required: ['themes'],
   properties: {
-    merges: {
+    themes: {
       type: 'array',
-      description: 'Duplicate-theme merges; [] when no themes are duplicates (the common case).',
+      description: 'One entry per canonical gap to act on; [] when nothing needs consolidating.',
       items: {
         type: 'object',
         properties: {
-          keep_id: { type: 'string', description: 'Id of the theme to keep (the better-named one).' },
-          drop_id: { type: 'string', description: 'Id of the duplicate theme to absorb into keep_id.' },
+          merge_ids: { type: 'array', items: { type: 'string' }, description: 'Existing theme ids to fuse (duplicates of one gap); 0, or 2+.' },
+          keep_id: { type: 'string', description: 'Which existing id survives a merge; omit to keep the oldest.' },
+          label: { type: 'string', description: 'Title-Case label — required for a NEW theme, optional reword for a merged one.' },
+          description: { type: 'string', description: 'One-sentence definition of the gap (for a new or reworded theme).' },
+          project_specific: { type: 'boolean', description: 'TRUE only if the gap is inherent to one project; FALSE (default) for general gaps.' },
+          orphan_refs: { type: 'array', items: { type: 'string' }, description: 'Unassigned event_refs that belong to this gap (echoed exactly).' },
         },
       },
     },

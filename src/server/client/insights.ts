@@ -72,14 +72,16 @@ function detailHtml(r, occ) {
         fixBody(r.fix) + '</div>'
     : '';
 
-  // Occurrences: one row per stored event, each linking to its transcript turn.
+  // Occurrences: one row per stored event, each opening the transcript at the exact
+  // message. (We don't label a number: the stored seq is the message index, not the
+  // transcript's user-turn count)
   var occRows = (occ || []).map(function (e, j) {
     var title = e.sessionTitle ? esc(e.sessionTitle) : esc(shortSession(e.sessionId));
     var note = e.note ? '<div class="ins-occ-note">' + esc(e.note) + '</div>' : '';
-    return '<button type="button" class="ins-occ" data-j="' + j + '" title="Open transcript at this turn">' +
+    return '<button type="button" class="ins-occ" data-j="' + j + '" title="Open transcript at this message">' +
       note +
       '<div class="ins-occ-src"><span class="ins-occ-arrow">↳</span>' + title +
-        (e.turnIdx != null ? '<span class="ins-occ-turn">turn ' + esc(String(e.turnIdx)) + '</span>' : '') +
+        (e.turnIdx != null ? '<span class="ins-occ-turn">open ↗</span>' : '') +
       '</div></button>';
   }).join('');
   var occSection = '<div class="ins-occ-list"><div class="ins-section-label">Occurrences (' +
