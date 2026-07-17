@@ -3298,6 +3298,22 @@ export class Store {
     return { row: row ? toEnvSnapshotRow(row) : null, stale: !row }
   }
 
+  /**
+   * Distinct categories with any stored snapshot for a key. Used by capture to
+   * detect deletions: a category with history that a successful read no longer
+   * returns has been removed from disk and gets a null tombstone snapshot.
+   */
+  envSnapshotCategories(source: string, scope: string, scopeKey: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT category FROM environment_snapshots
+           WHERE source = ? AND scope = ? AND scope_key = ?`,
+        )
+        .all(source, scope, scopeKey) as Array<{ category: string }>
+    ).map((r) => r.category)
+  }
+
   close() {
     this.readonlyDb?.close()
     this.db.close()

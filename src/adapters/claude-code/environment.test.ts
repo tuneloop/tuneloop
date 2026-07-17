@@ -243,6 +243,27 @@ describe('resolvePluginDirs', () => {
     expect((await resolvePluginDirs(['y@mkt'], 'project'))[0]?.id).toBe('y@mkt')
   })
 
+  it('drops manifest paths that escape the plugin install root', async () => {
+    const ip = join(home, 'plugins', 'cache', 'esc')
+    const outside = join(home, 'outside')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, 'notes.md'), 'private notes, not plugin content')
+    writeFileSync(join(outside, 'SKILL.md'), 'not a plugin skill')
+    writeInstalled({ plugins: { 'esc@mkt': [{ scope: 'user', installPath: ip }] } })
+    writeManifest(ip, {
+      name: 'esc',
+      agents: '../../../outside',
+      commands: ['../../../outside/notes.md'],
+      skills: '../../../outside',
+    })
+    const p = (await resolvePluginDirs(['esc@mkt'], 'user'))[0]!
+    // Every escaping path is dropped; agents/commands fall back to their defaults.
+    expect(p.agentDirs).toEqual([join(ip, 'agents')])
+    expect(p.commandDirs).toEqual([join(ip, 'commands')])
+    expect(p.skillDirs).toEqual([join(ip, 'skills')])
+    expect(p.skillRoots).toEqual([])
+  })
+
   it('returns [] when installed_plugins.json is missing or has no matching id', async () => {
     expect(await resolvePluginDirs(['fd@mkt'], 'user')).toEqual([]) // no file
     writeInstalled({ plugins: {} })
@@ -404,13 +425,13 @@ describe('mcp reader', () => {
   it('unions .claude.json entries from subdirectories under the repo root', async () => {
     writeJson(join(home, '.claude.json'), {
       projects: {
-        [repo]: { mcpServers: { root: { type: 'sse', url: 'u1' } } },
+        [repo]: { mcpServers: { root: { type: 'sse', url: 'https://mcp.example.com/sse' } } },
         [join(repo, 'frontend')]: { mcpServers: { fe: { type: 'stdio' } } },
         ['/some/other/repo']: { mcpServers: { nope: { type: 'stdio' } } }, // not under repo — excluded
       },
     })
     const payload = cat(await readClaudeCodeEnvironment(repo), 'mcp') as Record<string, any>
-    expect(payload['.claude.json'].servers).toEqual({ root: { type: 'sse', url: 'u1' }, fe: { type: 'stdio' } })
+    expect(payload['.claude.json'].servers).toEqual({ root: { type: 'sse', url: 'https://mcp.example.com/sse' }, fe: { type: 'stdio' } })
     expect(payload['.claude.json'].servers.nope).toBeUndefined()
   })
 
@@ -435,6 +456,28 @@ describe('mcp reader', () => {
     expect(serialized).not.toContain('client-abc')
     expect(serialized).not.toContain('postgresql://')
     expect(serialized).not.toContain('npx')
+  })
+
+  it('strips credentials from MCP URLs: userinfo, query, and fragment never stored', async () => {
+    writeJson(join(repo, '.mcp.json'), {
+      mcpServers: {
+        corp: { type: 'sse', url: 'https://svc:hunter2@mcp.example.com:8443/v1/sse?api_key=sk-secret#frag' },
+      },
+    })
+    const payload = cat(await readClaudeCodeEnvironment(repo), 'mcp') as Record<string, any>
+    // Endpoint identity survives (host, port, path); credentials do not.
+    expect(payload['.mcp.json'].servers.corp).toEqual({ type: 'sse', url: 'https://mcp.example.com:8443/v1/sse' })
+    const serialized = JSON.stringify(payload)
+    expect(serialized).not.toContain('hunter2')
+    expect(serialized).not.toContain('sk-secret')
+  })
+
+  it('drops an unparseable MCP url rather than storing it verbatim', async () => {
+    writeJson(join(repo, '.mcp.json'), {
+      mcpServers: { odd: { type: 'sse', url: 'not a url, maybe with a token' } },
+    })
+    const payload = cat(await readClaudeCodeEnvironment(repo), 'mcp') as Record<string, any>
+    expect(payload['.mcp.json'].servers.odd).toEqual({ type: 'sse' })
   })
 
   it('infers type:stdio for a type-less entry that has a command', async () => {
@@ -705,6 +748,20 @@ describe('skills reader', () => {
     const bySource = Object.fromEntries(payload.skills.map((s) => [s.name, s.source]))
     expect(bySource['proj-skill']).toBe('plugin:proj@mkt')
     expect(bySource['local-skill']).toBe('plugin:local@mkt') // local-scope plugin now captured
+  })
+
+  it('a local-settings false override disables a project-enabled plugin', async () => {
+    const ip = join(home, 'plugins', 'cache', 'ov')
+    // CC's own disable flow: project settings enable it, the user's local settings
+    // write a false override — the plugin is OFF for this user.
+    writeFile(join(repo, '.claude', 'settings.json'), JSON.stringify({ enabledPlugins: { 'ov@mkt': true } }))
+    writeFile(join(repo, '.claude', 'settings.local.json'), JSON.stringify({ enabledPlugins: { 'ov@mkt': false } }))
+    writeFile(
+      join(home, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ plugins: { 'ov@mkt': [{ scope: 'project', installPath: ip }] } }),
+    )
+    writeFile(join(ip, 'skills', 'ov-skill', 'SKILL.md'), 'disabled by local override\n')
+    expect(cat(await readClaudeCodeEnvironment(repo), 'skills')).toBeUndefined()
   })
 
   it('returns no skills category when neither dir has files', async () => {

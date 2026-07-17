@@ -278,10 +278,28 @@ function redactMcpServers(raw: unknown): Record<string, unknown> | null {
     // a type-less stdio entry reads as {type:'stdio'} rather than an empty object.
     if (typeof d.type === 'string') kept.type = d.type
     else if (typeof d.command === 'string') kept.type = 'stdio'
-    if (typeof d.url === 'string') kept.url = d.url
+    if (typeof d.url === 'string') {
+      const safe = redactUrl(d.url)
+      if (safe) kept.url = safe
+    }
     out[name] = kept
   }
   return Object.keys(out).length > 0 ? out : null
+}
+
+/**
+ * Strip everything credential-bearing from a URL, keeping endpoint identity:
+ * protocol + host(:port) + path survive; userinfo (`user:token@`), query
+ * (`?api_key=...`), and fragment are dropped. Null when the URL doesn't parse —
+ * an unparseable value can't be safely redacted, so it isn't stored at all.
+ */
+function redactUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw)
+    return `${u.protocol}//${u.host}${u.pathname}`
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -576,42 +594,53 @@ export async function resolvePluginDirs(enabledIds: string[], scope: 'user' | 'p
   return out
 }
 
-/** Normalize a manifest path field (string | string[]) to absolute paths under `root`. */
+/**
+ * Normalize a manifest path field (string | string[]) to absolute paths under `root`.
+ * Paths that escape the install root (`../...`) are DROPPED: docs require manifest
+ * paths relative to the plugin root, CC's cache-copy install means external paths
+ * don't work anyway, and following them would capture arbitrary files' content into
+ * the snapshot — violating the "only plugin config is read" invariant.
+ */
 function toPaths(field: unknown, root: string): string[] {
   const list = typeof field === 'string' ? [field] : Array.isArray(field) ? field.filter((x) => typeof x === 'string') : []
   // join collapses `./` and (unlike a trailing-slash literal) normalizes the result,
   // but a trailing slash on the manifest value survives — strip it for a clean path.
-  return (list as string[]).map((p) => join(root, p).replace(/\/+$/, ''))
+  return (list as string[]).map((p) => join(root, p).replace(/\/+$/, '')).filter((p) => isUnder(p, root))
 }
 
 /**
- * Enabled plugins' resolved dirs for a snapshot scope. Reads `enabledPlugins` from
- * the settings files at that scope, keeping ids whose value is `true`, and resolves
- * each against its MATCHING install scope (a plugin's install scope in
- * installed_plugins.json must equal the settings file it was enabled from, else its
- * install entry won't be found):
- *   - global snapshot  ← `$CLAUDE_HOME/settings.json`        → `user` installs
- *   - project snapshot ← `<repo>/.claude/settings.json`      → `project` installs
- *                      + `<repo>/.claude/settings.local.json` → `local`   installs
- * Both project files feed the project snapshot. Deduped per (id, install) — the same
- * plugin id resolved to the SAME install path (e.g. enabled in both files pointing at
- * one install) appears once; a plugin installed at two distinct paths (project + local)
- * is kept as two entries, since those are genuinely different installs.
+ * Enabled plugins' resolved dirs for a snapshot scope:
+ *   - global snapshot  ← `$CLAUDE_HOME/settings.json` → `user` installs
+ *   - project snapshot ← the EFFECTIVE merge of `<repo>/.claude/settings.json` and
+ *     `settings.local.json` (local wins per id — a local `false` disables a
+ *     project-enabled plugin), resolved against `project` and `local` installs.
+ * Deduped per (id, install) — the same plugin id resolved to the SAME install path
+ * appears once; a plugin installed at two distinct paths (project + local) is kept
+ * as two entries, since those are genuinely different installs.
  */
 async function enabledPluginDirs(scope: 'global' | 'project', projectPath?: string): Promise<PluginDirs[]> {
-  const idsFrom = async (path: string): Promise<string[]> => {
+  const mapFrom = async (path: string): Promise<Record<string, unknown>> => {
     const raw = (await readJsonIfExists(path)) as Record<string, unknown> | null
     const ep = raw?.enabledPlugins
-    if (!ep || typeof ep !== 'object') return []
-    return Object.entries(ep as Record<string, unknown>)
+    return ep && typeof ep === 'object' ? (ep as Record<string, unknown>) : {}
+  }
+  const trueIds = (map: Record<string, unknown>): string[] =>
+    Object.entries(map)
       .filter(([, v]) => v === true)
       .map(([id]) => id)
-  }
   if (scope === 'global') {
-    return resolvePluginDirs(await idsFrom(join(claudeHome(), 'settings.json')), 'user')
+    return resolvePluginDirs(trueIds(await mapFrom(join(claudeHome(), 'settings.json'))), 'user')
   }
-  const project = await resolvePluginDirs(await idsFrom(join(projectPath!, '.claude', 'settings.json')), 'project')
-  const local = await resolvePluginDirs(await idsFrom(join(projectPath!, '.claude', 'settings.local.json')), 'local')
+  // Effective enablement first, THEN resolve: settings.local.json overrides
+  // settings.json per plugin id — a local `false` is how CC disables a
+  // project-enabled plugin for one user, so it must suppress the project `true`.
+  const effective = {
+    ...(await mapFrom(join(projectPath!, '.claude', 'settings.json'))),
+    ...(await mapFrom(join(projectPath!, '.claude', 'settings.local.json'))),
+  }
+  const ids = trueIds(effective)
+  const project = await resolvePluginDirs(ids, 'project')
+  const local = await resolvePluginDirs(ids, 'local')
   // Dedup per (id, install) — skillDirs[0] is always `<installPath>/skills`, so the key
   // is effectively id+installPath. Same plugin at the SAME install (enabled in both
   // files) → one entry; the same plugin at two DISTINCT installs (project + local) →

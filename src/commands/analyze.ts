@@ -8,6 +8,7 @@ import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
 import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
+import type { EnvCategory } from '../store/types'
 import { runDetectors } from '../core/detector-runner'
 import { getAdapters, getDetectors, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
@@ -383,6 +384,12 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
  * payloads; the store append-on-change gate decides what actually persists. Adapters
  * without `readEnvironment` do nothing. A read failure for one scope is logged and
  * skipped, never fatal. Returns the number of categories written this call.
+ *
+ * Deletions are recorded as tombstones: a category with stored history that a
+ * SUCCESSFUL read no longer returns was removed from disk, so a `null` payload is
+ * written — current/asOf then reflect the deletion instead of reporting the last
+ * state forever (an adoption fix can be "remove X" as much as "add X"). A failed
+ * read never tombstones: no evidence the config is gone, only that we couldn't look.
  */
 export async function captureEnvironment(
   adapter: SourceAdapter,
@@ -393,14 +400,23 @@ export async function captureEnvironment(
   if (!adapter.readEnvironment) return 0
   let count = 0
   const capture = async (scope: 'global' | 'project', scopeKey: string, projectPath?: string): Promise<void> => {
+    let cats
     try {
-      const cats = await adapter.readEnvironment!(projectPath)
-      for (const c of cats) {
-        store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: c.category, payload: c.payload })
-        count++
-      }
+      cats = await adapter.readEnvironment!(projectPath)
     } catch (err) {
       log.warn(`[${adapter.id}] environment read failed for ${scopeKey}: ${(err as Error).message}`)
+      return
+    }
+    const seen = new Set<string>(cats.map((c) => c.category))
+    for (const c of cats) {
+      store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: c.category, payload: c.payload })
+      count++
+    }
+    for (const category of store.envSnapshotCategories(adapter.id, scope, scopeKey)) {
+      if (seen.has(category)) continue
+      if (store.envSnapshotCurrent(adapter.id, scope, scopeKey, category)?.payload === null) continue // already tombstoned
+      store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: category as EnvCategory, payload: null })
+      count++
     }
   }
   await capture('global', '_global')
