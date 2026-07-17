@@ -3290,7 +3290,7 @@ export class Store {
       this.db
         .prepare(
           `SELECT e.session_id AS sessionId, e.turn_idx AS turnIdx, e.note AS note,
-                  COALESCE(NULLIF(s.title, ''), NULLIF(s.first_prompt, '')) AS sessionTitle
+                  ${titleExpr('s')} AS sessionTitle
            FROM insight_evidence e LEFT JOIN sessions s ON s.id = e.session_id
            WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.session_id, e.turn_idx`,
         )
