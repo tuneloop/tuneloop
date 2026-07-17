@@ -59,6 +59,25 @@ describe('runThemeMerge', () => {
     expect(store.themesWithEvents().find((t) => t.id === 'recurring-themes:o-r:db-config-path')!.eventCount).toBe(2)
   })
 
+  it('retires the absorbed theme\'s insight (no frozen duplicate left behind)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:a', 'Theme A', null, 's1')
+    seedTheme(db, 'recurring-themes:global:b', 'Theme B (dup)', null, 's2')
+    // Both themes had surfaced as insights.
+    store.persistInsights('recurring-themes', 1, [
+      { signalKey: 'recurring-themes:global:a', repo: '*', severity: 'low', title: 'A', description: 'd', evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'l', content: 'c' } },
+      { signalKey: 'recurring-themes:global:b', repo: '*', severity: 'low', title: 'B', description: 'd', evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'l', content: 'c' } },
+    ])
+    const llm = mergeLlm([{ keep_id: 'recurring-themes:global:a', drop_id: 'recurring-themes:global:b' }])
+    await runThemeMerge(store, llm, noopLog)
+    const insights = store.insights({ detector: 'recurring-themes' })
+    // A still surfaced; B resolved (retired) rather than left dangling on a deleted theme.
+    expect(insights.find((i) => i.signalKey === 'recurring-themes:global:a')?.state).toBe('surfaced')
+    // insights() excludes dismissed but includes resolved; B should be resolved.
+    const b = store.insights({ detector: 'recurring-themes', state: 'resolved' }).find((i) => i.signalKey === 'recurring-themes:global:b')
+    expect(b).toBeDefined()
+  })
+
   it('refuses an illegal cross-repo merge (keeper repo-scoped, drop in another repo)', async () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:o-a:x', 'X', 'o/a', 's1')

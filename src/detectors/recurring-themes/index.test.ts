@@ -90,6 +90,18 @@ function ctx(store: Store, llm: LlmClient): DetectorContext {
   }
 }
 
+/**
+ * Run the detector AND mark its processed sessions seen — what the real runner
+ * (detector-runner.ts) does after a successful persist. Tests that re-run across
+ * an unchanged delta need this, else every session looks unseen and re-extracts.
+ */
+async function runAndMark(c: DetectorContext): Promise<InsightInput[]> {
+  const res = await recurringThemes.run(c)
+  const norm = Array.isArray(res) ? { insights: res, seen: [] as Array<{ sessionId: string; contentHash: string }> } : res
+  if (norm.seen?.length) c.store.markDetectorSessionSeen('recurring-themes', norm.seen)
+  return norm.insights
+}
+
 describe('recurring-themes detector', () => {
   it('surfaces a theme only once it recurs across the threshold (3 events, >=2 sessions)', async () => {
     const { db, store } = setup()
@@ -163,26 +175,53 @@ describe('recurring-themes detector', () => {
     expect(store.queryAll('SELECT 1 FROM theme_events')).toHaveLength(1)
   })
 
-  it('reopens a resolved theme when it recurs (theme stayed in the extraction feed)', async () => {
-    const { db, store } = setup()
-    for (const id of ['r1', 'r2', 'r3']) seedSession(db, store, id)
-    const one: Canned = { events: [{ turn: 1, type: 'preference', description: 'user restated the changelog format', new_theme_label: 'Changelog Format Convention' }] }
-    const { llm } = stubLlm([one, one, one])
-    const res = await recurringThemes.run(ctx(store, llm))
-    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
-    expect(insights).toHaveLength(1)
-    // Persist it, mark resolved (simulating the loop-closure engine), and confirm it stays listable.
+  // Helper: seed 3 sessions of one theme, surface + persist the insight, resolve it.
+  // Returns the theme label + insight id so tests can drive re-analyze scenarios.
+  async function surfaceAndResolve(db: ReturnType<typeof openDb>, store: Store, label: string, ids: string[]) {
+    for (const id of ids) seedSession(db, store, id, { followupText: `friction about ${label}` })
+    const one: Canned = { events: [{ turn: 1, type: 'preference', description: `user restated ${label}`, new_theme_label: label }] }
+    const insights = await runAndMark(ctx(store, stubLlm(ids.map(() => one)).llm))
     store.persistInsights('recurring-themes', 1, insights)
     const id = insightId('recurring-themes', insights[0]!.repo, insights[0]!.signalKey)
     store.transitionInsight(id, 'resolved')
-    store.setThemeResolved(insights[0]!.signalKey, true)
-    // A resolved theme is still visible to extraction (global preference theme).
-    expect(store.listThemes(null).some((t) => t.id === insights[0]!.signalKey)).toBe(true)
-    // Re-detecting it re-surfaces the insight and persistInsights reopens it.
-    const res2 = await recurringThemes.run(ctx(store, stubLlm([one, one, one]).llm))
-    const again = (Array.isArray(res2) ? res2 : res2.insights) as InsightInput[]
+    return { signalKey: insights[0]!.signalKey, id }
+  }
+
+  it('a resolved insight does NOT reopen on re-analyze when there are no new occurrences', async () => {
+    const { db, store } = setup()
+    const { id } = await surfaceAndResolve(db, store, 'Changelog Format Convention', ['r1', 'r2', 'r3'])
+    // Re-analyze with the delta empty (nothing new): the theme still has its 3
+    // historical events, but the resolved insight must stay resolved.
+    const again = await runAndMark(ctx(store, stubLlm([]).llm))
+    expect(again.find((i) => i.signalKey && insightId('recurring-themes', i.repo, i.signalKey) === id)).toBeUndefined()
+    store.persistInsights('recurring-themes', 1, again)
+    expect(store.insights({ detector: 'recurring-themes' }).find((i) => i.id === id)?.state).toBe('resolved')
+  })
+
+  it('a resolved insight reopens on a GENUINE recurrence (a new occurrence in a new session)', async () => {
+    const { db, store } = setup()
+    const { signalKey, id } = await surfaceAndResolve(db, store, 'Changelog Format Convention', ['r1', 'r2', 'r3'])
+    // A 4th session hits the same theme (matched by id) — a real recurrence.
+    seedSession(db, store, 'r4', { followupText: 'friction about changelog again' })
+    const match: Canned = { events: [{ turn: 1, type: 'preference', description: 'user restated it again', matched_theme_id: signalKey }] }
+    const again = await runAndMark(ctx(store, stubLlm([match]).llm))
+    // Now above its prior count → re-emitted, and persist reopens the resolved insight.
+    expect(again.some((i) => i.signalKey === signalKey)).toBe(true)
     store.persistInsights('recurring-themes', 1, again)
     expect(store.insights({ detector: 'recurring-themes' }).find((i) => i.id === id)?.state).toBe('surfaced')
+  })
+
+  it('a dismissed insight never re-surfaces, even with the theme still present', async () => {
+    const { db, store } = setup()
+    for (const id of ['d1', 'd2', 'd3']) seedSession(db, store, id, { followupText: 'friction x' })
+    const one: Canned = { events: [{ turn: 1, type: 'preference', description: 'user restated x', new_theme_label: 'Dismissed Theme' }] }
+    const insights = await runAndMark(ctx(store, stubLlm([one, one, one]).llm))
+    store.persistInsights('recurring-themes', 1, insights)
+    const id = insightId('recurring-themes', insights[0]!.repo, insights[0]!.signalKey)
+    store.dismissInsight(id)
+    // Re-analyze: the theme is unchanged; the dismissed insight must not come back.
+    const again = await runAndMark(ctx(store, stubLlm([]).llm))
+    expect(again.some((i) => i.signalKey === insights[0]!.signalKey)).toBe(false)
   })
 
   it('a behavioral-nudge fix carries NO tuneloop-fix marker (nothing to adopt)', async () => {
@@ -196,15 +235,21 @@ describe('recurring-themes detector', () => {
     expect(ins.fix.content).not.toContain('tuneloop-fix:')
   })
 
-  it('reuses the cached fix when occurrences are unchanged (hash-gated, no draft_fix call)', async () => {
+  it('reuses the cached fix when occurrences are unchanged: no draft_fix call, no hydration', async () => {
     const { db, store } = setup()
     for (const id of ['g1', 'g2', 'g3']) seedSession(db, store, id)
     const one: Canned = { events: [{ turn: 1, type: 'context-supply', description: 'user had to supply the db path', new_theme_label: 'Db Path Not Found' }] }
-    await recurringThemes.run(ctx(store, stubLlm([one, one, one]).llm))
-    // Second run: same corpus, delta empty → extraction skipped, occurrence set
-    // unchanged → the fix is reused from the theme cache, no draft_fix call.
+    await runAndMark(ctx(store, stubLlm([one, one, one]).llm))
+    // Second run: delta empty → extraction skipped, occurrence set unchanged → the
+    // fix is reused from the theme cache with NO draft_fix call AND no blob hydration
+    // (the snippet build is behind the hash gate).
     const second = stubLlm([], undefined)
-    await recurringThemes.run(ctx(store, second.llm))
+    let hydrations = 0
+    const c = ctx(store, second.llm)
+    const base = c.loadSession
+    c.loadSession = (id) => { hydrations++; return base(id) }
+    await recurringThemes.run(c)
     expect(second.calls).not.toContain('draft_fix')
+    expect(hydrations).toBe(0)
   })
 })

@@ -5,6 +5,9 @@ import type { Logger } from '../../util/log'
 import type { Store } from '../../store/store'
 
 const TOOL_NAME = 'draft_fix'
+// Cap occurrences fed to the fix LLM — a heavily-recurring theme (100s of events)
+// doesn't need every one to draft a good fix; the most recent are representative.
+const MAX_FIX_OCCURRENCES = 40
 
 // The fix payload shapes the detector may emit (mirrors InsightInput.fix.type).
 const FIX_TYPES = ['behavioral-nudge', 'config-snippet', 'install-command', 'fix-prompt'] as const
@@ -41,9 +44,11 @@ export async function generateFix(
 ): Promise<{ fix: ThemeFix | null; usage: TokenUsage }> {
   let usage = emptyUsage()
   const scope = theme.repo ? `the ${theme.repo} project` : 'the user (across projects)'
-  const occLines = occurrences
+  const shown = occurrences.slice(0, MAX_FIX_OCCURRENCES)
+  const occLines = shown
     .map((o, i) => `${i + 1}. ${o.description}${o.snippet ? `\n   user said: "${clip(o.snippet, 400)}"` : ''}`)
     .join('\n')
+  const moreNote = occurrences.length > shown.length ? ` (showing ${shown.length} of ${occurrences.length})` : ''
 
   const system =
     'You write a single, concrete FIX for a recurring friction pattern between a developer and their AI coding ' +
@@ -56,7 +61,7 @@ export async function generateFix(
     theme.description ? `Definition: ${theme.description}` : '',
     `Type: ${theme.type} · Scope: ${scope}`,
     '',
-    `Observed ${occurrences.length} time(s):`,
+    `Observed ${occurrences.length} time(s)${moreNote}:`,
     occLines,
     '',
     'Choose the fix_type that will actually stop this recurring:',
@@ -82,15 +87,17 @@ export async function generateFix(
   return { fix: content ? { fixType, content } : null, usage }
 }
 
-/** Stable hash of a theme's occurrence set — the gate that decides whether to regenerate. */
-export function occurrenceHash(occurrences: FixOccurrence[]): string {
-  return contentHash(occurrences.map((o) => o.description).sort().join('|'))
+/** Stable hash of a theme's occurrence set (description-only) — the regenerate gate. */
+export function occurrenceHash(descriptions: string[]): string {
+  return contentHash([...descriptions].sort().join('|'))
 }
 
 /**
- * Hash-gated fix retrieval: reuse the theme's cached fix when its occurrence set
- * is unchanged (no LLM call); otherwise regenerate, persist, and return it.
- * Returns the fix (or null if generation failed/empty) plus the tokens spent.
+ * Hash-gated fix retrieval. The gate is computed from the occurrence DESCRIPTIONS
+ * alone; only on a miss do we build the full occurrences (which hydrates session
+ * blobs for the user-quote snippets) — so a quiet re-analyze reuses the cached fix
+ * with zero hydration and zero LLM cost. Returns the fix (or null on failure/empty)
+ * plus tokens spent.
  */
 export async function ensureThemeFix(
   store: Store,
@@ -100,14 +107,15 @@ export async function ensureThemeFix(
     id: string; label: string; description: string | null; type: string; repo: string | null
     fixType: string | null; fixContent: string | null; fixHash: string | null
   },
-  occurrences: FixOccurrence[],
+  descriptions: string[],
+  buildOccurrences: () => FixOccurrence[],
 ): Promise<{ fix: ThemeFix | null; usage: TokenUsage }> {
-  const hash = occurrenceHash(occurrences)
+  const hash = occurrenceHash(descriptions)
   if (theme.fixHash === hash && theme.fixType && theme.fixContent) {
-    // Unchanged since last generation — reuse the cached fix, no LLM call.
+    // Unchanged since last generation — reuse the cached fix, no hydration, no LLM call.
     return { fix: { fixType: theme.fixType as FixType, content: theme.fixContent }, usage: emptyUsage() }
   }
-  const { fix, usage } = await generateFix(llm, theme, occurrences)
+  const { fix, usage } = await generateFix(llm, theme, buildOccurrences())
   if (fix) {
     store.setThemeFix(theme.id, fix.fixType, fix.content, hash)
     log.debug(`recurring-themes: generated ${fix.fixType} fix for "${theme.label}"`)

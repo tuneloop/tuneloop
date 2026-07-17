@@ -45,7 +45,7 @@ export async function maybeSummarizeFollowups(
     .join('\n\n')
   if (!middleActivity) return { followups, usage }
 
-  log.info(`recurring-themes: session over ${BUDGET_TOKENS} tok — summarizing ${middle.length} middle activity window(s)`)
+  log.debug(`recurring-themes: session over ${BUDGET_TOKENS} tok — summarizing ${middle.length} middle activity window(s)`)
 
   let summary = '(agent activity in the middle of this session omitted for length)'
   try {

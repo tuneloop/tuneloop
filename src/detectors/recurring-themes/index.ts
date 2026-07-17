@@ -225,6 +225,14 @@ async function surfaceInsights(
   for (const t of store.themesWithEvents()) {
     if (t.eventCount < MIN_EVENTS || t.sessionCount < MIN_SESSIONS) continue
     const repo = t.repo ?? '*'
+
+    // Re-surface guard: don't re-emit a theme whose insight the user already
+    // resolved or dismissed, UNLESS it genuinely recurred (new occurrences since
+    // that insight was last persisted). Presence of old events is not a recurrence
+    // — without this, a resolved insight flips back to surfaced on every analyze.
+    const prior = store.insightStatus(DETECTOR, repo, t.id)
+    if (prior && (prior.state === 'dismissed' || (prior.state === 'resolved' && t.eventCount <= prior.count))) continue
+
     const id = insightId(DETECTOR, repo, t.id)
     const severity = t.eventCount >= SEVERITY_EVENTS.high ? 'high' : t.eventCount >= SEVERITY_EVENTS.medium ? 'medium' : 'low'
 
@@ -232,17 +240,20 @@ async function surfaceInsights(
     // by added_at desc). The occurrence description rides as the note.
     const evidence = t.evidence.map((e) => ({ sessionId: e.sessionId, turnIdx: e.turnSeq ?? undefined, note: e.description }))
 
-    // Fix input: each occurrence's description + the user's ACTUAL words, fetched
-    // live from the session blobs (no snippet copy stored).
-    const snippets = store.turnTexts(t.evidence.map((e) => ({ sessionId: e.sessionId, seq: e.turnSeq })))
-    const occurrences: FixOccurrence[] = t.evidence.map((e) => ({
-      description: e.description,
-      snippet: e.turnSeq != null ? snippets.get(`${e.sessionId}:${e.turnSeq}`) : undefined,
-    }))
+    // Fix input is built LAZILY: ensureThemeFix hashes the descriptions first and
+    // only calls buildOccurrences() on a cache miss — so a quiet re-analyze skips
+    // the session-blob hydration entirely.
+    const buildOccurrences = (): FixOccurrence[] => {
+      const snippets = store.turnTexts(t.evidence.map((e) => ({ sessionId: e.sessionId, seq: e.turnSeq })))
+      return t.evidence.map((e) => ({
+        description: e.description,
+        snippet: e.turnSeq != null ? snippets.get(`${e.sessionId}:${e.turnSeq}`) : undefined,
+      }))
+    }
 
     let fix: InsightInput['fix']
     try {
-      const res = await ensureThemeFix(store, llm, log, t, occurrences)
+      const res = await ensureThemeFix(store, llm, log, t, t.descriptions, buildOccurrences)
       usage = addUsage(usage, res.usage)
       if (res.fix) {
         // Non-nudge fixes carry the tuneloop-fix marker so the fix session self-

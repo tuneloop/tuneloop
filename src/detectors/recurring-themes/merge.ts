@@ -87,6 +87,9 @@ export async function runThemeMerge(
       if (store.applyThemeMerge(keep.id, drop.id)) {
         byId.delete(drop.id)
         applied++
+        // The dropped theme's id is gone, so its insight (if it had surfaced) can
+        // never re-surface — retire it so it doesn't linger as a frozen duplicate.
+        store.retireInsightForMergedTheme('recurring-themes', drop.id)
       }
     }
   }

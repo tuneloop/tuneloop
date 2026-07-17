@@ -288,3 +288,32 @@ describe('insightEvidence', () => {
     expect(ev.map((e) => e.note)).toEqual(['second'])
   })
 })
+
+describe('persistThemeExtraction prune vs. live insights', () => {
+  const THEME = 'recurring-themes:global:live-theme'
+
+  it('does NOT prune a theme that backs a non-dismissed insight, even with no events left', () => {
+    const { store } = setup()
+    // Theme with one event in s1, surfaced as an insight (signal_key = theme id).
+    store.persistThemeExtraction('s1', [{ id: THEME, label: 'Live', type: 'preference' }], [
+      { idx: 0, type: 'preference', trigger: 'unprompted', description: 'x', themeId: THEME },
+    ])
+    store.persistInsights('recurring-themes', 1, [{
+      signalKey: THEME, repo: '*', severity: 'low', title: 'Live', description: 'd', evidence: [], count: 3,
+      fix: { type: 'behavioral-nudge', label: 'l', content: 'c' },
+    }])
+    // A re-extract of s1 now yields NO events for the theme (its last event drops).
+    store.persistThemeExtraction('s1', [], [])
+    // The theme survives because a live insight still backs it (would otherwise orphan).
+    expect(store.allThemes().some((t) => t.id === THEME)).toBe(true)
+  })
+
+  it('DOES prune a theme with no events and no backing insight', () => {
+    const { store } = setup()
+    store.persistThemeExtraction('s1', [{ id: 'recurring-themes:global:ghost', label: 'Ghost', type: 'other' }], [
+      { idx: 0, type: 'other', trigger: 'unprompted', description: 'x', themeId: 'recurring-themes:global:ghost' },
+    ])
+    store.persistThemeExtraction('s1', [], []) // drops its only event; nothing backs it
+    expect(store.allThemes().some((t) => t.id === 'recurring-themes:global:ghost')).toBe(false)
+  })
+})

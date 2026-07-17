@@ -2989,12 +2989,15 @@ export class Store {
           .run(sessionId, e.idx, e.turnSeq ?? null, e.type, e.trigger, e.description, e.themeId ?? null, now)
       }
       // Prune derived themes with no surviving member events (a re-extraction may
-      // have moved the last event off a theme). Resolved themes are kept so a
-      // recurrence can reopen them; user themes (if ever added) are never pruned.
+      // have moved the last event off a theme). Kept from pruning: resolved themes
+      // (so a recurrence can reopen them), and any theme still backing a live
+      // (non-dismissed) insight — else a version-bump full re-extract could delete
+      // a surfaced theme mid-run and orphan its insight. User themes never prune.
       this.db
         .prepare(
           `DELETE FROM theme WHERE source = 'derived' AND resolved = 0
-             AND id NOT IN (SELECT DISTINCT theme_id FROM theme_events WHERE theme_id IS NOT NULL)`,
+             AND id NOT IN (SELECT DISTINCT theme_id FROM theme_events WHERE theme_id IS NOT NULL)
+             AND id NOT IN (SELECT signal_key FROM insights WHERE detector = 'recurring-themes' AND state != 'dismissed')`,
         )
         .run()
     })()
@@ -3072,6 +3075,35 @@ export class Store {
   /** Cache a theme's LLM-generated fix + the hash of the occurrence set it was built from. */
   setThemeFix(id: string, fixType: string, fixContent: string, fixHash: string): void {
     this.db.prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_hash = ? WHERE id = ?').run(fixType, fixContent, fixHash, id)
+  }
+
+  /**
+   * The lifecycle state + last-persisted occurrence count of an existing insight,
+   * or null if none exists yet. A detector reads this before re-surfacing a theme
+   * so a dismissed insight stays gone and a resolved one only reopens on a GENUINE
+   * recurrence (new occurrences)
+   */
+  insightStatus(detector: string, repo: string, signalKey: string): { state: InsightState; count: number } | null {
+    const row = this.db
+      .prepare('SELECT state, count FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
+      .get(detector, repo, signalKey) as { state: string; count: number } | undefined
+    return row ? { state: row.state as InsightState, count: row.count } : null
+  }
+
+  /**
+   * Retire the insight of a theme that was absorbed by a merge (its theme id no
+   * longer exists, so it can never re-surface). Marked resolved with a state-log
+   * entry, not deleted, so its history and any adoption survive. No-op if there's
+   * no insight for that theme or it's already terminal.
+   */
+  retireInsightForMergedTheme(detector: string, signalKey: string): void {
+    const row = this.db
+      .prepare("SELECT id, state FROM insights WHERE detector = ? AND signal_key = ?")
+      .get(detector, signalKey) as { id: string; state: string } | undefined
+    if (!row || row.state === 'resolved' || row.state === 'dismissed') return
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run('resolved', now, row.id)
+    this.logInsightState(row.id, row.state as InsightState, 'resolved', now)
   }
 
   /**
