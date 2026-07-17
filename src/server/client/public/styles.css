@@ -750,8 +750,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .ins-occ:hover { border-color: var(--emerald); background: var(--track); }
 .ins-occ-note { font-size: 13px; line-height: 1.4; }
 .ins-occ-src { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-.ins-occ-arrow { color: var(--emerald); }
-.ins-occ-turn { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; background: var(--track); border-radius: 4px; padding: 0 5px; }
+.ins-occ-arrow { color: var(--emerald); flex: 0 0 auto; }
+.ins-occ-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ins-occ-turn { flex: 0 0 auto; margin-left: auto; white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; background: var(--track); border-radius: 4px; padding: 0 5px; }
 .ins-occ:hover .ins-occ-turn { background: var(--paper); }
 .ins-detail-actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
 .ins-detail-actions .ins-dismiss:hover { border-color: var(--red); color: var(--red); }

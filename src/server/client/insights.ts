@@ -80,7 +80,8 @@ function detailHtml(r, occ) {
     var note = e.note ? '<div class="ins-occ-note">' + esc(e.note) + '</div>' : '';
     return '<button type="button" class="ins-occ" data-j="' + j + '" title="Open transcript at this message">' +
       note +
-      '<div class="ins-occ-src"><span class="ins-occ-arrow">↳</span>' + title +
+      '<div class="ins-occ-src"><span class="ins-occ-arrow">↳</span>' +
+        '<span class="ins-occ-title">' + title + '</span>' +
         (e.turnIdx != null ? '<span class="ins-occ-turn">open ↗</span>' : '') +
       '</div></button>';
   }).join('');
