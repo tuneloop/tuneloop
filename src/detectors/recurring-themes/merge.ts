@@ -57,9 +57,12 @@ export async function runThemeMerge(
   try {
     const { data, usage: u } = await llm.completeStructured({
       system:
-        'You maintain a taxonomy of "friction themes" — recurring patterns of AI-agent friction mined from ' +
-        'coding sessions. You are given the current themes and friction events not yet attached to any theme. ' +
-        `Consolidate the taxonomy via the ${TOOL_NAME} tool.`,
+        'You curate a taxonomy of "friction themes" — RECURRING patterns where an AI coding agent fell short and ' +
+        'the user had to compensate. A theme is a pattern seen ACROSS sessions, never a single incident. You are ' +
+        'given the current themes and friction events not yet attached to any theme, and you tidy the taxonomy via ' +
+        `the ${TOOL_NAME} tool: fuse duplicate themes, and attach an unassigned event when it is a real recurrence ` +
+        'of a known gap. Most unassigned events are genuine one-offs — leaving an event unassigned is the common, ' +
+        'expected outcome, not a failure. Consolidate conservatively; when unsure, do nothing.',
       user: buildUser(themes, orphans),
       schema: reconcileSchema,
       toolName: TOOL_NAME,
@@ -104,12 +107,14 @@ function applyCluster(
 
   // Resolve the keeper: an explicit valid keep_id, else the first merge id the LLM
   // listed (the prompt asks it to name the better/older survivor first), else mint a
-  // new theme from the label. Nothing to key on → skip the cluster.
+  // new theme. Minting requires 2+ orphans: a theme is a recurrence, so one lone
+  // incident must NOT coin one (it stays unassigned and can join a theme if it
+  // recurs). Nothing to key on → skip the cluster.
   let keeper: ThemeRef | undefined
   const keepId = str(c.keep_id)
   if (keepId && byId.has(keepId)) keeper = byId.get(keepId)
   else if (mergeIds.length) keeper = byId.get(mergeIds[0]!)
-  else if (label) {
+  else if (label && orphanRefs.length >= 2) {
     keeper = mintTheme(store, byId, label, description, c.project_specific === true, orphanRefs, byRef)
   }
   if (!keeper) return 0
@@ -186,19 +191,20 @@ function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: 
     'Unassigned friction events (event_ref is opaque — echo it back exactly):',
     orphans.length ? orphans.map((o) => `- event_ref=${o.sessionId}#${o.idx} (${o.type}): ${o.description}`).join('\n') : '(none)',
     '',
-    'Return one entry per CANONICAL gap you want to act on (skip gaps that need no change):',
-    '- merge_ids: two or more existing theme ids that name the SAME specific gap in different words — duplicates',
-    '  to fuse into one. Merge ONLY true duplicates; do NOT merge themes that are merely related, in the same',
-    '  area, or one broader than the other. When in doubt, do not merge.',
-    '- keep_id: which existing id survives a merge (the better-named/older one). Omit to let the oldest win.',
-    '- label / description: for a NEW theme (required) or to REWORD the kept theme so it best captures its',
-    '  members (optional — omit to keep the survivor\'s own wording).',
-    '- project_specific: TRUE only if the gap is inherent to ONE project; FALSE (default) for general gaps.',
-    '- orphan_refs: the unassigned event_refs that belong to this gap. Attach an orphan ONLY when it is genuinely',
-    '  another occurrence of that same specific gap — a fresh theme is better than a wrong match. Leave a true',
-    '  one-off unreferenced (it stays unassigned).',
-    'An entry may do any combination: merge alone, assign orphans to an existing theme, or mint a new theme from',
-    'orphans. An empty list is valid when nothing needs consolidating.',
+    'Return one entry per action. Prefer the least invasive action, in this order — most entries will be the',
+    'first two, many runs return an empty list:',
+    '1. MERGE duplicate themes: set merge_ids to two or more existing theme ids that name the SAME specific gap in',
+    '   different words. Merge ONLY true duplicates — never themes that are merely related, in the same area, or',
+    '   one broader than another. Set keep_id to the survivor (better-named/older); omit to keep the oldest.',
+    '2. ATTACH an orphan to an EXISTING theme: set keep_id to that theme and list the event_ref(s) in orphan_refs.',
+    '   Do this only when the event is unmistakably another occurrence of that theme\'s exact gap.',
+    '3. MINT a new theme from orphans — ONLY when TWO OR MORE orphans independently describe the SAME recurring',
+    '   gap that no existing theme covers. Set label + description and list all their orphan_refs. Never mint from',
+    '   a single orphan: one incident is not a recurrence, and it can join a theme later if it happens again.',
+    'label/description may also REWORD a kept/merged theme so it best captures its members (omit to keep as-is).',
+    'project_specific: TRUE only if the gap is inherent to ONE project; FALSE (default) for general gaps.',
+    'Leave an event unassigned whenever it does not clearly fit — a wrong match or a one-off theme is worse than',
+    'an unassigned event. Most orphans stay unassigned; that is correct.',
   ].join('\n')
 }
 
@@ -233,10 +239,10 @@ const reconcileSchema: JsonSchema = {
         properties: {
           merge_ids: { type: 'array', items: { type: 'string' }, description: 'Existing theme ids to fuse (duplicates of one gap); 0, or 2+.' },
           keep_id: { type: 'string', description: 'Which existing id survives a merge; omit to keep the oldest.' },
-          label: { type: 'string', description: 'Title-Case label — required for a NEW theme, optional reword for a merged one.' },
+          label: { type: 'string', description: 'Title-Case label — required to mint a NEW theme (needs 2+ orphan_refs), optional reword for a merged one.' },
           description: { type: 'string', description: 'One-sentence definition of the gap (for a new or reworded theme).' },
           project_specific: { type: 'boolean', description: 'TRUE only if the gap is inherent to one project; FALSE (default) for general gaps.' },
-          orphan_refs: { type: 'array', items: { type: 'string' }, description: 'Unassigned event_refs that belong to this gap (echoed exactly).' },
+          orphan_refs: { type: 'array', items: { type: 'string' }, description: 'Unassigned event_refs that belong to this gap (echoed exactly); 2+ required when minting a new theme.' },
         },
       },
     },

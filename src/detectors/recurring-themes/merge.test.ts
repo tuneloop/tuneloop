@@ -219,15 +219,29 @@ describe('runThemeMerge', () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:o-r:unrelated', 'Unrelated', 'o/r', 's0')
     seedOrphan(db, 's1', 0, 'acme/app', 'agent did not know this app\'s deploy sequence')
+    seedOrphan(db, 's2', 0, 'acme/app', 'agent again did not know this app\'s deploy sequence')
     const llm = themeLlm([{
       label: 'Deploy Sequence Unknown',
       description: 'Agent does not know this project\'s deploy steps.',
       project_specific: true,
-      orphan_refs: ['s1#0'],
+      orphan_refs: ['s1#0', 's2#0'],
     }])
     await runThemeMerge(store, llm, noopLog)
     const minted = store.allThemes().find((t) => t.label === 'Deploy Sequence Unknown')!
     expect(minted.repo).toBe('acme/app')
+  })
+
+  it('does NOT mint a theme from a single orphan (one incident is not a recurrence)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:x', 'X', null, 's0')
+    seedTheme(db, 'recurring-themes:global:y', 'Y', null, 's3')
+    seedOrphan(db, 's1', 0, 'o/r', 'a one-off gap the model wanted to coin a theme for')
+    // The LLM proposes a mint from a lone orphan — the code guard must reject it.
+    const llm = themeLlm([{ label: 'Tempting But Single', description: 'one incident', orphan_refs: ['s1#0'] }])
+    await runThemeMerge(store, llm, noopLog)
+    expect(store.allThemes().some((t) => t.label === 'Tempting But Single')).toBe(false)
+    const rows = store.queryAll('SELECT theme_id FROM theme_events WHERE session_id = ?', 's1') as Array<{ theme_id: string | null }>
+    expect(rows[0]!.theme_id).toBeNull() // stays unassigned; can join a theme if it recurs
   })
 
   it('leaves a genuine one-off orphan unassigned (no cluster references it)', async () => {
