@@ -155,6 +155,67 @@ export interface ProcessorRunRow {
   invalidated: boolean
 }
 
+// ---- environment reader (harness config snapshots) -------------------------
+
+/**
+ * Harness-neutral category vocabulary for config snapshots. Deliberately abstract,
+ * not per-harness fields: the storage layer is shared, only the reader is
+ * per-harness. A harness populates ONLY the categories it has — an absent category
+ * simply produces no rows (Pi, e.g., has no sub-agents or skills, so writes neither).
+ *
+ *  settings     — permissions / plugins / equivalent. Concept is universal; the
+ *                 file format is not (CC=JSON, Codex=TOML, OpenCode=JSON).
+ *  mcp          — MCP servers. The most universal — every supported harness has it.
+ *  agents       — custom SUB-AGENT DEFINITIONS. NOTE: this is NOT `AGENTS.md`.
+ *                 `AGENTS.md` is Codex/OpenCode's instructions file (their CLAUDE.md)
+ *                 and belongs to `instructions`, despite the name. A harness reader
+ *                 must never file AGENTS.md here.
+ *  skills       — custom skills / commands. Ragged across harnesses: CC = SKILL.md
+ *                 dirs, Codex = shell SKILL.md bundles, OpenCode = a skill tool,
+ *                 Pi = none. Same label, different mechanism — reader is per-harness.
+ *  instructions — the project-instructions file: CLAUDE.md (CC) / AGENTS.md (Codex,
+ *                 OpenCode). The generic name for "always-on instructions the user wrote".
+ */
+export type EnvCategory = 'settings' | 'mcp' | 'agents' | 'skills' | 'instructions'
+
+/**
+ * One category's redacted, allowlisted config payload, as read by an adapter's
+ * `readEnvironment`. `payload` is serialized to `snapshot_json`; only fields in
+ * the design's allowlist are ever included (never env values, MCP secrets, etc.).
+ */
+export interface EnvCategorySnapshot {
+  category: EnvCategory
+  payload: unknown
+}
+
+/** A snapshot write: one category, at one scope, for the store to append-on-change. */
+export interface EnvSnapshotInput {
+  source: string
+  scope: 'global' | 'project'
+  /** '_global' for global scope; repo root for project scope. */
+  scopeKey: string
+  category: EnvCategory
+  payload: unknown
+}
+
+/** One stored config state, as returned by the snapshot read methods. */
+export interface EnvSnapshotRow {
+  payload: unknown
+  capturedAt: string
+  lastObservedAt: string
+}
+
+/**
+ * Result of a point-in-time (`asOf`) read. `stale` is true when no snapshot was
+ * recorded at or before the requested time — i.e. we have no observation of the
+ * config as it was then, so a caller should down-weight or abstain rather than
+ * assert. `row` is null in that case only if nothing precedes the time at all.
+ */
+export interface EnvSnapshotAsOf {
+  row: EnvSnapshotRow | null
+  stale: boolean
+}
+
 // ---- insight ledger types ---------------------------------------------------
 
 export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'resolved' | 'dismissed'

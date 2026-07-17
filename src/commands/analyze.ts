@@ -8,6 +8,7 @@ import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
 import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
+import type { EnvCategory } from '../store/types'
 import { runDetectors } from '../core/detector-runner'
 import { getAdapters, getDetectors, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
@@ -211,19 +212,21 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // cwd may be a subdir). Short name = basename of the git toplevel. Cached per
   // cwd since sessions cluster into a few working dirs; null when the dir is gone
   // or isn't a git checkout.
-  const repoCache = new Map<string, string | null>()
-  const resolveRepo = async (cwd: string | undefined): Promise<string | null> => {
+  // Cache both the short name (sessions.repo) and the git toplevel path (the
+  // environment reader's project scope_key + where it reads <root>/.claude/...).
+  const repoCache = new Map<string, { name: string; root: string } | null>()
+  const resolveRepo = async (cwd: string | undefined): Promise<{ name: string; root: string } | null> => {
     if (!cwd) return null
     const cached = repoCache.get(cwd)
     if (cached !== undefined) return cached
-    let repo: string | null = null
+    let entry: { name: string; root: string } | null = null
     const res = await sh('git', ['-C', cwd, 'rev-parse', '--show-toplevel'])
     if (res && res.code === 0) {
       const top = res.stdout.trim()
-      if (top) repo = basename(top)
+      if (top) entry = { name: basename(top), root: top }
     }
-    repoCache.set(cwd, repo)
-    return repo
+    repoCache.set(cwd, entry)
+    return entry
   }
 
   // Merge each group, then process oldest-first. Chronological order matters:
@@ -267,12 +270,22 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
 
   const progress = new Progress(sessionsToProcess.length, totalNeedingWork)
 
+  // Repo roots touched this run, per source — the environment reader's project
+  // scope keys (one snapshot per unique repo, not per session).
+  const reposBySource = new Map<string, Set<string>>()
+
   let processed = 0
   for (const session of merged) {
     if (opts.limit != null && processed >= opts.limit) break
     assignSeq(session) // main-thread seq, post-merge — the block partition's coordinate
-    const repo = await resolveRepo(session.project.cwd)
+    const resolved = await resolveRepo(session.project.cwd)
+    const repo = resolved?.name ?? null
     if (repo) session.project.repo = repo
+    if (resolved) {
+      const set = reposBySource.get(session.source) ?? new Set<string>()
+      set.add(resolved.root)
+      reposBySource.set(session.source, set)
+    }
     const prior = store.storedMeta(session.id)
     const parseVersion = parseVersionBySource.get(session.source) ?? NORMALIZE_VERSION
     const needsIngest = prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion
@@ -326,6 +339,15 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const pruned = store.pruneOrphanArtifacts()
   if (pruned > 0) log.debug(`pruned ${pruned} orphan artifact(s)`)
 
+  // Capture harness config snapshots (environment reader). Runs before detectors so
+  // a config-diff detector sees fresh snapshots. Unconditional (never gated on the
+  // processor cache — config drifts even when transcripts don't). Adapters without a
+  // readEnvironment contribute nothing.
+  for (const adapter of activeAdapters) {
+    const captured = await captureEnvironment(adapter, store, reposBySource.get(adapter.id) ?? new Set(), log)
+    if (captured > 0) log.debug(`[${adapter.id}] captured ${captured} config snapshot(s)`)
+  }
+
   // Run detectors (cross-session pattern detection) after all processors complete.
   const detectors = getDetectors()
   if (detectors.length > 0) {
@@ -354,6 +376,52 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   printSummary(store.summary())
   if (promptedProvider && llmEnabled) printPersistHint(promptedProvider)
   store.close()
+}
+
+/**
+ * Capture one adapter's config snapshots: global once, then each repo root touched
+ * this run. The adapter's `readEnvironment` returns the redacted per-category
+ * payloads; the store append-on-change gate decides what actually persists. Adapters
+ * without `readEnvironment` do nothing. A read failure for one scope is logged and
+ * skipped, never fatal. Returns the number of categories written this call.
+ *
+ * Deletions are recorded as tombstones: a category with stored history that a
+ * SUCCESSFUL read no longer returns was removed from disk, so a `null` payload is
+ * written — current/asOf then reflect the deletion instead of reporting the last
+ * state forever (an adoption fix can be "remove X" as much as "add X"). A failed
+ * read never tombstones: no evidence the config is gone, only that we couldn't look.
+ */
+export async function captureEnvironment(
+  adapter: SourceAdapter,
+  store: Store,
+  repoRoots: Set<string>,
+  log: ReturnType<typeof createLogger>,
+): Promise<number> {
+  if (!adapter.readEnvironment) return 0
+  let count = 0
+  const capture = async (scope: 'global' | 'project', scopeKey: string, projectPath?: string): Promise<void> => {
+    let cats
+    try {
+      cats = await adapter.readEnvironment!(projectPath)
+    } catch (err) {
+      log.warn(`[${adapter.id}] environment read failed for ${scopeKey}: ${(err as Error).message}`)
+      return
+    }
+    const seen = new Set<string>(cats.map((c) => c.category))
+    for (const c of cats) {
+      store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: c.category, payload: c.payload })
+      count++
+    }
+    for (const category of store.envSnapshotCategories(adapter.id, scope, scopeKey)) {
+      if (seen.has(category)) continue
+      if (store.envSnapshotCurrent(adapter.id, scope, scopeKey, category)?.payload === null) continue // already tombstoned
+      store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: category as EnvCategory, payload: null })
+      count++
+    }
+  }
+  await capture('global', '_global')
+  for (const root of repoRoots) await capture('project', root, root)
+  return count
 }
 
 /** Offered when the user says yes but doesn't name a provider (README's primary example). */
