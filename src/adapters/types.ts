@@ -1,4 +1,5 @@
 import type { Session } from '../core/model'
+import type { EnvCategorySnapshot } from '../store/types'
 
 /** Translates a vendor's transcripts into the normalized session model. */
 export interface SourceAdapter {
@@ -25,4 +26,13 @@ export interface SourceAdapter {
    * directly; analyze.ts prefers it over the discover→parse file loop when present.
    */
   discoverSessions?(roots: string[]): Promise<Session[]>
+  /**
+   * Read this harness's config surface. Called once for the global scope
+   * (`projectPath` undefined → read the harness home) and once per unique project
+   * path (→ read that repo's project config). Returns one entry per category
+   * present; the caller (analyze) stores each as an environment snapshot. The path
+   * is always passed in — the adapter never explores for projects itself. Omitted
+   * by adapters that don't yet read config (they contribute no snapshots).
+   */
+  readEnvironment?(projectPath?: string): Promise<EnvCategorySnapshot[]>
 }

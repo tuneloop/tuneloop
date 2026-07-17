@@ -415,6 +415,34 @@ CREATE TABLE IF NOT EXISTS insight_state_log (
   at          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_insight_state_log_insight ON insight_state_log(insight_id);
+
+-- Harness config snapshots (environment reader). A dated timeline of config
+-- states per (source, scope, scope_key, category): global config keyed '_global',
+-- project config keyed on repo root. Append-on-change — a row is written only when
+-- content_hash differs from the LATEST row for that key (by captured_at), so an
+-- unchanged config across many analyze runs is one row. captured_at = when this
+-- state was recorded (the change timeline); last_observed_at = most recent run that
+-- confirmed it (updated in place on a no-change run, so "still X" is distinguishable
+-- from "assumed X, didn't look"). snapshot_json holds only allowlisted, secret-free
+-- fields.
+--
+-- PK ends in captured_at (not content_hash) so a config can round-trip A->B->A: the
+-- reverted-to A is a new row at a later captured_at, and ORDER BY captured_at DESC
+-- reports it as current. captured_at is unique per key — each key is written at most
+-- once per analyze run.
+CREATE TABLE IF NOT EXISTS environment_snapshots (
+  source           TEXT NOT NULL,   -- harness, e.g. 'claude-code'
+  scope            TEXT NOT NULL,   -- 'global' | 'project'
+  scope_key        TEXT NOT NULL,   -- '_global' for global; repo root for project
+  category         TEXT NOT NULL,   -- 'settings' | 'mcp' | 'agents' | 'skills' | 'instructions'
+  content_hash     TEXT NOT NULL,   -- hash of snapshot_json (change-detection key)
+  snapshot_json    TEXT NOT NULL,   -- redacted, allowlisted payload for this category
+  captured_at      TEXT NOT NULL,   -- when this state was recorded (change timeline)
+  last_observed_at TEXT NOT NULL,   -- most recent analyze run that confirmed this state
+  PRIMARY KEY (source, scope, scope_key, category, captured_at)
+);
+CREATE INDEX IF NOT EXISTS ix_env_snapshots_lookup
+  ON environment_snapshots(source, scope, scope_key, category, captured_at);
 `
 
 export function openDb(path: string): DB {
