@@ -12,7 +12,7 @@ import type { EnvCategory } from '../store/types'
 import { runDetectors } from '../core/detector-runner'
 import { getAdapters, getDetectors, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
-import { createLlmClient, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
+import { createLlmClient, startLlmTrace, endLlmTrace, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
@@ -87,6 +87,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const llmEnabled = !!llm
   const llmModel = llm?.model ?? null
   if (llmEnabled) {
+    // Open a run-level Langfuse trace (no-op without LANGFUSE_* env keys) so every
+    // LLM call this run nests under it — a personal prompt-debugging aid
+    await startLlmTrace('analyze', { provider: llm!.provider, model: llm!.model })
     log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
   } else if (prompted) {
     // The interactive offer above was declined (or the client failed to build
@@ -375,6 +378,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
   if (promptedProvider && llmEnabled) printPersistHint(promptedProvider)
+  await endLlmTrace() // flush buffered Langfuse events before exit (no-op if tracing off)
   store.close()
 }
 
