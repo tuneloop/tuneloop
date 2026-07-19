@@ -3,8 +3,12 @@ import { addUsage, emptyUsage, type TokenUsage } from '../../core/model'
 import type { LlmClient, JsonSchema } from '../../llm/types'
 import type { Logger } from '../../util/log'
 import type { Store } from '../../store/store'
+import { buildEnvInventory, hasInventory, type EnvInventory } from './env-inventory'
 
 const TOOL_NAME = 'draft_fix'
+// Cached in fix_type when the fix pass vetoed a theme, so a quiet re-analyze skips the
+// LLM call; re-evaluated on the next occurrence-hash change.
+const VETOED = '__vetoed__'
 // Cap occurrences fed to the fix LLM — a heavily-recurring theme (100s of events)
 // doesn't need every one to draft a good fix; the most recent are representative.
 const MAX_FIX_OCCURRENCES = 40
@@ -19,6 +23,18 @@ export interface ThemeFix {
   content: string
 }
 
+/**
+ * The fix pass's verdict on one theme. `worthSurfacing` is an LLM veto ON TOP of the
+ * mechanical recurrence threshold: the fix pass reads every occurrence, so it can
+ * judge "this crossed the count but isn't a generalizable gap worth a fix" (a
+ * clustered one-off, taste iteration, etc.) and suppress the insight — with a reason.
+ */
+export interface FixVerdict {
+  worthSurfacing: boolean
+  reason: string
+  fix: ThemeFix | null
+}
+
 /** One occurrence handed to the fix pass: the abstract description + the user's actual words. */
 export interface FixOccurrence {
   description: string
@@ -26,22 +42,20 @@ export interface FixOccurrence {
 }
 
 /**
- * Generate an ACTUAL, tailored fix for one theme by reading all its occurrences.
- * The LLM chooses the remedy shape itself — a CLAUDE.md edit / skill / config /
- * install command (any of which carry a tuneloop-fix marker for loop closure) or
- * a behavioral nudge (no marker; there's no artifact to adopt). The most
- * reasoning-heavy call in the detector — a candidate for a stronger model (Opus).
- *
- * NOTE (T3): once the environment reader lands, wire the user's installed
- * skills / MCP servers / plugins into this prompt so the fix can reference what
- * they already have (tighten an existing skill vs. install a new one). For now
- * the fix is drafted without that inventory.
+ * Generate an ACTUAL, tailored fix for one theme by reading all its occurrences and
+ * the user's installed harness inventory (T3). The LLM chooses the remedy shape — use/
+ * tighten an EXISTING skill/agent/MCP, install a new one, a config edit, a CLAUDE.md
+ * (or equivalent agent-instructions) edit, or a behavioral nudge — grounded in what
+ * the user actually has, so it references real tools instead of guessing. It also
+ * decides whether the theme is even worth surfacing (a veto on the count threshold).
+ * The most reasoning-heavy call in the detector — a candidate for a stronger model.
  */
 export async function generateFix(
   llm: LlmClient,
   theme: { label: string; description: string | null; type: string; repo: string | null },
   occurrences: FixOccurrence[],
-): Promise<{ fix: ThemeFix | null; usage: TokenUsage }> {
+  inventory: EnvInventory,
+): Promise<{ verdict: FixVerdict; usage: TokenUsage }> {
   let usage = emptyUsage()
   const scope = theme.repo ? `the ${theme.repo} project` : 'the user (across projects)'
   const shown = occurrences.slice(0, MAX_FIX_OCCURRENCES)
@@ -52,9 +66,11 @@ export async function generateFix(
 
   const system =
     'You write a single, concrete FIX for a recurring friction pattern between a developer and their AI coding ' +
-    'agent. You are given the pattern and every observed occurrence (with the user\'s actual words). Produce the ' +
+    'agent. You are given the pattern, every observed occurrence (with the user\'s actual words), and an inventory ' +
+    'of what the user ALREADY HAS installed in their agent (skills, sub-agents, MCP servers, plugins). Produce the ' +
     `most effective remedy and its exact content via the ${TOOL_NAME} tool. Be specific and actionable — the user ` +
-    'should be able to apply it directly, not read generic advice.'
+    'should be able to apply it directly, not read generic advice. You also judge whether the pattern is even worth ' +
+    'surfacing as an insight.'
 
   const user = [
     `Friction theme: ${theme.label}`,
@@ -64,27 +80,53 @@ export async function generateFix(
     `Observed ${occurrences.length} time(s)${moreNote}:`,
     occLines,
     '',
-    'Choose the fix_type that will actually stop this recurring:',
-    '- fix-prompt: a self-contained prompt the user pastes into their agent to make a durable change — ADD a',
-    '  CLAUDE.md section, CREATE or TIGHTEN a skill, wire a tool/MCP, etc. Use this when the remedy is a concrete',
-    '  repo/config artifact the agent should create. Write the full prompt: what to change, and a "Done when:" line.',
+    inventorySection(inventory),
+    '',
+    'FIRST decide worth_surfacing. It is TRUE only if this is a genuine, GENERALIZABLE recurring gap worth acting',
+    'on. Set it FALSE for: a one-off (or two) that happened to cluster, taste/preference iteration, a pattern too',
+    'vague to act on, or anything a fix would not actually prevent. When FALSE, give a one-line reason and skip the',
+    'fix. Better to surface nothing than a weak insight.',
+    '',
+    'If worth surfacing, choose the fix_type that will actually stop this recurring — PREFER what the user already',
+    'has over adding something new:',
+    '- fix-prompt: a self-contained prompt the user pastes into their agent to make a durable change. This is where',
+    '  you USE the inventory: "invoke your existing <skill>", "tighten the description of your <agent>", "wire your',
+    '  <mcp> server into this flow", or — only when nothing installed fits — add a section to the agent-instructions',
+    '  file (CLAUDE.md / AGENTS.md / equivalent). Write the full prompt body: diagnosis + task + a "Done when:" line.',
     '- config-snippet: a ready-to-paste settings.json / .mcp.json block, when the fix is pure configuration.',
-    '- install-command: a one-liner (npx …, /model …) when the fix is installing/enabling something.',
-    '- behavioral-nudge: prose describing the habit to change, when there is NO artifact to add — the fix is the',
+    '- install-command: a one-liner (npx …, /model …) — use ONLY when the capability is genuinely missing from the',
+    '  inventory; if the user already has a skill/tool for it, reference that instead of installing a duplicate.',
+    '- behavioral-nudge: prose describing the habit to change, when there is NO artifact that helps — the fix is the',
     '  user working differently (e.g. specifying scope upfront, verifying before accepting). Global behavior gaps',
-    '  are usually nudges.',
+    '  are often nudges.',
     'Rules: address the SPECIFIC gap shown in the occurrences, not the theme title in the abstract. Reference the',
-    'concrete things the user kept supplying/correcting. Do NOT invent file paths, tool names, or commands you',
-    "were not shown — if you don't know an exact name, describe what to add. Keep it tight.",
-    'For fix-prompt: write the prompt body only (diagnosis + task + "Done when:"); do NOT add any marker line —',
-    'that is added automatically.',
+    'concrete things the user kept supplying/correcting, and the concrete inventory items by name. Do NOT invent',
+    'file paths, tool, or skill names you were not shown — if unsure of an exact name, describe what to add. Keep it',
+    'tight. For fix-prompt: write the prompt body only (no marker line — that is added automatically).',
   ].filter(Boolean).join('\n')
 
   const { data, usage: u } = await llm.completeStructured({ system, user, schema: fixSchema, toolName: TOOL_NAME, maxTokens: 2048 })
   usage = addUsage(usage, u)
+  const worthSurfacing = data.worth_surfacing !== false // default true (only an explicit false vetoes)
+  const reason = typeof data.reason === 'string' ? data.reason.trim() : ''
+  if (!worthSurfacing) return { verdict: { worthSurfacing: false, reason, fix: null }, usage }
   const fixType = oneOf(data.fix_type, FIX_TYPES, 'behavioral-nudge')
   const content = typeof data.content === 'string' ? data.content.trim() : ''
-  return { fix: content ? { fixType, content } : null, usage }
+  return { verdict: { worthSurfacing: true, reason, fix: content ? { fixType, content } : null }, usage }
+}
+
+/** The "what you already have" block; explicit when empty so the model doesn't invent tools. */
+function inventorySection(inv: EnvInventory): string {
+  if (!hasInventory(inv)) {
+    return 'Installed agent inventory: (none captured — do NOT reference specific skills/tools by name; ' +
+      'prefer an agent-instructions edit or a behavioral nudge, or describe the tool to add generically).'
+  }
+  const lines = [`Installed agent inventory (from ${inv.scopes.join(', ')}) — prefer these over adding new things:`]
+  if (inv.skills.length) lines.push(`- Skills: ${inv.skills.join('; ')}`)
+  if (inv.agents.length) lines.push(`- Sub-agents: ${inv.agents.join('; ')}`)
+  if (inv.mcpServers.length) lines.push(`- MCP servers: ${inv.mcpServers.join(', ')}`)
+  if (inv.plugins.length) lines.push(`- Plugins: ${inv.plugins.join(', ')}`)
+  return lines.join('\n')
 }
 
 /** Stable hash of a theme's occurrence set (description-only) — the regenerate gate. */
@@ -109,18 +151,24 @@ export async function ensureThemeFix(
   },
   descriptions: string[],
   buildOccurrences: () => FixOccurrence[],
-): Promise<{ fix: ThemeFix | null; usage: TokenUsage }> {
+): Promise<{ verdict: FixVerdict; usage: TokenUsage }> {
   const hash = occurrenceHash(descriptions)
-  if (theme.fixHash === hash && theme.fixType && theme.fixContent) {
-    // Unchanged since last generation — reuse the cached fix, no hydration, no LLM call.
-    return { fix: { fixType: theme.fixType as FixType, content: theme.fixContent }, usage: emptyUsage() }
+  if (theme.fixHash === hash && theme.fixType) {
+    // Unchanged since last generation — reuse the cached verdict, no hydration, no LLM.
+    if (theme.fixType === VETOED) return { verdict: { worthSurfacing: false, reason: '', fix: null }, usage: emptyUsage() }
+    if (theme.fixContent) return { verdict: { worthSurfacing: true, reason: '', fix: { fixType: theme.fixType as FixType, content: theme.fixContent } }, usage: emptyUsage() }
   }
-  const { fix, usage } = await generateFix(llm, theme, buildOccurrences())
-  if (fix) {
-    store.setThemeFix(theme.id, fix.fixType, fix.content, hash)
-    log.debug(`recurring-themes: generated ${fix.fixType} fix for "${theme.label}"`)
+  const inventory = buildEnvInventory(store, theme.repo)
+  const { verdict, usage } = await generateFix(llm, theme, buildOccurrences(), inventory)
+  if (verdict.fix) {
+    store.setThemeFix(theme.id, verdict.fix.fixType, verdict.fix.content, hash)
+    log.debug(`recurring-themes: generated ${verdict.fix.fixType} fix for "${theme.label}"`)
+  } else if (!verdict.worthSurfacing) {
+    // Cache the veto so a quiet re-analyze doesn't re-ask; re-evaluated on a hash miss.
+    store.setThemeFix(theme.id, VETOED, verdict.reason || 'not worth surfacing', hash)
+    log.debug(`recurring-themes: fix pass vetoed "${theme.label}" — ${verdict.reason || 'not worth surfacing'}`)
   }
-  return { fix, usage }
+  return { verdict, usage }
 }
 
 function clip(s: string, n: number): string {
@@ -135,9 +183,11 @@ function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T)
 const fixSchema: JsonSchema = {
   type: 'object',
   additionalProperties: false,
-  required: ['fix_type', 'content'],
+  required: ['worth_surfacing'],
   properties: {
-    fix_type: { type: 'string', enum: FIX_TYPES as unknown as string[] },
-    content: { type: 'string', description: 'The fix deliverable. For fix-prompt: the prompt body (no marker). For config/command: the exact block/command. For a nudge: the prose.' },
+    worth_surfacing: { type: 'boolean', description: 'TRUE only if this is a genuine, generalizable recurring gap worth acting on; FALSE for one-offs, taste iteration, or patterns too vague to fix.' },
+    reason: { type: 'string', description: 'One line: why it is (or is not) worth surfacing.' },
+    fix_type: { type: 'string', enum: FIX_TYPES as unknown as string[], description: 'Omit when worth_surfacing is false.' },
+    content: { type: 'string', description: 'The fix deliverable (omit when worth_surfacing is false). For fix-prompt: the prompt body (no marker). For config/command: the exact block/command. For a nudge: the prose.' },
   },
 }

@@ -3134,12 +3134,13 @@ export class Store {
   }
 
   /**
-   * Retire the insight of a theme that was absorbed by a merge (its theme id no
-   * longer exists, so it can never re-surface). Marked resolved with a state-log
-   * entry, not deleted, so its history and any adoption survive. No-op if there's
-   * no insight for that theme or it's already terminal.
+   * Retire a theme's insight so it stops showing — used when the theme was absorbed
+   * by a merge (its id is gone) OR when the fix pass later vetoes it (no longer worth
+   * surfacing). Marked resolved with a state-log entry, not deleted, so its history
+   * and any adoption survive. No-op if there's no insight for that theme or it's
+   * already terminal.
    */
-  retireInsightForMergedTheme(detector: string, signalKey: string): void {
+  retireInsightForTheme(detector: string, signalKey: string): void {
     const row = this.db
       .prepare("SELECT id, state FROM insights WHERE detector = ? AND signal_key = ?")
       .get(detector, signalKey) as { id: string; state: string } | undefined

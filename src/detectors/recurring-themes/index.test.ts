@@ -30,7 +30,7 @@ interface Canned {
  * returns no merges; the fix pass (draft_fix) returns a canned fix-prompt. Each
  * tool call is recorded so tests can assert which passes ran.
  */
-function stubLlm(byLabelOrder: Canned[], fix?: { fix_type: string; content: string }): { llm: LlmClient; calls: string[] } {
+function stubLlm(byLabelOrder: Canned[], fix?: { fix_type?: string; content?: string; worth_surfacing?: boolean; reason?: string }): { llm: LlmClient; calls: string[] } {
   const queue = [...byLabelOrder]
   const calls: string[] = []
   const llm: LlmClient = {
@@ -139,6 +139,63 @@ describe('recurring-themes detector', () => {
     expect(ins.fix.content).toContain(`tuneloop-fix: ${expectedId}`)
     expect(ins.count).toBe(3)
     expect(ins.severity).toBe('low') // 3 events < medium(4)
+  })
+
+  it('the fix pass can VETO a theme that crossed the threshold (worth_surfacing=false → no insight)', async () => {
+    const { db, store } = setup()
+    for (const id of ['v1', 'v2', 'v3']) seedSession(db, store, id)
+    const one: Canned = { events: [{ turn: 1, type: 'other', description: 'a clustered one-off, not a real pattern', new_theme_label: 'Not Worth Surfacing' }] }
+    const { llm } = stubLlm([one, one, one], { worth_surfacing: false, reason: 'clustered one-off' })
+    const res = await recurringThemes.run(ctx(store, llm))
+    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
+    // Threshold met (3 events / 3 sessions) but the fix pass vetoed → nothing surfaces.
+    expect(insights).toHaveLength(0)
+    // The theme + its events still persist (a later, stronger recurrence could re-run the veto).
+    expect(store.themesWithEvents()[0]!.eventCount).toBe(3)
+  })
+
+  it('caches a veto: a quiet re-analyze does not re-ask the fix pass', async () => {
+    const { db, store } = setup()
+    for (const id of ['w1', 'w2', 'w3']) seedSession(db, store, id)
+    const one: Canned = { events: [{ turn: 1, type: 'other', description: 'clustered one-off', new_theme_label: 'Vetoed Theme' }] }
+    await runAndMark(ctx(store, stubLlm([one, one, one], { worth_surfacing: false, reason: 'one-off' }).llm))
+    // Second run: delta empty, occurrence set unchanged → the cached veto is reused,
+    // so draft_fix is NOT called again.
+    const second = stubLlm([], undefined)
+    await recurringThemes.run(ctx(store, second.llm))
+    expect(second.calls).not.toContain('draft_fix')
+  })
+
+  it('retires an already-surfaced insight when a later verdict flips to vetoed', async () => {
+    const { db, store } = setup()
+    for (const id of ['f1', 'f2', 'f3']) seedSession(db, store, id, { followupText: 'friction flip' })
+    const one: Canned = { events: [{ turn: 1, type: 'preference', description: 'user restated flip', new_theme_label: 'Flip Theme' }] }
+    // A stub whose draft_fix verdict we toggle between runs.
+    let surfacing = true
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName === 'reconcile_taxonomy') return { data: { themes: [] }, usage: emptyUsage() }
+        if (req.toolName === 'draft_fix') {
+          return surfacing
+            ? { data: { worth_surfacing: true, fix_type: 'fix-prompt', content: 'do the thing' }, usage: emptyUsage() }
+            : { data: { worth_surfacing: false, reason: 'now judged a one-off' }, usage: emptyUsage() }
+        }
+        return { data: { events: [{ turn: 1, type: 'preference', description: 'user restated flip', new_theme_label: 'Flip Theme' }] }, usage: emptyUsage() }
+      },
+    }
+    // Run 1: surfaces and persists the insight.
+    const first = await runAndMark(ctx(store, llm))
+    store.persistInsights('recurring-themes', 1, first)
+    const id = insightId('recurring-themes', first[0]!.repo, first[0]!.signalKey)
+    expect(store.insights({ detector: 'recurring-themes' }).find((i) => i.id === id)?.state).toBe('surfaced')
+    // A new occurrence (changes the hash → fix re-evaluated), and the verdict flips.
+    seedSession(db, store, 'f4', { followupText: 'friction flip again' })
+    surfacing = false
+    const again = await runAndMark(ctx(store, llm))
+    store.persistInsights('recurring-themes', 1, again)
+    // The stale insight is retired (resolved), not left showing.
+    expect(store.insights({ detector: 'recurring-themes' }).find((i) => i.id === id)?.state).toBe('resolved')
   })
 
   it('skips unsteered sessions (pre-gate) — no LLM call, no theme', async () => {

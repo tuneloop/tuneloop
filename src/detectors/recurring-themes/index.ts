@@ -257,12 +257,20 @@ async function surfaceInsights(
     try {
       const res = await ensureThemeFix(store, llm, log, t, t.descriptions, buildOccurrences)
       usage = addUsage(usage, res.usage)
-      if (res.fix) {
+      // The fix pass can veto a theme that crossed the count threshold (a clustered
+      // one-off, taste iteration, too vague). Skip surfacing it, and retire any insight
+      // it had surfaced before (a later verdict flip) so the ledger doesn't lag.
+      if (!res.verdict.worthSurfacing) {
+        store.retireInsightForTheme(DETECTOR, t.id)
+        continue
+      }
+      if (res.verdict.fix) {
         // Non-nudge fixes carry the tuneloop-fix marker so the fix session self-
         // identifies on the next analyze (loop closure). A nudge has no artifact
         // to adopt, so no marker.
-        const content = res.fix.fixType === 'behavioral-nudge' ? res.fix.content : `tuneloop-fix: ${id}\n\n${res.fix.content}`
-        fix = { type: res.fix.fixType, label: FIX_LABEL[res.fix.fixType] ?? 'Suggested fix', content }
+        const f = res.verdict.fix
+        const content = f.fixType === 'behavioral-nudge' ? f.content : `tuneloop-fix: ${id}\n\n${f.content}`
+        fix = { type: f.fixType, label: FIX_LABEL[f.fixType] ?? 'Suggested fix', content }
       } else {
         fix = fallbackFix()
       }

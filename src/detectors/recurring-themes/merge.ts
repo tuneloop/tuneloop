@@ -130,7 +130,7 @@ function applyCluster(
       byId.delete(dropId)
       applied++
       // The dropped id is gone; retire its insight so it doesn't linger as a frozen duplicate.
-      store.retireInsightForMergedTheme(DETECTOR, dropId)
+      store.retireInsightForTheme(DETECTOR, dropId)
     }
   }
 
