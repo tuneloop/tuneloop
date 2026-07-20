@@ -697,19 +697,25 @@ export class Store {
       )
       .all() as Array<{ name: string; calls: number; errors: number }>
 
-    const analysisCostUsd = (
-      this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }
-    ).s
+    // Enrichment spend = every LLM call analyze made: processor enrichment AND
+    // detector (tier P/X) passes. Both record cost_usd per run; sum both, or the
+    // detectors' spend (extraction/reconcile/fix — often the bulk) is invisible.
+    const analysisCostUsd =
+      (this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }).s +
+      (this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM detector_runs').get() as { s: number }).s
 
-    // Whether LLM enrichment has ever run. LLM-backed processors record their model
-    // in processor_runs (non-LLM ones store NULL), so a single non-null model is a
-    // durable "enrichment ran" signal — independent of which annotation dimensions
-    // the enricher currently emits (those can be renamed/removed; this won't). Note
-    // a row is only written on success, which is exactly what we want here: "did
-    // enrichment actually produce anything", not "was a key merely configured".
+    // Whether LLM enrichment has ever run. Both processor_runs and detector_runs
+    // record the model that ran them (NULL for non-LLM / S-tier), so a single
+    // non-null model in either is a durable "enrichment ran" signal — independent of
+    // which dimensions the enricher currently emits. Rows are written only on
+    // success: "did enrichment produce anything", not "was a key configured".
     const enrichmentRan =
-      (this.db.prepare('SELECT EXISTS(SELECT 1 FROM processor_runs WHERE model IS NOT NULL) AS r').get() as { r: number })
-        .r === 1
+      (this.db.prepare(
+        `SELECT EXISTS(
+           SELECT 1 FROM processor_runs WHERE model IS NOT NULL
+           UNION ALL SELECT 1 FROM detector_runs WHERE model IS NOT NULL
+         ) AS r`,
+      ).get() as { r: number }).r === 1
 
     const features = this.db
       .prepare(
@@ -3177,7 +3183,7 @@ export class Store {
     return out
   }
 
-  persistInsights(detector: string, version: number, inputs: InsightInput[], cost?: { inTokens: number; outTokens: number; usd: number }): void {
+  persistInsights(detector: string, version: number, inputs: InsightInput[], cost?: { inTokens: number; outTokens: number; usd: number; model?: string }): void {
     const now = new Date().toISOString()
     this.db.transaction(() => {
       for (const input of inputs) {
@@ -3250,10 +3256,10 @@ export class Store {
       }
       this.db
         .prepare(
-          `INSERT OR REPLACE INTO detector_runs (detector, version, status, in_tokens, out_tokens, cost_usd, ran_at)
-           VALUES (?, ?, 'ok', ?, ?, ?, ?)`,
+          `INSERT OR REPLACE INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+           VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)`,
         )
-        .run(detector, version, cost?.inTokens ?? null, cost?.outTokens ?? null, cost?.usd ?? null, now)
+        .run(detector, version, cost?.model ?? null, cost?.inTokens ?? null, cost?.outTokens ?? null, cost?.usd ?? null, now)
     })()
   }
 

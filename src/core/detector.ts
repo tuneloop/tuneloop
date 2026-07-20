@@ -115,8 +115,8 @@ export interface InsightInput {
  */
 export interface DetectorResult {
   insights: InsightInput[]
-  /** LLM spend this run incurred — recorded on `detector_runs` for per-detector cost accounting. */
-  cost?: { inTokens: number; outTokens: number; usd: number }
+  /** LLM spend + model this run incurred — recorded on `detector_runs` for per-detector cost accounting. */
+  cost?: { inTokens: number; outTokens: number; usd: number; model?: string }
   /**
    * Sessions this run actually processed, at the content hash it saw them at.
    * The runner marks them seen (detector_session_runs) ONLY if the persist

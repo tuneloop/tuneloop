@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 15
+const SCHEMA_VERSION = 16
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -373,6 +373,7 @@ CREATE TABLE IF NOT EXISTS detector_runs (
   detector    TEXT PRIMARY KEY,  -- detector name (e.g. 'permission-friction')
   version     INTEGER NOT NULL,  -- detector version at time of run (for cache invalidation)
   status      TEXT,              -- 'ok' | 'error'
+  model       TEXT,              -- LLM model that ran it (NULL for S-tier / non-LLM)
   in_tokens   INTEGER,           -- LLM input tokens (NULL for S-tier)
   out_tokens  INTEGER,           -- LLM output tokens (NULL for S-tier)
   cost_usd    REAL,              -- LLM cost in USD (NULL for S-tier)
@@ -527,6 +528,9 @@ function migrate(db: DB): void {
   }
   if (tableExists('insight_evidence') && !has('insight_evidence', 'note')) {
     db.exec('ALTER TABLE insight_evidence ADD COLUMN note TEXT')
+  }
+  if (tableExists('detector_runs') && !has('detector_runs', 'model')) {
+    db.exec('ALTER TABLE detector_runs ADD COLUMN model TEXT')
   }
   // recurring-themes v2: themes gained a description + a cached LLM-generated fix.
   for (const col of ['description', 'fix_type', 'fix_content', 'fix_hash']) {

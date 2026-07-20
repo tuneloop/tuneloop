@@ -50,24 +50,24 @@ describe('runDetectors — result normalization + cost/seen threading', () => {
     const d: Detector = { name: 'bare', version: 1, tier: 'S', run: () => [insight('a')] }
     await run(store, log, d)
     expect(store.insights({ detector: 'bare' })).toHaveLength(1)
-    // No cost reported → detector_runs cost columns stay null.
-    const row = db.prepare('SELECT in_tokens, out_tokens, cost_usd FROM detector_runs WHERE detector = ?').get('bare') as {
-      in_tokens: number | null; out_tokens: number | null; cost_usd: number | null
+    // No cost reported → detector_runs cost + model columns stay null.
+    const row = db.prepare('SELECT model, in_tokens, out_tokens, cost_usd FROM detector_runs WHERE detector = ?').get('bare') as {
+      model: string | null; in_tokens: number | null; out_tokens: number | null; cost_usd: number | null
     }
-    expect(row).toMatchObject({ in_tokens: null, out_tokens: null, cost_usd: null })
+    expect(row).toMatchObject({ model: null, in_tokens: null, out_tokens: null, cost_usd: null })
   })
 
-  it('records LLM cost from a DetectorResult onto detector_runs', async () => {
+  it('records LLM cost + model from a DetectorResult onto detector_runs', async () => {
     const { db, store, log } = setup()
     const d: Detector = {
       name: 'costly', version: 1, tier: 'X',
-      run: () => ({ insights: [insight('a')], cost: { inTokens: 1000, outTokens: 200, usd: 0.42 } }),
+      run: () => ({ insights: [insight('a')], cost: { inTokens: 1000, outTokens: 200, usd: 0.42, model: 'claude-x' } }),
     }
     await run(store, log, d)
-    const row = db.prepare('SELECT in_tokens, out_tokens, cost_usd FROM detector_runs WHERE detector = ?').get('costly') as {
-      in_tokens: number; out_tokens: number; cost_usd: number
+    const row = db.prepare('SELECT model, in_tokens, out_tokens, cost_usd FROM detector_runs WHERE detector = ?').get('costly') as {
+      model: string | null; in_tokens: number; out_tokens: number; cost_usd: number
     }
-    expect(row).toMatchObject({ in_tokens: 1000, out_tokens: 200, cost_usd: 0.42 })
+    expect(row).toMatchObject({ model: 'claude-x', in_tokens: 1000, out_tokens: 200, cost_usd: 0.42 })
   })
 
   it('marks the reported sessions seen after a successful persist', async () => {
