@@ -1,5 +1,5 @@
 import { registerDetector } from '../../core/registry'
-import { addUsage, emptyUsage, type TokenUsage } from '../../core/model'
+import { addUsage, emptyUsage, type Session, type TokenUsage } from '../../core/model'
 import { insightId } from '../../core/detector'
 import { costOfUsage } from '../../pricing/pricing'
 import { mapPool } from '../../util/pool'
@@ -65,7 +65,7 @@ export const recurringThemes: Detector = {
     const perSessionUsage = await mapPool(candidates, CONCURRENCY, async (cand) => {
       const session = ctx.loadSession(cand.sessionId)
       if (!session) return emptyUsage()
-      let followups = collectFollowups(session)
+      const followups = collectFollowups(session)
       if (followups.length === 0) {
         // Steered by count but no substantive follow-ups survive filtering —
         // nothing to extract, but it IS processed (don't re-hydrate next run).
@@ -73,29 +73,14 @@ export const recurringThemes: Detector = {
         return emptyUsage()
       }
 
-      // Nothing is clipped; a rare oversized session has its MIDDLE agent-activity
-      // summarized (user turns untouched) so it fits the model without erroring.
-      const summarized = await maybeSummarizeFollowups(followups, llm!, log)
-      followups = summarized.followups
-      let u = summarized.usage
-
       const repo = session.project.repo ?? null
       const visible = store.listThemes(repo)
-      const { system, user } = buildPrompt(session, followups, visible)
-      let result
-      try {
-        result = await llm.completeStructured({ system, user, schema: extractionSchema, toolName: TOOL_NAME, maxTokens: 4096 })
-      } catch (err) {
-        // A failed call leaves this session unprocessed (retried next analyze).
-        log.warn(`${DETECTOR}: extraction failed for ${cand.sessionId}: ${(err as Error).message}`)
-        return u
-      }
-      u = addUsage(u, result.usage)
+      const res = await extractSession(session, followups, repo, visible, llm!, log)
+      if (res.failed) return res.usage // a window failed → leave unprocessed (retried next analyze)
 
-      const { themes, events } = postprocess(result.data, followups, repo, visible, session.startedAt)
-      store.persistThemeExtraction(cand.sessionId, themes, events)
+      store.persistThemeExtraction(cand.sessionId, res.themes, res.events)
       processed.push(cand)
-      return u
+      return res.usage
     })
     for (const u of perSessionUsage) usage = addUsage(usage, u)
 
@@ -109,7 +94,7 @@ export const recurringThemes: Detector = {
     const surfaced = await surfaceInsights(store, llm, log)
     usage = addUsage(usage, surfaced.usage)
 
-    const cost = { inTokens: usage.input, outTokens: usage.output, usd: costOfUsage(llm.provider, llm.model, usage) }
+    const cost = { inTokens: usage.input, outTokens: usage.output, usd: costOfUsage(llm.provider, llm.model, usage), model: llm.model }
     return { insights: surfaced.insights, cost, seen: processed }
   },
 }
@@ -126,6 +111,67 @@ function steeredIds(store: DetectorContext['store']): Set<string> {
     MAX_TURNS_GATE,
   ) as Array<{ sessionId: string }>
   return new Set(rows.map((r) => r.sessionId))
+}
+
+// ---- windowed extraction ----------------------------------------------------
+
+// Follow-ups per extraction call. One call over a whole large session is unstable
+// (intermittently returns 0 events); bounded windows keep each ask stable and the
+// union is the session's events.
+const WINDOW = 30
+
+interface Extracted {
+  themes: ThemeInput[]
+  events: ThemeEventInput[]
+  usage: TokenUsage
+  failed: boolean
+}
+
+/**
+ * Extract one session's friction by windowing its follow-ups and unioning the results.
+ * Windows run sequentially so each sees earlier windows' minted themes (threaded via
+ * `visible`); residual duplicates are caught by the cross-session reconcile. If any
+ * window's call fails, the whole session is reported failed (not persisted) so it
+ * retries next analyze rather than persisting a partial event set.
+ */
+async function extractSession(
+  session: Session,
+  followups: ReturnType<typeof collectFollowups>,
+  repo: string | null,
+  baseVisible: ThemeRef[],
+  llm: NonNullable<DetectorContext['llm']>,
+  log: DetectorContext['log'],
+): Promise<Extracted> {
+  let usage = emptyUsage()
+  const themes = new Map<string, ThemeInput>()
+  const events: ThemeEventInput[] = []
+  // Grows as windows mint themes, so a later window matches an earlier one's theme.
+  const visible = new Map(baseVisible.map((t) => [t.id, t] as const))
+
+  for (let start = 0; start < followups.length; start += WINDOW) {
+    const windowFu = followups.slice(start, start + WINDOW)
+    const summarized = await maybeSummarizeFollowups(windowFu, llm, log)
+    usage = addUsage(usage, summarized.usage)
+    const visibleList = [...visible.values()]
+    const { system, user } = buildPrompt(session, summarized.followups, visibleList)
+    let result
+    try {
+      result = await llm.completeStructured({ system, user, schema: extractionSchema, toolName: TOOL_NAME, maxTokens: 4096 })
+    } catch (err) {
+      log.warn(`${DETECTOR}: extraction failed for ${session.id} (window @${start}): ${(err as Error).message}`)
+      return { themes: [], events: [], usage, failed: true }
+    }
+    usage = addUsage(usage, result.usage)
+
+    const pp = postprocess(result.data, summarized.followups, repo, visibleList, session.startedAt)
+    for (const t of pp.themes) {
+      if (!visible.has(t.id)) visible.set(t.id, { id: t.id, label: t.label, description: t.description ?? null, type: t.type, repo: t.repo ?? null })
+      themes.set(t.id, t)
+    }
+    for (const e of pp.events) events.push({ ...e, idx: events.length }) // re-index into the session-wide sequence
+  }
+
+  return { themes: [...themes.values()], events, usage, failed: false }
 }
 
 // ---- extraction postprocess -------------------------------------------------

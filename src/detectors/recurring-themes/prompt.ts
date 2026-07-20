@@ -13,8 +13,7 @@ export const TRIGGERS: ThemeTrigger[] = ['unprompted', 'after_tool_error', 'afte
  * The extraction prompt. The rules ARE the precision — they encode the spike
  * learnings (error-adjacency fabrication, domain-magnet themes, product-bug-as-
  * rework, taste-iteration inflation, harness noise, interrupt-tag neutrality)
- * that moved a naive prompt from ~60% to ~85%+ on a multi-user corpus. Written
- * to generalize across users, not to match any one person's steering style.
+ * Written to generalize across users, not to match any one person's steering style
  */
 export function buildPrompt(session: Session, followups: Followup[], themes: ThemeRef[]): { system: string; user: string } {
   const system =

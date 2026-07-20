@@ -79,6 +79,21 @@ function seedSession(
     .run(id, 'steering', 'followup_count', JSON.stringify(count))
 }
 
+/** Ingest a session with many follow-up user turns, to exercise windowed extraction. */
+function seedManyFollowups(db: ReturnType<typeof openDb>, store: Store, id: string, followups: number) {
+  const events: Event[] = [{ kind: 'user', text: 'opener', blocks: [], isSidechain: false, seq: 0 }]
+  for (let i = 1; i <= followups; i++) events.push({ kind: 'user', text: `follow-up ${i}, please fix it`, blocks: [], isSidechain: false, seq: i })
+  const session: Session = {
+    id, sessionId: id, source: 'claude-code', provider: 'anthropic',
+    project: { cwd: '/repo', repo: 'o/r' }, startedAt: new Date().toISOString(),
+    models: ['claude-fable-5'], tokens: emptyUsage(), events, toolCalls: [],
+    raw: { path: `/x/${id}`, contentHash: `h-${id}` },
+  }
+  store.ingestSession(session, 0, [], '2026-07-14.1', 5000)
+  db.prepare('INSERT OR REPLACE INTO annotations (session_id, processor, key, value) VALUES (?,?,?,?)')
+    .run(id, 'steering', 'followup_count', JSON.stringify(followups))
+}
+
 function ctx(store: Store, llm: LlmClient): DetectorContext {
   return {
     store,
@@ -120,6 +135,47 @@ describe('recurring-themes detector', () => {
     expect(themes).toHaveLength(1)
     expect(themes[0]!.eventCount).toBe(2)
     expect(themes[0]!.sessionCount).toBe(2)
+  })
+
+  it('windows a large session into multiple extraction calls and unions their events', async () => {
+    const { db, store } = setup()
+    seedManyFollowups(db, store, 'big', 65) // 65 follow-ups, WINDOW=30 → 3 windows (30+30+5)
+    let extractCalls = 0
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName === 'reconcile_taxonomy') return { data: { themes: [] }, usage: emptyUsage() }
+        if (req.toolName === 'draft_fix') return { data: { worth_surfacing: true, fix_type: 'fix-prompt', content: 'x' }, usage: emptyUsage() }
+        // Each extraction window emits one event (turn 1 is valid within every window slice).
+        extractCalls++
+        return { data: { events: [{ turn: 1, type: 'other', description: `friction in window ${extractCalls}`, new_theme_label: `Window Theme ${extractCalls}` }] }, usage: emptyUsage() }
+      },
+    }
+    await recurringThemes.run(ctx(store, llm))
+    expect(extractCalls).toBe(3) // 30 + 30 + 5
+    // One event per window, unioned into the session with a session-wide idx sequence.
+    const rows = store.queryAll('SELECT idx FROM theme_events WHERE session_id = ? ORDER BY idx', 'big') as Array<{ idx: number }>
+    expect(rows.map((r) => r.idx)).toEqual([0, 1, 2])
+  })
+
+  it('does not persist a partial session when one window fails (nothing saved, session unprocessed)', async () => {
+    const { db, store } = setup()
+    seedManyFollowups(db, store, 'big', 65) // WINDOW=30 → 3 windows
+    let n = 0
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName !== 'record_friction') return { data: { themes: [] }, usage: emptyUsage() }
+        n++
+        if (n === 2) throw new Error('window 2 boom') // second window fails
+        return { data: { events: [{ turn: 1, type: 'other', description: 'x', new_theme_label: 'T' }] }, usage: emptyUsage() }
+      },
+    }
+    await recurringThemes.run(ctx(store, llm))
+    // A failed window → the session is NOT persisted (no partial events) and stays
+    // unprocessed so the next analyze retries it.
+    expect(store.queryAll('SELECT 1 FROM theme_events WHERE session_id = ?', 'big')).toHaveLength(0)
+    expect(store.detectorUnseen('recurring-themes').some((s) => s.sessionId === 'big')).toBe(true)
   })
 
   it('surfaces an insight with a fix-prompt embedding its own id once past threshold', async () => {
