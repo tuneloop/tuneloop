@@ -60,9 +60,10 @@ export async function runThemeMerge(
         'You curate a taxonomy of "friction themes" — RECURRING patterns where an AI coding agent fell short and ' +
         'the user had to compensate. A theme is a pattern seen ACROSS sessions, never a single incident. You are ' +
         'given the current themes and friction events not yet attached to any theme, and you tidy the taxonomy via ' +
-        `the ${TOOL_NAME} tool: fuse duplicate themes, and attach an unassigned event when it is a real recurrence ` +
-        'of a known gap. Most unassigned events are genuine one-offs — leaving an event unassigned is the common, ' +
-        'expected outcome, not a failure. Consolidate conservatively; when unsure, do nothing.',
+        `the ${TOOL_NAME} tool: fuse themes that describe the SAME underlying gap — rolling several specific ` +
+        'instances up into the one general pattern behind them — and attach an unassigned event when it is a real ' +
+        'recurrence of a known gap. Merge by shared gap, not shared topic; when a merge is genuinely doubtful leave ' +
+        'it, but do NOT leave an obvious recurring pattern scattered across near-identical themes.',
       user: buildUser(themes, orphans),
       schema: reconcileSchema,
       toolName: TOOL_NAME,
@@ -193,11 +194,14 @@ function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: 
     '',
     'Return one entry per action. Prefer the least invasive action, in this order — most entries will be the',
     'first two, many runs return an empty list:',
-    '1. MERGE duplicate themes: set merge_ids to two or more existing theme ids that name the SAME specific gap in',
-    '   different words. Merge ONLY true duplicates — never themes that are merely related, in the same area, or',
-    '   one broader than another. Set keep_id to the survivor (better-named/older); omit to keep the oldest.',
+    '1. MERGE themes for one gap: set merge_ids to two or more existing theme ids that name the SAME underlying gap,',
+    '   INCLUDING several specific instances of one general pattern — fold them up into that pattern. E.g. three',
+    '   themes each naming a different fact the agent asserted without checking are one gap (the agent states',
+    '   unverified claims as fact) — merge them. But merge by shared GAP (what the agent keeps doing), not merely',
+    '   shared topic: two different mistakes in the same area are two gaps, not one. Set keep_id to the survivor, or',
+    '   set label+description to name the general pattern the merged specifics share; omit keep_id to keep the oldest.',
     '2. ATTACH an orphan to an EXISTING theme: set keep_id to that theme and list the event_ref(s) in orphan_refs.',
-    '   Do this only when the event is unmistakably another occurrence of that theme\'s exact gap.',
+    '   Do this when the event is another occurrence of that theme\'s gap (its general pattern, not only its exact wording).',
     '3. MINT a new theme from orphans — ONLY when TWO OR MORE orphans independently describe the SAME recurring',
     '   gap that no existing theme covers. Set label + description and list all their orphan_refs. Never mint from',
     '   a single orphan: one incident is not a recurrence, and it can join a theme later if it happens again.',

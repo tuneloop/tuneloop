@@ -118,7 +118,7 @@ function steeredIds(store: DetectorContext['store']): Set<string> {
 // Follow-ups per extraction call. One call over a whole large session is unstable
 // (intermittently returns 0 events); bounded windows keep each ask stable and the
 // union is the session's events.
-const WINDOW = 20
+const WINDOW = 30
 
 interface Extracted {
   themes: ThemeInput[]
