@@ -5,7 +5,8 @@ import type { ProcessorResult, RefreshResult } from '../core/processor'
 import Database from 'better-sqlite3'
 import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
-import { deterministicBlocks } from '../core/blocks'
+import { blockSpine, deterministicBlocks } from '../core/blocks'
+import type { Block } from '../core/blocks'
 import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
@@ -2249,6 +2250,28 @@ export class Store {
     } catch {
       return null
     }
+  }
+
+  /**
+   * A numbered one-line-per-block digest of a session's main thread (see
+   * blockSpine) plus the block partition it was rendered from: each block's
+   * opening user turn, a compact action summary, and its boundary tag.
+   * Reconstructs the partition from the blob at read time. Returns null when the
+   * session's blob is missing or unreadable.
+   *
+   * The `blocks` ride along so a caller reads the count and each block's startSeq
+   * from the same partition the digest was rendered from, rather than re-parsing
+   * the string or re-querying the stored blocks table (which can lag the blob).
+   *
+   * Recomputed on demand rather than stored: it's cheap for the few sessions a
+   * P-tier detector inspects, and hands a detector the block digest without
+   * exposing the full transcript (loadSession stays private).
+   */
+  blockDigest(id: string): { digest: string; blocks: Block[] } | null {
+    const session = this.loadSession(id)
+    if (!session) return null
+    const blocks = deterministicBlocks(session)
+    return { digest: blockSpine(session, blocks), blocks }
   }
 
   /**
