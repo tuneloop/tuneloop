@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 16
+const SCHEMA_VERSION = 17
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -442,7 +442,8 @@ CREATE TABLE IF NOT EXISTS theme_events (
   trigger     TEXT NOT NULL,      -- unprompted|after_tool_error|after_review|agent_stated
   description TEXT NOT NULL,      -- one abstract sentence; recurrences read the same
   theme_id    TEXT,              -- NULL = event survived but its proposed label was junk (topicless)
-  added_at    TEXT NOT NULL,
+  added_at    TEXT NOT NULL,     -- when this row was written (analyze-run wall clock, bookkeeping)
+  occurred_at TEXT,              -- timestamp of the user message itself (the real friction moment); drives first/last-seen
   PRIMARY KEY (session_id, idx),
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -535,6 +536,12 @@ function migrate(db: DB): void {
   // recurring-themes v2: themes gained a description + a cached LLM-generated fix.
   for (const col of ['description', 'fix_type', 'fix_content', 'fix_hash']) {
     if (tableExists('theme') && !has('theme', col)) db.exec(`ALTER TABLE theme ADD COLUMN ${col} TEXT`)
+  }
+  // recurring-themes v3: theme_events carry the user message's own timestamp, so
+  // first/last-seen reflect when friction actually happened (not the analyze run).
+  // Existing rows stay NULL until the detector version bump re-extracts them.
+  if (tableExists('theme_events') && !has('theme_events', 'occurred_at')) {
+    db.exec('ALTER TABLE theme_events ADD COLUMN occurred_at TEXT')
   }
 
   // Split cache creation by TTL. The old `tok_cache_create` held the whole write

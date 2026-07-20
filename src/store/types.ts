@@ -299,4 +299,6 @@ export interface ThemeEventInput {
   trigger: ThemeTrigger
   description: string
   themeId?: string
+  /** Timestamp of the user message this event was extracted from (the real friction moment). */
+  occurredAt?: string
 }

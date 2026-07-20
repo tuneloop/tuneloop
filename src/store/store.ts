@@ -2990,10 +2990,10 @@ export class Store {
       for (const e of events) {
         this.db
           .prepare(
-            `INSERT OR REPLACE INTO theme_events (session_id, idx, turn_seq, type, trigger, description, theme_id, added_at)
-             VALUES (?,?,?,?,?,?,?,?)`,
+            `INSERT OR REPLACE INTO theme_events (session_id, idx, turn_seq, type, trigger, description, theme_id, added_at, occurred_at)
+             VALUES (?,?,?,?,?,?,?,?,?)`,
           )
-          .run(sessionId, e.idx, e.turnSeq ?? null, e.type, e.trigger, e.description, e.themeId ?? null, now)
+          .run(sessionId, e.idx, e.turnSeq ?? null, e.type, e.trigger, e.description, e.themeId ?? null, now, e.occurredAt ?? null)
       }
       // Prune derived themes with no surviving member events (a re-extraction may
       // have moved the last event off a theme). Kept from pruning: resolved themes
@@ -3088,6 +3088,10 @@ export class Store {
     sessionCount: number
     evidence: Array<{ sessionId: string; turnSeq: number | null; description: string }>
     descriptions: string[]
+    // Real friction window from the member events' message timestamps (null until a
+    // post-schema-17 re-extraction populates occurred_at).
+    firstSeenAt: string | null
+    lastSeenAt: string | null
   }> {
     const themes = this.db
       .prepare(
@@ -3100,18 +3104,23 @@ export class Store {
         resolved: number; fixType: string | null; fixContent: string | null; fixHash: string | null
       }>
     const evStmt = this.db.prepare(
-      `SELECT session_id AS sessionId, turn_seq AS turnSeq, description
+      `SELECT session_id AS sessionId, turn_seq AS turnSeq, description, occurred_at AS occurredAt
        FROM theme_events WHERE theme_id = ? ORDER BY added_at DESC, session_id, idx`,
     )
     return themes.map((t) => {
-      const evs = evStmt.all(t.id) as Array<{ sessionId: string; turnSeq: number | null; description: string }>
+      const evs = evStmt.all(t.id) as Array<{ sessionId: string; turnSeq: number | null; description: string; occurredAt: string | null }>
       const sessions = new Set(evs.map((e) => e.sessionId))
+      // Friction window = min/max of the events' message timestamps. Ignore nulls
+      // (pre-schema-17 rows); all-null → null (caller falls back).
+      const times = evs.map((e) => e.occurredAt).filter((x): x is string => !!x).sort()
       return {
         ...t,
         eventCount: evs.length,
         sessionCount: sessions.size,
         evidence: evs.map((e) => ({ sessionId: e.sessionId, turnSeq: e.turnSeq, description: e.description })),
         descriptions: evs.map((e) => e.description),
+        firstSeenAt: times[0] ?? null,
+        lastSeenAt: times[times.length - 1] ?? null,
       }
     })
   }
@@ -3187,6 +3196,10 @@ export class Store {
     const now = new Date().toISOString()
     this.db.transaction(() => {
       for (const input of inputs) {
+        // Real occurrence times when the detector sources them (recurring-themes reads
+        // the events' message timestamps); else the analyze-run time as a coarse floor.
+        const lastSeen = input.lastSeenAt ?? now
+        const firstSeen = input.firstSeenAt ?? now
         const existing = this.db
           .prepare('SELECT id, state FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
           .get(detector, input.repo, input.signalKey) as { id: string; state: string } | undefined
@@ -3202,10 +3215,13 @@ export class Store {
         if (existing) {
           // Re-detection of a resolved insight means the problem came back — reopen it.
           const reopened = existing.state === 'resolved'
+          // first_seen_at: overwrite only when the detector supplies a real earliest
+          // occurrence (COALESCE keeps the stored value otherwise — never clobber a
+          // real creation time with the run time for detectors that don't source it).
           this.db
             .prepare(
               `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
-               fix_type = ?, fix_label = ?, fix_content = ?, last_seen_at = ?, detector_version = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = COALESCE(?, first_seen_at), last_seen_at = ?, detector_version = ?,
                state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
                state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
                WHERE id = ?`,
@@ -3218,7 +3234,8 @@ export class Store {
               input.fix.type,
               input.fix.label,
               input.fix.content,
-              now,
+              input.firstSeenAt ?? null,
+              lastSeen,
               version,
               now,
               existing.id,
@@ -3246,8 +3263,8 @@ export class Store {
               input.fix.type,
               input.fix.label,
               input.fix.content,
-              now,
-              now,
+              firstSeen,
+              lastSeen,
               version,
             )
           this.writeEvidence(id, input.evidence, now)

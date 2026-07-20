@@ -124,6 +124,15 @@ export interface InsightInput {
   evidence: EvidenceRef[]
   /** Total occurrences — the real scale, independent of the evidence cap. */
   count: number
+  /**
+   * When the pattern was first/last actually observed (the real friction moments,
+   * from the source events' timestamps). Optional: detectors that can't source a
+   * real occurrence time omit them, and the store falls back to the analyze-run
+   * time. Prefer supplying them — otherwise the dates read as "when we analyzed",
+   * not "when it happened".
+   */
+  firstSeenAt?: string
+  lastSeenAt?: string
   fix: {
     /** Controls rendering: snippet gets a copy button, nudge gets plain prose, command gets a run prompt, fix-prompt gets a paste-into-agent-config prompt. */
     type: 'config-snippet' | 'behavioral-nudge' | 'install-command' | 'fix-prompt'

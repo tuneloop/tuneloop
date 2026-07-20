@@ -72,15 +72,17 @@ export function userTurns(s: Session): string[] {
 export interface UserTurn {
   text: string
   seq?: number
+  /** The message's own timestamp (when the user actually sent it). */
+  ts?: string
 }
 
-/** Same filter as userTurns, but keeps each turn's seq (see UserTurn). */
+/** Same filter as userTurns, but keeps each turn's seq + ts (see UserTurn). */
 export function userTurnEvents(s: Session): UserTurn[] {
   const out: UserTurn[] = []
   for (const ev of s.events) {
     if (ev.kind !== 'user' || ev.isSidechain) continue
     const t = stripReminders(ev.text)
-    if (t && !isSyntheticUser(t)) out.push({ text: t, seq: ev.seq })
+    if (t && !isSyntheticUser(t)) out.push({ text: t, seq: ev.seq, ts: ev.ts })
   }
   return out
 }

@@ -317,3 +317,58 @@ describe('persistThemeExtraction prune vs. live insights', () => {
     expect(store.allThemes().some((t) => t.id === 'recurring-themes:global:ghost')).toBe(false)
   })
 })
+
+describe('insight first/last-seen from real occurrence times', () => {
+  const seen = (db: ReturnType<typeof openDb>, id: string) =>
+    db.prepare('SELECT first_seen_at AS first, last_seen_at AS last FROM insights WHERE id = ?').get(id) as { first: string; last: string }
+
+  it('themesWithEvents derives first/last-seen from the events’ message timestamps (min/max)', () => {
+    const { store } = setup()
+    const THEME = 'recurring-themes:global:t'
+    store.persistThemeExtraction('s1', [{ id: THEME, label: 'T', type: 'other' }], [
+      { idx: 0, type: 'other', trigger: 'unprompted', description: 'a', themeId: THEME, occurredAt: '2026-06-10T09:00:00Z' },
+      { idx: 1, type: 'other', trigger: 'unprompted', description: 'b', themeId: THEME, occurredAt: '2026-07-15T12:00:00Z' },
+      { idx: 2, type: 'other', trigger: 'unprompted', description: 'c', themeId: THEME, occurredAt: '2026-06-25T08:00:00Z' },
+    ])
+    const t = store.themesWithEvents().find((x) => x.id === THEME)!
+    expect(t.firstSeenAt).toBe('2026-06-10T09:00:00Z') // earliest
+    expect(t.lastSeenAt).toBe('2026-07-15T12:00:00Z') // latest, not extraction order
+  })
+
+  it('persistInsights stores supplied first/last-seen instead of the run time', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-07-15T00:00:00Z' })])
+    const row = seen(db, insightId('det', '*', 'k1'))
+    expect(row.first).toBe('2026-05-01T00:00:00Z')
+    expect(row.last).toBe('2026-07-15T00:00:00Z')
+  })
+
+  it('falls back to the run time when a detector supplies no occurrence times', () => {
+    const { db, store } = setup()
+    const before = new Date().toISOString()
+    store.persistInsights('det', 1, [mkInsight()]) // no first/last supplied (e.g. S-tier)
+    const row = seen(db, insightId('det', '*', 'k1'))
+    expect(row.first >= before).toBe(true) // run-time floor, not undefined/epoch
+    expect(row.last >= before).toBe(true)
+  })
+
+  it('re-persist advances last-seen but never clobbers the original first-seen', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    // A later run sees a NEW latest occurrence; first-seen must stay at the original.
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-07-20T00:00:00Z' })])
+    const row = seen(db, id)
+    expect(row.first).toBe('2026-05-01T00:00:00Z')
+    expect(row.last).toBe('2026-07-20T00:00:00Z')
+  })
+
+  it('a re-persist WITHOUT a supplied first-seen keeps the stored one (COALESCE guard)', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    store.persistInsights('det', 1, [mkInsight()]) // no first/last this time
+    const row = seen(db, id)
+    expect(row.first).toBe('2026-05-01T00:00:00Z') // preserved, not overwritten with run time
+  })
+})

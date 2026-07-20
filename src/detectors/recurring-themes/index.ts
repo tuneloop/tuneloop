@@ -39,7 +39,9 @@ const SEVERITY_EVENTS = { high: 8, medium: 4 }
  */
 export const recurringThemes: Detector = {
   name: DETECTOR,
-  version: 1,
+  // v2: theme_events now record each occurrence's message timestamp (occurred_at),
+  // so first/last-seen reflect real friction moments
+  version: 2,
   tier: 'X',
   needsLlm: true,
   async run(ctx: DetectorContext): Promise<DetectorResult> {
@@ -251,6 +253,7 @@ function postprocess(
       trigger: oneOf(e?.trigger, TRIGGERS, 'unprompted') as ThemeTrigger,
       description,
       themeId: themeId || undefined,
+      occurredAt: fu.ts,
     })
   }
 
@@ -348,6 +351,8 @@ async function surfaceInsights(
         `${t.type} pattern the user had to compensate for.`,
       evidence,
       count: t.eventCount,
+      firstSeenAt: t.firstSeenAt ?? undefined,
+      lastSeenAt: t.lastSeenAt ?? undefined,
       fix,
     })
   }

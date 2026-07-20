@@ -12,6 +12,8 @@ export interface Followup {
   /** The user's turn text, in full. */
   text: string
   seq?: number
+  /** Timestamp of the user message (the real friction moment); drives theme first/last-seen. */
+  ts?: string
   /** error_category keys of failed main-thread tool calls preceding this turn. */
   errors: string[]
   /**
@@ -117,6 +119,7 @@ export function collectFollowups(session: Session): Followup[] {
     out.push({
       text: t.text,
       seq: t.seq,
+      ts: t.ts,
       errors: cats,
       activity: renderActivity(win),
       interrupted: mark != null ? directionAt(win, mark) : undefined,
