@@ -707,9 +707,15 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .ins-cell { text-align: left; background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
   padding: 16px 18px; cursor: pointer; display: flex; flex-direction: column; gap: 8px; transition: border-color .12s, box-shadow .12s; }
 .ins-cell:hover { border-color: var(--emerald); box-shadow: 0 1px 6px rgba(0,0,0,.05); }
-/* Label row — same treatment as .tile .label (uppercase sans, tracked). */
+/* Selected (its detail drawer is open) — mirrors the dashboard tile's .on state. */
+.ins-cell.on { border-color: var(--emerald); box-shadow: inset 0 -3px 0 var(--emerald); }
+/* Label row — same treatment as .tile .label (uppercase sans, tracked). Single line:
+   the scope tag truncates (full value on hover) and the state badge stays pinned right,
+   so a long cwd can't overflow the cell or wrap the badge to a second line. */
 .ins-cell-label { display: flex; align-items: center; gap: 7px; font-size: 12px; text-transform: uppercase;
-  letter-spacing: .06em; color: var(--muted); }
+  letter-spacing: .06em; color: var(--muted); flex-wrap: nowrap; }
+.ins-cell-scope { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ins-cell-label .ins-state { flex: 0 0 auto; margin-left: auto; }
 .ins-cell-type { font-weight: 600; }
 .ins-cell-title { font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 600;
   line-height: 1.3; color: var(--ink); }

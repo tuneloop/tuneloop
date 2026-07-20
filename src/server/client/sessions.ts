@@ -11,6 +11,11 @@ import { syncHash } from './router'
 var onBackToInsight: ((insightId: string) => void) | null = null;
 export function setBackToInsight(fn: (insightId: string) => void) { onBackToInsight = fn; }
 
+// Fires whenever the drawer closes (button / overlay / programmatic) — lets a view
+// clear its own selected-state. Same decoupling pattern as onBackToInsight.
+var onDrawerClose: (() => void) | null = null;
+export function setOnDrawerClose(fn: () => void) { onDrawerClose = fn; }
+
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
 // queries the live elements, so it works across drawer re-opens without leaking
@@ -1856,6 +1861,7 @@ export function closeDrawer() {
   activeReveal = null;
   errWalk = null; renderErrWalkBar(); // closing the drawer ends any error walk
   if (state.open) { state.open = null; syncHash({ replace: true }); } // drop ?session= without adding history
+  if (onDrawerClose) onDrawerClose();
 }
 
 // The open drawer publishes its error-reveal fn here so the pager can reveal the

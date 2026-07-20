@@ -42,9 +42,10 @@ function cell(r, i) {
   var span = sessionSpan(r);
   var sub = num(r.count) + (r.count === 1 ? ' occurrence' : ' occurrences') +
     (span > 1 ? ' · ' + num(span) + ' sessions' : '');
+  var scope = repoLabel(r.repo);
   return '<button type="button" class="ins-cell" data-i="' + i + '" data-id="' + esc(r.id) + '">' +
     '<div class="ins-cell-label">' + sevDot(r.severity) +
-      '<span class="tag">' + esc(repoLabel(r.repo)) + '</span>' +
+      '<span class="tag ins-cell-scope" title="' + esc(scope) + '">' + esc(scope) + '</span>' +
       '<span class="ins-state st-' + esc(r.state) + '">' + esc(String(r.state).replace(/_/g, ' ')) + '</span>' +
     '</div>' +
     '<div class="ins-cell-title">' + esc(r.title) + '</div>' +
@@ -117,9 +118,20 @@ function paint() {
   Array.prototype.forEach.call(el.querySelectorAll('.ins-cell'), function (b) {
     b.onclick = function () {
       var r = rows[parseInt(b.getAttribute('data-i'), 10)];
-      if (r) openInsight(r);
+      if (r) { selectCell(b); openInsight(r); }
     };
   });
+}
+
+// Mark the open insight's cell selected (mirrors the dashboard tile's .on state),
+// clearing any prior selection. Selection is also cleared when the drawer closes.
+function selectCell(cell) {
+  Array.prototype.forEach.call(document.querySelectorAll('.ins-cell.on'), function (c) { c.classList.remove('on'); });
+  if (cell) cell.classList.add('on');
+}
+
+export function clearCellSelection() {
+  Array.prototype.forEach.call(document.querySelectorAll('.ins-cell.on'), function (c) { c.classList.remove('on'); });
 }
 
 // ---- detail drawer ----------------------------------------------------------
@@ -192,5 +204,8 @@ function wireDetail(r, occ) {
 // Re-open an insight's detail by id — the transcript's "← Insights" back button.
 export function reopenInsight(id) {
   var r = rows.filter(function (x) { return x.id === id; })[0];
-  if (r) openInsight(r);
+  if (r) {
+    selectCell(document.querySelector('.ins-cell[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]'));
+    openInsight(r);
+  }
 }

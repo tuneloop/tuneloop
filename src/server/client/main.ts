@@ -9,10 +9,10 @@ import { loadFacets } from './facets'
 import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
-import { renderInsights, reopenInsight } from './insights'
+import { renderInsights, reopenInsight, clearCellSelection } from './insights'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
-import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight } from './sessions'
+import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose } from './sessions'
 import { renderArtKindSeg, loadArtifacts } from './artifacts'
 
 function init() {
@@ -25,6 +25,8 @@ function init() {
   // Let the transcript drawer's "← Insights" back button reopen the insight detail
   // (registered here to avoid a sessions↔insights import cycle).
   setBackToInsight(reopenInsight);
+  // Clear the selected insight cell when the drawer closes.
+  setOnDrawerClose(clearCellSelection);
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     // Manual tab nav drops any question-grounding banner.
     b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); };
