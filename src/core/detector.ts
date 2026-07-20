@@ -28,6 +28,27 @@ export function insightId(detector: string, repo: string, signalKey: string): st
  */
 export type DetectorTier = 'S' | 'P' | 'X'
 
+/**
+ * Live progress reporter for the detector phase ("Step 2/2"). The runner backs all
+ * detectors with ONE shared implementation so their reports aggregate into a single
+ * bar, even though detectors run in parallel.
+ *
+ * Part of the P/X-tier authoring contract: an LLM detector should `addUnits` its
+ * delta up front, then `unitDone`/`addCost` as it spends, so the CLI can show live
+ * count + cost during the (expensive) detector phase. This is a live view only —
+ * authoritative cost still comes from `DetectorResult.cost` → `detector_runs`, so a
+ * detector that omits these calls under-counts only the bar, never the accounting.
+ * S-tier detectors are free/instant and leave it untouched.
+ */
+export interface DetectorProgress {
+  /** Declare this detector's delta — how many units (sessions) it will process. */
+  addUnits(n: number): void
+  /** One unit finished, with its incremental LLM spend. The runner stamps elapsed time. */
+  unitDone(costUsd: number): void
+  /** Spend not tied to a unit (e.g. an X-tier cross-session reconcile/fix tail). */
+  addCost(costUsd: number): void
+}
+
 /** Everything a detector receives when it runs — the "bag of tools" passed into run(). */
 export interface DetectorContext {
   /**
@@ -54,6 +75,11 @@ export interface DetectorContext {
    * missing/corrupt. Read-only; detectors never mutate the returned object.
    */
   loadSession(id: string): Session | null
+  /**
+   * Live progress reporter for the step-2 bar (optional — S-tier detectors ignore
+   * it). Shared across all detectors this run, so reports aggregate into one bar.
+   */
+  progress?: DetectorProgress
 }
 
 export interface EvidenceRef {

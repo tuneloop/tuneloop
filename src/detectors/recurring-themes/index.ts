@@ -53,6 +53,7 @@ export const recurringThemes: Detector = {
     const steered = steeredIds(store)
     const candidates = delta.filter((d) => steered.has(d.sessionId))
     log.debug(`${DETECTOR}: ${delta.length} in delta, ${candidates.length} steered → extracting`)
+    ctx.progress?.addUnits(candidates.length) // declare this detector's step-2 delta
 
     let usage = emptyUsage()
     const processed: Array<{ sessionId: string; contentHash: string }> = []
@@ -62,7 +63,7 @@ export const recurringThemes: Detector = {
     // success, records the session as processed for the delta. Each returns its
     // token usage (summed after the pool — concurrent callbacks can't safely
     // read-modify-write a shared accumulator).
-    const perSessionUsage = await mapPool(candidates, CONCURRENCY, async (cand) => {
+    const extractOne = async (cand: { sessionId: string; contentHash: string }): Promise<TokenUsage> => {
       const session = ctx.loadSession(cand.sessionId)
       if (!session) return emptyUsage()
       const followups = collectFollowups(session)
@@ -81,6 +82,13 @@ export const recurringThemes: Detector = {
       store.persistThemeExtraction(cand.sessionId, res.themes, res.events)
       processed.push(cand)
       return res.usage
+    }
+    const perSessionUsage = await mapPool(candidates, CONCURRENCY, async (cand) => {
+      const u = await extractOne(cand)
+      // Tick the step-2 bar once per candidate, whatever the outcome — a unit was
+      // consumed. Report this session's incremental extraction spend.
+      ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, u))
+      return u
     })
     for (const u of perSessionUsage) usage = addUsage(usage, u)
 
@@ -88,11 +96,13 @@ export const recurringThemes: Detector = {
     // re-homes still-unclustered events (hash-gated; no-op when nothing changed).
     const merge = await runThemeMerge(store, llm, log)
     usage = addUsage(usage, merge.usage)
+    ctx.progress?.addCost(costOfUsage(llm.provider, llm.model, merge.usage)) // cross-session tail, not per-session
 
     // 4. Surface themes past the recurrence threshold as insights, each with an
     // LLM-generated fix (hash-gated per theme, so quiet re-analyzes reuse it).
     const surfaced = await surfaceInsights(store, llm, log)
     usage = addUsage(usage, surfaced.usage)
+    ctx.progress?.addCost(costOfUsage(llm.provider, llm.model, surfaced.usage))
 
     const cost = { inTokens: usage.input, outTokens: usage.output, usd: costOfUsage(llm.provider, llm.model, usage), model: llm.model }
     return { insights: surfaced.insights, cost, seen: processed }

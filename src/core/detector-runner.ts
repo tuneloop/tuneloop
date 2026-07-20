@@ -1,8 +1,9 @@
 import { normalizeDetectorResult } from './detector'
-import type { Detector, DetectorContext, DetectorResult } from './detector'
+import type { Detector, DetectorContext, DetectorProgress, DetectorResult } from './detector'
 import type { LlmClient } from '../llm/types'
 import type { Store } from '../store/store'
 import type { Logger } from '../util/log'
+import type { Progress } from '../util/progress'
 
 export interface DetectorRunOptions {
   detectors: Detector[]
@@ -10,10 +11,23 @@ export interface DetectorRunOptions {
   log: Logger
   llmEnabled: boolean
   llm: LlmClient | null
+  /** Optional step-2 progress bar; all detectors share one aggregator backing it. */
+  progress?: Progress
 }
 
 export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
-  const { detectors, store, log, llmEnabled, llm } = opts
+  const { detectors, store, log, llmEnabled, llm, progress } = opts
+
+  // One shared reporter backing the step-2 bar: every detector's addUnits/unitDone/
+  // addCost aggregates into the same Progress, even though detectors run in parallel
+  // (single-threaded JS → no locking). ETA extrapolates from wall-clock since the
+  // phase started, so parallel unit completions still yield a (rough) estimate.
+  const phaseStart = Date.now()
+  const reporter: DetectorProgress | undefined = progress && {
+    addUnits: (n) => progress.addUnits(n),
+    unitDone: (costUsd) => progress.unitDone(Date.now() - phaseStart, costUsd),
+    addCost: (costUsd) => progress.addCost(costUsd),
+  }
 
   // Per-detector context: unseenSessions/loadSession close over the detector name
   // (each detector's delta is tracked independently in detector_session_runs).
@@ -24,6 +38,7 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
     llm,
     unseenSessions: () => store.detectorUnseen(d.name),
     loadSession: (id) => store.hydrateSession(id),
+    progress: reporter,
   })
 
   const applicable = detectors.filter((d) => {

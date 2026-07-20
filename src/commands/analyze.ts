@@ -271,7 +271,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       `${totalNeedingWork} ${totalNeedingWork === 1 ? 'needs' : 'need'} processing.`,
   )
 
-  const progress = new Progress(sessionsToProcess.length, totalNeedingWork)
+  const progress = new Progress(sessionsToProcess.length, totalNeedingWork, process.stderr, 'Step 1/2 · Processing sessions')
 
   // Repo roots touched this run, per source — the environment reader's project
   // scope keys (one snapshot per unique repo, not per session).
@@ -352,10 +352,14 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   }
 
   // Run detectors (cross-session pattern detection) after all processors complete.
+  // Step 2/2: a shared bar whose total grows as each LLM detector declares its delta
+  // (starts at 0 — S-tier detectors add nothing and it completes instantly).
   const detectors = getDetectors()
   if (detectors.length > 0) {
     log.debug(`Running ${detectors.length} detector(s)...`)
-    await runDetectors({ detectors, store, log, llmEnabled, llm })
+    const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
+    await runDetectors({ detectors, store, log, llmEnabled, llm, progress: detectorProgress })
+    detectorProgress.clear()
   }
 
   // Interpret fix-marker sightings AFTER detectors, so sightings scanned before

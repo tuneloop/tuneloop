@@ -117,3 +117,63 @@ describe('runDetectors — result normalization + cost/seen threading', () => {
     expect(loaded).toBeNull()
   })
 })
+
+describe('runDetectors — shared step-2 progress aggregator', () => {
+  // A minimal Progress stand-in recording the aggregated calls.
+  function fakeProgress() {
+    const calls: string[] = []
+    let units = 0
+    let cost = 0
+    const progress = {
+      addUnits(n: number) { units += n; calls.push(`addUnits:${n}`) },
+      unitDone(_elapsedMs: number, c: number) { cost += c; calls.push(`unitDone:${c}`) },
+      addCost(c: number) { cost += c; calls.push(`addCost:${c}`) },
+    } as unknown as import('../util/progress').Progress
+    return { progress, calls, units: () => units, cost: () => cost }
+  }
+
+  it('aggregates addUnits/unitDone/addCost across multiple detectors into one bar', async () => {
+    const { store, log } = setup()
+    const a: Detector = {
+      name: 'da', version: 1, tier: 'X',
+      run: (ctx) => { ctx.progress?.addUnits(2); ctx.progress?.unitDone(0.10); ctx.progress?.unitDone(0.20); ctx.progress?.addCost(0.05); return [] },
+    }
+    const b: Detector = {
+      name: 'db', version: 1, tier: 'P',
+      run: (ctx) => { ctx.progress?.addUnits(1); ctx.progress?.unitDone(0.30); return [] },
+    }
+    const fp = fakeProgress()
+    await runDetectors({ detectors: [a, b], store, log, llmEnabled: true, llm: null, progress: fp.progress })
+    expect(fp.units()).toBe(3) // 2 + 1
+    expect(fp.cost()).toBeCloseTo(0.65, 5) // 0.10 + 0.20 + 0.05 + 0.30
+  })
+
+  it('stamps elapsed time on the bar (detector reports cost only)', async () => {
+    const { store, log } = setup()
+    let observedArgc = -1
+    const stamping = {
+      addUnits() {},
+      unitDone(...args: unknown[]) { observedArgc = args.length },
+      addCost() {},
+    } as unknown as import('../util/progress').Progress
+    const d: Detector = {
+      name: 'stamp', version: 1, tier: 'X',
+      // Detector calls unitDone with ONE arg (cost); runner must forward TWO (elapsed, cost).
+      run: (ctx) => { ctx.progress?.unitDone(0.5); return [] },
+    }
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: null, progress: stamping })
+    expect(observedArgc).toBe(2)
+  })
+
+  it('runs fine with no progress bar (S-tier / no CLI attached)', async () => {
+    const { store, log } = setup()
+    let sawProgress: unknown = 'unset'
+    const d: Detector = {
+      name: 'noprog', version: 1, tier: 'S',
+      run: (ctx) => { sawProgress = ctx.progress; return [insight('a')] },
+    }
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: null })
+    expect(sawProgress).toBeUndefined()
+    expect(store.insights({ detector: 'noprog' })).toHaveLength(1)
+  })
+})
