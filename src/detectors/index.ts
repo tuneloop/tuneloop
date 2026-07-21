@@ -2,3 +2,4 @@
 import './cache-miss'
 import './unused-capabilities'
 import './context-exhaustion'
+import './kitchen-sink'
