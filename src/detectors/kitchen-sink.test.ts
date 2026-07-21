@@ -425,6 +425,13 @@ describe('judge', () => {
     expect(verdict.splitBlockIdx).toBe(-1)
   })
 
+  it('demotes a positive verdict split at block 0 (nothing precedes it to split off)', async () => {
+    const { llm } = fakeLlm({ isKitchenSink: true, splitBlockIdx: 0, reason: 'split at start' })
+    const { verdict } = await judge(llm, digest, blocks2)
+    expect(verdict.isKitchenSink).toBe(false)
+    expect(verdict.splitBlockIdx).toBe(-1)
+  })
+
   it('treats a malformed response as not a kitchen sink', async () => {
     const { llm } = fakeLlm({ garbage: true })
     const { verdict } = await judge(llm, digest, blocks2)
@@ -453,8 +460,8 @@ describe('toInsight', () => {
 
   it('raises severity to high when 3+ distinct jobs', () => {
     const wide = { ...candidate, features: 3 }
-    expect(toInsight(wide, { isKitchenSink: true, splitBlockIdx: 0, reason: 'x' }, blocks3).severity).toBe('high')
-    expect(toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 0, reason: 'x' }, blocks3).severity).toBe('medium')
+    expect(toInsight(wide, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3).severity).toBe('high')
+    expect(toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3).severity).toBe('medium')
   })
 
   it('omits turnIdx when the split index is out of the partition', () => {
@@ -463,7 +470,7 @@ describe('toInsight', () => {
   })
 
   it('does not leave a double space when the reason is empty', () => {
-    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 0, reason: '' }, blocks3)
+    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: '' }, blocks3)
     expect(insight.description).not.toContain('  ')
     expect(insight.description).toContain('one sitting. Carrying')
   })

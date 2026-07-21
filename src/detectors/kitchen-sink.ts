@@ -212,8 +212,9 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
     '  - follow-up requests that refine, debug, or extend the same task already underway',
     '',
     'When unsure, answer false: a wrong flag on coherent work is worse than a miss.',
-    `When true, set splitBlockIdx to the block index (0..${Math.max(0, nBlocks - 1)}) where the`,
-    'FIRST unrelated objective begins; otherwise set it to -1.',
+    `When true, set splitBlockIdx to the block index (1..${Math.max(1, nBlocks - 1)}) where the`,
+    'FIRST unrelated objective begins — the block that should have opened a new session.',
+    'It is never 0 (block 0 opens the first objective). Otherwise set it to -1.',
   ].join('\n')
 
   return {
@@ -226,7 +227,7 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
       required: ['isKitchenSink', 'splitBlockIdx', 'reason'],
       properties: {
         isKitchenSink: { type: 'boolean', description: 'True only when 2+ blocks pursue unrelated objectives.' },
-        splitBlockIdx: { type: 'integer', description: 'Block index where the first unrelated objective begins; -1 if not a kitchen sink.' },
+        splitBlockIdx: { type: 'integer', description: 'Block index (>= 1) where the first unrelated objective begins; -1 if not a kitchen sink.' },
         reason: { type: 'string', description: 'One sentence explaining the judgment.' },
       },
     },
@@ -238,8 +239,9 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
  * forced-tool output defensively: a non-boolean or missing isKitchenSink is
  * treated as not a kitchen sink, and a positive verdict with an out-of-range or
  * missing splitBlockIdx is demoted to false rather than emitting an insight that
- * points nowhere. The range is checked against `blocks.length` — the same
- * partition the digest was rendered from. Returns { verdict, usage }.
+ * points nowhere. A valid split point is 1..blocks.length-1 (block 0 opens the
+ * first objective, so it can never be where the second one begins), checked
+ * against the same partition the digest was rendered from. Returns { verdict, usage }.
  */
 export async function judge(llm: LlmClient, digest: string, blocks: Block[]): Promise<{ verdict: Verdict; usage: TokenUsage }> {
   const n = blocks.length
@@ -247,7 +249,10 @@ export async function judge(llm: LlmClient, digest: string, blocks: Block[]): Pr
 
   const isKitchenSink = data.isKitchenSink === true
   const rawIdx = typeof data.splitBlockIdx === 'number' ? Math.trunc(data.splitBlockIdx) : -1
-  const inRange = rawIdx >= 0 && rawIdx < n
+  // The split point is where the SECOND (first unrelated) objective begins, so it
+  // is always >= 1: block 0 opens the first objective and has nothing before it to
+  // split off. Reject 0 (and negatives) as no valid split point.
+  const inRange = rawIdx >= 1 && rawIdx < n
   const reason = typeof data.reason === 'string' ? data.reason : ''
 
   // A positive verdict with no valid split point can't produce an actionable
