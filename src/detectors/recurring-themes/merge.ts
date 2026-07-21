@@ -58,12 +58,21 @@ export async function runThemeMerge(
     const { data, usage: u } = await llm.completeStructured({
       system:
         'You curate a taxonomy of "friction themes" — RECURRING patterns where an AI coding agent fell short and ' +
-        'the user had to compensate. A theme is a pattern seen ACROSS sessions, never a single incident. You are ' +
-        'given the current themes and friction events not yet attached to any theme, and you tidy the taxonomy via ' +
+        'the user had to compensate. A theme is a general PATTERN, not a single incident. You are given the current ' +
+        'themes and friction events not yet attached to any theme, and you tidy the taxonomy via ' +
         `the ${TOOL_NAME} tool: fuse themes that describe the SAME underlying gap — rolling several specific ` +
-        'instances up into the one general pattern behind them — and attach an unassigned event when it is a real ' +
-        'recurrence of a known gap. Merge by shared gap, not shared topic; when a merge is genuinely doubtful leave ' +
-        'it, but do NOT leave an obvious recurring pattern scattered across near-identical themes.',
+        'instances up into the one general pattern behind them — and attach an unassigned event when it is another ' +
+        'occurrence of a known gap. ' +
+        'Consolidation is your PRIMARY job. Themes are minted per-session, so the same gap can arrive under slightly ' +
+        'different names — scan the whole list for such near-duplicate families and fuse each one (some runs have many, ' +
+        'some none — judge by the list you are given). Two themes are the SAME gap when a single fix-prompt would ' +
+        'address both, or when one is a specific instance of the other (e.g. themes naming different unverified ' +
+        'assertions — an unchecked comment, an unchecked technical claim, an unchecked convention — are one gap: the ' +
+        'agent states unverified claims as fact; fuse them). Merge by shared gap, not merely shared topic: two ' +
+        'DIFFERENT mistakes in the same area (e.g. producing a bad UI design vs. being unable to verify a UI) are two ' +
+        'gaps, not one. Fuse only clear duplicates: when you are unsure whether two themes are the same gap, leave them ' +
+        'separate — a wrong merge buries two distinct gaps under one vague fix, and a genuine duplicate a later run can ' +
+        'still consolidate once more evidence arrives.',
       user: buildUser(themes, orphans),
       schema: reconcileSchema,
       toolName: TOOL_NAME,
@@ -192,14 +201,16 @@ function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: 
     'Unassigned friction events (event_ref is opaque — echo it back exactly):',
     orphans.length ? orphans.map((o) => `- event_ref=${o.sessionId}#${o.idx} (${o.type}): ${o.description}`).join('\n') : '(none)',
     '',
-    'Return one entry per action. Prefer the least invasive action, in this order — most entries will be the',
-    'first two, many runs return an empty list:',
+    'Return one entry per action, in this order of preference:',
     '1. MERGE themes for one gap: set merge_ids to two or more existing theme ids that name the SAME underlying gap,',
     '   INCLUDING several specific instances of one general pattern — fold them up into that pattern. E.g. three',
     '   themes each naming a different fact the agent asserted without checking are one gap (the agent states',
-    '   unverified claims as fact) — merge them. But merge by shared GAP (what the agent keeps doing), not merely',
-    '   shared topic: two different mistakes in the same area are two gaps, not one. Set keep_id to the survivor, or',
-    '   set label+description to name the general pattern the merged specifics share; omit keep_id to keep the oldest.',
+    '   unverified claims as fact) — merge them. This is the MOST IMPORTANT action: scan the whole theme list for',
+    '   families of near-duplicates (the same gap under slightly different names) and fuse each family you find.',
+    '   Merge by shared GAP (what the agent keeps doing), not merely shared topic: two different mistakes in the same',
+    '   area are two gaps, not one. Fuse only CLEAR duplicates; if you are unsure two themes are the same gap, leave',
+    '   them separate. Set keep_id to the survivor, or set label+description to name the general pattern the merged',
+    '   specifics share; omit keep_id to keep the oldest.',
     '2. ATTACH an orphan to an EXISTING theme: set keep_id to that theme and list the event_ref(s) in orphan_refs.',
     '   Do this when the event is another occurrence of that theme\'s gap (its general pattern, not only its exact wording).',
     '3. MINT a new theme from orphans — ONLY when TWO OR MORE orphans independently describe the SAME recurring',
@@ -207,8 +218,8 @@ function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: 
     '   a single orphan: one incident is not a recurrence, and it can join a theme later if it happens again.',
     'label/description may also REWORD a kept/merged theme so it best captures its members (omit to keep as-is).',
     'project_specific: TRUE only if the gap is inherent to ONE project; FALSE (default) for general gaps.',
-    'Leave an event unassigned whenever it does not clearly fit — a wrong match or a one-off theme is worse than',
-    'an unassigned event. Most orphans stay unassigned; that is correct.',
+    'Leave an event unassigned only when it fits no theme AND no other orphan — a wrong match is worse than an',
+    'unassigned event, but do not leave a clear recurrence stranded.',
   ].join('\n')
 }
 

@@ -158,6 +158,52 @@ describe('recurring-themes detector', () => {
     expect(rows.map((r) => r.idx)).toEqual([0, 1, 2])
   })
 
+  it('weights the step-2 bar by extraction windows, not sessions, and always resolves to its declared total', async () => {
+    const { db, store } = setup()
+    seedManyFollowups(db, store, 'big', 65) // 65 follow-ups → 3 windows
+    seedManyFollowups(db, store, 'small', 10) // 10 follow-ups → 1 window
+    const { llm } = stubLlm(
+      Array.from({ length: 4 }, (_, i) => ({ events: [{ turn: 1, type: 'other', description: `w${i}`, new_theme_label: `T${i}` }] })),
+    )
+    let declared = 0
+    let ticks = 0
+    const c = ctx(store, llm)
+    c.progress = {
+      addUnits: (n) => { declared += n },
+      unitDone: () => { ticks++ },
+      addCost: () => {},
+    }
+    await recurringThemes.run(c)
+    // 3 windows (big) + 1 window (small) + 1 reserved finalize unit.
+    expect(declared).toBe(5)
+    // Every declared unit is ticked exactly once — the bar always reaches 100%.
+    expect(ticks).toBe(declared)
+  })
+
+  it('pads the bar to a session\'s declared window budget when a window fails mid-session', async () => {
+    const { db, store } = setup()
+    seedManyFollowups(db, store, 'big', 65) // declares 3 windows
+    let n = 0
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName !== 'record_friction') return { data: { themes: [] }, usage: emptyUsage() }
+        n++
+        if (n === 2) throw new Error('window 2 boom') // fails on the 2nd of 3 windows
+        return { data: { events: [{ turn: 1, type: 'other', description: 'x', new_theme_label: 'T' }] }, usage: emptyUsage() }
+      },
+    }
+    let declared = 0
+    let ticks = 0
+    const c = ctx(store, llm)
+    c.progress = { addUnits: (x) => { declared += x }, unitDone: () => { ticks++ }, addCost: () => {} }
+    await recurringThemes.run(c)
+    // 3 declared windows + finalize. The failed session runs 2 windows (1 ok + the throw),
+    // and the 3rd never-run window is padded, so ticks still equals the declared total.
+    expect(declared).toBe(4)
+    expect(ticks).toBe(declared)
+  })
+
   it('does not persist a partial session when one window fails (nothing saved, session unprocessed)', async () => {
     const { db, store } = setup()
     seedManyFollowups(db, store, 'big', 65) // WINDOW=30 → 3 windows
@@ -195,6 +241,51 @@ describe('recurring-themes detector', () => {
     expect(ins.fix.content).toContain(`tuneloop-fix: ${expectedId}`)
     expect(ins.count).toBe(3)
     expect(ins.severity).toBe('low') // 3 events < medium(4)
+  })
+
+  it('surfaces a theme that recurred intensely within ONE session (>= strong single-session count)', async () => {
+    const { db, store } = setup()
+    // One session, 5 follow-ups → 1 window → 5 events all matching the same minted theme.
+    seedManyFollowups(db, store, 'solo', 5)
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName === 'reconcile_taxonomy') return { data: { themes: [] }, usage: emptyUsage() }
+        if (req.toolName === 'draft_fix') return { data: { worth_surfacing: true, fix_type: 'fix-prompt', content: 'x' }, usage: emptyUsage() }
+        // Five friction events in this one window, all the same gap.
+        return {
+          data: { events: Array.from({ length: 5 }, (_, i) => ({ turn: i + 1, type: 'other', description: `unverified claim ${i}`, new_theme_label: 'Unverified Claims Stated As Fact' })) },
+          usage: emptyUsage(),
+        }
+      },
+    }
+    const res = await recurringThemes.run(ctx(store, llm))
+    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
+    // 5 events in a single session clears the strong-single-session arm despite only 1 session.
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.count).toBe(5)
+  })
+
+  it('does NOT surface a single-session theme below the strong count (4 events, 1 session)', async () => {
+    const { db, store } = setup()
+    seedManyFollowups(db, store, 'weak', 4)
+    const llm: LlmClient = {
+      provider: 'anthropic', model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName === 'reconcile_taxonomy') return { data: { themes: [] }, usage: emptyUsage() }
+        if (req.toolName === 'draft_fix') return { data: { worth_surfacing: true, fix_type: 'fix-prompt', content: 'x' }, usage: emptyUsage() }
+        return {
+          data: { events: Array.from({ length: 4 }, (_, i) => ({ turn: i + 1, type: 'other', description: `d${i}`, new_theme_label: 'Below Strong Threshold' })) },
+          usage: emptyUsage(),
+        }
+      },
+    }
+    const res = await recurringThemes.run(ctx(store, llm))
+    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
+    // 4 events < strong count (5), and only 1 session → below both arms of the gate.
+    expect(insights).toHaveLength(0)
+    // The theme + events still persist (a later session could push it across the cross-session arm).
+    expect(store.themesWithEvents()[0]!.eventCount).toBe(4)
   })
 
   it('the fix pass can VETO a theme that crossed the threshold (worth_surfacing=false → no insight)', async () => {

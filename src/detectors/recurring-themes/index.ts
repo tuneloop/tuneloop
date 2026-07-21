@@ -2,7 +2,6 @@ import { registerDetector } from '../../core/registry'
 import { addUsage, emptyUsage, type Session, type TokenUsage } from '../../core/model'
 import { insightId } from '../../core/detector'
 import { costOfUsage } from '../../pricing/pricing'
-import { mapPool } from '../../util/pool'
 import { collectFollowups } from './followups'
 import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
 import { buildPrompt, extractionSchema, REMEDIES, TOOL_NAME, TRIGGERS, TYPES } from './prompt'
@@ -12,12 +11,18 @@ import { maybeSummarizeFollowups } from './summarize'
 import type { Detector, DetectorContext, DetectorResult, InsightInput } from '../../core/detector'
 import type { ThemeEventInput, ThemeInput, ThemeRef, ThemeRemedy, ThemeTrigger } from '../../store/types'
 
-const CONCURRENCY = 6 // LLM calls in flight across the session delta
 const MAX_TURNS_GATE = 0 // pre-gate: a session needs > this many substantive follow-ups (steered) to extract
 
-// Surfacing threshold: a theme surfaces as an insight once it recurs enough.
+// Step-2 bar unit is an extraction WINDOW (= one LLM call), not a session, since
+// windows are homogeneous work. Plus one reserved unit for the cross-session tail
+// (reconcile + fix gen): its size isn't knowable up front, so we accept a small end-bump.
+const FINALIZE_WEIGHT = 1
+
+// A theme surfaces once it recurs enough: across sessions (>= MIN_EVENTS over
+// >= MIN_SESSIONS) OR intensely within one (>= STRONG_SINGLE_SESSION_EVENTS).
 const MIN_EVENTS = 3
 const MIN_SESSIONS = 2
+const STRONG_SINGLE_SESSION_EVENTS = 5
 // Severity by total event count — recurrence scale, not dollars.
 const SEVERITY_EVENTS = { high: 8, medium: 4 }
 
@@ -30,12 +35,14 @@ const SEVERITY_EVENTS = { high: 8, medium: 4 }
  * inefficiency (dormant tooling, model mismatch, compaction) is the job of the
  * S/P-tier detectors, not this one.
  *
- * Flow: pre-gate to steered sessions in the delta → one extraction call per
- * session (assign-at-extraction against the existing theme list) → one taxonomy-
- * reconcile call (merge duplicate themes + re-home still-unclustered events) →
- * surface themes past the recurrence threshold. Themes persist in their own tables
- * so they outlive their insights (a resolved theme stays in the extraction feed and
- * can reopen on recurrence).
+ * Flow: pre-gate to steered sessions in the delta → one extraction call per session
+ * → one taxonomy-reconcile call (merge duplicate themes + re-home orphan events) →
+ * surface themes past the recurrence threshold. Themes persist in their own tables so
+ * they outlive their insights (a resolved theme can reopen on recurrence).
+ *
+ * Extraction runs SEQUENTIALLY, not concurrently: parallel sessions read a stale theme
+ * list and coin near-duplicate labels for the same gap. One at a time, each session
+ * matches its predecessors' freshly-minted themes — far less fragmentation at the source.
  */
 export const recurringThemes: Detector = {
   name: DETECTOR,
@@ -53,54 +60,58 @@ export const recurringThemes: Detector = {
     // sessions cost nothing (no hydrate, no LLM call).
     const delta = ctx.unseenSessions()
     const steered = steeredIds(store)
-    const candidates = delta.filter((d) => steered.has(d.sessionId))
+    const candidates = delta
+      .filter((d) => steered.has(d.sessionId))
+      .map((d) => ({ ...d, windows: windowsFor(steered.get(d.sessionId)!) }))
     log.debug(`${DETECTOR}: ${delta.length} in delta, ${candidates.length} steered → extracting`)
-    // Declare this detector's step-2 delta: one unit per candidate session, PLUS one
-    // reserved "finalize" unit for the cross-session tail (reconcile + fix-generation)
-    ctx.progress?.addUnits(candidates.length + 1)
+    // Declare the step-2 delta weighted by windows (+ the finalize unit) so total is
+    // known up front and the bar never regresses.
+    const declaredWindows = candidates.reduce((n, c) => n + c.windows, 0)
+    ctx.progress?.addUnits(declaredWindows + FINALIZE_WEIGHT)
 
     let usage = emptyUsage()
     const processed: Array<{ sessionId: string; contentHash: string }> = []
 
-    // 2. Per-session extraction, bounded concurrency. Each call persists its own
-    // themes+events immediately (so a mid-run failure keeps prior work) and, on
-    // success, records the session as processed for the delta. Each returns its
-    // token usage (summed after the pool — concurrent callbacks can't safely
-    // read-modify-write a shared accumulator).
-    const extractOne = async (cand: { sessionId: string; contentHash: string }): Promise<TokenUsage> => {
+    // 2. Per-session extraction (sequential — see class doc). Each reads the LIVE theme
+    // list, persists its own themes+events immediately (a mid-run failure keeps prior
+    // work), and on success is recorded as processed. The bar ticks once per window;
+    // a declared window that doesn't run (empty session, or a failure) is padded with a
+    // cost-0 tick so the declared total still resolves to 100%.
+    for (const cand of candidates) {
+      const padRemaining = (ran: number) => {
+        for (let i = ran; i < cand.windows; i++) ctx.progress?.unitDone(0)
+      }
+
       const session = ctx.loadSession(cand.sessionId)
-      if (!session) return emptyUsage()
+      if (!session) {
+        padRemaining(0)
+        continue
+      }
       const followups = collectFollowups(session)
       if (followups.length === 0) {
         // Steered by count but no substantive follow-ups survive filtering —
         // nothing to extract, but it IS processed (don't re-hydrate next run).
+        padRemaining(0)
         processed.push(cand)
-        return emptyUsage()
+        continue
       }
 
       const repo = session.project.repo ?? null
       const visible = store.listThemes(repo)
-      const res = await extractSession(session, followups, repo, visible, llm!, log)
-      if (res.failed) return res.usage // a window failed → leave unprocessed (retried next analyze)
+      const res = await extractSession(session, followups, repo, visible, llm!, log, (u) =>
+        ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, u)),
+      )
+      usage = addUsage(usage, res.usage)
+      padRemaining(res.windowsRun)
+      if (res.failed) continue // a window failed → leave unprocessed (retried next analyze)
 
       store.persistThemeExtraction(cand.sessionId, res.themes, res.events)
       processed.push(cand)
-      return res.usage
     }
-    const perSessionUsage = await mapPool(candidates, CONCURRENCY, async (cand) => {
-      const u = await extractOne(cand)
-      // Tick the step-2 bar once per candidate, whatever the outcome — a unit was
-      // consumed. Report this session's incremental extraction spend.
-      ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, u))
-      return u
-    })
-    for (const u of perSessionUsage) usage = addUsage(usage, u)
 
-    // 3 + 4: the cross-session tail (the reserved finalize unit) — reconcile the
-    // taxonomy (merge dup themes + re-home orphan events) then surface themes past
-    // the recurrence threshold, each with an LLM-generated fix. Both are hash-gated
-    // (no-op when nothing changed). Its spend rides the finalize unit's unitDone (not
-    // addCost), so the tail's cost extrapolates into est-total like any other unit.
+    // 3 + 4: the cross-session tail (the reserved finalize unit) — reconcile the taxonomy,
+    // then surface themes past the threshold with an LLM fix. Both hash-gated (no-op when
+    // unchanged). Spend rides the finalize unit's unitDone so it feeds est-total like any unit.
     const merge = await runThemeMerge(store, llm, log)
     usage = addUsage(usage, merge.usage)
     const surfaced = await surfaceInsights(store, llm, log)
@@ -117,14 +128,23 @@ registerDetector(recurringThemes)
 
 // ---- pre-gate ---------------------------------------------------------------
 
-/** Session ids the steering processor marked as steered (followup_count > gate). */
-function steeredIds(store: DetectorContext['store']): Set<string> {
+/**
+ * Steered sessions (followup_count > gate) → their follow-up count. That count is the
+ * same tally collectFollowups() produces, so ceil(count/WINDOW) exactly pre-counts the
+ * extraction windows — used to weight the step-2 bar without hydrating.
+ */
+function steeredIds(store: DetectorContext['store']): Map<string, number> {
   const rows = store.queryAll(
-    `SELECT session_id AS sessionId FROM annotations
+    `SELECT session_id AS sessionId, CAST(json_extract(value,'$') AS INTEGER) AS count FROM annotations
      WHERE key = 'followup_count' AND CAST(json_extract(value,'$') AS INTEGER) > ?`,
     MAX_TURNS_GATE,
-  ) as Array<{ sessionId: string }>
-  return new Set(rows.map((r) => r.sessionId))
+  ) as Array<{ sessionId: string; count: number }>
+  return new Map(rows.map((r) => [r.sessionId, r.count]))
+}
+
+/** Extraction windows a session will run — one LLM call each (see WINDOW). */
+function windowsFor(followupCount: number): number {
+  return Math.max(1, Math.ceil(followupCount / WINDOW))
 }
 
 // ---- windowed extraction ----------------------------------------------------
@@ -139,6 +159,8 @@ interface Extracted {
   events: ThemeEventInput[]
   usage: TokenUsage
   failed: boolean
+  /** Windows actually run (incl. a failed one) — lets the caller pad the bar to its budget. */
+  windowsRun: number
 }
 
 /**
@@ -146,7 +168,8 @@ interface Extracted {
  * Windows run sequentially so each sees earlier windows' minted themes (threaded via
  * `visible`); residual duplicates are caught by the cross-session reconcile. If any
  * window's call fails, the whole session is reported failed (not persisted) so it
- * retries next analyze rather than persisting a partial event set.
+ * retries next analyze rather than persisting a partial event set. `onWindow` is
+ * invoked with each window's incremental usage as it completes (drives the step-2 bar).
  */
 async function extractSession(
   session: Session,
@@ -155,8 +178,10 @@ async function extractSession(
   baseVisible: ThemeRef[],
   llm: NonNullable<DetectorContext['llm']>,
   log: DetectorContext['log'],
+  onWindow: (windowUsage: TokenUsage) => void,
 ): Promise<Extracted> {
   let usage = emptyUsage()
+  let windowsRun = 0
   const themes = new Map<string, ThemeInput>()
   const events: ThemeEventInput[] = []
   // Grows as windows mint themes, so a later window matches an earlier one's theme.
@@ -165,7 +190,7 @@ async function extractSession(
   for (let start = 0; start < followups.length; start += WINDOW) {
     const windowFu = followups.slice(start, start + WINDOW)
     const summarized = await maybeSummarizeFollowups(windowFu, llm, log)
-    usage = addUsage(usage, summarized.usage)
+    let windowUsage = summarized.usage
     const visibleList = [...visible.values()]
     const { system, user } = buildPrompt(session, summarized.followups, visibleList)
     let result
@@ -173,9 +198,14 @@ async function extractSession(
       result = await llm.completeStructured({ system, user, schema: extractionSchema, toolName: TOOL_NAME, maxTokens: 4096 })
     } catch (err) {
       log.warn(`${DETECTOR}: extraction failed for ${session.id} (window @${start}): ${(err as Error).message}`)
-      return { themes: [], events: [], usage, failed: true }
+      windowsRun++
+      usage = addUsage(usage, windowUsage)
+      onWindow(windowUsage) // count the failed window's spend (summarize may have cost)
+      return { themes: [], events: [], usage, failed: true, windowsRun }
     }
-    usage = addUsage(usage, result.usage)
+    windowUsage = addUsage(windowUsage, result.usage)
+    usage = addUsage(usage, windowUsage)
+    windowsRun++
 
     const pp = postprocess(result.data, summarized.followups, repo, visibleList, session.startedAt)
     for (const t of pp.themes) {
@@ -183,9 +213,10 @@ async function extractSession(
       themes.set(t.id, t)
     }
     for (const e of pp.events) events.push({ ...e, idx: events.length }) // re-index into the session-wide sequence
+    onWindow(windowUsage)
   }
 
-  return { themes: [...themes.values()], events, usage, failed: false }
+  return { themes: [...themes.values()], events, usage, failed: false, windowsRun }
 }
 
 // ---- extraction postprocess -------------------------------------------------
@@ -273,6 +304,15 @@ const FIX_LABEL: Record<string, string> = {
 }
 
 /**
+ * Recurrence gate. The single-session arm surfaces heavy in-session friction (a claim
+ * corrected 10× in one session is real) that the strict cross-session gate would hide.
+ */
+function surfaces(eventCount: number, sessionCount: number): boolean {
+  if (eventCount >= MIN_EVENTS && sessionCount >= MIN_SESSIONS) return true
+  return eventCount >= STRONG_SINGLE_SESSION_EVENTS
+}
+
+/**
  * Themes past the recurrence threshold become insights (one per theme), each with
  * an LLM-generated, occurrence-grounded fix (hash-gated, so a quiet re-analyze
  * reuses the cached fix). Returns the insights + tokens spent generating fixes.
@@ -286,7 +326,7 @@ async function surfaceInsights(
   let usage = emptyUsage()
 
   for (const t of store.themesWithEvents()) {
-    if (t.eventCount < MIN_EVENTS || t.sessionCount < MIN_SESSIONS) continue
+    if (!surfaces(t.eventCount, t.sessionCount)) continue
     const repo = t.repo ?? '*'
 
     // Re-surface guard: don't re-emit a theme whose insight the user already
