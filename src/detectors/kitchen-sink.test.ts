@@ -523,4 +523,20 @@ describe('kitchenSink.run (end to end)', () => {
     expect(result.insights).toEqual([])
     expect(result.cost).toBeUndefined()
   })
+
+  it('reports step-2 progress: declares its delta and ticks once per candidate', async () => {
+    const { store } = setup()
+    ingestCandidate(store, 'kc:1')
+    ingestCandidate(store, 'kc:2')
+    const llm = fakeLlmClient({ isKitchenSink: false, splitBlockIdx: -1, reason: 'x' })
+    const prog = { units: 0, ticks: 0,
+      addUnits(n: number) { this.units += n },
+      unitDone() { this.ticks++ },
+      addCost() {},
+    }
+    const ctx = { store, log: { debug() {}, info() {}, warn() {} }, llmEnabled: true, llm, progress: prog } as unknown as DetectorContext
+    await kitchenSink.run(ctx)
+    expect(prog.units).toBe(2) // declared both candidates up front
+    expect(prog.ticks).toBe(2) // one tick per candidate, whatever the verdict (bar total stays honest)
+  })
 })

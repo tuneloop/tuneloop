@@ -324,6 +324,7 @@ export const kitchenSink: Detector = {
     if (!ctx.llm) return { insights: [] }
     const found = unseenCandidates(ctx.store)
     ctx.log.info(`kitchen-sink: ${found.length} unseen candidate session(s) after pre-gate`)
+    ctx.progress?.addUnits(found.length) // declare this detector's step-2 delta
 
     const insights: InsightInput[] = []
     // Sessions actually judged, reported as `seen` so the runner marks them ONLY
@@ -332,11 +333,16 @@ export const kitchenSink: Detector = {
     let usage = emptyUsage()
     for (const c of found) {
       const digest = ctx.store.blockDigest(c.sessionId)
-      if (!digest) continue
+      if (!digest) {
+        ctx.progress?.unitDone(0) // unit consumed (no digest → skipped), keep the bar's total honest
+        continue
+      }
       const judged = await judge(ctx.llm, digest.digest, digest.blocks)
       usage = addUsage(usage, judged.usage)
       seen.push({ sessionId: c.sessionId, contentHash: c.contentHash })
       if (judged.verdict.isKitchenSink) insights.push(toInsight(c, judged.verdict, digest.blocks))
+      // Tick the step-2 bar with this candidate's incremental judge spend.
+      ctx.progress?.unitDone(costOfUsage(ctx.llm.provider, ctx.llm.model, judged.usage))
     }
 
     ctx.log.info(`kitchen-sink: flagged ${insights.length}/${found.length} candidate(s)`)
