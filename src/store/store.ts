@@ -19,8 +19,11 @@ import { insightId } from '../core/detector'
 import type { EvidenceRef, InsightInput } from '../core/detector'
 import type { InsightRow } from './types'
 
-/** How many evidence occurrences to retain per insight (detail view lists them all). */
-const EVIDENCE_CAP = 50
+/**
+ * Max evidence occurrences retained per insight — a defensive bound on per-insight row
+ * growth, not a display limit
+ */
+const EVIDENCE_CAP = 500
 
 export interface Dist {
   value: string
@@ -3182,6 +3185,20 @@ export class Store {
     const row = this.db
       .prepare("SELECT id, state FROM insights WHERE detector = ? AND signal_key = ?")
       .get(detector, signalKey) as { id: string; state: string } | undefined
+    if (!row || row.state === 'resolved' || row.state === 'dismissed') return
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run('resolved', now, row.id)
+    this.logInsightState(row.id, row.state as InsightState, 'resolved', now)
+  }
+
+  /**
+   * Resolve an insight by its (detector, repo, signalKey) triple — for a detector that
+   * stops emitting a still-open insight, so no stale surfaced row lingers. No-op if absent or already terminal.
+   */
+  resolveInsight(detector: string, repo: string, signalKey: string): void {
+    const row = this.db
+      .prepare('SELECT id, state FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
+      .get(detector, repo, signalKey) as { id: string; state: string } | undefined
     if (!row || row.state === 'resolved' || row.state === 'dismissed') return
     const now = new Date().toISOString()
     this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run('resolved', now, row.id)

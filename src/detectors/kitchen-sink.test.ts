@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { artifactCounts, buildRequest, candidates, judge, kitchenSink, realUserTurns, sizeCutoff, toInsight, unseenCandidates } from './kitchen-sink'
+import { artifactCounts, buildAggregate, buildRequest, candidates, judge, kitchenSink, mergeEvidence, realUserTurns, sizeCutoff, toEvidence, unseenCandidates } from './kitchen-sink'
 import { normalizeDetectorResult } from '../core/detector'
 import type { DetectorContext } from '../core/detector'
 import { emptyUsage } from '../core/model'
@@ -440,7 +440,7 @@ describe('judge', () => {
   })
 })
 
-describe('toInsight', () => {
+describe('toEvidence', () => {
   const candidate = { sessionId: 's1', repo: 'o/r', turns: 10, features: 2, prs: 0, contentHash: 'h', startedAt: '2026-06-25T00:00:00Z', endedAt: '2026-07-06T00:00:00Z' }
   const blocks3: Block[] = [
     { idx: 0, startSeq: 0, endSeq: 3, boundaryKind: 'user_turn' },
@@ -448,43 +448,78 @@ describe('toInsight', () => {
     { idx: 2, startSeq: 8, endSeq: 9, boundaryKind: 'session_end' },
   ]
 
-  it('points evidence at the split block’s start_seq', () => {
-    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'auth then export.' }, blocks3)
-    expect(insight.signalKey).toBe('kitchen-sink:s1')
-    expect(insight.repo).toBe('o/r')
+  it('points the occurrence at the split block’s start_seq, with the reason as the note', () => {
+    const ev = toEvidence(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'auth then export.' }, blocks3)
     // block 1 opens at seq 4 in blocks3.
-    expect(insight.evidence).toEqual([{ sessionId: 's1', turnIdx: 4 }])
-    expect(insight.fix.type).toBe('behavioral-nudge')
-    expect(insight.description).toContain('auth then export.')
-  })
-
-  it('raises severity to high when 3+ distinct jobs', () => {
-    const wide = { ...candidate, features: 3 }
-    expect(toInsight(wide, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3).severity).toBe('high')
-    expect(toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3).severity).toBe('medium')
+    expect(ev).toEqual({ sessionId: 's1', turnIdx: 4, note: 'Block 1 began a separate objective — auth then export.' })
   })
 
   it('omits turnIdx when the split index is out of the partition', () => {
-    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 9, reason: 'x' }, blocks3)
-    expect(insight.evidence).toEqual([{ sessionId: 's1' }])
+    const ev = toEvidence(candidate, { isKitchenSink: true, splitBlockIdx: 9, reason: 'x' }, blocks3)
+    expect(ev.turnIdx).toBeUndefined()
+    expect(ev.sessionId).toBe('s1')
   })
 
-  it('does not leave a double space when the reason is empty', () => {
-    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: '' }, blocks3)
-    expect(insight.description).not.toContain('  ')
-    expect(insight.description).toContain('one sitting. Carrying')
+  it('leaves the note clause off when the reason is empty', () => {
+    const ev = toEvidence(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: '' }, blocks3)
+    expect(ev.note).toBe('Block 1 began a separate objective')
+  })
+})
+
+describe('buildAggregate', () => {
+  const ev = (id: string): { sessionId: string; turnIdx?: number; note?: string } => ({ sessionId: id, turnIdx: 4, note: 'x' })
+
+  it('returns null when nothing is flagged', () => {
+    expect(buildAggregate([])).toBeNull()
   })
 
-  it('sources first/last-seen from the session run times, not the analyze run', () => {
-    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3)
+  it('builds one cross-repo insight whose count is the flagged-session tally', () => {
+    const insight = buildAggregate([ev('a'), ev('b')], '2026-06-25T00:00:00Z', '2026-07-06T00:00:00Z')!
+    expect(insight.signalKey).toBe('kitchen-sink')
+    expect(insight.repo).toBe('*')
+    expect(insight.count).toBe(2)
+    expect(insight.title).toBe('2 sessions mixed unrelated work')
+    expect(insight.evidence).toHaveLength(2)
     expect(insight.firstSeenAt).toBe('2026-06-25T00:00:00Z')
     expect(insight.lastSeenAt).toBe('2026-07-06T00:00:00Z')
+    expect(insight.fix.type).toBe('behavioral-nudge')
   })
 
-  it('falls back to the session start when it has no end time', () => {
-    const noEnd = { ...candidate, endedAt: null }
-    const insight = toInsight(noEnd, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3)
-    expect(insight.lastSeenAt).toBe('2026-06-25T00:00:00Z')
+  it('uses the singular title for a single flagged session', () => {
+    expect(buildAggregate([ev('a')])!.title).toBe('1 session mixed unrelated work')
+  })
+
+  it('raises severity to high at 3+ flagged sessions', () => {
+    expect(buildAggregate([ev('a'), ev('b')])!.severity).toBe('medium')
+    expect(buildAggregate([ev('a'), ev('b'), ev('c')])!.severity).toBe('high')
+  })
+})
+
+describe('mergeEvidence', () => {
+  const prior = [
+    { sessionId: 'a', turnIdx: 2, note: 'was-a' },
+    { sessionId: 'b', turnIdx: 3, note: 'was-b' },
+  ]
+
+  it('carries prior sessions forward and adds new positives', () => {
+    const merged = mergeEvidence(prior, [{ sessionId: 'c', turnIdx: 5, note: 'new-c' }], new Set())
+    expect(merged.map((e) => e.sessionId).sort()).toEqual(['a', 'b', 'c'])
+  })
+
+  it('a re-judged positive overwrites its prior occurrence in place', () => {
+    const merged = mergeEvidence(prior, [{ sessionId: 'a', turnIdx: 9, note: 'now-a' }], new Set())
+    expect(merged).toHaveLength(2)
+    expect(merged.find((e) => e.sessionId === 'a')).toEqual({ sessionId: 'a', turnIdx: 9, note: 'now-a' })
+  })
+
+  it('a negative verdict removes its session from the set', () => {
+    const merged = mergeEvidence(prior, [], new Set(['b']))
+    expect(merged.map((e) => e.sessionId)).toEqual(['a'])
+  })
+
+  it('normalizes prior null turn/note back to absent fields', () => {
+    const merged = mergeEvidence([{ sessionId: 'a', turnIdx: null, note: null }], [], new Set())
+    expect(merged).toEqual([{ sessionId: 'a' }])
   })
 })
 
@@ -495,23 +530,62 @@ describe('kitchenSink.run (end to end)', () => {
     expect(await kitchenSink.run(ctxWith(store, null))).toEqual({ insights: [] })
   })
 
-  it('flags a confirmed candidate and persists a retrievable insight', async () => {
+  it('flags a confirmed candidate as one aggregate insight and persists it retrievably', async () => {
     const { store } = setup()
     ingestCandidate(store, 'kc:1')
     const llm = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'auth fix then unrelated CSV export.' })
 
     const result = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
     expect(result.insights).toHaveLength(1)
-    expect(result.insights[0]!.signalKey).toBe('kitchen-sink:kc:1')
+    expect(result.insights[0]!.signalKey).toBe('kitchen-sink')
+    expect(result.insights[0]!.repo).toBe('*')
+    expect(result.insights[0]!.count).toBe(1)
     // Reports the judged session as seen and its LLM spend, but does not mark seen itself.
     expect(result.seen).toEqual([{ sessionId: 'kc:1', contentHash: 'kc:1-hash' }])
     expect(result.cost?.inTokens).toBe(100)
 
     // Persist through the real store path and read it back.
-    store.persistInsights('kitchen-sink', 1, result.insights)
-    const rows = store.insights()
-    expect(rows.map((r) => r.signalKey)).toContain('kitchen-sink:kc:1')
-    expect(rows.find((r) => r.signalKey === 'kitchen-sink:kc:1')?.evidence[0]?.turnIdx).toBe(2)
+    store.persistInsights('kitchen-sink', kitchenSink.version, result.insights)
+    const row = store.insights().find((r) => r.signalKey === 'kitchen-sink')
+    expect(row).toBeDefined()
+    // Block 1 opens at seq 2 in the ingested session — the evidence points there.
+    expect(row!.evidence[0]?.turnIdx).toBe(2)
+  })
+
+  it('accumulates flagged sessions across runs by merging into stored evidence', async () => {
+    const { store } = setup()
+    ingestCandidate(store, 'kc:1')
+    const llm = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'auth then export.' })
+
+    // Run 1: judge kc:1, persist the aggregate, mark it seen (as the runner would).
+    const r1 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
+    store.persistInsights('kitchen-sink', kitchenSink.version, r1.insights)
+    store.markDetectorSessionSeen('kitchen-sink', r1.seen ?? [])
+
+    // Run 2: kc:2 is new; kc:1 is already seen, so only kc:2 is judged — yet the
+    // aggregate must still carry BOTH (read-back merge), not shrink to just kc:2.
+    ingestCandidate(store, 'kc:2')
+    const r2 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
+    expect(r2.seen).toEqual([{ sessionId: 'kc:2', contentHash: 'kc:2-hash' }])
+    expect(r2.insights[0]!.count).toBe(2)
+    expect(r2.insights[0]!.evidence.map((e) => e.sessionId).sort()).toEqual(['kc:1', 'kc:2'])
+  })
+
+  it('resolves the aggregate when a re-judged session clears the last flag', async () => {
+    const { store } = setup()
+    ingestCandidate(store, 'kc:1')
+    // Run 1: flag it.
+    const pos = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'x' })
+    const r1 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, pos)))
+    store.persistInsights('kitchen-sink', kitchenSink.version, r1.insights)
+    // kc:1's content changes → unseen again; re-judged negative this time.
+    store['db'].prepare('UPDATE sessions SET content_hash = ? WHERE id = ?').run('kc:1-hash-v2', 'kc:1')
+    const neg = fakeLlmClient({ isKitchenSink: false, splitBlockIdx: -1, reason: 'coherent.' })
+    const r2 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, neg)))
+    store.persistInsights('kitchen-sink', kitchenSink.version, r2.insights)
+    expect(r2.insights).toEqual([]) // nothing flagged → no aggregate emitted
+    // The prior aggregate is retired, not left surfaced.
+    expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')?.state).toBe('resolved')
   })
 
   it('reports a judged session as seen even on a negative verdict', async () => {

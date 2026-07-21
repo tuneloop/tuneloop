@@ -122,7 +122,7 @@ export interface InsightInput {
   title: string
   /** Longer explanation with evidence context — the "why should you care." */
   description: string
-  /** Session (and optionally turn) pointers for drill-in links. Capped at 10 in the store. */
+  /** Session (and optionally turn) pointers for drill-in links. Retained up to the store's EVIDENCE_CAP. */
   evidence: EvidenceRef[]
   /** Total occurrences — the real scale, independent of the evidence cap. */
   count: number
