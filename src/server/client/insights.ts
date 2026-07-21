@@ -61,9 +61,9 @@ function detailHtml(r, occ) {
         fixBody(r.fix) + '</div>'
     : '';
 
-  // Occurrences: one row per stored event, each opening the transcript at the exact
-  // message. (We don't label a number: the stored seq is the message index, not the
-  // transcript's user-turn count)
+  // Evidence: one row per stored occurrence pointer, each opening the transcript at
+  // the exact message. This is a capped sample of moments to drill into (one session
+  // may appear more than once), NOT the recurrence count — that's r.count in the header.
   var occRows = (occ || []).map(function (e, j) {
     var title = e.sessionTitle ? esc(e.sessionTitle) : esc(shortSession(e.sessionId));
     var note = e.note ? '<div class="ins-occ-note">' + esc(e.note) + '</div>' : '';
@@ -74,7 +74,7 @@ function detailHtml(r, occ) {
         (e.turnIdx != null ? '<span class="ins-occ-turn">open ↗</span>' : '') +
       '</div></button>';
   }).join('');
-  var occSection = '<div class="ins-occ-list"><div class="ins-section-label">Occurrences (' +
+  var occSection = '<div class="ins-occ-list"><div class="ins-section-label">Evidence (' +
     ((occ && occ.length) || 0) + ')</div>' +
     (occRows || '<div class="empty">No stored occurrences.</div>') + '</div>';
 
@@ -227,7 +227,7 @@ function arrow(key) {
 
 function row(r, i) {
   var span = sessionSpan(r);
-  var rec = num(r.count) + (r.count === 1 ? ' occ' : ' occ') + (span > 1 ? ' · ' + num(span) + ' sessions' : '');
+  var rec = num(r.count) + ' occ' + (span >= 1 ? ' · ' + num(span) + (span === 1 ? ' session' : ' sessions') : '');
   var repoTag = isGlobal(r.repo) ? '' : '<span class="tag ins-row-repo" title="' + esc(r.repo) + '">' + esc(r.repo) + '</span>';
   // NOTE: our OWN row class only — NOT the sessions tab's `srow`. sessions.ts binds
   // `document.querySelectorAll('.srow')` GLOBALLY to its openDetail(), which would

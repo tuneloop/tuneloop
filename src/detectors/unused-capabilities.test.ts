@@ -461,6 +461,20 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
   })
 
+  it('stamps last-seen from the most recent examined session, not the analyze run', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, 'sentry')
+    seedRepo(db, 'web', 12)
+    // Push one session's start later than the others (seedRepo uses now − 1 day) but
+    // still in window; it becomes MAX(started_at) → the card's last-seen. (No
+    // first-seen for a structural finding.)
+    const latest = new Date(Date.now() - DAY_MS / 2).toISOString()
+    db.prepare('UPDATE sessions SET started_at = ? WHERE id = ?').run(latest, 'web-0')
+    const card = run(store)[0]!
+    expect(card.lastSeenAt).toBe(latest)
+    expect(card.firstSeenAt).toBeUndefined()
+  })
+
   it('stays silent when the global server is unused but sessions are too few', () => {
     const { db, store } = setupDb()
     installGlobalMcp(store, 'sentry')

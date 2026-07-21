@@ -441,7 +441,7 @@ describe('judge', () => {
 })
 
 describe('toInsight', () => {
-  const candidate = { sessionId: 's1', repo: 'o/r', turns: 10, features: 2, prs: 0, contentHash: 'h' }
+  const candidate = { sessionId: 's1', repo: 'o/r', turns: 10, features: 2, prs: 0, contentHash: 'h', startedAt: '2026-06-25T00:00:00Z', endedAt: '2026-07-06T00:00:00Z' }
   const blocks3: Block[] = [
     { idx: 0, startSeq: 0, endSeq: 3, boundaryKind: 'user_turn' },
     { idx: 1, startSeq: 4, endSeq: 7, boundaryKind: 'user_turn' },
@@ -473,6 +473,18 @@ describe('toInsight', () => {
     const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: '' }, blocks3)
     expect(insight.description).not.toContain('  ')
     expect(insight.description).toContain('one sitting. Carrying')
+  })
+
+  it('sources first/last-seen from the session run times, not the analyze run', () => {
+    const insight = toInsight(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3)
+    expect(insight.firstSeenAt).toBe('2026-06-25T00:00:00Z')
+    expect(insight.lastSeenAt).toBe('2026-07-06T00:00:00Z')
+  })
+
+  it('falls back to the session start when it has no end time', () => {
+    const noEnd = { ...candidate, endedAt: null }
+    const insight = toInsight(noEnd, { isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, blocks3)
+    expect(insight.lastSeenAt).toBe('2026-06-25T00:00:00Z')
   })
 })
 

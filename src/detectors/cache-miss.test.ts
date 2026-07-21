@@ -95,6 +95,29 @@ describe('cache-miss detector', () => {
     expect(ins.description).toContain('10 of the 10 misses came more than 5 minutes after')
   })
 
+  it('sources first/last-seen from the miss turns, not the analyze run', () => {
+    const { db, ctx } = setup()
+    // Two misses per session: idx 1 (10 min) and idx 3 (30 min). idx 2/4 read back → hits.
+    for (let i = 0; i < 10; i++)
+      seedSession(db, `s${i}`, [
+        { atMs: 0, creates: 200_000 },
+        { atMs: 10 * MIN, creates: 220_000 }, // miss
+        { atMs: 11 * MIN, reads: 220_000, creates: 5_000 }, // hit
+        { atMs: 30 * MIN, creates: 220_000 }, // miss
+        { atMs: 31 * MIN, reads: 220_000, creates: 5_000 }, // hit
+      ])
+    const ins = (cacheMiss.run(ctx) as InsightInput[])[0]!
+    // First/last miss = the earliest/latest miss turn's ts, so they're a full session
+    // in the past and exactly 20 min apart (the idx1→idx3 gap) — never the analyze run.
+    const first = Date.parse(ins.firstSeenAt!)
+    const last = Date.parse(ins.lastSeenAt!)
+    // ~20 min apart (idx1→idx3 gap); a few ms slack since each session's start is
+    // stamped at its own Date.now(). The point: both are real miss-turn times, not now.
+    expect(last - first).toBeGreaterThanOrEqual(20 * MIN)
+    expect(last - first).toBeLessThan(20 * MIN + 1000)
+    expect(Date.now() - last).toBeGreaterThan(DAY_MS / 2) // clearly a past occurrence, not now
+  })
+
   it('reports mid-flow misses honestly in the timing split (no cause claimed)', () => {
     const { db, ctx } = setup()
     // Cold every turn despite quick succession — churn-shaped, not idle-shaped.

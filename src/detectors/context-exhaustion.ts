@@ -35,6 +35,7 @@ const SEVERITY_SHARE = { high: 0.3, medium: 0.1 }
 interface FactRow {
   sessionId: string
   repo: string
+  ts: string | null
   input: number
   output: number
   creates: number
@@ -52,6 +53,8 @@ interface RepoAgg {
   sessions: number // sessions in the window that ran (contributed turns)
   compactedSessions: SessionResult[]
   totalCompactions: number
+  firstCompactionTs: string | null // earliest/latest compaction time — the real occurrence window
+  lastCompactionTs: string | null
 }
 
 export const contextExhaustion: Detector = {
@@ -65,6 +68,7 @@ export const contextExhaustion: Detector = {
     const rows = ctx.store.queryAll(
       `SELECT u.session_id AS sessionId,
               COALESCE(NULLIF(s.repo, ''), NULLIF(s.cwd, ''), '_unknown') AS repo,
+              u.ts,
               COALESCE(u.tok_input, 0) AS input,
               COALESCE(u.tok_output, 0) AS output,
               -- Cache-write total = both TTL buckets (disjoint; see the 5m/1h split).
@@ -90,7 +94,7 @@ export const contextExhaustion: Detector = {
       const repo = facts[0]!.repo
       let agg = repos.get(repo)
       if (!agg) {
-        agg = { sessions: 0, compactedSessions: [], totalCompactions: 0 }
+        agg = { sessions: 0, compactedSessions: [], totalCompactions: 0, firstCompactionTs: null, lastCompactionTs: null }
         repos.set(repo, agg)
       }
 
@@ -98,13 +102,22 @@ export const contextExhaustion: Detector = {
       let peak = 0
       let prevOcc = 0
       let contributed = false
+      let firstTs: string | null = null
+      let lastTs: string | null = null
       for (const f of facts) {
         // Skip all-zero rows (content flushes, ingest-deduped repeat lines) — they'd
         // read as occupancy 0 and fake a massive drop.
         if (f.input + f.output + f.creates + f.reads === 0) continue
         contributed = true
         const occ = f.input + f.reads + f.creates
-        if (prevOcc >= PEAK_FLOOR && occ <= prevOcc * DROP_SHARE) compactions++
+        if (prevOcc >= PEAK_FLOOR && occ <= prevOcc * DROP_SHARE) {
+          compactions++
+          // The compaction turn's real time (rows arrive in idx order). Skip null ts.
+          if (f.ts) {
+            if (firstTs === null) firstTs = f.ts
+            lastTs = f.ts
+          }
+        }
         if (occ > peak) peak = occ
         prevOcc = occ
       }
@@ -114,6 +127,9 @@ export const contextExhaustion: Detector = {
       if (compactions > 0) {
         agg.compactedSessions.push({ sessionId: facts[0]!.sessionId, repo, compactions, peak })
         agg.totalCompactions += compactions
+        // Widen the repo's compaction window (sessions arrive in id order, not time order).
+        if (firstTs && (agg.firstCompactionTs === null || firstTs < agg.firstCompactionTs)) agg.firstCompactionTs = firstTs
+        if (lastTs && (agg.lastCompactionTs === null || lastTs > agg.lastCompactionTs)) agg.lastCompactionTs = lastTs
       }
     }
 
@@ -144,6 +160,8 @@ export const contextExhaustion: Detector = {
           `time${top.compactions === 1 ? '' : 's'}, peaking near ${Math.round(top.peak / 1000)}K tokens of context.`,
         evidence: worst.slice(0, 10).map((s) => ({ sessionId: s.sessionId })),
         count: nSessions,
+        firstSeenAt: a.firstCompactionTs ?? undefined,
+        lastSeenAt: a.lastCompactionTs ?? undefined,
         fix: {
           type: 'behavioral-nudge',
           label: 'Avoid context exhaustion',

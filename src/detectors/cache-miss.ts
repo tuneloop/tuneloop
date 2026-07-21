@@ -49,6 +49,8 @@ interface RepoAgg {
   breakMisses: number // misses that followed a >5-min break (descriptive, not causal)
   wasteUsd: number
   sessionWaste: Map<string, number>
+  firstMissTs: string | null // earliest/latest miss-turn timestamp — the real occurrence window
+  lastMissTs: string | null
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}%`
@@ -91,6 +93,8 @@ export const cacheMiss: Detector = {
       let misses = 0
       let breakMisses = 0
       let wasteUsd = 0
+      let firstMissTs: string | null = null
+      let lastMissTs: string | null = null
       let prevCtx = 0 // what a warm turn would read back
       let prevTs: number | null = null
       for (const f of facts) {
@@ -109,6 +113,12 @@ export const cacheMiss: Detector = {
           classified++
           if (f.reads < prevCtx * HIT_READ_SHARE) {
             misses++
+            // Real occurrence time for this miss (rows arrive in idx order, so the
+            // first/last we see are the earliest/latest miss). Skip rows with no ts.
+            if (f.ts) {
+              if (firstMissTs === null) firstMissTs = f.ts
+              lastMissTs = f.ts
+            }
             if (prevTs !== null && !Number.isNaN(ts) && ts - prevTs > LONG_BREAK_MS) breakMisses++
             // Premium actually paid: un-read prior context re-bought at uncached
             // rates, capped at what this turn really paid. Unpriced model → miss counts, $0.
@@ -133,7 +143,7 @@ export const cacheMiss: Detector = {
       const repo = facts[0]!.repo
       let agg = repos.get(repo)
       if (!agg) {
-        agg = { sessions: 0, classified: 0, misses: 0, breakMisses: 0, wasteUsd: 0, sessionWaste: new Map() }
+        agg = { sessions: 0, classified: 0, misses: 0, breakMisses: 0, wasteUsd: 0, sessionWaste: new Map(), firstMissTs: null, lastMissTs: null }
         repos.set(repo, agg)
       }
       agg.sessions++
@@ -142,6 +152,10 @@ export const cacheMiss: Detector = {
       agg.breakMisses += breakMisses
       agg.wasteUsd += wasteUsd
       if (wasteUsd > 0) agg.sessionWaste.set(facts[0]!.sessionId, wasteUsd)
+      // Widen the repo's miss window (sessions arrive in id order, not time order,
+      // so compare rather than assign).
+      if (firstMissTs && (agg.firstMissTs === null || firstMissTs < agg.firstMissTs)) agg.firstMissTs = firstMissTs
+      if (lastMissTs && (agg.lastMissTs === null || lastMissTs > agg.lastMissTs)) agg.lastMissTs = lastMissTs
     }
 
     const insights: InsightInput[] = []
@@ -166,6 +180,8 @@ export const cacheMiss: Detector = {
           `${a.misses} misses came more than 5 minutes after the previous message.`,
         evidence,
         count: a.misses,
+        firstSeenAt: a.firstMissTs ?? undefined,
+        lastSeenAt: a.lastMissTs ?? undefined,
         fix: {
           type: 'behavioral-nudge',
           label: 'Reduce cache misses',

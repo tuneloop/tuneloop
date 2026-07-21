@@ -465,6 +465,21 @@ function loadInstalled(store: Store): { installed: InstalledCap[]; ambiguous: Se
   return { installed, ambiguous }
 }
 
+/**
+ * The most recent session start time in the window — the freshest evidence that the
+ * config was still in this state. Used as the cards' `lastSeenAt` ("as of when we last
+ * looked"), since a structural absence-of-use finding has no per-occurrence moment.
+ * Null when the window has no sessions.
+ */
+function latestSessionStart(store: Store, sinceIso: string): string | null {
+  const row = store.queryOne(
+    `SELECT MAX(started_at) AS latest FROM sessions WHERE source = ? AND started_at >= ?`,
+    SOURCE,
+    sinceIso,
+  ) as { latest: string | null } | undefined
+  return row?.latest ?? null
+}
+
 /** Distinct-session count per repo in the window (null-repo sessions excluded — they name no repo). */
 function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> {
   const rows = store.queryAll(
@@ -510,7 +525,12 @@ export const unusedCapabilities: Detector = {
     const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
     const sessionCounts = loadSessionCounts(ctx.store, sinceIso)
     const classified = classify(installed, invoked, sessionCounts)
-    return buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
+    const cards = buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
+    // Stamp last-seen as of the most recent examined session, so the card doesn't
+    // default to the analyze-run time. A structural finding has no first-seen moment.
+    const lastSeenAt = latestSessionStart(ctx.store, sinceIso) ?? undefined
+    for (const card of cards) card.lastSeenAt = lastSeenAt
+    return cards
   },
 }
 

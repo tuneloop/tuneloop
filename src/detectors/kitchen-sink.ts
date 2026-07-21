@@ -100,6 +100,9 @@ export interface Candidate {
   prs: number
   /** Session content hash at pre-gate time — recorded once the LLM has judged it. */
   contentHash: string
+  /** When the session ran — the insight's real first/last-seen (else the run time). */
+  startedAt: string | null
+  endedAt: string | null
 }
 
 /**
@@ -117,11 +120,13 @@ export function candidates(store: Store): Candidate[] {
   const repos = store.queryAll(
     `SELECT id AS sessionId,
             COALESCE(NULLIF(repo, ''), NULLIF(cwd, ''), '_unknown') AS repo,
-            content_hash AS contentHash
+            content_hash AS contentHash,
+            started_at AS startedAt,
+            ended_at AS endedAt
      FROM sessions
      WHERE started_at >= ? AND content_hash IS NOT NULL`,
     since,
-  ) as Array<{ sessionId: string; repo: string; contentHash: string }>
+  ) as Array<{ sessionId: string; repo: string; contentHash: string; startedAt: string | null; endedAt: string | null }>
 
   const turns = realUserTurns(store, since)
   const arts = artifactCounts(store, since)
@@ -143,7 +148,7 @@ export function candidates(store: Store): Candidate[] {
   }
 
   const out: Candidate[] = []
-  for (const { sessionId, repo, contentHash } of repos) {
+  for (const { sessionId, repo, contentHash, startedAt, endedAt } of repos) {
     const t = turns.get(sessionId)
     if (t == null) continue
     if (t < MIN_TURNS) continue // absolute floor: too small for splitting to matter
@@ -151,7 +156,7 @@ export function candidates(store: Store): Candidate[] {
     if (repoCutoff != null && t < repoCutoff) continue // large for its repo, when measurable
     const a = arts.get(sessionId) ?? { features: 0, prs: 0 }
     if (a.features < MIN_FEATURES && a.prs < MIN_PRS) continue
-    out.push({ sessionId, repo, turns: t, features: a.features, prs: a.prs, contentHash })
+    out.push({ sessionId, repo, turns: t, features: a.features, prs: a.prs, contentHash, startedAt, endedAt })
   }
   return out
 }
@@ -293,6 +298,10 @@ export function toInsight(c: Candidate, verdict: Verdict, blocks: Block[]): Insi
       `keeps the agent focused and makes each piece of work easy to find and pick back up later.`,
     evidence: [{ sessionId: c.sessionId, ...(startSeq != null ? { turnIdx: startSeq } : {}) }],
     count: jobs,
+    // One session, so its span IS the occurrence window: first-seen = session start,
+    // last-seen = session end (fall back to start when the session has no end time).
+    firstSeenAt: c.startedAt ?? undefined,
+    lastSeenAt: c.endedAt ?? c.startedAt ?? undefined,
     fix: {
       type: 'behavioral-nudge',
       label: 'Split unrelated work',
