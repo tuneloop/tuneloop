@@ -340,7 +340,7 @@ describe('buildCards', () => {
     expect(buildCards([], samples)).toEqual([])
   })
 
-  it('routes globals to one repo:* card and projects to per-repo cards', () => {
+  it('folds globals and every project repo into one cross-repo card', () => {
     const classified = [
       remove(gcap('mcp', 'sentry')),
       scope(gcap('skill', 'frontend-design'), ['web']),
@@ -348,10 +348,15 @@ describe('buildCards', () => {
       remove(pcap('skill', 'lint', 'api')),
     ]
     const cards = buildCards(classified, samples)
-    const repos = cards.map((c) => c.repo).sort()
-    expect(repos).toEqual(['*', 'api', 'web'])
-    expect(cards.every((c) => c.signalKey === 'unused-caps')).toBe(true)
-    expect(cards.every((c) => c.fix.type === 'config-snippet')).toBe(true)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.repo).toBe('*')
+    expect(cards[0]!.signalKey).toBe('unused-caps')
+    expect(cards[0]!.fix.type).toBe('config-snippet')
+    expect(cards[0]!.count).toBe(4) // total flagged items across all scopes
+    // Fix carries the global section plus a per-repo removal section for each project.
+    expect(cards[0]!.fix.content).toContain('Remove from your global config:')
+    expect(cards[0]!.fix.content).toContain("Remove from api's config:")
+    expect(cards[0]!.fix.content).toContain("Remove from web's config:")
   })
 
   it('global snippet lists removals and scoping moves with target repos', () => {
@@ -366,10 +371,11 @@ describe('buildCards', () => {
     expect(global.fix.content).toContain('- skill: frontend-design → move to web, docs')
   })
 
-  it('project card names the repo and lists its capabilities', () => {
+  it('names the project repo and lists its capabilities in the fix', () => {
     const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], samples)
-    const card = cards.find((c) => c.repo === 'web')!
-    expect(card.title).toContain('web')
+    const card = cards[0]!
+    expect(card.repo).toBe('*')
+    expect(card.description).toContain('web')
     expect(card.fix.content).toContain("Remove from web's config:")
     expect(card.fix.content).toContain('- MCP server: pg')
   })
@@ -510,13 +516,14 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(run(store)).toEqual([])
   })
 
-  it('routes a project-scoped unused server to its own repo card', () => {
+  it('surfaces a project-scoped unused server in the aggregate, noting its repo', () => {
     const { db, store } = setupDb()
     installProjectMcp(store, '/Users/x/git/web', 'pg')
     seedRepo(db, 'web', 12) // pg never used in web
     const cards = run(store)
     expect(cards).toHaveLength(1)
-    expect(cards[0]).toMatchObject({ repo: 'web', count: 1 })
+    expect(cards[0]).toMatchObject({ repo: '*', count: 1 })
+    expect(cards[0]!.fix.content).toContain("Remove from web's config:")
     expect(cards[0]!.fix.content).toContain('- MCP server: pg')
   })
 

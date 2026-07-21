@@ -740,7 +740,7 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .ins-fix-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .ins-fix-prose { font-size: 13px; }
 .ins-desc pre.md-code, .ins-fix pre.md-code { margin: 6px 0; padding: 8px 10px; background: var(--track); border-radius: 6px; overflow-x: auto; }
-.ins-fix pre.md-code { margin: 0; background: var(--paper); }
+.ins-fix pre.md-code { margin: 0; background: var(--paper); max-height: 420px; overflow-y: auto; }
 .ins-desc pre.md-code code, .ins-fix pre.md-code code { background: none; padding: 0; font-size: 11.5px; line-height: 1.45; word-break: normal; }
 
 /* Occurrences: one clickable row per stored event → its transcript turn. */

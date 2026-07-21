@@ -85,13 +85,15 @@ describe('context-exhaustion detector', () => {
     const ins = insights[0]!
     expect(ins).toMatchObject({
       signalKey: 'context-exhaustion',
-      repo: 'o/r',
+      repo: '*', // one cross-repo aggregate insight
       severity: 'high', // 10/10 sessions compacted → share 1.0 ≥ 0.3
       count: 10,
       fix: { type: 'behavioral-nudge' },
     })
     expect(ins.evidence).toHaveLength(10)
-    expect(ins.description).toContain('10 of 10 sessions')
+    // Single qualifying repo → named directly; each evidence row notes its repo + compactions.
+    expect(ins.evidence[0]!.note).toContain('o/r · ')
+    expect(ins.description).toContain('10 of 10 sessions in o/r')
     expect(ins.description).toContain('166K') // worst-session peak
   })
 
@@ -220,13 +222,18 @@ describe('context-exhaustion detector', () => {
     expect(insights[0]!.count).toBe(10)
   })
 
-  it('scopes per repo: two exhausted repos → two insights, a calm one stays out', () => {
+  it('aggregates qualifying repos into one insight, excluding a calm repo', () => {
     const { db, ctx } = setup()
     for (let i = 0; i < 10; i++) seedSession(db, `a${i}`, compactedOnce, { repo: 'o/a' })
     for (let i = 0; i < 10; i++) seedSession(db, `b${i}`, compactedOnce, { repo: 'o/b' })
     for (let i = 0; i < 10; i++) seedSession(db, `c${i}`, smallSession, { repo: 'o/calm' })
     const insights = contextExhaustion.run(ctx) as InsightInput[]
-    expect(insights.map((i) => i.repo).sort()).toEqual(['o/a', 'o/b'])
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.repo).toBe('*')
+    expect(insights[0]!.count).toBe(20) // both exhausted repos fold in; the calm one does not
+    expect(insights[0]!.description).toContain('2 repos')
+    const notedRepos = new Set(insights[0]!.evidence.map((e) => e.note!.split(' · ')[0]))
+    expect([...notedRepos].sort()).toEqual(['o/a', 'o/b'])
   })
 
   it('ranks evidence by compaction count then peak', () => {

@@ -133,50 +133,67 @@ export const contextExhaustion: Detector = {
       }
     }
 
-    const insights: InsightInput[] = []
-    for (const [repo, a] of repos) {
-      if (a.sessions < MIN_SESSIONS) continue
-      if (a.compactedSessions.length < MIN_COMPACTED_SESSIONS) continue
+    // Qualifying repos (each gated on its own corpus + a compacted session), then fold
+    // into ONE cross-repo insight. Per-repo detail survives as each evidence session's note.
+    const qualifying = [...repos.entries()].filter(
+      ([, a]) => a.sessions >= MIN_SESSIONS && a.compactedSessions.length >= MIN_COMPACTED_SESSIONS,
+    )
+    if (qualifying.length === 0) return []
 
-      const share = a.compactedSessions.length / a.sessions
-      // Worst offenders first — most compactions, then highest peak — for evidence + the receipt.
-      const worst = [...a.compactedSessions].sort(
-        (x, y) => y.compactions - x.compactions || y.peak - x.peak,
-      )
-      const top = worst[0]!
-      const nSessions = a.compactedSessions.length
-
-      insights.push({
-        signalKey: 'context-exhaustion',
-        repo,
-        severity: share >= SEVERITY_SHARE.high ? 'high' : share >= SEVERITY_SHARE.medium ? 'medium' : 'low',
-        title: `${nSessions} session${nSessions === 1 ? '' : 's'} hit the context limit and compacted`,
-        description:
-          `In the last ${WINDOW_DAYS} days, ${nSessions} of ${a.sessions} sessions in this repo ran the ` +
-          `context window up to the limit and were auto-compacted (${a.totalCompactions} compaction` +
-          `${a.totalCompactions === 1 ? '' : 's'} total). Compaction summarizes and discards earlier ` +
-          `context — the agent loses the thread of work it did before the reset, which tends to show up ` +
-          `as repeated exploration or dropped requirements. The worst session compacted ${top.compactions} ` +
-          `time${top.compactions === 1 ? '' : 's'}, peaking near ${Math.round(top.peak / 1000)}K tokens of context.`,
-        evidence: worst.slice(0, 10).map((s) => ({ sessionId: s.sessionId })),
-        count: nSessions,
-        firstSeenAt: a.firstCompactionTs ?? undefined,
-        lastSeenAt: a.lastCompactionTs ?? undefined,
-        fix: {
-          type: 'behavioral-nudge',
-          label: 'Avoid context exhaustion',
-          content:
-            `A session that fills the context window gets compacted: the harness summarizes the ` +
-            `conversation to fit, and detail from earlier turns is lost. To keep sessions under the limit:\n` +
-            `• Split large tasks into scoped sessions — finish and start fresh at natural breakpoints ` +
-            `instead of carrying one session across many unrelated steps.\n` +
-            `• Push investigation into subagents (the Task tool): exploring a codebase, reading many ` +
-            `files, or running searches in a subagent keeps that bulk out of the main thread's context.\n` +
-            `• Watch for the tell — a session that compacts more than once is doing too much in one place.`,
-        },
-      })
+    let sessions = 0
+    let compactedCount = 0
+    let totalCompactions = 0
+    let firstCompactionTs: string | null = null
+    let lastCompactionTs: string | null = null
+    const compacted: SessionResult[] = []
+    for (const [, a] of qualifying) {
+      sessions += a.sessions
+      compactedCount += a.compactedSessions.length
+      totalCompactions += a.totalCompactions
+      if (a.firstCompactionTs && (firstCompactionTs === null || a.firstCompactionTs < firstCompactionTs)) firstCompactionTs = a.firstCompactionTs
+      if (a.lastCompactionTs && (lastCompactionTs === null || a.lastCompactionTs > lastCompactionTs)) lastCompactionTs = a.lastCompactionTs
+      compacted.push(...a.compactedSessions)
     }
-    return insights
+
+    const share = compactedCount / sessions
+    // Worst offenders first — most compactions, then highest peak — for evidence + the receipt.
+    const worst = compacted.sort((x, y) => y.compactions - x.compactions || y.peak - x.peak)
+    const top = worst[0]!
+    const repoLabel = qualifying.length === 1 ? qualifying[0]![0] : `${qualifying.length} repos`
+
+    return [{
+      signalKey: 'context-exhaustion',
+      repo: '*',
+      severity: share >= SEVERITY_SHARE.high ? 'high' : share >= SEVERITY_SHARE.medium ? 'medium' : 'low',
+      title: `${compactedCount} session${compactedCount === 1 ? '' : 's'} hit the context limit and compacted`,
+      description:
+        `In the last ${WINDOW_DAYS} days, ${compactedCount} of ${sessions} sessions in ${repoLabel} ran the ` +
+        `context window up to the limit and were auto-compacted (${totalCompactions} compaction` +
+        `${totalCompactions === 1 ? '' : 's'} total). Compaction summarizes and discards earlier ` +
+        `context — the agent loses the thread of work it did before the reset, which tends to show up ` +
+        `as repeated exploration or dropped requirements. The worst session compacted ${top.compactions} ` +
+        `time${top.compactions === 1 ? '' : 's'}, peaking near ${Math.round(top.peak / 1000)}K tokens of context.`,
+      // Each row notes its repo + compaction count — the per-repo detail the single row would lose.
+      evidence: worst.map((s) => ({
+        sessionId: s.sessionId,
+        note: `${s.repo} · ${s.compactions} compaction${s.compactions === 1 ? '' : 's'}, peak ${Math.round(s.peak / 1000)}K`,
+      })),
+      count: compactedCount,
+      firstSeenAt: firstCompactionTs ?? undefined,
+      lastSeenAt: lastCompactionTs ?? undefined,
+      fix: {
+        type: 'behavioral-nudge',
+        label: 'Avoid context exhaustion',
+        content:
+          `A session that fills the context window gets compacted: the harness summarizes the ` +
+          `conversation to fit, and detail from earlier turns is lost. To keep sessions under the limit:\n` +
+          `• Split large tasks into scoped sessions — finish and start fresh at natural breakpoints ` +
+          `instead of carrying one session across many unrelated steps.\n` +
+          `• Push investigation into subagents (the Task tool): exploring a codebase, reading many ` +
+          `files, or running searches in a subagent keeps that bulk out of the main thread's context.\n` +
+          `• Watch for the tell — a session that compacts more than once is doing too much in one place.`,
+      },
+    }]
   },
 }
 

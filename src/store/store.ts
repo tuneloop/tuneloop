@@ -3379,7 +3379,9 @@ export class Store {
       sql += ' AND repo = ?'
       params.push(opts.repo)
     }
-    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC`
+    // Rank most-valuable-first: severity, then recurrence (how often it bit), then
+    // recency
+    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, count DESC, last_seen_at DESC`
 
     const rows = this.db.prepare(sql).all(...params) as Array<{
       id: string

@@ -240,19 +240,19 @@ const SEVERITY_MEDIUM_COUNT = 3
 const MAX_EVIDENCE = 10
 
 /**
- * Group classified verdicts into insight cards — one holistic card per scope.
- *
- *  - Global card (repo '*'): every global capability to remove or scope. It owns the
- *    scoping suggestions because narrowing a global capability edits global config.
- *  - Project card (repo '<name>'): the project capabilities dead in that repo.
+ * Fold every classified verdict into ONE cross-repo insight (repo '*'). The fix lists
+ * the global actions (remove/scope, which edit global config) and, per project repo, the
+ * capabilities dead there — each under its own labelled section, since they edit different
+ * config locations. Count is the total flagged items across all scopes.
  *
  * Framing is qualitative — these load into every session's startup and add to its
  * overhead — with no token or dollar figure (unquantifiable from our data). Severity
- * tracks the count of flagged items, not any cost. `sampleSessionsByRepo` supplies
- * evidence pointers (repo name → session ids); the global card draws its evidence
- * from the repos its scope suggestions point at.
+ * tracks the total flagged count, not any cost. Evidence draws sample sessions from the
+ * repos the suggestions touch (scope targets + the project repos with dead caps).
  */
 export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<string, string[]>): InsightInput[] {
+  if (classified.length === 0) return []
+
   const globals = classified.filter((c) => c.cap.scope === 'global')
   const byRepo = new Map<string, Classified[]>()
   for (const c of classified) {
@@ -262,55 +262,34 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
     byRepo.set(c.cap.repo, list)
   }
 
-  const cards: InsightInput[] = []
-
-  if (globals.length > 0) {
-    // Evidence: sessions from the repos the scope suggestions point at (concrete
-    // "used here" pointers). Removals name no repo, so contribute none.
-    const evidenceRepos = new Set(globals.flatMap((c) => c.scopeToRepos ?? []))
-    const evidence = sampleEvidence(evidenceRepos, sampleSessionsByRepo)
-    cards.push({
-      signalKey: 'unused-caps',
-      repo: '*',
-      severity: globals.length >= SEVERITY_MEDIUM_COUNT ? 'medium' : 'low',
-      title: `${globals.length} global ${plural(globals.length, 'capability', 'capabilities')} inflating startup`,
-      description:
-        `${globalProblem(globals)} Each one loads into every session's startup across all your repos, ` +
-        `adding to its overhead. Apply the fix below to trim your global config.`,
-      evidence,
-      count: globals.length,
-      fix: {
-        type: 'config-snippet',
-        label: 'Trim global config',
-        content: globalFixContent(globals),
-      },
-    })
-  }
-
+  // Fix: the global section (remove/scope) then one "remove from <repo>" section per repo.
+  const sections: string[] = []
+  if (globals.length > 0) sections.push(globalFixContent(globals))
   for (const repo of [...byRepo.keys()].sort()) {
-    const items = byRepo.get(repo)!
-    const names = items.map((c) => c.cap)
-    cards.push({
-      signalKey: 'unused-caps',
-      repo,
-      severity: items.length >= SEVERITY_MEDIUM_COUNT ? 'medium' : 'low',
-      title: `${items.length} unused ${plural(items.length, 'capability', 'capabilities')} in ${repo}`,
-      description:
-        `${items.length} ${plural(items.length, 'capability', 'capabilities')} configured in ${repo} ` +
-        `${plural(items.length, 'was', 'were')} never invoked there in the last ${WINDOW_DAYS} days. ` +
-        `${plural(items.length, 'It loads', 'They load')} into every session's startup in this repo, ` +
-        `adding to its overhead. Apply the fix below to remove them.`,
-      evidence: sampleEvidence(new Set([repo]), sampleSessionsByRepo),
-      count: items.length,
-      fix: {
-        type: 'config-snippet',
-        label: 'Remove unused capabilities',
-        content: `Remove from ${repo}'s config:\n${capList(names)}`,
-      },
-    })
+    sections.push(`Remove from ${repo}'s config:\n${capList(byRepo.get(repo)!.map((c) => c.cap))}`)
   }
 
-  return cards
+  // Evidence: sessions from the repos the suggestions touch — scope targets (concrete
+  // "used here" pointers) plus every project repo with dead caps.
+  const evidenceRepos = new Set([...globals.flatMap((c) => c.scopeToRepos ?? []), ...byRepo.keys()])
+
+  const total = classified.length
+  return [{
+    signalKey: 'unused-caps',
+    repo: '*',
+    severity: total >= SEVERITY_MEDIUM_COUNT ? 'medium' : 'low',
+    title: `${total} unused ${plural(total, 'capability', 'capabilities')} inflating startup`,
+    description:
+      [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ') +
+      ` Each loads into a session's startup and adds to its overhead. Apply the fix below to trim your config.`,
+    evidence: sampleEvidence(evidenceRepos, sampleSessionsByRepo),
+    count: total,
+    fix: {
+      type: 'config-snippet',
+      label: 'Trim unused capabilities',
+      content: sections.join('\n\n'),
+    },
+  }]
 }
 
 /** Up to MAX_EVIDENCE session pointers drawn from the given repos' samples. */
@@ -336,7 +315,7 @@ function capList(caps: InstalledCap[]): string {
   return sorted.map(label).join('\n')
 }
 
-/** A precise statement of the problem, split by verdict — no vague "barely used". */
+/** A precise statement of the global problem, split by verdict — no vague "barely used". Empty when there are no global caps. */
 function globalProblem(globals: Classified[]): string {
   const scoped = globals.filter((c) => c.verdict === 'scope')
   const never = globals.length - scoped.length
@@ -352,9 +331,19 @@ function globalProblem(globals: Classified[]): string {
     const where = oneRepo ? 'just one of your repos' : 'only a few of your repos'
     parts.push(`${few} global ${plural(few, 'capability is', 'capabilities are')} used in ${where}`)
   }
+  if (parts.length === 0) return ''
   // Capitalize the first word of the assembled sentence.
   const s = parts.join(', and ')
   return s.charAt(0).toUpperCase() + s.slice(1) + '.'
+}
+
+/** The project-scoped half of the problem statement: dead caps per repo. Empty when there are none. */
+function projectProblem(byRepo: Map<string, Classified[]>): string {
+  const repos = [...byRepo.keys()].sort()
+  if (repos.length === 0) return ''
+  const total = repos.reduce((n, r) => n + byRepo.get(r)!.length, 0)
+  const where = repos.length === 1 ? repos[0] : `${repos.length} repos`
+  return `${total} project ${plural(total, 'capability is', 'capabilities are')} never invoked in ${where} in the last ${WINDOW_DAYS} days.`
 }
 
 /** The copy-paste snippet body for the global card: removals then scoping moves. */

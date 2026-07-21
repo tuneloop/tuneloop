@@ -92,7 +92,7 @@ var occCache: any = {};     // insightId → occurrences (fetched lazily on deta
 // Client-side view controls (insights are few — filter/sort in the browser).
 // `time` is a preset (7/14/30/90), 'all', or 'custom' (then from/to bound it).
 var flt = { time: 'all', from: '', to: '', q: '', status: '', severity: '', repo: '' };
-var sort = { key: 'default', dir: 'desc' }; // 'default' = API order (severity → recency)
+var sort = { key: 'default', dir: 'desc' }; // 'default' = API order (severity → recurrence → recency)
 
 var SEV_RANK = { high: 0, medium: 1, low: 2 };
 var TIME_PRESETS = [{ d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }];
@@ -214,7 +214,7 @@ function visibleRows() {
   var ms = function (s) { var t = Date.parse(s || ''); return isNaN(t) ? 0 : t; };
   if (sort.key === 'occ') out.sort(function (a, b) { return (a.count - b.count) * dir; });
   else if (sort.key === 'lastSeen') out.sort(function (a, b) { return (ms(a.lastSeenAt) - ms(b.lastSeenAt)) * dir; });
-  // 'default' keeps the API order (severity → last-seen desc) — most urgent first.
+  // 'default' keeps the API order (severity → recurrence → last-seen desc) — most valuable first
   return out;
 }
 
