@@ -70,9 +70,8 @@ export async function runThemeMerge(
         'assertions — an unchecked comment, an unchecked technical claim, an unchecked convention — are one gap: the ' +
         'agent states unverified claims as fact; fuse them). Merge by shared gap, not merely shared topic: two ' +
         'DIFFERENT mistakes in the same area (e.g. producing a bad UI design vs. being unable to verify a UI) are two ' +
-        'gaps, not one. Fuse only clear duplicates: when you are unsure whether two themes are the same gap, leave them ' +
-        'separate — a wrong merge buries two distinct gaps under one vague fix, and a genuine duplicate a later run can ' +
-        'still consolidate once more evidence arrives.',
+        'gaps, not one. Merge by shared gap, not shared topic; when a merge is genuinely doubtful leave ' +
+        'it, but do NOT leave an obvious recurring pattern scattered across near-identical themes.',
       user: buildUser(themes, orphans),
       schema: reconcileSchema,
       toolName: TOOL_NAME,
@@ -219,7 +218,7 @@ function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: 
     'label/description may also REWORD a kept/merged theme so it best captures its members (omit to keep as-is).',
     'project_specific: TRUE only if the gap is inherent to ONE project; FALSE (default) for general gaps.',
     'Leave an event unassigned only when it fits no theme AND no other orphan — a wrong match is worse than an',
-    'unassigned event, but do not leave a clear recurrence stranded.',
+    'unassigned event. Most orphans stay unassigned; that is correct',
   ].join('\n')
 }
 

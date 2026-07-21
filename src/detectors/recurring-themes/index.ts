@@ -195,7 +195,8 @@ async function extractSession(
     const { system, user } = buildPrompt(session, summarized.followups, visibleList)
     let result
     try {
-      result = await llm.completeStructured({ system, user, schema: extractionSchema, toolName: TOOL_NAME, maxTokens: 4096 })
+      // cacheSystem: the rule block repeats identically every call, so cache it.
+      result = await llm.completeStructured({ system, user, schema: extractionSchema, toolName: TOOL_NAME, maxTokens: 4096, cacheSystem: true })
     } catch (err) {
       log.warn(`${DETECTOR}: extraction failed for ${session.id} (window @${start}): ${(err as Error).message}`)
       windowsRun++

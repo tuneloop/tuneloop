@@ -16,32 +16,16 @@ export const TRIGGERS: ThemeTrigger[] = ['unprompted', 'after_tool_error', 'afte
  * Written to generalize across users, not to match any one person's steering style
  */
 export function buildPrompt(session: Session, followups: Followup[], themes: ThemeRef[]): { system: string; user: string } {
-  const system =
+  // Rules go in SYSTEM (a stable prefix the caller caches); only per-session DATA in `user`.
+  const system = [
     'You analyze the follow-up user messages of an AI coding session to find FRICTION: moments where the ' +
-    'human had to nudge, correct, re-steer, re-supply context, or force rework of the agent. You also ' +
-    `maintain a running list of friction themes across sessions. Report via the ${TOOL_NAME} tool.`
-
-  const opener = userTurnEvents(session)[0]?.text ?? '(none)'
-  const themeLines = themes.length
-    ? themes.map((t) => `- [${t.id}] ${t.label}${t.description ? ` — ${t.description}` : ''} (${t.type})`).join('\n')
-    : '(empty — no themes yet)'
-
-  const user = [
-    `Repo: ${session.project.repo ?? '(none)'}`,
+      'human had to nudge, correct, re-steer, re-supply context, or force rework of the agent. You also ' +
+      `maintain a running list of friction themes across sessions. Report via the ${TOOL_NAME} tool.`,
     '',
-    'Opening request (context only — never a friction event):',
-    opener,
-    '',
-    `Follow-up user turns (${followups.length}, bare approvals already removed; "(after errors: …)" = failed`,
-    'tool calls between the previous turn and this one; the indented "agent before:" block is what the',
-    "agent said and did just before that turn — context for reading the user's reaction, never itself friction):",
-    numberedFollowups(followups),
-    '',
-    'Assistant limitation statements (the agent saying it cannot do something):',
-    limitationSnippets(session).map((x) => `- ${x}`).join('\n') || '(none)',
-    '',
-    'Existing friction themes (match against these FIRST):',
-    themeLines,
+    'INPUT FORMAT: each follow-up user turn is numbered [n]. "(after errors: …)" = failed tool calls between the',
+    'previous turn and this one; "(user INTERRUPTED the agent …)" = the user hit Esc mid-action; "(agent used',
+    'skill: X)" = the agent invoked that skill/subagent in the window. The indented "agent before:" block is what',
+    "the agent said and did just before that turn — context for reading the user's reaction, never itself friction.",
     '',
     'Friction means the AGENT FELL SHORT and the user had to compensate. The test for every event: "would a',
     'better-equipped agent (better docs, better tools, better instructions) have made this turn unnecessary?"',
@@ -67,14 +51,13 @@ export function buildPrompt(session: Session, followups: Followup[], themes: The
     '  render, when no explicit earlier spec was violated. It becomes friction only when the same correction',
     '  has to be repeated or the output contradicted an explicit instruction,',
     '- system/harness notifications and the user correcting their OWN earlier mistake.',
-    'A "(user INTERRUPTED the agent …)" tag means the user cut the agent off mid-action (Esc); the tag names',
-    'what the agent was doing. Use it ONLY to interpret that turn\'s text — the same test as error tags applies:',
-    "the turn must react to the agent's direction, and an interrupt followed by an unrelated request or a pause",
-    'to answer/think is NOT friction. The tag never makes an otherwise-collaborative turn friction.',
-    'An "(agent used skill: X)" tag means the agent invoked that skill/subagent in the window. If the user then',
-    'had to correct or redo what the skill produced, that IS friction (type re-steer or rework) — name the theme',
-    'after the SKILL\'s gap ("Agent\'s <skill> Skill Produces Wrong Output"), so repeat underperformance of one',
-    'skill clusters. A skill that ran and was accepted is NOT friction.',
+    'A "(user INTERRUPTED the agent …)" tag names what the agent was doing. Use it ONLY to interpret that turn\'s',
+    "text — the same test as error tags applies: the turn must react to the agent's direction, and an interrupt",
+    'followed by an unrelated request or a pause to answer/think is NOT friction. The tag never makes an',
+    'otherwise-collaborative turn friction.',
+    'An "(agent used skill: X)" tag: if the user then had to correct or redo what the skill produced, that IS',
+    'friction (type re-steer or rework) — name the theme after the SKILL\'s gap ("Agent\'s <skill> Skill Produces',
+    'Wrong Output"), so repeat underperformance of one skill clusters. A skill that ran and was accepted is NOT friction.',
     'When the user repeatedly pastes screenshots to show the agent its own rendered output, the recurring gap',
     'is ONE tool-gap theme (the agent cannot verify rendered UI itself), not many per-tweak rework themes.',
     'Consecutive turns rejecting the same deliverable ("no, try again" × N) are ONE event, not N.',
@@ -100,6 +83,27 @@ export function buildPrompt(session: Session, followups: Followup[], themes: The
     'Use trigger=after_tool_error when the friction follows the turn\'s listed tool errors, after_review when the',
     "follow-up itself relays code-review feedback (quotes or paraphrases a reviewer's comments), agent_stated when",
     'it corresponds to an assistant limitation statement, else unprompted.',
+  ].join('\n')
+
+  const opener = userTurnEvents(session)[0]?.text ?? '(none)'
+  const themeLines = themes.length
+    ? themes.map((t) => `- [${t.id}] ${t.label}${t.description ? ` — ${t.description}` : ''} (${t.type})`).join('\n')
+    : '(empty — no themes yet)'
+
+  const user = [
+    `Repo: ${session.project.repo ?? '(none)'}`,
+    '',
+    'Opening request (context only — never a friction event):',
+    opener,
+    '',
+    `Follow-up user turns (${followups.length}, bare approvals already removed):`,
+    numberedFollowups(followups),
+    '',
+    'Assistant limitation statements (the agent saying it cannot do something):',
+    limitationSnippets(session).map((x) => `- ${x}`).join('\n') || '(none)',
+    '',
+    'Existing friction themes (match against these FIRST):',
+    themeLines,
   ].join('\n')
 
   return { system, user }

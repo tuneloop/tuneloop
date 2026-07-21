@@ -4,9 +4,9 @@ import type { Session } from '../../core/model'
 
 /**
  * A substantive follow-up turn plus the agent activity that preceded it — the
- * context needed to read the user's REACTION rather than guess at it. Nothing
- * here is clipped: the user's words and the agent's messages go in full (only
- * tool RESULTS are dropped, since they're the bulk and rarely change the read).
+ * context needed to read the user's REACTION rather than guess at it. The user's
+ * words go in full; tool RESULTS are dropped (bulk, rarely change the read) and
+ * assistant messages 2+ steps from the turn are head+tail clipped (see renderActivity).
  */
 export interface Followup {
   /** The user's turn text, in full. */
@@ -141,19 +141,32 @@ function toolHeader(action: string, target: { paths?: string[]; command?: string
   return name
 }
 
+// Head/tail budget for clipping far (non-final) assistant messages.
+const FAR_MSG_HEAD = 500
+const FAR_MSG_TAIL = 300
+
 /**
- * Render one window's agent activity as full assistant prose interleaved with
- * tool-call lines, in order. Assistant text is NOT clipped; tool results are
- * omitted (a failure shows its trimmed error, a success just its header).
+ * Render one window's agent activity as assistant prose interleaved with tool-call
+ * lines, in order. Tool results are omitted (a failure shows its trimmed error, a
+ * success just its header). The LAST assistant message stays full (the user reacts to
+ * it); earlier ones are clipped — only backdrop for the reaction.
  */
 function renderActivity(win: Activity[]): string | undefined {
   if (!win.length) return undefined
-  const lines = win.map((a) => {
-    if (a.kind === 'text') return a.text!.trim()
+  let lastTextIdx = -1
+  for (let i = win.length - 1; i >= 0; i--) if (win[i]!.kind === 'text') { lastTextIdx = i; break }
+  const lines = win.map((a, i) => {
+    if (a.kind === 'text') return i === lastTextIdx ? a.text!.trim() : clipFar(a.text!.trim())
     if (a.ok === false) return `[tool] ${a.header}${a.error ? ` — FAILED: ${a.error}` : ' — FAILED'}`
     return `[tool] ${a.header}`
   })
   return lines.join('\n')
+}
+
+/** Head+tail clip for a far (non-final) assistant message: keep the framing, drop the middle. */
+function clipFar(text: string): string {
+  if (text.length <= FAR_MSG_HEAD + FAR_MSG_TAIL) return text
+  return `${text.slice(0, FAR_MSG_HEAD)}\n… [${text.length - FAR_MSG_HEAD - FAR_MSG_TAIL} chars clipped] …\n${text.slice(-FAR_MSG_TAIL)}`
 }
 
 /** Name of the skill/subagent a tool call invoked, if any — the "bad skill" signal's raw material. */
