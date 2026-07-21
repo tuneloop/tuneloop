@@ -136,7 +136,11 @@ function toolHeader(action: string, target: { paths?: string[]; command?: string
     task_spawn: 'Subagent', mcp_call: 'MCP', skill: 'Skill', web: 'Web',
   }
   const name = label[action] ?? action
-  if (target.command) return `${name}: ${target.command.replace(/\s+/g, ' ').slice(0, 120)}`
+  // Keep a short command prefix (which command was run) but drop the long tail
+  if (target.command) {
+    const cmd = target.command.replace(/\s+/g, ' ').trim()
+    return `${name}: ${cmd.length > 60 ? cmd.slice(0, 60) + '…' : cmd}`
+  }
   if (target.paths?.length) return `${name} ${shortPath(target.paths[0]!)}${target.paths.length > 1 ? ` +${target.paths.length - 1}` : ''}`
   return name
 }

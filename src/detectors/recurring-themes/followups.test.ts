@@ -5,6 +5,13 @@ import { emptyUsage, type Event, type Session } from '../../core/model'
 function assistantText(seq: number, text: string): Event {
   return { kind: 'assistant', seq, isSidechain: false, blocks: [{ type: 'text', text }], usage: emptyUsage() }
 }
+// An assistant turn that issues a tool_use, plus the matching ToolCall the session carries.
+function assistantBash(seq: number, id: string, command: string): { ev: Event; call: any } {
+  return {
+    ev: { kind: 'assistant', seq, isSidechain: false, blocks: [{ type: 'tool_use', id, name: 'Bash', input: {} } as any], usage: emptyUsage() },
+    call: { id, name: 'Bash', action: 'shell', input: {}, target: { command }, result: { ok: true, isError: false }, isSidechain: false },
+  }
+}
 function userTurn(seq: number, text: string): Event {
   return { kind: 'user', seq, isSidechain: false, text, blocks: [] }
 }
@@ -47,5 +54,24 @@ describe('collectFollowups activity clipping', () => {
     const [fu] = collectFollowups(session)
     expect(fu!.activity).toContain('a brief note')
     expect(fu!.activity).not.toContain('chars clipped')
+  })
+
+  it('caps a long Bash tool-header command at 60 chars but keeps a short one whole', () => {
+    const longCmd = 'npm test -- --coverage && git add -A && git commit -m "wip" && git push origin main'
+    const shortCmd = 'npm test'
+    const a = assistantBash(1, 'u1', longCmd)
+    const b = assistantBash(2, 'u2', shortCmd)
+    const session = sessionOf([
+      userTurn(0, 'opener'),
+      a.ev, b.ev,
+      userTurn(3, 'that broke the build'),
+    ])
+    session.toolCalls = [a.call, b.call]
+    const activity = collectFollowups(session)[0]!.activity!
+    // Long command: keeps the 60-char prefix + ellipsis, drops the tail.
+    expect(activity).toContain('[tool] Bash: ' + longCmd.slice(0, 60) + '…')
+    expect(activity).not.toContain('git push origin main')
+    // Short command: passes through untouched, no ellipsis.
+    expect(activity).toContain('[tool] Bash: npm test')
   })
 })
