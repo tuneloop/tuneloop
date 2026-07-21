@@ -108,10 +108,18 @@ export class Progress {
     }
 
     if (costUsd > 0) {
+      // Per-unit cost varies widely (e.g. windowed large sessions cost ~10x small
+      // ones) and cheaper units often finish first, so an early est-total can read
+      // ~10x low. Only show it once enough units have landed for the average to
+      // settle; until then show spend-so-far alone rather than a misleading figure
       const remaining = needingWork - worked
-      const avgCost = worked > 0 ? costUsd / worked : 0
-      const estTotal = costUsd + remaining * avgCost
-      line += ` | Cost: $${costUsd.toFixed(4)} (est. total $${estTotal.toFixed(2)})`
+      const estReady = worked >= Math.max(3, Math.ceil(0.1 * needingWork))
+      if (estReady) {
+        const estTotal = costUsd + remaining * (costUsd / worked)
+        line += ` | Cost: $${costUsd.toFixed(4)} (est. total $${estTotal.toFixed(2)})`
+      } else {
+        line += ` | Cost: $${costUsd.toFixed(4)}`
+      }
     }
 
     this.stream.clearLine(0)

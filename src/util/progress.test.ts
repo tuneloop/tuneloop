@@ -42,16 +42,30 @@ describe('Progress', () => {
     expect(f.last()).toContain('0/5')
   })
 
-  it('advances count + cost on unitDone and shows a running est. total', () => {
+  it('advances count + cost on unitDone and shows a running est. total once the estimate settles', () => {
+    const f = fakeStream()
+    const p = new Progress(0, 0, f.stream, 'Step 2/2')
+    p.addUnits(6)
+    p.unitDone(1000, 0.5) // 1/6 — below the settle gate (needs >= max(3, ceil(0.6))=3)
+    expect(f.last()).toContain('1/6')
+    expect(f.last()).toContain('Cost: $0.5000')
+    expect(f.last()).not.toContain('est. total') // suppressed until enough units land
+    p.unitDone(2000, 0.5)
+    p.unitDone(3000, 0.5) // 3/6 done, $1.50 spent — gate now crossed
+    const line = f.last()
+    expect(line).toContain('3/6')
+    // avg $0.50/unit × 3 remaining + $1.50 spent = $3.00 est total
+    expect(line).toContain('est. total $3.00')
+  })
+
+  it('suppresses est. total until enough units complete (avoids a misleading early figure)', () => {
     const f = fakeStream()
     const p = new Progress(0, 0, f.stream, 'Step 2/2')
     p.addUnits(4)
-    p.unitDone(1000, 0.5) // 1 of 4 done, $0.50 spent
-    const line = f.last()
-    expect(line).toContain('1/4')
-    expect(line).toContain('Cost: $0.5000')
-    // avg $0.50/unit × 3 remaining + $0.50 spent = $2.00 est total
-    expect(line).toContain('est. total $2.00')
+    p.unitDone(1000, 0.02) // cheap unit first — extrapolating now would read ~10x low
+    p.unitDone(2000, 0.02) // 2/4, still below the 3-unit floor
+    expect(f.last()).not.toContain('est. total')
+    expect(f.last()).toContain('Cost: $0.0400')
   })
 
   it('addCost moves the cost line without advancing the unit count', () => {

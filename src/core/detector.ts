@@ -34,18 +34,20 @@ export type DetectorTier = 'S' | 'P' | 'X'
  * bar, even though detectors run in parallel.
  *
  * Part of the P/X-tier authoring contract: an LLM detector should `addUnits` its
- * delta up front, then `unitDone`/`addCost` as it spends, so the CLI can show live
- * count + cost during the (expensive) detector phase. This is a live view only —
- * authoritative cost still comes from `DetectorResult.cost` → `detector_runs`, so a
- * detector that omits these calls under-counts only the bar, never the accounting.
- * S-tier detectors are free/instant and leave it untouched.
+ * delta up front, then `unitDone` as it spends, so the CLI can show live count + cost
+ * (and a non-premature ETA) during the (expensive) detector phase. Reserve a unit for
+ * any post-loop tail work (e.g. an X-tier cross-session reconcile) so the bar doesn't
+ * read 100%/ETA-0s while the tail still runs. This is a live view only — authoritative
+ * cost still comes from `DetectorResult.cost` → `detector_runs`, so a detector that
+ * omits these calls under-counts only the bar, never the accounting. S-tier detectors
+ * are free/instant and leave it untouched.
  */
 export interface DetectorProgress {
-  /** Declare this detector's delta — how many units (sessions) it will process. */
+  /** Declare this detector's delta — how many units it will process (reserve one for a tail). */
   addUnits(n: number): void
   /** One unit finished, with its incremental LLM spend. The runner stamps elapsed time. */
   unitDone(costUsd: number): void
-  /** Spend not tied to a unit (e.g. an X-tier cross-session reconcile/fix tail). */
+  /** Spend genuinely not tied to a unit. Prefer reserving a unit + unitDone so ETA/percent stay honest. */
   addCost(costUsd: number): void
 }
 

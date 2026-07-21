@@ -55,7 +55,9 @@ export const recurringThemes: Detector = {
     const steered = steeredIds(store)
     const candidates = delta.filter((d) => steered.has(d.sessionId))
     log.debug(`${DETECTOR}: ${delta.length} in delta, ${candidates.length} steered → extracting`)
-    ctx.progress?.addUnits(candidates.length) // declare this detector's step-2 delta
+    // Declare this detector's step-2 delta: one unit per candidate session, PLUS one
+    // reserved "finalize" unit for the cross-session tail (reconcile + fix-generation)
+    ctx.progress?.addUnits(candidates.length + 1)
 
     let usage = emptyUsage()
     const processed: Array<{ sessionId: string; contentHash: string }> = []
@@ -94,17 +96,17 @@ export const recurringThemes: Detector = {
     })
     for (const u of perSessionUsage) usage = addUsage(usage, u)
 
-    // 3. Reconcile the taxonomy: one call that both merges duplicate themes and
-    // re-homes still-unclustered events (hash-gated; no-op when nothing changed).
+    // 3 + 4: the cross-session tail (the reserved finalize unit) — reconcile the
+    // taxonomy (merge dup themes + re-home orphan events) then surface themes past
+    // the recurrence threshold, each with an LLM-generated fix. Both are hash-gated
+    // (no-op when nothing changed). Its spend rides the finalize unit's unitDone (not
+    // addCost), so the tail's cost extrapolates into est-total like any other unit.
     const merge = await runThemeMerge(store, llm, log)
     usage = addUsage(usage, merge.usage)
-    ctx.progress?.addCost(costOfUsage(llm.provider, llm.model, merge.usage)) // cross-session tail, not per-session
-
-    // 4. Surface themes past the recurrence threshold as insights, each with an
-    // LLM-generated fix (hash-gated per theme, so quiet re-analyzes reuse it).
     const surfaced = await surfaceInsights(store, llm, log)
     usage = addUsage(usage, surfaced.usage)
-    ctx.progress?.addCost(costOfUsage(llm.provider, llm.model, surfaced.usage))
+    const tailUsage = addUsage(merge.usage, surfaced.usage)
+    ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, tailUsage))
 
     const cost = { inTokens: usage.input, outTokens: usage.output, usd: costOfUsage(llm.provider, llm.model, usage), model: llm.model }
     return { insights: surfaced.insights, cost, seen: processed }
