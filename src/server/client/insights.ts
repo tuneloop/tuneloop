@@ -33,9 +33,11 @@ function shortSession(id) {
   return (parts[parts.length - 1] || id).slice(0, 8);
 }
 
-// Distinct sessions among the (capped) evidence — a floor on how many sessions the
-// pattern spans, for the recurrence column.
+// True session span for the recurrence column: the server's uncapped sessionCount.
+// Falls back to distinct sessions in the capped evidence (a floor) only for older
+// payloads that predate the field.
 function sessionSpan(r) {
+  if (typeof r.sessionCount === 'number') return r.sessionCount;
   var seen = {};
   (r.evidence || []).forEach(function (e) { seen[e.sessionId] = 1; });
   return Object.keys(seen).length;

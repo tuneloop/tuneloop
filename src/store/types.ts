@@ -239,6 +239,8 @@ export interface InsightRow {
   lastSeenAt: string
   stateChangedAt: string | null
   detectorVersion: number
+  /** Distinct sessions across ALL evidence (uncapped) — the true span, not the capped `evidence` sample. */
+  sessionCount: number
   evidence: Array<{ sessionId: string; turnIdx: number | null }>
   /** Event time the fix was first applied in the current cycle (transcript timestamp), null if not adopted. */
   adoptedAt: string | null

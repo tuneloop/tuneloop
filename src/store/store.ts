@@ -3406,6 +3406,11 @@ export class Store {
       const evidence = this.db
         .prepare('SELECT session_id, turn_idx FROM insight_evidence WHERE insight_id = ? ORDER BY added_at DESC LIMIT 10')
         .all(r.id) as Array<{ session_id: string; turn_idx: number }>
+      // True session span, over ALL evidence — the capped `evidence` above can all fall
+      // in one session and under-count (the list must not infer this from the sample)
+      const sessionCount = (
+        this.db.prepare('SELECT COUNT(DISTINCT session_id) AS n FROM insight_evidence WHERE insight_id = ?').get(r.id) as { n: number }
+      ).n
       // Fix sessions are scoped to the current lifecycle cycle: after a reopen,
       // the previous cycle's fix must read as history, not as the current fix.
       // Same boundary reconcile gates on, so state and refs can't disagree.
@@ -3432,6 +3437,7 @@ export class Store {
         lastSeenAt: r.last_seen_at,
         stateChangedAt: r.state_changed_at,
         detectorVersion: r.detector_version,
+        sessionCount,
         evidence: evidence.map((e) => ({ sessionId: e.session_id, turnIdx: e.turn_idx === -1 ? null : e.turn_idx })),
         // Event time of the first fix application in the current cycle. When the
         // fix session was pruned (transcript rotated → sightings cascade away),
