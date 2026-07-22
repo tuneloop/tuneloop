@@ -1,6 +1,7 @@
 import { registerDetector } from '../../core/registry'
 import { addUsage, emptyUsage, type Session, type TokenUsage } from '../../core/model'
 import { insightId } from '../../core/detector'
+import { arrayField } from '../../llm/json'
 import { costOfUsage } from '../../pricing/pricing'
 import { collectFollowups } from './followups'
 import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
@@ -245,7 +246,7 @@ function postprocess(
   const events: ThemeEventInput[] = []
   const firstSeen = startedAt ?? new Date().toISOString()
 
-  const raw = Array.isArray(data.events) ? data.events : []
+  const raw = arrayField(data, 'events')
   for (const e of raw as Array<Record<string, unknown>>) {
     const turn = typeof e?.turn === 'number' ? e.turn : 0
     const fu = followups[turn - 1] // events reference the 1-based [n] labels

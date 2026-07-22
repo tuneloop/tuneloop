@@ -45,20 +45,35 @@ interface Cluster {
   orphan_refs?: string[]
 }
 
-/** LLM stub returning canned reconcile clusters. */
-function themeLlm(clusters: Cluster[] = []): LlmClient {
+/**
+ * LLM stub returning canned reconcile clusters. Tests express clusters by id/ref
+ * (readable); the reconcile prompt now numbers themes [1..N] and orphans [1..M] and
+ * the model answers with those NUMBERS — so translate id→number at call time, using
+ * the same ordering runThemeMerge builds (store.allThemes / orphanThemeEvents).
+ */
+function themeLlm(store: Store, clusters: Cluster[] = []): LlmClient {
   return {
     provider: 'anthropic',
     model: 'claude-fable-5',
     async completeStructured(_req: StructuredRequest): Promise<LlmResult> {
-      return { data: { themes: clusters }, usage: emptyUsage() }
+      const themeNum = new Map(store.allThemes().map((t, i) => [t.id, i + 1]))
+      const orphanTok = new Map(store.orphanThemeEvents().map((o, i) => [`${o.sessionId}#${o.idx}`, `E${i + 1}`]))
+      const numeric = clusters.map((c) => ({
+        merge_ids: c.merge_ids?.map((id) => themeNum.get(id)),
+        keep_id: c.keep_id != null ? themeNum.get(c.keep_id) : undefined,
+        orphan_refs: c.orphan_refs?.map((r) => orphanTok.get(r)),
+        label: c.label,
+        description: c.description,
+        project_specific: c.project_specific,
+      }))
+      return { data: { themes: numeric }, usage: emptyUsage() }
     },
   }
 }
 
 /** Sugar for the common "merge two themes" cluster. */
-function mergeLlm(pairs: Array<{ keep_id: string; drop_id: string }>): LlmClient {
-  return themeLlm(pairs.map((p) => ({ keep_id: p.keep_id, merge_ids: [p.keep_id, p.drop_id] })))
+function mergeLlm(store: Store, pairs: Array<{ keep_id: string; drop_id: string }>): LlmClient {
+  return themeLlm(store, pairs.map((p) => ({ keep_id: p.keep_id, merge_ids: [p.keep_id, p.drop_id] })))
 }
 
 /** Seed a topicless (theme_id NULL) friction event on a session with a repo. */
@@ -74,7 +89,7 @@ describe('runThemeMerge', () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:o-r:db-config-path', 'Db Config Path', 'o/r', 's1')
     seedTheme(db, 'recurring-themes:o-r:where-is-db-config', 'Where Is Db Config', 'o/r', 's2')
-    const llm = mergeLlm([{ keep_id: 'recurring-themes:o-r:db-config-path', drop_id: 'recurring-themes:o-r:where-is-db-config' }])
+    const llm = mergeLlm(store, [{ keep_id: 'recurring-themes:o-r:db-config-path', drop_id: 'recurring-themes:o-r:where-is-db-config' }])
     const { applied } = await runThemeMerge(store, llm, noopLog)
     expect(applied).toBe(1)
     const themes = store.allThemes()
@@ -92,7 +107,7 @@ describe('runThemeMerge', () => {
       { signalKey: 'recurring-themes:global:a', repo: '*', severity: 'low', title: 'A', description: 'd', evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'l', content: 'c' } },
       { signalKey: 'recurring-themes:global:b', repo: '*', severity: 'low', title: 'B', description: 'd', evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'l', content: 'c' } },
     ])
-    const llm = mergeLlm([{ keep_id: 'recurring-themes:global:a', drop_id: 'recurring-themes:global:b' }])
+    const llm = mergeLlm(store, [{ keep_id: 'recurring-themes:global:a', drop_id: 'recurring-themes:global:b' }])
     await runThemeMerge(store, llm, noopLog)
     const insights = store.insights({ detector: 'recurring-themes' })
     // A still surfaced; B resolved (retired) rather than left dangling on a deleted theme.
@@ -106,7 +121,7 @@ describe('runThemeMerge', () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:o-a:x', 'X', 'o/a', 's1')
     seedTheme(db, 'recurring-themes:o-b:y', 'Y', 'o/b', 's2')
-    const llm = mergeLlm([{ keep_id: 'recurring-themes:o-a:x', drop_id: 'recurring-themes:o-b:y' }])
+    const llm = mergeLlm(store, [{ keep_id: 'recurring-themes:o-a:x', drop_id: 'recurring-themes:o-b:y' }])
     const { applied } = await runThemeMerge(store, llm, noopLog)
     expect(applied).toBe(0)
     expect(store.allThemes()).toHaveLength(2)
@@ -116,7 +131,7 @@ describe('runThemeMerge', () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:global:changelog-format', 'Changelog Format', null, 's1')
     seedTheme(db, 'recurring-themes:o-r:changelog-style', 'Changelog Style', 'o/r', 's2')
-    const llm = mergeLlm([{ keep_id: 'recurring-themes:global:changelog-format', drop_id: 'recurring-themes:o-r:changelog-style' }])
+    const llm = mergeLlm(store, [{ keep_id: 'recurring-themes:global:changelog-format', drop_id: 'recurring-themes:o-r:changelog-style' }])
     const { applied } = await runThemeMerge(store, llm, noopLog)
     expect(applied).toBe(1)
     expect(store.allThemes().map((t) => t.id)).toEqual(['recurring-themes:global:changelog-format'])
@@ -142,7 +157,7 @@ describe('runThemeMerge', () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:o-r:db-config-path', 'Db Config Path', 'o/r', 's1')
     seedTheme(db, 'recurring-themes:o-r:where-is-db-config', 'Where Is Db Config', 'o/r', 's2')
-    const llm = themeLlm([{
+    const llm = themeLlm(store, [{
       merge_ids: ['recurring-themes:o-r:db-config-path', 'recurring-themes:o-r:where-is-db-config'],
       keep_id: 'recurring-themes:o-r:db-config-path',
       label: 'Database Config Location Unknown',
@@ -159,7 +174,7 @@ describe('runThemeMerge', () => {
     seedTheme(db, 'recurring-themes:global:a', 'A', null, 's1')
     seedTheme(db, 'recurring-themes:global:b', 'B', null, 's2')
     const longLabel = 'X'.repeat(200)
-    const llm = themeLlm([{ merge_ids: ['recurring-themes:global:a', 'recurring-themes:global:b'], keep_id: 'recurring-themes:global:a', label: longLabel }])
+    const llm = themeLlm(store, [{ merge_ids: ['recurring-themes:global:a', 'recurring-themes:global:b'], keep_id: 'recurring-themes:global:a', label: longLabel }])
     await runThemeMerge(store, llm, noopLog)
     const kept = store.allThemes().find((t) => t.id === 'recurring-themes:global:a')!
     expect(kept.label.length).toBeLessThanOrEqual(80)
@@ -170,7 +185,7 @@ describe('runThemeMerge', () => {
     seedTheme(db, 'recurring-themes:global:t1', 'T1', null, 's1')
     seedTheme(db, 'recurring-themes:global:t2', 'T2', null, 's2')
     seedTheme(db, 'recurring-themes:global:t3', 'T3', null, 's3')
-    const llm = themeLlm([{
+    const llm = themeLlm(store, [{
       merge_ids: ['recurring-themes:global:t1', 'recurring-themes:global:t2', 'recurring-themes:global:t3'],
       keep_id: 'recurring-themes:global:t1',
     }])
@@ -184,7 +199,7 @@ describe('runThemeMerge', () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:global:self-review-misses-bugs', 'Self-Review Misses Bugs', null, 's1')
     seedOrphan(db, 's2', 0, 'o/r', 'a code review caught a real bug the agent shipped')
-    const llm = themeLlm([{
+    const llm = themeLlm(store, [{
       keep_id: 'recurring-themes:global:self-review-misses-bugs',
       orphan_refs: ['s2#0'],
     }])
@@ -199,7 +214,7 @@ describe('runThemeMerge', () => {
     seedTheme(db, 'recurring-themes:o-r:unrelated', 'Unrelated', 'o/r', 's0')
     seedOrphan(db, 's1', 0, 'o/a', 'user had to restate the changelog format')
     seedOrphan(db, 's2', 0, 'o/b', 'user again had to restate the changelog format')
-    const llm = themeLlm([{
+    const llm = themeLlm(store, [{
       label: 'Changelog Format Not Followed',
       description: 'Agent keeps missing the changelog format.',
       project_specific: false,
@@ -220,7 +235,7 @@ describe('runThemeMerge', () => {
     seedTheme(db, 'recurring-themes:o-r:unrelated', 'Unrelated', 'o/r', 's0')
     seedOrphan(db, 's1', 0, 'acme/app', 'agent did not know this app\'s deploy sequence')
     seedOrphan(db, 's2', 0, 'acme/app', 'agent again did not know this app\'s deploy sequence')
-    const llm = themeLlm([{
+    const llm = themeLlm(store, [{
       label: 'Deploy Sequence Unknown',
       description: 'Agent does not know this project\'s deploy steps.',
       project_specific: true,
@@ -237,7 +252,7 @@ describe('runThemeMerge', () => {
     seedTheme(db, 'recurring-themes:global:y', 'Y', null, 's3')
     seedOrphan(db, 's1', 0, 'o/r', 'a one-off gap the model wanted to coin a theme for')
     // The LLM proposes a mint from a lone orphan — the code guard must reject it.
-    const llm = themeLlm([{ label: 'Tempting But Single', description: 'one incident', orphan_refs: ['s1#0'] }])
+    const llm = themeLlm(store, [{ label: 'Tempting But Single', description: 'one incident', orphan_refs: ['s1#0'] }])
     await runThemeMerge(store, llm, noopLog)
     expect(store.allThemes().some((t) => t.label === 'Tempting But Single')).toBe(false)
     const rows = store.queryAll('SELECT theme_id FROM theme_events WHERE session_id = ?', 's1') as Array<{ theme_id: string | null }>
@@ -249,10 +264,76 @@ describe('runThemeMerge', () => {
     seedTheme(db, 'recurring-themes:global:x', 'X', null, 's0')
     seedTheme(db, 'recurring-themes:global:y', 'Y', null, 's3')
     seedOrphan(db, 's1', 0, 'o/r', 'a truly one-off friction that fits nothing')
-    const llm = themeLlm([]) // nothing to consolidate
+    const llm = themeLlm(store, []) // nothing to consolidate
     await runThemeMerge(store, llm, noopLog)
     const rows = store.queryAll('SELECT theme_id FROM theme_events WHERE session_id = ?', 's1') as Array<{ theme_id: string | null }>
     expect(rows[0]!.theme_id).toBeNull()
+  })
+
+  it('applies clusters even when the tool returns `themes` as a JSON string (Sonnet-5 quirk)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:a', 'A', null, 's1')
+    seedTheme(db, 'recurring-themes:global:b', 'B (dup)', null, 's2')
+    // The model emitted the whole array as a stringified value, not native JSON.
+    const stringifyingLlm: LlmClient = {
+      provider: 'anthropic', model: 'claude-sonnet-5',
+      async completeStructured() {
+        return { data: { themes: JSON.stringify({ themes: [{ merge_ids: [1, 2], keep_id: 1 }] }) }, usage: emptyUsage() }
+      },
+    }
+    const { applied } = await runThemeMerge(store, stringifyingLlm, noopLog)
+    expect(applied).toBe(1)
+    expect(store.allThemes().map((t) => t.id)).toEqual(['recurring-themes:global:a'])
+  })
+
+  it('drops out-of-range numeric refs instead of acting on the wrong theme', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:a', 'A', null, 's1')
+    seedTheme(db, 'recurring-themes:global:b', 'B', null, 's2')
+    // [1] and [99] — 99 has no theme, so the merge has only one valid id → no-op (not a mis-merge).
+    const badRefLlm: LlmClient = {
+      provider: 'anthropic', model: 'claude-sonnet-5',
+      async completeStructured() {
+        return { data: { themes: [{ merge_ids: [1, 99], keep_id: 1 }] }, usage: emptyUsage() }
+      },
+    }
+    const { applied } = await runThemeMerge(store, badRefLlm, noopLog)
+    expect(applied).toBe(0)
+    expect(store.allThemes()).toHaveLength(2)
+  })
+
+  it('skips a null/primitive cluster element (salvaged JSON) without throwing', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:a', 'A', null, 's1')
+    seedTheme(db, 'recurring-themes:global:b', 'B', null, 's2')
+    // A malformed array (a null + a primitive alongside a valid merge) must not crash the pass.
+    const messyLlm: LlmClient = {
+      provider: 'anthropic', model: 'claude-sonnet-5',
+      async completeStructured() {
+        return { data: { themes: [null, 'oops', { merge_ids: [1, 2], keep_id: 1 }] }, usage: emptyUsage() }
+      },
+    }
+    const { applied } = await runThemeMerge(store, messyLlm, noopLog)
+    expect(applied).toBe(1) // the one valid cluster still applied
+    expect(store.allThemes().map((t) => t.id)).toEqual(['recurring-themes:global:a'])
+  })
+
+  it('resolves orphan E-tokens (and drops a stray theme number placed in orphan_refs)', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:known', 'Known', null, 's0')
+    seedOrphan(db, 's1', 0, 'o/r', 'an occurrence of the known gap')
+    // keep_id=1 (theme), orphan_refs mixes the real token "E1" with "1" (a theme number,
+    // wrong namespace) — only the E-token should resolve.
+    const tokenLlm: LlmClient = {
+      provider: 'anthropic', model: 'claude-sonnet-5',
+      async completeStructured() {
+        return { data: { themes: [{ keep_id: 1, orphan_refs: ['E1', '1'] }] }, usage: emptyUsage() }
+      },
+    }
+    const { applied } = await runThemeMerge(store, tokenLlm, noopLog)
+    expect(applied).toBe(1) // exactly the E1 orphan attached; the stray "1" dropped
+    const rows = store.queryAll('SELECT theme_id FROM theme_events WHERE session_id = ?', 's1') as Array<{ theme_id: string | null }>
+    expect(rows[0]!.theme_id).toBe('recurring-themes:global:known')
   })
 
   it('runs even when the theme set is unchanged (orphans present), then gates once they are consumed', async () => {
