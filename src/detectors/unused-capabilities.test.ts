@@ -429,11 +429,11 @@ describe('unusedCapabilities.run (end to end)', () => {
     }
   }
 
-  // Config captured before the 30-day session window: the removal gate treats these as
-  // "installed all along", so a never-used capability is eligible for a remove verdict.
+  // Config first observed well past the removal-tenure cutoff (10 days): a never-used
+  // capability seen this long ago is eligible for a remove verdict.
   const OLD = new Date(Date.now() - 40 * DAY_MS).toISOString()
-  // Config captured today: too new to have appeared in older sessions, so the removal
-  // gate holds fire (used by the fresh-install test).
+  // Config first observed today: inside the tenure cutoff, so the removal gate holds
+  // fire (used by the fresh-install test).
   const NEW = new Date().toISOString()
 
   const installGlobalMcp = (store: Store, servers: string[], capturedAt = OLD) =>
@@ -477,19 +477,27 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('does not flag a freshly-installed server for removal', () => {
     const { db, store } = setupDb()
-    // Captured today: no snapshot reaches back to the window start, so its absence
-    // from the older sessions is not disuse — the removal gate holds fire.
+    // First observed today — inside the tenure cutoff. Its absence from the older
+    // sessions is not disuse (it didn't exist then), so the removal gate holds fire.
     installGlobalMcp(store, ['sentry'], NEW)
     seedRepo(db, 'web', 20) // plenty of sessions, but all predate the install
     expect(run(store)).toEqual([])
   })
 
-  it('flags a server that was already installed at the window start', () => {
+  it('flags a server observed installed past the tenure cutoff', () => {
     const { db, store } = setupDb()
-    // A snapshot older than the window plus a fresh no-change re-capture: the AS-OF
-    // read still finds the old row, so the capability is removal-eligible.
+    // First observed 40 days ago plus a fresh no-change re-capture: the as-of read at
+    // the 10-day cutoff still finds the old row, so the capability is removal-eligible.
     installGlobalMcp(store, ['sentry'], OLD)
     installGlobalMcp(store, ['sentry'], NEW)
+    seedRepo(db, 'web', 12)
+    expect(run(store)).toHaveLength(1)
+  })
+
+  it('flags a server observed 15 days ago — tenure (10d) is shorter than the session window (30d)', () => {
+    const { db, store } = setupDb()
+    // Past the 10-day tenure cutoff but well inside the 30-day session window: eligible.
+    installGlobalMcp(store, ['sentry'], new Date(Date.now() - 15 * DAY_MS).toISOString())
     seedRepo(db, 'web', 12)
     expect(run(store)).toHaveLength(1)
   })

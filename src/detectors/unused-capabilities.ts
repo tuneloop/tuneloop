@@ -27,6 +27,16 @@ const SAMPLE_SESSIONS_PER_REPO = 10
 export const WINDOW_DAYS = 30
 
 /**
+ * How long a capability must have been observed installed before "never used" is
+ * trusted enough to recommend removal. Shorter than WINDOW_DAYS: usage is judged over
+ * the full 30-day window, but a capability only needs 10 days of config tenure to be
+ * removal-eligible, so a genuinely-unused capability surfaces without waiting a full
+ * window of tuneloop history. One added more recently is held back — it couldn't have
+ * appeared in sessions that predate it, so its absence isn't disuse.
+ */
+export const MIN_REMOVAL_TENURE_DAYS = 10
+
+/**
  * Sessions that must have been observed before we trust "never used" enough to
  * recommend removal — below this, absence is just too little data, not disuse.
  * (Does NOT gate the scoping verdict: seeing a capability live in a few repos is
@@ -450,28 +460,28 @@ function capIdentity(cap: InstalledCap): string {
  * same name) are skipped so their caps are never misattributed — the skipped names are
  * returned for logging.
  *
- * `installed` is the CURRENT config (what to judge and report). `presentAtStart` is the
- * subset that was ALSO installed at `windowStartIso` — the removal-eligibility gate: a
- * capability added mid-window can't have appeared in the older sessions we compare it
- * against, so "never used" would be a false positive. A scope_key with no snapshot
- * reaching back to the window start (envSnapshotAsOf `stale`) contributes nothing to
- * `presentAtStart`, so its caps are ineligible for removal until history goes back far
- * enough. Scoping isn't gated — it's driven by positive use, not absence.
+ * `installed` is the CURRENT config (what to judge and report). `removalEligible` is the
+ * subset that was ALSO installed at `tenureCutoffIso` — the removal-eligibility gate: a
+ * capability observed only more recently can't have appeared in the older sessions we
+ * compare it against, so "never used" would be a false positive. A scope_key with no
+ * snapshot reaching back to the cutoff (envSnapshotAsOf `stale`) contributes nothing to
+ * `removalEligible`, so its caps can't be removed until they've been observed that long.
+ * Scoping isn't gated — it's driven by positive use, not absence.
  */
 function loadInstalled(
   store: Store,
-  windowStartIso: string,
-): { installed: InstalledCap[]; ambiguous: Set<string>; presentAtStart: Set<string> } {
+  tenureCutoffIso: string,
+): { installed: InstalledCap[]; ambiguous: Set<string>; removalEligible: Set<string> } {
   const installed: InstalledCap[] = []
-  const presentAtStart = new Set<string>()
+  const removalEligible = new Set<string>()
 
   const addScope = (scope: 'global' | 'project', scopeKey: string, repo?: string) => {
     for (const { category, kind, parse } of CAP_CATEGORIES) {
       const current = store.envSnapshotCurrent(SOURCE, scope, scopeKey, category)
       for (const name of current ? parse(current.payload) : []) installed.push({ kind, name, scope, repo })
-      // Names present in the snapshot as it stood at the window start (if any that old exists).
-      const asOf = store.envSnapshotAsOf(SOURCE, scope, scopeKey, category, windowStartIso)
-      for (const name of asOf.row ? parse(asOf.row.payload) : []) presentAtStart.add(capIdentity({ kind, name, scope, repo }))
+      // Names present in the snapshot as it stood at the tenure cutoff (if one that old exists).
+      const asOf = store.envSnapshotAsOf(SOURCE, scope, scopeKey, category, tenureCutoffIso)
+      for (const name of asOf.row ? parse(asOf.row.payload) : []) removalEligible.add(capIdentity({ kind, name, scope, repo }))
     }
   }
 
@@ -487,7 +497,7 @@ function loadInstalled(
   const { byRepo, ambiguous } = mapScopeKeysToRepos(projectKeys)
   for (const [repo, scopeKey] of byRepo) addScope('project', scopeKey, repo)
 
-  return { installed, ambiguous, presentAtStart }
+  return { installed, ambiguous, removalEligible }
 }
 
 /** Distinct-session count per repo in the window (null-repo sessions excluded — they name no repo). */
@@ -525,8 +535,10 @@ export const unusedCapabilities: Detector = {
   version: 1,
   tier: 'S',
   run(ctx: DetectorContext): InsightInput[] {
-    const sinceIso = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
-    const { installed, ambiguous, presentAtStart } = loadInstalled(ctx.store, sinceIso)
+    const now = Date.now()
+    const sinceIso = new Date(now - WINDOW_DAYS * 86_400_000).toISOString()
+    const tenureCutoffIso = new Date(now - MIN_REMOVAL_TENURE_DAYS * 86_400_000).toISOString()
+    const { installed, ambiguous, removalEligible } = loadInstalled(ctx.store, tenureCutoffIso)
     if (ambiguous.size > 0) {
       ctx.log.debug(`unused-capabilities: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
     }
@@ -535,11 +547,11 @@ export const unusedCapabilities: Detector = {
     const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
     const sessionCounts = loadSessionCounts(ctx.store, sinceIso)
     // A `remove` verdict means "never used across the window". Only trust it for a
-    // capability that was already installed at the window start — one added mid-window
-    // couldn't appear in the older sessions, so its absence isn't disuse. `scope`
-    // verdicts rest on positive use, so they're never gated this way.
+    // capability we've observed installed for at least MIN_REMOVAL_TENURE_DAYS — one
+    // observed more recently couldn't have appeared in the older sessions, so its
+    // absence isn't disuse. `scope` verdicts rest on positive use, so they're not gated.
     const classified = classify(installed, invoked, sessionCounts).filter(
-      (c) => c.verdict !== 'remove' || presentAtStart.has(capIdentity(c.cap)),
+      (c) => c.verdict !== 'remove' || removalEligible.has(capIdentity(c.cap)),
     )
     return buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
   },
