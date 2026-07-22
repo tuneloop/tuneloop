@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { emptyUsage } from './model'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { runDetectors } from './detector-runner'
@@ -42,6 +43,11 @@ const insight = (signalKey: string): InsightInput => ({
 
 function run(store: Store, log: DetectorContext['log'], d: Detector) {
   return runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: null })
+}
+
+/** A stand-in LLM client that only needs to carry a model id for cache-key checks. */
+function fakeLlm(model: string) {
+  return { provider: 'anthropic', model, completeStructured: async () => ({ data: {}, usage: emptyUsage() }) }
 }
 
 describe('runDetectors — result normalization + cost/seen threading', () => {
@@ -115,6 +121,76 @@ describe('runDetectors — result normalization + cost/seen threading', () => {
     }
     await run(store, log, d)
     expect(loaded).toBeNull()
+  })
+})
+
+describe('runDetectors — delta cache invalidation', () => {
+  // A detector that reports whatever delta it was handed, so the test can read
+  // how many sessions the runner considered unseen on each run.
+  function deltaDetector(name: string, version: number, model: string) {
+    let sawUnseen = -1
+    const d: Detector = {
+      name, version, tier: 'X', needsLlm: true,
+      run: (ctx) => {
+        const unseen = ctx.unseenSessions()
+        sawUnseen = unseen.length
+        return { insights: [insight('a')], seen: unseen, cost: { inTokens: 1, outTokens: 1, usd: 0.01, model } }
+      },
+    }
+    return { d, unseen: () => sawUnseen }
+  }
+
+  it('re-analyzes the full corpus when the detector version changed', async () => {
+    const { db, store, log } = setup()
+    seedSession(db, 's1', 'h1')
+    const first = deltaDetector('versioned', 1, 'small')
+    await runDetectors({ detectors: [first.d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(first.unseen()).toBe(1)
+
+    const second = deltaDetector('versioned', 2, 'small')
+    await runDetectors({ detectors: [second.d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(second.unseen()).toBe(1) // version bump → whole corpus unseen again
+  })
+
+  it('re-analyzes the full corpus when the LLM model changed', async () => {
+    const { db, store, log } = setup()
+    seedSession(db, 's1', 'h1')
+    const first = deltaDetector('remodeled', 1, 'small')
+    await runDetectors({ detectors: [first.d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(first.unseen()).toBe(1)
+
+    // Same version, same corpus, different model → the prior extraction is not
+    // comparable, so the delta must reset (mirrors the processor cache key).
+    const second = deltaDetector('remodeled', 1, 'big')
+    await runDetectors({ detectors: [second.d], store, log, llmEnabled: true, llm: fakeLlm('big') })
+    expect(second.unseen()).toBe(1)
+  })
+
+  it('keeps the delta cached when neither version nor model changed', async () => {
+    const { db, store, log } = setup()
+    seedSession(db, 's1', 'h1')
+    const first = deltaDetector('stable', 1, 'small')
+    await runDetectors({ detectors: [first.d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(first.unseen()).toBe(1)
+
+    const second = deltaDetector('stable', 1, 'small')
+    await runDetectors({ detectors: [second.d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(second.unseen()).toBe(0)
+  })
+
+  it('leaves S-tier (model-less) detectors alone — a null stored model is not a change', async () => {
+    const { db, store, log } = setup()
+    seedSession(db, 's1', 'h1')
+    // S-tier reports no cost, so detector_runs.model stays null; it must not be
+    // read as "the model changed" on every subsequent run.
+    const d: Detector = {
+      name: 'sqlonly', version: 1, tier: 'S',
+      run: (ctx) => ({ insights: [insight('a')], seen: ctx.unseenSessions() }),
+    }
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(store.detectorUnseen('sqlonly')).toHaveLength(0)
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(store.detectorUnseen('sqlonly')).toHaveLength(0)
   })
 })
 

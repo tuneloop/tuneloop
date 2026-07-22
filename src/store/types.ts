@@ -252,6 +252,8 @@ export interface DetectorRunRow {
   version: number
   status: string | null
   ranAt: string
+  /** LLM model the last run billed against; null for S-tier (no LLM spend). */
+  model: string | null
 }
 
 /** One fix-marker sighting: a real user turn in this session carried `tuneloop-fix: <insightId>`. */

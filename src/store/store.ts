@@ -2923,10 +2923,10 @@ export class Store {
   }
 
   detectorRun(detector: string): DetectorRunRow | undefined {
-    const row = this.db.prepare('SELECT version, status, ran_at as ranAt FROM detector_runs WHERE detector = ?').get(detector) as
-      | { version: number; status: string | null; ranAt: string }
+    const row = this.db.prepare('SELECT version, status, model, ran_at as ranAt FROM detector_runs WHERE detector = ?').get(detector) as
+      | { version: number; status: string | null; model: string | null; ranAt: string }
       | undefined
-    return row ? { version: row.version, status: row.status, ranAt: row.ranAt } : undefined
+    return row ? { version: row.version, status: row.status, model: row.model, ranAt: row.ranAt } : undefined
   }
 
   /**

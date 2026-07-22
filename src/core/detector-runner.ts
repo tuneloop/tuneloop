@@ -53,11 +53,21 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
   // A version bump means a new prompt/schema — the whole corpus must be re-analyzed,
   // not just the content-hash delta. Forget prior per-session tracking so
   // unseenSessions() returns everything. (S-tier ignores this — it has no tracking.)
+  //
+  // A model swap invalidates the delta for the same reason: extractions made by the
+  // old model aren't comparable to what the new one would produce, and without this
+  // switching TUNELOOP_LLM_MODEL_HEAVY would leave every session "seen" and quietly
+  // produce nothing. Mirrors the processor cache, which keys on model directly. Only
+  // for LLM detectors with a recorded model — S-tier's stored model is always null.
   for (const d of applicable) {
     const prior = store.detectorRun(d.name)
-    if (prior && prior.version !== d.version) {
+    if (!prior) continue
+    if (prior.version !== d.version) {
       store.resetDetectorSessionRuns(d.name)
       log.debug(`detector ${d.name} version ${prior.version}→${d.version}: re-analyzing full corpus`)
+    } else if (d.needsLlm && prior.model && llm && prior.model !== llm.model) {
+      store.resetDetectorSessionRuns(d.name)
+      log.debug(`detector ${d.name} model ${prior.model}→${llm.model}: re-analyzing full corpus`)
     }
   }
 
