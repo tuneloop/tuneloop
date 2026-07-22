@@ -432,21 +432,50 @@ export function parseInstalledSkills(payload: unknown): string[] {
 
 // ---- run() wiring ----------------------------------------------------------
 
-/**
- * Load the installed capability set from the current config snapshots. Global scope
- * (scope_key '_global') contributes global caps; every project scope_key contributes
- * repo-scoped caps, keyed by the basename of its git-root path. Ambiguous basenames
- * (two roots, same name) are skipped so their caps are never misattributed — the
- * skipped names are returned for logging.
- */
-function loadInstalled(store: Store): { installed: InstalledCap[]; ambiguous: Set<string> } {
-  const installed: InstalledCap[] = []
+/** Snapshot categories carrying capabilities, paired with their InstalledCap kind. */
+const CAP_CATEGORIES = [
+  { category: 'mcp', kind: 'mcp' as const, parse: parseInstalledMcp },
+  { category: 'skills', kind: 'skill' as const, parse: parseInstalledSkills },
+]
 
-  // Global: one well-known scope_key.
-  const gMcp = store.envSnapshotCurrent(SOURCE, 'global', '_global', 'mcp')
-  for (const name of gMcp ? parseInstalledMcp(gMcp.payload) : []) installed.push({ kind: 'mcp', name, scope: 'global' })
-  const gSkill = store.envSnapshotCurrent(SOURCE, 'global', '_global', 'skills')
-  for (const name of gSkill ? parseInstalledSkills(gSkill.payload) : []) installed.push({ kind: 'skill', name, scope: 'global' })
+/** Stable identity of an installed capability, for set membership across snapshots. */
+function capIdentity(cap: InstalledCap): string {
+  return `${cap.scope} ${cap.repo ?? ''} ${cap.kind} ${cap.name}`
+}
+
+/**
+ * Load the installed capability set from config snapshots. Global scope (scope_key
+ * '_global') contributes global caps; every project scope_key contributes repo-scoped
+ * caps, keyed by the basename of its git-root path. Ambiguous basenames (two roots,
+ * same name) are skipped so their caps are never misattributed — the skipped names are
+ * returned for logging.
+ *
+ * `installed` is the CURRENT config (what to judge and report). `presentAtStart` is the
+ * subset that was ALSO installed at `windowStartIso` — the removal-eligibility gate: a
+ * capability added mid-window can't have appeared in the older sessions we compare it
+ * against, so "never used" would be a false positive. A scope_key with no snapshot
+ * reaching back to the window start (envSnapshotAsOf `stale`) contributes nothing to
+ * `presentAtStart`, so its caps are ineligible for removal until history goes back far
+ * enough. Scoping isn't gated — it's driven by positive use, not absence.
+ */
+function loadInstalled(
+  store: Store,
+  windowStartIso: string,
+): { installed: InstalledCap[]; ambiguous: Set<string>; presentAtStart: Set<string> } {
+  const installed: InstalledCap[] = []
+  const presentAtStart = new Set<string>()
+
+  const addScope = (scope: 'global' | 'project', scopeKey: string, repo?: string) => {
+    for (const { category, kind, parse } of CAP_CATEGORIES) {
+      const current = store.envSnapshotCurrent(SOURCE, scope, scopeKey, category)
+      for (const name of current ? parse(current.payload) : []) installed.push({ kind, name, scope, repo })
+      // Names present in the snapshot as it stood at the window start (if any that old exists).
+      const asOf = store.envSnapshotAsOf(SOURCE, scope, scopeKey, category, windowStartIso)
+      for (const name of asOf.row ? parse(asOf.row.payload) : []) presentAtStart.add(capIdentity({ kind, name, scope, repo }))
+    }
+  }
+
+  addScope('global', '_global')
 
   // Project: every distinct scope_key path recorded for this source, mapped to a repo name.
   const projectKeys = (
@@ -456,13 +485,9 @@ function loadInstalled(store: Store): { installed: InstalledCap[]; ambiguous: Se
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
   const { byRepo, ambiguous } = mapScopeKeysToRepos(projectKeys)
-  for (const [repo, scopeKey] of byRepo) {
-    const pMcp = store.envSnapshotCurrent(SOURCE, 'project', scopeKey, 'mcp')
-    for (const name of pMcp ? parseInstalledMcp(pMcp.payload) : []) installed.push({ kind: 'mcp', name, scope: 'project', repo })
-    const pSkill = store.envSnapshotCurrent(SOURCE, 'project', scopeKey, 'skills')
-    for (const name of pSkill ? parseInstalledSkills(pSkill.payload) : []) installed.push({ kind: 'skill', name, scope: 'project', repo })
-  }
-  return { installed, ambiguous }
+  for (const [repo, scopeKey] of byRepo) addScope('project', scopeKey, repo)
+
+  return { installed, ambiguous, presentAtStart }
 }
 
 /** Distinct-session count per repo in the window (null-repo sessions excluded — they name no repo). */
@@ -501,7 +526,7 @@ export const unusedCapabilities: Detector = {
   tier: 'S',
   run(ctx: DetectorContext): InsightInput[] {
     const sinceIso = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
-    const { installed, ambiguous } = loadInstalled(ctx.store)
+    const { installed, ambiguous, presentAtStart } = loadInstalled(ctx.store, sinceIso)
     if (ambiguous.size > 0) {
       ctx.log.debug(`unused-capabilities: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
     }
@@ -509,7 +534,13 @@ export const unusedCapabilities: Detector = {
 
     const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
     const sessionCounts = loadSessionCounts(ctx.store, sinceIso)
-    const classified = classify(installed, invoked, sessionCounts)
+    // A `remove` verdict means "never used across the window". Only trust it for a
+    // capability that was already installed at the window start — one added mid-window
+    // couldn't appear in the older sessions, so its absence isn't disuse. `scope`
+    // verdicts rest on positive use, so they're never gated this way.
+    const classified = classify(installed, invoked, sessionCounts).filter(
+      (c) => c.verdict !== 'remove' || presentAtStart.has(capIdentity(c.cap)),
+    )
     return buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
   },
 }
