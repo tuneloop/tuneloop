@@ -85,6 +85,15 @@ export interface UserMessage extends BaseEvent {
   kind: 'user'
   text: string
   blocks: ContentBlock[]
+  /**
+   * The source marked this "user" turn as injected machinery rather than
+   * something the human typed — Claude Code's `isMeta`. Slash-command and skill
+   * bodies arrive this way: the harness expands them into a user-role message
+   * because the API has no third role. Authoritative where present; adapters
+   * whose format lacks the flag leave it undefined and fall back to the text
+   * heuristic (see core/turns.ts).
+   */
+  isMeta?: boolean
 }
 
 export interface AssistantMessage extends BaseEvent {

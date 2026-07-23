@@ -277,3 +277,61 @@ describe('enrich-session reviewed-PR linkage', () => {
     expect(res.sessionArtifacts).toContainEqual(expect.objectContaining({ artifactId: 'pr:o/r:99', role: 'reviewed' }))
   })
 })
+
+describe('enrich-session digest excludes harness-injected turns', () => {
+  // The digest drives autonomy classification. A skill/slash-command body the
+  // harness expanded into a user-role message is not the human steering the
+  // agent — counting it inflates "Steering signal" and pushes an autonomous
+  // session toward guided. Only the source's isMeta flag can catch it: the text
+  // reads exactly like a real prompt.
+  const SKILL_BODY = 'Review target: GitHub pull request `62`.\n\nGather this target\'s diff with `gh pr diff 62`.'
+
+  function capturingLlm(): { llm: LlmClient; prompt: () => string } {
+    let seen = ''
+    return {
+      prompt: () => seen,
+      llm: {
+        provider: 'anthropic',
+        model: 'claude-haiku-4-5',
+        async completeStructured(req) {
+          seen = req.user
+          return {
+            data: {
+              complexity: 'routine', autonomy: 'autonomous', intent_summary: 'x', decisions: [],
+              success: 'unknown', features: [], feature_revisions: [], use_case_runs: [], feature_runs: [],
+            },
+            usage: emptyUsage(),
+          }
+        },
+      },
+    }
+  }
+
+  function sessionWithMeta(): Session {
+    const events: Event[] = [
+      { kind: 'user', text: 'review PR#62.', blocks: [], isSidechain: false, seq: 0 },
+      { kind: 'user', text: SKILL_BODY, blocks: [], isSidechain: false, isMeta: true, seq: 1 },
+      { kind: 'assistant', blocks: [{ type: 'text', text: 'Here is the review.' }], usage: emptyUsage(), isSidechain: false, seq: 2 },
+    ]
+    return {
+      id: 'claude-code:s', sessionId: 's', source: 'claude-code', provider: 'anthropic',
+      project: { cwd: '/repo', repo: 'o/r' }, models: ['claude-haiku-4-5'], tokens: emptyUsage(),
+      events, toolCalls: [], raw: { path: '', contentHash: 'h' },
+    }
+  }
+
+  it('does not count an injected turn as a user turn or a follow-up', async () => {
+    const { llm, prompt } = capturingLlm()
+    await enrichSession.run(ctx(sessionWithMeta(), llm))
+    // One real turn (the opener), so zero follow-ups — not 2 turns / 1 follow-up.
+    expect(prompt()).toContain('User turns: 1 |')
+    expect(prompt()).toContain('Steering signal: 0 of 1 user turn(s)')
+  })
+
+  it('keeps the injected body out of the user-message spine', async () => {
+    const { llm, prompt } = capturingLlm()
+    await enrichSession.run(ctx(sessionWithMeta(), llm))
+    expect(prompt()).toContain('review PR#62.')
+    expect(prompt()).not.toContain('Review target')
+  })
+})

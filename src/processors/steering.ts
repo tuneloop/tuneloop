@@ -16,7 +16,9 @@ import type { AnnotationInput } from '../store/types'
  */
 export const steering: Processor = {
   name: 'steering',
-  version: 1,
+  // 2: userTurns now drops harness-injected turns (isMeta), so followup_count —
+  // and the recurring-themes pre-gate that reads it — no longer counts them.
+  version: 2,
   kind: 'static',
   facets: [
     // Detail-only: did the user intervene after the opener at all?
