@@ -371,6 +371,30 @@ describe('insight first/last-seen from real occurrence times', () => {
     const row = seen(db, id)
     expect(row.first).toBe('2026-05-01T00:00:00Z') // preserved, not overwritten with run time
   })
+
+  it('keeps the earliest when a re-persist supplies a LATER first-seen', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    // Rolling-window detectors (cache-miss, context-exhaustion, kitchen-sink) compute
+    // their earliest occurrence over a trailing 30 days, so the value they supply
+    // marches forward every run. A chronic insight open for months must not keep
+    // reporting "first seen ≤30 days ago" — that destroys the origin date.
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-04-01T00:00:00Z', lastSeenAt: '2026-05-01T00:00:00Z' })])
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-06-22T00:00:00Z', lastSeenAt: '2026-07-22T00:00:00Z' })])
+    const row = seen(db, id)
+    expect(row.first).toBe('2026-04-01T00:00:00Z')
+    expect(row.last).toBe('2026-07-22T00:00:00Z') // last-seen still advances
+  })
+
+  it('moves first-seen back when the detector finds a genuinely earlier occurrence', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    // Newly-ingested older sessions can reveal the pattern started earlier.
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-03-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    expect(seen(db, id).first).toBe('2026-03-01T00:00:00Z')
+  })
+
 })
 
 describe('detector_runs — append-only run log', () => {

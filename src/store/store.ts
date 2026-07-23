@@ -3276,13 +3276,18 @@ export class Store {
         if (existing) {
           // Re-detection of a resolved insight means the problem came back — reopen it.
           const reopened = existing.state === 'resolved'
-          // first_seen_at: overwrite only when the detector supplies a real earliest
-          // occurrence (COALESCE keeps the stored value otherwise — never clobber a
-          // real creation time with the run time for detectors that don't source it).
+          // first_seen_at only ever moves EARLIER. COALESCE alone kept the stored value
+          // when the detector supplied nothing, but let any supplied value win — and
+          // rolling-window detectors recompute their earliest occurrence over a trailing
+          // 30 days, so theirs marches forward every run. A chronic insight would keep
+          // reporting "first seen ≤30 days ago" and lose its origin date for good.
+          // MIN is safe here only because the column is NOT NULL: SQLite's multi-arg
+          // min() returns NULL if any argument is NULL, and the COALESCE covers the
+          // other argument (a detector that sources no occurrence time binds null).
           this.db
             .prepare(
               `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
-               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = COALESCE(?, first_seen_at), last_seen_at = ?, detector_version = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
                state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
                state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
                WHERE id = ?`,
