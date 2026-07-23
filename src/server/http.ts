@@ -9,6 +9,11 @@ import { ERROR_CATEGORIES } from '../core/error-category'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
+// The Insights tab surfaces only the most valuable insights to act on — not an
+// exhaustive ledger. We cap the read model to the top-ranked few (store.insights()
+// already orders them severity → recurrence → recency)
+const TOP_INSIGHTS = 7
+
 /**
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
  * time; POST endpoints write user judgment only — curation (features +
@@ -162,8 +167,20 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/insights') {
-    // The insight ledger read model (dismissed excluded, severity → recency).
-    sendJson(res, 200, store.insights())
+    // The insight read model, capped to the top TOP_INSIGHTS (dismissed excluded,
+    // ranked severity → recurrence → recency) — only the most valuable to act on.
+    sendJson(res, 200, store.insights().slice(0, TOP_INSIGHTS))
+    return
+  }
+  if (path === '/api/insight/evidence') {
+    // Every occurrence of one insight (with per-turn notes + session titles) — the
+    // detail drawer's drill-in list. Compact grid cards don't need this.
+    const id = url.searchParams.get('id') ?? ''
+    if (!id) {
+      sendJson(res, 400, { error: 'id required' })
+      return
+    }
+    sendJson(res, 200, store.insightEvidence(id))
     return
   }
   if (path === '/api/facets') {

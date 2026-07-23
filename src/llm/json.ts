@@ -18,3 +18,22 @@ export function parseJsonObject(text: string): Record<string, unknown> | null {
   const match = text.match(/\{[\s\S]*\}/)
   return match ? tryParse(match[0]) : null
 }
+
+/**
+ * Read an array-valued field out of a forced-tool result. Sonnet-5 sometimes emits a
+ * large array as a JSON STRING (bare array, or the enclosing {key:[…]}) instead of
+ * native JSON — so parse a string back. Returns [] when absent/unparseable.
+ */
+export function arrayField(data: Record<string, unknown>, key: string): unknown[] {
+  const v = data[key]
+  if (Array.isArray(v)) return v
+  if (typeof v !== 'string') return []
+  try {
+    const parsed = JSON.parse(v)
+    if (Array.isArray(parsed)) return parsed
+    const nested = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>)[key] : undefined
+    return Array.isArray(nested) ? nested : []
+  } catch {
+    return []
+  }
+}

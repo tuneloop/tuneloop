@@ -2,4 +2,5 @@
 import './cache-miss'
 import './unused-capabilities'
 import './context-exhaustion'
+import './recurring-themes'
 import './kitchen-sink'

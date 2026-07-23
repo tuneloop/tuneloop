@@ -83,16 +83,41 @@ describe('cache-miss detector', () => {
     const ins = insights[0]!
     expect(ins).toMatchObject({
       signalKey: 'cache-misses',
-      repo: 'o/r',
+      repo: '*', // one cross-repo aggregate insight
       severity: 'high', // 10 × $2.30 = $23.00 ≥ $10
       count: 10, // one miss per session
       fix: { type: 'behavioral-nudge' },
     })
     expect(ins.evidence).toHaveLength(10)
+    // Single qualifying repo → named directly; each evidence row notes its repo + premium.
+    expect(ins.evidence[0]!.note).toContain('o/r · $')
     expect(ins.description).toContain('$23.00')
-    expect(ins.description).toContain('10 sessions')
+    expect(ins.description).toContain('10 sessions in o/r')
     expect(ins.description).toContain('50%') // miss rate: 1 of 2 classified turns
     expect(ins.description).toContain('10 of the 10 misses came more than 5 minutes after')
+  })
+
+  it('sources first/last-seen from the miss turns, not the analyze run', () => {
+    const { db, ctx } = setup()
+    // Two misses per session: idx 1 (10 min) and idx 3 (30 min). idx 2/4 read back → hits.
+    for (let i = 0; i < 10; i++)
+      seedSession(db, `s${i}`, [
+        { atMs: 0, creates: 200_000 },
+        { atMs: 10 * MIN, creates: 220_000 }, // miss
+        { atMs: 11 * MIN, reads: 220_000, creates: 5_000 }, // hit
+        { atMs: 30 * MIN, creates: 220_000 }, // miss
+        { atMs: 31 * MIN, reads: 220_000, creates: 5_000 }, // hit
+      ])
+    const ins = (cacheMiss.run(ctx) as InsightInput[])[0]!
+    // First/last miss = the earliest/latest miss turn's ts, so they're a full session
+    // in the past and exactly 20 min apart (the idx1→idx3 gap) — never the analyze run.
+    const first = Date.parse(ins.firstSeenAt!)
+    const last = Date.parse(ins.lastSeenAt!)
+    // ~20 min apart (idx1→idx3 gap); a few ms slack since each session's start is
+    // stamped at its own Date.now(). The point: both are real miss-turn times, not now.
+    expect(last - first).toBeGreaterThanOrEqual(20 * MIN)
+    expect(last - first).toBeLessThan(20 * MIN + 1000)
+    expect(Date.now() - last).toBeGreaterThan(DAY_MS / 2) // clearly a past occurrence, not now
   })
 
   it('reports mid-flow misses honestly in the timing split (no cause claimed)', () => {
@@ -235,13 +260,19 @@ describe('cache-miss detector', () => {
     expect(insights[0]!.description).toContain('$38.00') // 10 × $3.80, priced at the 1h rate
   })
 
-  it('scopes per repo: two cold repos → two insights, a warm one stays out', () => {
+  it('aggregates qualifying repos into one insight, excluding a warm repo', () => {
     const { db, ctx } = setup()
     for (let i = 0; i < 10; i++) seedSession(db, `a${i}`, coldSession, { repo: 'o/a' })
     for (let i = 0; i < 10; i++) seedSession(db, `b${i}`, coldSession, { repo: 'o/b' })
     for (let i = 0; i < 10; i++) seedSession(db, `w${i}`, warmSession, { repo: 'o/warm' })
     const insights = cacheMiss.run(ctx) as InsightInput[]
-    expect(insights.map((i) => i.repo).sort()).toEqual(['o/a', 'o/b'])
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.repo).toBe('*')
+    // Both cold repos fold in (20 misses); the warm repo contributes nothing.
+    expect(insights[0]!.count).toBe(20)
+    expect(insights[0]!.description).toContain('2 repos')
+    const notedRepos = new Set(insights[0]!.evidence.map((e) => e.note!.split(' · ')[0]))
+    expect([...notedRepos].sort()).toEqual(['o/a', 'o/b'])
   })
 
   it('ranks evidence by wasted dollars', () => {

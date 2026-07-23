@@ -239,6 +239,8 @@ export interface InsightRow {
   lastSeenAt: string
   stateChangedAt: string | null
   detectorVersion: number
+  /** Distinct sessions across ALL evidence (uncapped) — the true span, not the capped `evidence` sample. */
+  sessionCount: number
   evidence: Array<{ sessionId: string; turnIdx: number | null }>
   /** Event time the fix was first applied in the current cycle (transcript timestamp), null if not adopted. */
   adoptedAt: string | null
@@ -250,6 +252,8 @@ export interface DetectorRunRow {
   version: number
   status: string | null
   ranAt: string
+  /** LLM model the last run billed against; null for S-tier (no LLM spend). */
+  model: string | null
 }
 
 /** One fix-marker sighting: a real user turn in this session carried `tuneloop-fix: <insightId>`. */
@@ -259,4 +263,46 @@ export interface FixMarkerSightingInput {
   seq: number
   /** Transcript timestamp of that turn — event time, the "fix applied" date. */
   turnAt: string
+}
+
+// ---- Recurring-theme mining (recurring-themes detector) ---------------------
+
+/** Frozen theme-type enum — gives the dashboard a stable facet (prototype DR-5). */
+export type ThemeType = 're-steer' | 'context-supply' | 'tool-gap' | 'rework' | 'preference' | 'other'
+/** Remedy-class hint carried on a theme (not a fix itself — the fix is generated at surface time). */
+export type ThemeRemedy = 'add_doc' | 'add_skill' | 'add_tool' | 'model_or_prompt' | 'none'
+/** What preceded the friction, for interpreting the event (never itself proof of friction). */
+export type ThemeTrigger = 'unprompted' | 'after_tool_error' | 'after_review' | 'agent_stated'
+
+/** A theme referenced during extraction/merge — the existing-theme list fed into the prompt. */
+export interface ThemeRef {
+  id: string
+  label: string
+  description?: string | null
+  type: string
+  repo: string | null
+  source?: string | null
+}
+
+/** A theme to persist (INSERT OR IGNORE — minting an existing id never renames/retypes it). */
+export interface ThemeInput {
+  id: string
+  label: string
+  description?: string
+  type: ThemeType
+  remedy?: ThemeRemedy
+  repo?: string | null
+  firstSeen?: string
+}
+
+/** One extracted friction occurrence within a session. */
+export interface ThemeEventInput {
+  idx: number
+  turnSeq?: number
+  type: ThemeType
+  trigger: ThemeTrigger
+  description: string
+  themeId?: string
+  /** Timestamp of the user message this event was extracted from (the real friction moment). */
+  occurredAt?: string
 }

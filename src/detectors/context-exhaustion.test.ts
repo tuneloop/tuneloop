@@ -34,6 +34,7 @@ interface UsageSpec {
   creates?: number
   reads?: number
   sidechain?: boolean
+  ts?: string // per-row timestamp override (defaults to the session start)
 }
 
 function seedSession(
@@ -51,7 +52,7 @@ function seedSession(
     'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,0,?,0)',
   )
   usage.forEach((u, idx) => {
-    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(startMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.reads ?? 0)
+    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, u.ts ?? new Date(startMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.reads ?? 0)
   })
   if (over.success) {
     db.prepare("INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'enrich-session', 'success', ?)").run(id, over.success)
@@ -84,14 +85,33 @@ describe('context-exhaustion detector', () => {
     const ins = insights[0]!
     expect(ins).toMatchObject({
       signalKey: 'context-exhaustion',
-      repo: 'o/r',
+      repo: '*', // one cross-repo aggregate insight
       severity: 'high', // 10/10 sessions compacted → share 1.0 ≥ 0.3
       count: 10,
       fix: { type: 'behavioral-nudge' },
     })
     expect(ins.evidence).toHaveLength(10)
-    expect(ins.description).toContain('10 of 10 sessions')
+    // Single qualifying repo → named directly; each evidence row notes its repo + compactions.
+    expect(ins.evidence[0]!.note).toContain('o/r · ')
+    expect(ins.description).toContain('10 of 10 sessions in o/r')
     expect(ins.description).toContain('166K') // worst-session peak
+  })
+
+  it('sources first/last-seen from the compaction turns, not the analyze run', () => {
+    const { db, ctx } = setup()
+    // Stamp the compaction turn (idx 3) at a fixed past time; earlier/later turns
+    // carry other times so we prove last-seen tracks the compaction, not the max row.
+    const stamped: UsageSpec[] = [
+      { reads: 20_000, creates: 20_000, ts: '2026-06-01T00:00:00Z' },
+      { reads: 100_000, creates: 5_000, ts: '2026-06-01T01:00:00Z' },
+      { reads: 160_000, creates: 6_000, ts: '2026-06-01T02:00:00Z' },
+      { reads: 0, creates: 40_000, ts: '2026-06-10T00:00:00Z' }, // the compaction
+      { reads: 60_000, creates: 3_000, ts: '2026-06-11T00:00:00Z' }, // later, but not a compaction
+    ]
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, stamped)
+    const ins = (contextExhaustion.run(ctx) as InsightInput[])[0]!
+    expect(ins.firstSeenAt).toBe('2026-06-10T00:00:00Z')
+    expect(ins.lastSeenAt).toBe('2026-06-10T00:00:00Z')
   })
 
   it('counts multiple compactions within one session', () => {
@@ -202,13 +222,18 @@ describe('context-exhaustion detector', () => {
     expect(insights[0]!.count).toBe(10)
   })
 
-  it('scopes per repo: two exhausted repos → two insights, a calm one stays out', () => {
+  it('aggregates qualifying repos into one insight, excluding a calm repo', () => {
     const { db, ctx } = setup()
     for (let i = 0; i < 10; i++) seedSession(db, `a${i}`, compactedOnce, { repo: 'o/a' })
     for (let i = 0; i < 10; i++) seedSession(db, `b${i}`, compactedOnce, { repo: 'o/b' })
     for (let i = 0; i < 10; i++) seedSession(db, `c${i}`, smallSession, { repo: 'o/calm' })
     const insights = contextExhaustion.run(ctx) as InsightInput[]
-    expect(insights.map((i) => i.repo).sort()).toEqual(['o/a', 'o/b'])
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.repo).toBe('*')
+    expect(insights[0]!.count).toBe(20) // both exhausted repos fold in; the calm one does not
+    expect(insights[0]!.description).toContain('2 repos')
+    const notedRepos = new Set(insights[0]!.evidence.map((e) => e.note!.split(' · ')[0]))
+    expect([...notedRepos].sort()).toEqual(['o/a', 'o/b'])
   })
 
   it('ranks evidence by compaction count then peak', () => {

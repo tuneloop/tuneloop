@@ -258,3 +258,192 @@ describe('reconcileFixSightings', () => {
     expect(row.adoptedAt).toBe('2099-01-01T00:00:00Z')
   })
 })
+
+describe('insightEvidence', () => {
+  it('returns each occurrence with its note, turn, and session title', () => {
+    const { db, store } = setup()
+    db.prepare('UPDATE sessions SET title = ? WHERE id = ?').run('Add codex adapter', 's1')
+    store.persistInsights('det', 1, [
+      mkInsight({
+        evidence: [
+          { sessionId: 's1', turnIdx: 12, note: 'user had to point at the db config' },
+          { sessionId: 's2', note: 'user re-supplied the deploy steps' }, // no turn
+        ],
+      }),
+    ])
+    const id = insightId('det', '*', 'k1')
+    const ev = store.insightEvidence(id)
+    expect(ev).toHaveLength(2)
+    const s1 = ev.find((e) => e.sessionId === 's1')!
+    expect(s1).toMatchObject({ turnIdx: 12, note: 'user had to point at the db config', sessionTitle: 'Add codex adapter' })
+    // A -1 turn_idx (session-level evidence) reads back as null.
+    expect(ev.find((e) => e.sessionId === 's2')!.turnIdx).toBeNull()
+  })
+
+  it('re-detection replaces evidence notes (no stale rows)', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight({ evidence: [{ sessionId: 's1', note: 'first' }] })])
+    store.persistInsights('det', 1, [mkInsight({ evidence: [{ sessionId: 's2', note: 'second' }] })])
+    const ev = store.insightEvidence(insightId('det', '*', 'k1'))
+    expect(ev.map((e) => e.note)).toEqual(['second'])
+  })
+})
+
+describe('persistThemeExtraction prune vs. live insights', () => {
+  const THEME = 'recurring-themes:global:live-theme'
+
+  it('does NOT prune a theme that backs a non-dismissed insight, even with no events left', () => {
+    const { store } = setup()
+    // Theme with one event in s1, surfaced as an insight (signal_key = theme id).
+    store.persistThemeExtraction('s1', [{ id: THEME, label: 'Live', type: 'preference' }], [
+      { idx: 0, type: 'preference', trigger: 'unprompted', description: 'x', themeId: THEME },
+    ])
+    store.persistInsights('recurring-themes', 1, [{
+      signalKey: THEME, repo: '*', severity: 'low', title: 'Live', description: 'd', evidence: [], count: 3,
+      fix: { type: 'behavioral-nudge', label: 'l', content: 'c' },
+    }])
+    // A re-extract of s1 now yields NO events for the theme (its last event drops).
+    store.persistThemeExtraction('s1', [], [])
+    // The theme survives because a live insight still backs it (would otherwise orphan).
+    expect(store.allThemes().some((t) => t.id === THEME)).toBe(true)
+  })
+
+  it('DOES prune a theme with no events and no backing insight', () => {
+    const { store } = setup()
+    store.persistThemeExtraction('s1', [{ id: 'recurring-themes:global:ghost', label: 'Ghost', type: 'other' }], [
+      { idx: 0, type: 'other', trigger: 'unprompted', description: 'x', themeId: 'recurring-themes:global:ghost' },
+    ])
+    store.persistThemeExtraction('s1', [], []) // drops its only event; nothing backs it
+    expect(store.allThemes().some((t) => t.id === 'recurring-themes:global:ghost')).toBe(false)
+  })
+})
+
+describe('insight first/last-seen from real occurrence times', () => {
+  const seen = (db: ReturnType<typeof openDb>, id: string) =>
+    db.prepare('SELECT first_seen_at AS first, last_seen_at AS last FROM insights WHERE id = ?').get(id) as { first: string; last: string }
+
+  it('themesWithEvents derives first/last-seen from the events’ message timestamps (min/max)', () => {
+    const { store } = setup()
+    const THEME = 'recurring-themes:global:t'
+    store.persistThemeExtraction('s1', [{ id: THEME, label: 'T', type: 'other' }], [
+      { idx: 0, type: 'other', trigger: 'unprompted', description: 'a', themeId: THEME, occurredAt: '2026-06-10T09:00:00Z' },
+      { idx: 1, type: 'other', trigger: 'unprompted', description: 'b', themeId: THEME, occurredAt: '2026-07-15T12:00:00Z' },
+      { idx: 2, type: 'other', trigger: 'unprompted', description: 'c', themeId: THEME, occurredAt: '2026-06-25T08:00:00Z' },
+    ])
+    const t = store.themesWithEvents().find((x) => x.id === THEME)!
+    expect(t.firstSeenAt).toBe('2026-06-10T09:00:00Z') // earliest
+    expect(t.lastSeenAt).toBe('2026-07-15T12:00:00Z') // latest, not extraction order
+  })
+
+  it('persistInsights stores supplied first/last-seen instead of the run time', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-07-15T00:00:00Z' })])
+    const row = seen(db, insightId('det', '*', 'k1'))
+    expect(row.first).toBe('2026-05-01T00:00:00Z')
+    expect(row.last).toBe('2026-07-15T00:00:00Z')
+  })
+
+  it('falls back to the run time when a detector supplies no occurrence times', () => {
+    const { db, store } = setup()
+    const before = new Date().toISOString()
+    store.persistInsights('det', 1, [mkInsight()]) // no first/last supplied (e.g. S-tier)
+    const row = seen(db, insightId('det', '*', 'k1'))
+    expect(row.first >= before).toBe(true) // run-time floor, not undefined/epoch
+    expect(row.last >= before).toBe(true)
+  })
+
+  it('re-persist advances last-seen but never clobbers the original first-seen', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    // A later run sees a NEW latest occurrence; first-seen must stay at the original.
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-07-20T00:00:00Z' })])
+    const row = seen(db, id)
+    expect(row.first).toBe('2026-05-01T00:00:00Z')
+    expect(row.last).toBe('2026-07-20T00:00:00Z')
+  })
+
+  it('a re-persist WITHOUT a supplied first-seen keeps the stored one (COALESCE guard)', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    store.persistInsights('det', 1, [mkInsight()]) // no first/last this time
+    const row = seen(db, id)
+    expect(row.first).toBe('2026-05-01T00:00:00Z') // preserved, not overwritten with run time
+  })
+
+  it('keeps the earliest when a re-persist supplies a LATER first-seen', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    // Rolling-window detectors (cache-miss, context-exhaustion, kitchen-sink) compute
+    // their earliest occurrence over a trailing 30 days, so the value they supply
+    // marches forward every run. A chronic insight open for months must not keep
+    // reporting "first seen ≤30 days ago" — that destroys the origin date.
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-04-01T00:00:00Z', lastSeenAt: '2026-05-01T00:00:00Z' })])
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-06-22T00:00:00Z', lastSeenAt: '2026-07-22T00:00:00Z' })])
+    const row = seen(db, id)
+    expect(row.first).toBe('2026-04-01T00:00:00Z')
+    expect(row.last).toBe('2026-07-22T00:00:00Z') // last-seen still advances
+  })
+
+  it('moves first-seen back when the detector finds a genuinely earlier occurrence', () => {
+    const { db, store } = setup()
+    const id = insightId('det', '*', 'k1')
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    // Newly-ingested older sessions can reveal the pattern started earlier.
+    store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-03-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z' })])
+    expect(seen(db, id).first).toBe('2026-03-01T00:00:00Z')
+  })
+
+})
+
+describe('detector_runs — append-only run log', () => {
+  const cost = (usd: number, model: string) => ({ inTokens: 100, outTokens: 20, usd, model })
+
+  it('appends one row per run instead of overwriting the prior one', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistInsights('det', 1, [mkInsight()], cost(0.02, 'small'))
+    const rows = db.prepare('SELECT cost_usd FROM detector_runs WHERE detector = ? ORDER BY id').all('det') as Array<{ cost_usd: number }>
+    expect(rows.map((r) => r.cost_usd)).toEqual([0.4, 0.02])
+  })
+
+  it('sums lifetime spend across runs — an incremental re-run cannot erase the first run', () => {
+    const { store } = setup()
+    // Detector work is incremental: run 1 pays for the whole corpus, run 2 for a
+    // 3-session delta. Reporting only the last run would hide 95% of the spend.
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistInsights('det', 1, [mkInsight()], cost(0.02, 'small'))
+    expect(store.summary().analysisCostUsd).toBeCloseTo(0.42, 5)
+  })
+
+  it('an error run appends its own row and never clobbers the last successful one', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistDetectorError('det', 1)
+    const rows = db.prepare('SELECT status, model, cost_usd FROM detector_runs WHERE detector = ? ORDER BY id').all('det') as Array<{
+      status: string; model: string | null; cost_usd: number | null
+    }>
+    expect(rows).toEqual([
+      { status: 'ok', model: 'small', cost_usd: 0.4 },
+      { status: 'error', model: null, cost_usd: null },
+    ])
+    // The spend that actually happened survives the error run.
+    expect(store.summary().analysisCostUsd).toBeCloseTo(0.4, 5)
+  })
+
+  it('detectorRun reports the latest run; lastSuccessfulModel skips over error runs', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistDetectorError('det', 1)
+    expect(store.detectorRun('det')).toMatchObject({ status: 'error', version: 1 })
+    // The model whose extractions are actually in the store — not the failed run's null.
+    expect(store.detectorLastSuccessfulModel('det')).toBe('small')
+  })
+
+  it('lastSuccessfulModel is null for a detector that has only ever errored', () => {
+    const { store } = setup()
+    store.persistDetectorError('det', 1)
+    expect(store.detectorLastSuccessfulModel('det')).toBeNull()
+  })
+})

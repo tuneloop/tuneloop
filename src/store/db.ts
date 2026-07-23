@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 12
+const SCHEMA_VERSION = 18
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -342,6 +342,10 @@ CREATE TABLE IF NOT EXISTS insight_evidence (
   insight_id  TEXT NOT NULL,
   session_id  TEXT NOT NULL,
   turn_idx    INTEGER NOT NULL DEFAULT -1,
+  -- Optional per-occurrence human-readable note (e.g. the recurring-themes event
+  -- description). Lets the insight detail show WHAT happened at each evidence
+  -- turn, not just a session chip. Generic — any detector may set it.
+  note        TEXT,
   added_at    TEXT NOT NULL,
   PRIMARY KEY (insight_id, session_id, turn_idx),
   FOREIGN KEY(insight_id) REFERENCES insights(id) ON DELETE CASCADE,
@@ -349,12 +353,18 @@ CREATE TABLE IF NOT EXISTS insight_evidence (
 );
 CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(session_id);
 
--- One row per detector: tracks when it last ran and at what version.
 -- Two tables for detector execution tracking, at different grains:
 --
--- detector_runs: one row per detector. Tracks the *invocation* — when it last ran,
--- whether it succeeded, and aggregate LLM cost. Cost and status belong to the run
--- as a whole (a cross-session LLM call can't be split across individual sessions).
+-- detector_runs: append-only log — one row per detector INVOCATION. Records the
+-- version and model it ran under, whether it succeeded, and the LLM spend it
+-- incurred (cost belongs to the run as a whole: a cross-session LLM call can't be
+-- split across individual sessions). Append rather than upsert because detector
+-- work is INCREMENTAL — each run pays only for its delta, so the last run's cost
+-- is not what the current insights cost to produce. Overwriting one row per
+-- detector would report a $0.02 top-up as the whole bill for a $0.42 corpus, and
+-- would let a failed run erase the accounting of the successful one before it.
+-- Readers therefore take the latest row (current state) or the latest successful
+-- row (the model whose extractions are actually in the store) — never a sole row.
 --
 -- detector_session_runs: one row per (detector × session). Tracks which sessions a
 -- detector has already seen and at what content hash. Enables incremental analysis
@@ -366,14 +376,17 @@ CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(sessi
 -- detector_runs for cost tracking.
 
 CREATE TABLE IF NOT EXISTS detector_runs (
-  detector    TEXT PRIMARY KEY,  -- detector name (e.g. 'permission-friction')
-  version     INTEGER NOT NULL,  -- detector version at time of run (for cache invalidation)
-  status      TEXT,              -- 'ok' | 'error'
-  in_tokens   INTEGER,           -- LLM input tokens (NULL for S-tier)
-  out_tokens  INTEGER,           -- LLM output tokens (NULL for S-tier)
-  cost_usd    REAL,              -- LLM cost in USD (NULL for S-tier)
-  ran_at      TEXT NOT NULL      -- ISO timestamp of last run
+  id          INTEGER PRIMARY KEY, -- rowid alias; ascending = run order (the log is never deleted from)
+  detector    TEXT NOT NULL,       -- detector name (e.g. 'permission-friction')
+  version     INTEGER NOT NULL,    -- detector version at time of run (for cache invalidation)
+  status      TEXT NOT NULL,       -- 'ok' | 'error'
+  model       TEXT,                -- LLM model that ran it (NULL for S-tier / non-LLM / error runs)
+  in_tokens   INTEGER,             -- LLM input tokens (NULL for S-tier)
+  out_tokens  INTEGER,             -- LLM output tokens (NULL for S-tier)
+  cost_usd    REAL,                -- LLM cost in USD (NULL for S-tier)
+  ran_at      TEXT NOT NULL        -- ISO timestamp of this run
 );
+CREATE INDEX IF NOT EXISTS idx_detector_runs_detector ON detector_runs(detector, id DESC);
 
 CREATE TABLE IF NOT EXISTS detector_session_runs (
   detector      TEXT NOT NULL,
@@ -404,6 +417,45 @@ CREATE TABLE IF NOT EXISTS fix_marker_sightings (
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_fix_marker_sightings_insight ON fix_marker_sightings(insight_id);
+
+-- Recurring-theme mining (recurring-themes detector, tier X). A THEME is a
+-- persistent, emergent friction pattern (its identity IS its LLM-minted label);
+-- theme_events are its member occurrences across sessions. Kept separate from the
+-- insights ledger because a theme must OUTLIVE its insight: dismiss/resolve must
+-- not erase it from the extraction feed, and themes accumulate events below the
+-- surfacing threshold where no insight yet exists. The insight is a projection of
+-- a theme once it crosses the recurrence bar.
+CREATE TABLE IF NOT EXISTS theme (
+  id          TEXT PRIMARY KEY,   -- permanent; INSERT OR IGNORE, never renamed (a rename mislabels past members)
+  label       TEXT NOT NULL,
+  description TEXT,               -- one-sentence gap explanation (minted with the label); feeds merge + fix prompts
+  type        TEXT NOT NULL,      -- frozen enum: re-steer|context-supply|tool-gap|rework|preference|other
+  remedy      TEXT,               -- remedy-class hint: add_doc|add_skill|add_tool|model_or_prompt|none
+  repo        TEXT,               -- NULL = global (spans repos); set only when the LLM marks a theme project-specific
+  source      TEXT NOT NULL DEFAULT 'derived',
+  first_seen  TEXT NOT NULL,
+  resolved    INTEGER NOT NULL DEFAULT 0, -- 1 keeps the theme in the extraction feed after its insight resolved
+  -- LLM-generated fix, cached + hash-gated on the theme's occurrence set so a
+  -- quiet re-analyze reuses it. fix_type is the InsightInput fix.type the LLM chose.
+  fix_type    TEXT,
+  fix_content TEXT,
+  fix_hash    TEXT                -- hash of the occurrence set the current fix was generated from
+);
+
+CREATE TABLE IF NOT EXISTS theme_events (
+  session_id  TEXT NOT NULL,
+  idx         INTEGER NOT NULL,   -- 0-based within the session's extraction
+  turn_seq    INTEGER,            -- main-thread seq of the user turn (evidence pointer); NULL if unknown
+  type        TEXT NOT NULL,
+  trigger     TEXT NOT NULL,      -- unprompted|after_tool_error|after_review|agent_stated
+  description TEXT NOT NULL,      -- one abstract sentence; recurrences read the same
+  theme_id    TEXT,              -- NULL = event survived but its proposed label was junk (topicless)
+  added_at    TEXT NOT NULL,     -- when this row was written (analyze-run wall clock, bookkeeping)
+  occurred_at TEXT,              -- timestamp of the user message itself (the real friction moment); drives first/last-seen
+  PRIMARY KEY (session_id, idx),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_theme_events_theme ON theme_events(theme_id);
 
 -- Append-only lifecycle history for insights. state_changed_at on the insights row
 -- only remembers the LAST transition; measurement ("fix applied Jul 25, recurrences
@@ -482,6 +534,59 @@ function migrate(db: DB): void {
   }
   if (tableExists('sessions') && !has('sessions', 'first_prompt')) {
     db.exec('ALTER TABLE sessions ADD COLUMN first_prompt TEXT')
+  }
+  if (tableExists('insight_evidence') && !has('insight_evidence', 'note')) {
+    db.exec('ALTER TABLE insight_evidence ADD COLUMN note TEXT')
+  }
+  if (tableExists('detector_runs') && !has('detector_runs', 'model')) {
+    db.exec('ALTER TABLE detector_runs ADD COLUMN model TEXT')
+  }
+  // detector_runs became an append-only run log. The old shape keyed on `detector`
+  // and upserted, so each run erased the previous one's spend — and an error run,
+  // which has no model or cost of its own, blanked the last successful run's.
+  // Rebuild (SQLite can't drop a PRIMARY KEY), carrying each detector's surviving
+  // row over as its first log entry. Must follow the ADD COLUMN above so `model`
+  // exists to copy. COALESCE on status because the old column was nullable and the
+  // new one isn't — a NULL there would fail the insert and brick the store.
+  if (tableExists('detector_runs') && !has('detector_runs', 'id')) {
+    db.exec(`
+      ALTER TABLE detector_runs RENAME TO detector_runs_v1;
+      CREATE TABLE detector_runs (
+        id          INTEGER PRIMARY KEY,
+        detector    TEXT NOT NULL,
+        version     INTEGER NOT NULL,
+        status      TEXT NOT NULL,
+        model       TEXT,
+        in_tokens   INTEGER,
+        out_tokens  INTEGER,
+        cost_usd    REAL,
+        ran_at      TEXT NOT NULL
+      );
+      INSERT INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+        SELECT detector, version, COALESCE(status, 'ok'), model, in_tokens, out_tokens, cost_usd, ran_at
+        FROM detector_runs_v1;
+      DROP TABLE detector_runs_v1;
+    `)
+  }
+  // recurring-themes v2: themes gained a description + a cached LLM-generated fix.
+  for (const col of ['description', 'fix_type', 'fix_content', 'fix_hash']) {
+    if (tableExists('theme') && !has('theme', col)) db.exec(`ALTER TABLE theme ADD COLUMN ${col} TEXT`)
+  }
+  // recurring-themes v3: theme_events carry the user message's own timestamp, so
+  // first/last-seen reflect when friction actually happened (not the analyze run).
+  // Existing rows stay NULL until the detector version bump re-extracts them.
+  if (tableExists('theme_events') && !has('theme_events', 'occurred_at')) {
+    db.exec('ALTER TABLE theme_events ADD COLUMN occurred_at TEXT')
+  }
+  // kitchen-sink v2: one aggregate insight (signal_key 'kitchen-sink') replaces the old
+  // per-session rows (signal_key 'kitchen-sink:<id>'). The LIKE ':%' matches only those
+  // v1 rows, never the new key; evidence cascades. Idempotent (no-op once cleared).
+  if (tableExists('insights')) {
+    db.exec("DELETE FROM insights WHERE detector = 'kitchen-sink' AND signal_key LIKE 'kitchen-sink:%'")
+    // cache-miss / context-exhaustion / unused-capabilities: now emit ONE cross-repo
+    // insight (repo '*') instead of one per repo. Drop the orphaned per-repo rows once —
+    // the detectors no longer re-emit them, so they'd linger. Evidence cascades. Idempotent.
+    db.exec("DELETE FROM insights WHERE detector IN ('cache-miss','context-exhaustion','unused-capabilities') AND repo != '*'")
   }
 
   // Split cache creation by TTL. The old `tok_cache_create` held the whole write

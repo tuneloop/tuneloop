@@ -145,3 +145,21 @@ describe('claude-code cache-creation TTL split', () => {
     expect(computeSessionCost(session).usd).toBeCloseTo(6.25, 6)
   })
 })
+
+describe('claude-code isMeta (harness-injected user turns)', () => {
+  const META_SID = 'cccc0000-1111-2222-3333-444444444444'
+
+  it('carries isMeta through to the user event, and leaves real turns unflagged', async () => {
+    const path = join(dir, `${META_SID}.jsonl`)
+    const lines = [
+      { parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: META_SID, uuid: 'm1', timestamp: '2026-07-08T20:20:04.762Z', message: { role: 'user', content: 'review PR#62.' } },
+      { parentUuid: 'm1', isSidechain: false, type: 'assistant', cwd: '/repo', sessionId: META_SID, uuid: 'm2', timestamp: '2026-07-08T20:20:11.936Z', message: { id: 'msg_m1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'sk1', name: 'Skill', input: { skill: 'review', args: '62' } }], usage: USAGE } },
+      // The skill body: role user, but isMeta — the harness wrote it, not the human.
+      { parentUuid: 'm2', isSidechain: false, isMeta: true, type: 'user', cwd: '/repo', sessionId: META_SID, uuid: 'm3', timestamp: '2026-07-08T20:20:11.945Z', message: { role: 'user', content: 'Review target: GitHub pull request `62`.' } },
+    ]
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'))
+    const session = (await parseClaudeCode(path))!
+    const users = session.events.filter((e) => e.kind === 'user')
+    expect(users.map((u) => (u.kind === 'user' ? !!u.isMeta : null))).toEqual([false, true])
+  })
+})
