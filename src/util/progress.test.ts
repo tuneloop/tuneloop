@@ -151,3 +151,60 @@ describe('Progress', () => {
     expect(writes.length).toBe(0)
   })
 })
+
+describe('Progress — unit overflow', () => {
+  // A detector declares its total from stored annotations but ticks from live data,
+  // so actual units can exceed declared. The bar is a display: it must absorb that,
+  // never throw. A throw here is swallowed into persistDetectorError, costing the
+  // detector its whole run — and it re-spends and re-crashes on the next analyze.
+  it('does not throw when more units complete than were declared', () => {
+    const f = fakeStream()
+    const p = new Progress(0, 0, f.stream, 'Step 2/2')
+    p.addUnits(1)
+    expect(() => {
+      p.unitDone(1000, 0.1)
+      p.unitDone(2000, 0.1) // one past the declared total
+      p.unitDone(3000, 0.1)
+    }).not.toThrow()
+  })
+
+  it('keeps the bar coherent on overrun — no negative fill, no >100%', () => {
+    const f = fakeStream()
+    const p = new Progress(0, 0, f.stream, 'Step 2/2')
+    p.addUnits(1)
+    p.unitDone(1000, 0)
+    p.unitDone(2000, 0)
+    const line = f.last()
+    expect(line).toContain('2/2') // total absorbed the extra unit rather than reading 2/1
+    expect(line).toContain('(100%)')
+    expect(line).toMatch(/\[█{20}\]/) // full bar, not a truncated or padded-negative one
+  })
+
+  it('never shows a negative ETA', () => {
+    const f = fakeStream()
+    const p = new Progress(0, 0, f.stream, 'Step 2/2')
+    p.addUnits(1)
+    p.unitDone(1000, 0)
+    p.unitDone(2000, 0)
+    expect(f.last()).not.toMatch(/ETA: -/)
+  })
+
+  it('never estimates a total below what has already been spent', () => {
+    const f = fakeStream()
+    const p = new Progress(0, 0, f.stream, 'Step 2/2')
+    p.addUnits(3)
+    for (let i = 1; i <= 5; i++) p.unitDone(i * 1000, 0.1) // 5 units against a declared 3
+    const m = f.last().match(/Cost: \$([\d.]+) \(est\. total \$([\d.]+)\)/)
+    if (m) expect(Number(m[2])).toBeGreaterThanOrEqual(Number(m[1]))
+  })
+
+  it('tick() absorbs overrun too (processor phase, same failure mode)', () => {
+    const f = fakeStream()
+    const p = new Progress(1, 1, f.stream)
+    expect(() => {
+      p.tick(true, 100, 0)
+      p.tick(true, 100, 0)
+    }).not.toThrow()
+    expect(f.last()).toContain('2/2')
+  })
+})
