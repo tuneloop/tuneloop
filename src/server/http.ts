@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
+import { skillHealth } from './skill-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -185,6 +186,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
   if (path === '/api/facets') {
     sendJson(res, 200, store.facetList())
+    return
+  }
+  if (path === '/api/skill-health') {
+    // Per-skill health from real sessions: frequency, trend, dead/scope verdict,
+    // own-call error rate, and a labelled friction-adjacency proxy. No cost claim.
+    sendJson(res, 200, skillHealth(store))
     return
   }
   if (path === '/api/error-categories') {
