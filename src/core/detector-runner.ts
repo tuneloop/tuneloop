@@ -57,17 +57,25 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
   // A model swap invalidates the delta for the same reason: extractions made by the
   // old model aren't comparable to what the new one would produce, and without this
   // switching TUNELOOP_LLM_MODEL_HEAVY would leave every session "seen" and quietly
-  // produce nothing. Mirrors the processor cache, which keys on model directly. Only
-  // for LLM detectors with a recorded model — S-tier's stored model is always null.
+  // produce nothing. Mirrors the processor cache, which keys on model directly.
+  //
+  // The comparison is against the last SUCCESSFUL run's model, not the latest run's:
+  // an error run records no model, and reading that null as "no model to compare"
+  // would silently skip this check for every swap following a failure. S-tier never
+  // records a model at all, so it never resets here.
   for (const d of applicable) {
     const prior = store.detectorRun(d.name)
     if (!prior) continue
     if (prior.version !== d.version) {
       store.resetDetectorSessionRuns(d.name)
       log.debug(`detector ${d.name} version ${prior.version}→${d.version}: re-analyzing full corpus`)
-    } else if (d.needsLlm && prior.model && llm && prior.model !== llm.model) {
+      continue
+    }
+    if (!d.needsLlm || !llm) continue
+    const priorModel = store.detectorLastSuccessfulModel(d.name)
+    if (priorModel && priorModel !== llm.model) {
       store.resetDetectorSessionRuns(d.name)
-      log.debug(`detector ${d.name} model ${prior.model}→${llm.model}: re-analyzing full corpus`)
+      log.debug(`detector ${d.name} model ${priorModel}→${llm.model}: re-analyzing full corpus`)
     }
   }
 

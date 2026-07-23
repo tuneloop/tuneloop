@@ -178,6 +178,27 @@ describe('runDetectors — delta cache invalidation', () => {
     expect(second.unseen()).toBe(0)
   })
 
+  it('still resets after a model swap even when the run in between errored', async () => {
+    const { db, store, log } = setup()
+    seedSession(db, 's1', 'h1')
+    const first = deltaDetector('resilient', 1, 'small')
+    await runDetectors({ detectors: [first.d], store, log, llmEnabled: true, llm: fakeLlm('small') })
+    expect(first.unseen()).toBe(1)
+
+    // A run that throws records an error with no model. That must not erase the
+    // model the corpus was actually extracted with — otherwise the swap below is
+    // invisible and model B silently re-extracts nothing.
+    const boom: Detector = {
+      name: 'resilient', version: 1, tier: 'X', needsLlm: true,
+      run: () => { throw new Error('transient') },
+    }
+    await runDetectors({ detectors: [boom], store, log, llmEnabled: true, llm: fakeLlm('small') })
+
+    const second = deltaDetector('resilient', 1, 'big')
+    await runDetectors({ detectors: [second.d], store, log, llmEnabled: true, llm: fakeLlm('big') })
+    expect(second.unseen()).toBe(1)
+  })
+
   it('leaves S-tier (model-less) detectors alone — a null stored model is not a change', async () => {
     const { db, store, log } = setup()
     seedSession(db, 's1', 'h1')

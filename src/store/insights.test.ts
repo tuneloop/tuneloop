@@ -372,3 +372,54 @@ describe('insight first/last-seen from real occurrence times', () => {
     expect(row.first).toBe('2026-05-01T00:00:00Z') // preserved, not overwritten with run time
   })
 })
+
+describe('detector_runs — append-only run log', () => {
+  const cost = (usd: number, model: string) => ({ inTokens: 100, outTokens: 20, usd, model })
+
+  it('appends one row per run instead of overwriting the prior one', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistInsights('det', 1, [mkInsight()], cost(0.02, 'small'))
+    const rows = db.prepare('SELECT cost_usd FROM detector_runs WHERE detector = ? ORDER BY id').all('det') as Array<{ cost_usd: number }>
+    expect(rows.map((r) => r.cost_usd)).toEqual([0.4, 0.02])
+  })
+
+  it('sums lifetime spend across runs — an incremental re-run cannot erase the first run', () => {
+    const { store } = setup()
+    // Detector work is incremental: run 1 pays for the whole corpus, run 2 for a
+    // 3-session delta. Reporting only the last run would hide 95% of the spend.
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistInsights('det', 1, [mkInsight()], cost(0.02, 'small'))
+    expect(store.summary().analysisCostUsd).toBeCloseTo(0.42, 5)
+  })
+
+  it('an error run appends its own row and never clobbers the last successful one', () => {
+    const { db, store } = setup()
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistDetectorError('det', 1)
+    const rows = db.prepare('SELECT status, model, cost_usd FROM detector_runs WHERE detector = ? ORDER BY id').all('det') as Array<{
+      status: string; model: string | null; cost_usd: number | null
+    }>
+    expect(rows).toEqual([
+      { status: 'ok', model: 'small', cost_usd: 0.4 },
+      { status: 'error', model: null, cost_usd: null },
+    ])
+    // The spend that actually happened survives the error run.
+    expect(store.summary().analysisCostUsd).toBeCloseTo(0.4, 5)
+  })
+
+  it('detectorRun reports the latest run; lastSuccessfulModel skips over error runs', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight()], cost(0.4, 'small'))
+    store.persistDetectorError('det', 1)
+    expect(store.detectorRun('det')).toMatchObject({ status: 'error', version: 1 })
+    // The model whose extractions are actually in the store — not the failed run's null.
+    expect(store.detectorLastSuccessfulModel('det')).toBe('small')
+  })
+
+  it('lastSuccessfulModel is null for a detector that has only ever errored', () => {
+    const { store } = setup()
+    store.persistDetectorError('det', 1)
+    expect(store.detectorLastSuccessfulModel('det')).toBeNull()
+  })
+})

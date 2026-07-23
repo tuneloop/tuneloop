@@ -4,7 +4,7 @@ import Database from 'better-sqlite3'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 17
+const SCHEMA_VERSION = 18
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -353,12 +353,18 @@ CREATE TABLE IF NOT EXISTS insight_evidence (
 );
 CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(session_id);
 
--- One row per detector: tracks when it last ran and at what version.
 -- Two tables for detector execution tracking, at different grains:
 --
--- detector_runs: one row per detector. Tracks the *invocation* — when it last ran,
--- whether it succeeded, and aggregate LLM cost. Cost and status belong to the run
--- as a whole (a cross-session LLM call can't be split across individual sessions).
+-- detector_runs: append-only log — one row per detector INVOCATION. Records the
+-- version and model it ran under, whether it succeeded, and the LLM spend it
+-- incurred (cost belongs to the run as a whole: a cross-session LLM call can't be
+-- split across individual sessions). Append rather than upsert because detector
+-- work is INCREMENTAL — each run pays only for its delta, so the last run's cost
+-- is not what the current insights cost to produce. Overwriting one row per
+-- detector would report a $0.02 top-up as the whole bill for a $0.42 corpus, and
+-- would let a failed run erase the accounting of the successful one before it.
+-- Readers therefore take the latest row (current state) or the latest successful
+-- row (the model whose extractions are actually in the store) — never a sole row.
 --
 -- detector_session_runs: one row per (detector × session). Tracks which sessions a
 -- detector has already seen and at what content hash. Enables incremental analysis
@@ -370,15 +376,17 @@ CREATE INDEX IF NOT EXISTS ix_insight_evidence_session ON insight_evidence(sessi
 -- detector_runs for cost tracking.
 
 CREATE TABLE IF NOT EXISTS detector_runs (
-  detector    TEXT PRIMARY KEY,  -- detector name (e.g. 'permission-friction')
-  version     INTEGER NOT NULL,  -- detector version at time of run (for cache invalidation)
-  status      TEXT,              -- 'ok' | 'error'
-  model       TEXT,              -- LLM model that ran it (NULL for S-tier / non-LLM)
-  in_tokens   INTEGER,           -- LLM input tokens (NULL for S-tier)
-  out_tokens  INTEGER,           -- LLM output tokens (NULL for S-tier)
-  cost_usd    REAL,              -- LLM cost in USD (NULL for S-tier)
-  ran_at      TEXT NOT NULL      -- ISO timestamp of last run
+  id          INTEGER PRIMARY KEY, -- rowid alias; ascending = run order (the log is never deleted from)
+  detector    TEXT NOT NULL,       -- detector name (e.g. 'permission-friction')
+  version     INTEGER NOT NULL,    -- detector version at time of run (for cache invalidation)
+  status      TEXT NOT NULL,       -- 'ok' | 'error'
+  model       TEXT,                -- LLM model that ran it (NULL for S-tier / non-LLM / error runs)
+  in_tokens   INTEGER,             -- LLM input tokens (NULL for S-tier)
+  out_tokens  INTEGER,             -- LLM output tokens (NULL for S-tier)
+  cost_usd    REAL,                -- LLM cost in USD (NULL for S-tier)
+  ran_at      TEXT NOT NULL        -- ISO timestamp of this run
 );
+CREATE INDEX IF NOT EXISTS idx_detector_runs_detector ON detector_runs(detector, id DESC);
 
 CREATE TABLE IF NOT EXISTS detector_session_runs (
   detector      TEXT NOT NULL,
@@ -532,6 +540,33 @@ function migrate(db: DB): void {
   }
   if (tableExists('detector_runs') && !has('detector_runs', 'model')) {
     db.exec('ALTER TABLE detector_runs ADD COLUMN model TEXT')
+  }
+  // detector_runs became an append-only run log. The old shape keyed on `detector`
+  // and upserted, so each run erased the previous one's spend — and an error run,
+  // which has no model or cost of its own, blanked the last successful run's.
+  // Rebuild (SQLite can't drop a PRIMARY KEY), carrying each detector's surviving
+  // row over as its first log entry. Must follow the ADD COLUMN above so `model`
+  // exists to copy. COALESCE on status because the old column was nullable and the
+  // new one isn't — a NULL there would fail the insert and brick the store.
+  if (tableExists('detector_runs') && !has('detector_runs', 'id')) {
+    db.exec(`
+      ALTER TABLE detector_runs RENAME TO detector_runs_v1;
+      CREATE TABLE detector_runs (
+        id          INTEGER PRIMARY KEY,
+        detector    TEXT NOT NULL,
+        version     INTEGER NOT NULL,
+        status      TEXT NOT NULL,
+        model       TEXT,
+        in_tokens   INTEGER,
+        out_tokens  INTEGER,
+        cost_usd    REAL,
+        ran_at      TEXT NOT NULL
+      );
+      INSERT INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+        SELECT detector, version, COALESCE(status, 'ok'), model, in_tokens, out_tokens, cost_usd, ran_at
+        FROM detector_runs_v1;
+      DROP TABLE detector_runs_v1;
+    `)
   }
   // recurring-themes v2: themes gained a description + a cached LLM-generated fix.
   for (const col of ['description', 'fix_type', 'fix_content', 'fix_hash']) {
