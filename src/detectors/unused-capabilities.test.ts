@@ -435,21 +435,28 @@ describe('unusedCapabilities.run (end to end)', () => {
     }
   }
 
-  const installGlobalMcp = (store: Store, ...servers: string[]) =>
+  // Config first observed well past the removal-tenure cutoff (10 days): a never-used
+  // capability seen this long ago is eligible for a remove verdict.
+  const OLD = new Date(Date.now() - 40 * DAY_MS).toISOString()
+  // Config first observed today: inside the tenure cutoff, so the removal gate holds
+  // fire (used by the fresh-install test).
+  const NEW = new Date().toISOString()
+
+  const installGlobalMcp = (store: Store, servers: string[], capturedAt = OLD) =>
     store.recordEnvSnapshot({
       source: 'claude-code', scope: 'global', scopeKey: '_global', category: 'mcp',
       payload: { '.claude.json': { servers: Object.fromEntries(servers.map((s) => [s, { type: 'stdio' }])) } },
-    })
-  const installGlobalSkills = (store: Store, ...names: string[]) =>
+    }, capturedAt)
+  const installGlobalSkills = (store: Store, names: string[], capturedAt = OLD) =>
     store.recordEnvSnapshot({
       source: 'claude-code', scope: 'global', scopeKey: '_global', category: 'skills',
       payload: { skills: names.map((n) => ({ name: n, body: 'x', bodyHash: 'h' })), count: names.length },
-    })
-  const installProjectMcp = (store: Store, rootPath: string, ...servers: string[]) =>
+    }, capturedAt)
+  const installProjectMcp = (store: Store, rootPath: string, servers: string[], capturedAt = OLD) =>
     store.recordEnvSnapshot({
       source: 'claude-code', scope: 'project', scopeKey: rootPath, category: 'mcp',
       payload: { '.mcp.json': { servers: Object.fromEntries(servers.map((s) => [s, { type: 'stdio' }])) } },
-    })
+    }, capturedAt)
 
   it('returns nothing when no config snapshots have been captured', () => {
     const { db, store } = setupDb()
@@ -459,7 +466,7 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('flags a global server never used, once past the session minimum', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 12) // ≥ MIN_SESSIONS
     const cards = run(store)
     expect(cards).toHaveLength(1)
@@ -469,7 +476,7 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('stamps last-seen from the most recent examined session, not the analyze run', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 12)
     // Push one session's start later than the others (seedRepo uses now − 1 day) but
     // still in window; it becomes MAX(started_at) → the card's last-seen. (No
@@ -483,14 +490,41 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('stays silent when the global server is unused but sessions are too few', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 5) // < MIN_SESSIONS
     expect(run(store)).toEqual([])
   })
 
+  it('does not flag a freshly-installed server for removal', () => {
+    const { db, store } = setupDb()
+    // First observed today — inside the tenure cutoff. Its absence from the older
+    // sessions is not disuse (it didn't exist then), so the removal gate holds fire.
+    installGlobalMcp(store, ['sentry'], NEW)
+    seedRepo(db, 'web', 20) // plenty of sessions, but all predate the install
+    expect(run(store)).toEqual([])
+  })
+
+  it('flags a server observed installed past the tenure cutoff', () => {
+    const { db, store } = setupDb()
+    // First observed 40 days ago plus a fresh no-change re-capture: the as-of read at
+    // the 10-day cutoff still finds the old row, so the capability is removal-eligible.
+    installGlobalMcp(store, ['sentry'], OLD)
+    installGlobalMcp(store, ['sentry'], NEW)
+    seedRepo(db, 'web', 12)
+    expect(run(store)).toHaveLength(1)
+  })
+
+  it('flags a server observed 15 days ago — tenure (10d) is shorter than the session window (30d)', () => {
+    const { db, store } = setupDb()
+    // Past the 10-day tenure cutoff but well inside the 30-day session window: eligible.
+    installGlobalMcp(store, ['sentry'], new Date(Date.now() - 15 * DAY_MS).toISOString())
+    seedRepo(db, 'web', 12)
+    expect(run(store)).toHaveLength(1)
+  })
+
   it('scopes a global server used in a minority of repos to those repos', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__issues' }])
     seedRepo(db, 'api', 8)
     seedRepo(db, 'cli', 8)
@@ -501,7 +535,7 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('keeps a global server used across most repos', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
     seedRepo(db, 'api', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }]) // 2 of 2 → shared
     expect(run(store)).toEqual([])
@@ -509,7 +543,7 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('matches a plugin-namespaced skill invocation, so a used skill is not flagged', () => {
     const { db, store } = setupDb()
-    installGlobalSkills(store, 'frontend-design')
+    installGlobalSkills(store, ['frontend-design'])
     // Used everywhere (both repos) via the plugin-namespaced name → shared, no card.
     seedRepo(db, 'web', 8, [{ action: 'skill', name: 'frontend-design:frontend-design' }])
     seedRepo(db, 'api', 8, [{ action: 'skill', name: 'frontend-design:frontend-design' }])
@@ -518,7 +552,7 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('surfaces a project-scoped unused server in the aggregate, noting its repo', () => {
     const { db, store } = setupDb()
-    installProjectMcp(store, '/Users/x/git/web', 'pg')
+    installProjectMcp(store, '/Users/x/git/web', ['pg'])
     seedRepo(db, 'web', 12) // pg never used in web
     const cards = run(store)
     expect(cards).toHaveLength(1)
@@ -530,15 +564,15 @@ describe('unusedCapabilities.run (end to end)', () => {
   it('skips a project repo whose basename collides with another root', () => {
     const { db, store } = setupDb()
     // Two distinct roots, same basename 'api' → ambiguous, both skipped.
-    installProjectMcp(store, '/Users/x/work/api', 'pg')
-    installProjectMcp(store, '/Users/x/personal/api', 'redis')
+    installProjectMcp(store, '/Users/x/work/api', ['pg'])
+    installProjectMcp(store, '/Users/x/personal/api', ['redis'])
     seedRepo(db, 'api', 12)
     expect(run(store)).toEqual([])
   })
 
   it('does not read another harness’s sessions (source scoping)', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     // A codex session that uses sentry must not count as claude-code usage.
     db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
       .run('cx-1', 'cx-1', 'codex', 'openai', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())

@@ -27,6 +27,16 @@ const SAMPLE_SESSIONS_PER_REPO = 10
 export const WINDOW_DAYS = 30
 
 /**
+ * How long a capability must have been observed installed before "never used" is
+ * trusted enough to recommend removal. Shorter than WINDOW_DAYS: usage is judged over
+ * the full 30-day window, but a capability only needs 10 days of config tenure to be
+ * removal-eligible, so a genuinely-unused capability surfaces without waiting a full
+ * window of tuneloop history. One added more recently is held back — it couldn't have
+ * appeared in sessions that predate it, so its absence isn't disuse.
+ */
+export const MIN_REMOVAL_TENURE_DAYS = 10
+
+/**
  * Sessions that must have been observed before we trust "never used" enough to
  * recommend removal — below this, absence is just too little data, not disuse.
  * (Does NOT gate the scoping verdict: seeing a capability live in a few repos is
@@ -421,21 +431,50 @@ export function parseInstalledSkills(payload: unknown): string[] {
 
 // ---- run() wiring ----------------------------------------------------------
 
-/**
- * Load the installed capability set from the current config snapshots. Global scope
- * (scope_key '_global') contributes global caps; every project scope_key contributes
- * repo-scoped caps, keyed by the basename of its git-root path. Ambiguous basenames
- * (two roots, same name) are skipped so their caps are never misattributed — the
- * skipped names are returned for logging.
- */
-function loadInstalled(store: Store): { installed: InstalledCap[]; ambiguous: Set<string> } {
-  const installed: InstalledCap[] = []
+/** Snapshot categories carrying capabilities, paired with their InstalledCap kind. */
+const CAP_CATEGORIES = [
+  { category: 'mcp', kind: 'mcp' as const, parse: parseInstalledMcp },
+  { category: 'skills', kind: 'skill' as const, parse: parseInstalledSkills },
+]
 
-  // Global: one well-known scope_key.
-  const gMcp = store.envSnapshotCurrent(SOURCE, 'global', '_global', 'mcp')
-  for (const name of gMcp ? parseInstalledMcp(gMcp.payload) : []) installed.push({ kind: 'mcp', name, scope: 'global' })
-  const gSkill = store.envSnapshotCurrent(SOURCE, 'global', '_global', 'skills')
-  for (const name of gSkill ? parseInstalledSkills(gSkill.payload) : []) installed.push({ kind: 'skill', name, scope: 'global' })
+/** Stable identity of an installed capability, for set membership across snapshots. */
+function capIdentity(cap: InstalledCap): string {
+  return `${cap.scope}\u0000${cap.repo ?? ''}\u0000${cap.kind}\u0000${cap.name}`
+}
+
+/**
+ * Load the installed capability set from config snapshots. Global scope (scope_key
+ * '_global') contributes global caps; every project scope_key contributes repo-scoped
+ * caps, keyed by the basename of its git-root path. Ambiguous basenames (two roots,
+ * same name) are skipped so their caps are never misattributed — the skipped names are
+ * returned for logging.
+ *
+ * `installed` is the CURRENT config (what to judge and report). `removalEligible` is the
+ * subset that was ALSO installed at `tenureCutoffIso` — the removal-eligibility gate: a
+ * capability observed only more recently can't have appeared in the older sessions we
+ * compare it against, so "never used" would be a false positive. A scope_key with no
+ * snapshot reaching back to the cutoff (envSnapshotAsOf `stale`) contributes nothing to
+ * `removalEligible`, so its caps can't be removed until they've been observed that long.
+ * Scoping isn't gated — it's driven by positive use, not absence.
+ */
+function loadInstalled(
+  store: Store,
+  tenureCutoffIso: string,
+): { installed: InstalledCap[]; ambiguous: Set<string>; removalEligible: Set<string> } {
+  const installed: InstalledCap[] = []
+  const removalEligible = new Set<string>()
+
+  const addScope = (scope: 'global' | 'project', scopeKey: string, repo?: string) => {
+    for (const { category, kind, parse } of CAP_CATEGORIES) {
+      const current = store.envSnapshotCurrent(SOURCE, scope, scopeKey, category)
+      for (const name of current ? parse(current.payload) : []) installed.push({ kind, name, scope, repo })
+      // Names present in the snapshot as it stood at the tenure cutoff (if one that old exists).
+      const asOf = store.envSnapshotAsOf(SOURCE, scope, scopeKey, category, tenureCutoffIso)
+      for (const name of asOf.row ? parse(asOf.row.payload) : []) removalEligible.add(capIdentity({ kind, name, scope, repo }))
+    }
+  }
+
+  addScope('global', '_global')
 
   // Project: every distinct scope_key path recorded for this source, mapped to a repo name.
   const projectKeys = (
@@ -445,13 +484,9 @@ function loadInstalled(store: Store): { installed: InstalledCap[]; ambiguous: Se
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
   const { byRepo, ambiguous } = mapScopeKeysToRepos(projectKeys)
-  for (const [repo, scopeKey] of byRepo) {
-    const pMcp = store.envSnapshotCurrent(SOURCE, 'project', scopeKey, 'mcp')
-    for (const name of pMcp ? parseInstalledMcp(pMcp.payload) : []) installed.push({ kind: 'mcp', name, scope: 'project', repo })
-    const pSkill = store.envSnapshotCurrent(SOURCE, 'project', scopeKey, 'skills')
-    for (const name of pSkill ? parseInstalledSkills(pSkill.payload) : []) installed.push({ kind: 'skill', name, scope: 'project', repo })
-  }
-  return { installed, ambiguous }
+  for (const [repo, scopeKey] of byRepo) addScope('project', scopeKey, repo)
+
+  return { installed, ambiguous, removalEligible }
 }
 
 /**
@@ -504,8 +539,10 @@ export const unusedCapabilities: Detector = {
   version: 1,
   tier: 'S',
   run(ctx: DetectorContext): InsightInput[] {
-    const sinceIso = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
-    const { installed, ambiguous } = loadInstalled(ctx.store)
+    const now = Date.now()
+    const sinceIso = new Date(now - WINDOW_DAYS * 86_400_000).toISOString()
+    const tenureCutoffIso = new Date(now - MIN_REMOVAL_TENURE_DAYS * 86_400_000).toISOString()
+    const { installed, ambiguous, removalEligible } = loadInstalled(ctx.store, tenureCutoffIso)
     if (ambiguous.size > 0) {
       ctx.log.debug(`unused-capabilities: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
     }
@@ -513,7 +550,13 @@ export const unusedCapabilities: Detector = {
 
     const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
     const sessionCounts = loadSessionCounts(ctx.store, sinceIso)
-    const classified = classify(installed, invoked, sessionCounts)
+    // A `remove` verdict means "never used across the window". Only trust it for a
+    // capability we've observed installed for at least MIN_REMOVAL_TENURE_DAYS — one
+    // observed more recently couldn't have appeared in the older sessions, so its
+    // absence isn't disuse. `scope` verdicts rest on positive use, so they're not gated.
+    const classified = classify(installed, invoked, sessionCounts).filter(
+      (c) => c.verdict !== 'remove' || removalEligible.has(capIdentity(c.cap)),
+    )
     const cards = buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
     // Stamp last-seen as of the most recent examined session, so the card doesn't
     // default to the analyze-run time. A structural finding has no first-seen moment.
