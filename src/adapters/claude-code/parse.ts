@@ -23,7 +23,9 @@ import { mapAction } from './actions'
 // 7: count usage once per API message id, from the message's final line.
 // 8: capture the 1h-TTL share of cache creation (`cacheCreate1h`) so cache
 //    writes price at their real rate instead of all-5m.
-export const PARSE_VERSION = 8
+// 9: carry `isMeta` on user events so harness-injected turns (expanded skill and
+//    slash-command bodies) stop counting as human steering.
+export const PARSE_VERSION = 9
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -207,6 +209,8 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
         agentId,
         text,
         blocks,
+        // Only when set: keeps the flag out of the blob for the ordinary turn.
+        ...(r.isMeta ? { isMeta: true } : {}),
       }
       events.push(ev)
     } else if (r.type === 'system') {

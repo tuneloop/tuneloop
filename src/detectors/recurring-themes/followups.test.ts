@@ -15,6 +15,10 @@ function assistantBash(seq: number, id: string, command: string): { ev: Event; c
 function userTurn(seq: number, text: string): Event {
   return { kind: 'user', seq, isSidechain: false, text, blocks: [] }
 }
+// A harness-injected user-role turn (skill body, slash-command expansion).
+function metaTurn(seq: number, text: string): Event {
+  return { kind: 'user', seq, isSidechain: false, isMeta: true, text, blocks: [] }
+}
 
 function sessionOf(events: Event[]): Session {
   return {
@@ -73,5 +77,44 @@ describe('collectFollowups activity clipping', () => {
     expect(activity).not.toContain('git push origin main')
     // Short command: passes through untouched, no ellipsis.
     expect(activity).toContain('[tool] Bash: npm test')
+  })
+})
+
+describe('collectFollowups excludes injected turns', () => {
+  // Reproduces a real transcript: "review PR#62." → Claude invokes the `review`
+  // skill → the harness expands the skill BODY into an isMeta user message. That
+  // block is instructions, not the user reacting to the agent; counted as a
+  // follow-up it inflates the steering signal and feeds the extraction LLM a
+  // 200-word "correction" that never happened.
+  const SKILL_BODY =
+    'Review target: GitHub pull request `62`.\n\n' +
+    "Gather this target's diff with (instead of any local `git diff`):\n" +
+    '1. `gh pr view 62 --json title,body,author` for context\n' +
+    '2. `gh pr diff 62` for the unified diff\n\n' +
+    'Analyze the changes and provide a thorough code review.'
+
+  it('does not treat an expanded skill body as a follow-up', () => {
+    const session = sessionOf([
+      userTurn(0, 'review PR#62.'),
+      assistantText(1, 'Launching the review skill.'),
+      metaTurn(2, SKILL_BODY),
+      assistantText(3, 'Here is the review: …'),
+    ])
+    // The opener is the only real turn, so there is nothing to steer with.
+    expect(collectFollowups(session)).toEqual([])
+  })
+
+  it('still reports the genuine follow-up that comes after an injected turn', () => {
+    const session = sessionOf([
+      userTurn(0, 'review PR#62.'),
+      metaTurn(1, SKILL_BODY),
+      assistantText(2, 'Here is the review: …'),
+      userTurn(3, 'post 1,2,3,4 as comments please'),
+    ])
+    const fus = collectFollowups(session)
+    expect(fus.map((f) => f.text)).toEqual(['post 1,2,3,4 as comments please'])
+    // The injected block must not leak in as agent activity either — it is not
+    // something the agent said.
+    expect(fus[0]!.activity ?? '').not.toContain('Review target')
   })
 })

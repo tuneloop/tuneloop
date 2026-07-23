@@ -107,4 +107,29 @@ describe('userTurnEvents', () => {
       { text: 'real follow-up', seq: 3 },
     ])
   })
+
+  // A skill/slash-command body the harness expanded into a user-role message.
+  // Nothing in its TEXT marks it as machinery, so only the source's isMeta flag
+  // can tell it from a genuine turn — without it the block reads as steering.
+  it('drops isMeta turns even when the text looks like a genuine prompt', () => {
+    const s = session([
+      user('review PR#62.', { seq: 0 }),
+      user('Review target: GitHub pull request `62`.\n\nGather this target\'s diff with…', { seq: 1, isMeta: true }),
+      user('post 1,2,3,4 as comments please', { seq: 2 }),
+    ])
+    expect(userTurnEvents(s)).toEqual([
+      { text: 'review PR#62.', seq: 0 },
+      { text: 'post 1,2,3,4 as comments please', seq: 2 },
+    ])
+  })
+})
+
+describe('firstUserPrompt with isMeta', () => {
+  it('skips an injected turn to find the real opener', () => {
+    const s = session([
+      user('Review target: GitHub pull request `62`.', { isMeta: true }),
+      user('the actual ask'),
+    ])
+    expect(firstUserPrompt(s)).toBe('the actual ask')
+  })
 })
