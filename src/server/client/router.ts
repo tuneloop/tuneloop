@@ -21,6 +21,7 @@ import type { Route } from './router-url'
 import { setView, openDetail, closeDrawer, getSessionParams, applySessionParams } from './sessions'
 import { openMetric } from './kpis'
 import { getArtifactParams, applyArtifactParams } from './artifacts'
+import { openSkill } from './skills'
 
 export type { Route } from './router-url'
 
@@ -68,6 +69,7 @@ function applyRoute(r: Route): void {
     if (r.view === 'dashboard') openMetric(r.metric)
     else if (r.view === 'artifacts') applyArtifactParams(r.artKind, r.query)
     else if (r.view === 'sessions') applySessionParams(r.query)
+    else if (r.view === 'skills') openSkill(r.skill)
     if (r.session && r.session !== state.open) openDetail(r.session)
     else if (!r.session && state.open) closeDrawer()
   } finally {

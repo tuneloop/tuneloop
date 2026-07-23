@@ -34,6 +34,9 @@ export interface ClientState {
   // the URL as `?session=<id>` so a session is shareable / reload-survivable.
   open: string | null
   artKind: string
+  // The skill whose detail page is open on the Skills tab (null = the roster).
+  // Mirrored into the URL as #/skills/<name> so a skill page is shareable.
+  skill: string | null
   overview: any
   home: any // Explore (question-led) stats; null until fetched
   asked: any // the question the user clicked through from, for the grounding banner (null = none)
@@ -67,7 +70,7 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', skill: null, overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 7,

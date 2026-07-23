@@ -3,6 +3,7 @@
 //
 //   #/highlights                    the landing digest (empty hash also lands here)
 //   #/insights                      the detector insight ledger
+//   #/skills[/<name>]               the skill roster, or one skill's detail page
 //   #/dashboard/<metric>            e.g. #/dashboard/cost_artifact
 //   #/artifacts/<kind>[?q=&sort=&dir=]
 //   #/sessions[?win=&q=&outcomes=&artifact=&artifactKind=&f.<facet>=…]
@@ -18,6 +19,7 @@ export interface Route {
   view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string // dashboard sub-selection (which KPI is expanded)
   artKind: string // artifacts sub-selection (feature | pr)
+  skill: string | null // skills sub-selection: the open per-skill page, or null (roster)
   session: string | null // open drawer target, or null (mirror of query.session)
   query: Record<string, string> // full decoded query string (filtered-list state)
 }
@@ -27,6 +29,7 @@ export interface NavState {
   view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string | null
   artKind: string
+  skill: string | null
 }
 
 // 'highlights' is routable (so the landing tab is shareable / reload-survivable),
@@ -78,8 +81,18 @@ export function parseHash(hash: string): Route {
   const view = (VIEWS.indexOf(parts[0]) >= 0 ? parts[0] : 'dashboard') as Route['view']
   const metric = view === 'dashboard' && METRICS.indexOf(parts[1]) >= 0 ? parts[1] : DEFAULT_METRIC
   const artKind = view === 'artifacts' && ART_KINDS.indexOf(parts[1]) >= 0 ? parts[1] : DEFAULT_ARTKIND
+  // A skill name is a free-form path segment (may be plugin-namespaced with ':'),
+  // decoded from its encoded form; absent → the roster.
+  let skill: string | null = null
+  if (view === 'skills' && parts[1]) {
+    try {
+      skill = decodeURIComponent(parts[1])
+    } catch {
+      skill = parts[1] // keep the raw segment if it's not valid encoding
+    }
+  }
 
-  return { view, metric, artKind, session: query.session || null, query }
+  return { view, metric, artKind, skill, session: query.session || null, query }
 }
 
 /** Serialize a path slice + a query map into a canonical hash string. */
@@ -90,7 +103,7 @@ export function serializeRoute(nav: NavState, query: Record<string, string>): st
       : nav.view === 'insights'
         ? '#/insights'
         : nav.view === 'skills'
-          ? '#/skills'
+          ? '#/skills' + (nav.skill ? '/' + encodeURIComponent(nav.skill) : '')
           : nav.view === 'artifacts'
           ? '#/artifacts/' + (nav.artKind || DEFAULT_ARTKIND)
           : nav.view === 'sessions'

@@ -1,21 +1,22 @@
 // Skill Health tab: a per-skill roster built from real sessions — trigger
 // frequency (with a sparkline), a used/dead/idle/scope verdict, own-call error
-// rate, and a clearly-LABELLED friction-adjacency proxy. Plus each skill's
-// SKILL.md description. Deliberately makes NO per-skill cost claim (tokens aren't
-// attributable to a tool call — see src/server/skill-health.ts).
+// rate, and a clearly-LABELLED friction-adjacency proxy. Clicking a row opens a
+// full per-skill DETAIL PAGE (routed at #/skills/<name>, back-button aware), which
+// shows the skill's SKILL.md description and the honest metric grid. Deliberately
+// makes NO per-skill cost claim (tokens aren't attributable to a tool call — see
+// src/server/skill-health.ts).
 //
 // All DOM classes are `sk-`-prefixed and all handlers are wired by querying
 // WITHIN this tab's container, never a global querySelectorAll — so the Sessions
 // tab's global .facet-filter/.srow handlers can't clobber them (and vice-versa).
 import { state, $, esc, num, get } from './core';
+import { syncHash } from './router';
 import { filterBySkill } from './sessions';
 
 // Cached report (one fetch; re-render is cheap). Refetched only if the store changes.
 var skReport = null;
 // Active roster filter: '' = all, or a verdict key.
 var skFilter = '';
-// Expanded skill name (single-open accordion), or null.
-var skOpen = null;
 
 // Verdict presentation: label + dot color + one-line meaning for the legend/tooltip.
 var VERDICTS = {
@@ -41,6 +42,24 @@ export function renderSkills() {
   });
 }
 
+// Open a skill's detail page (or return to the roster when name is null). Mirrors
+// openMetric: set state, sync the URL, repaint. Called by the router on navigation
+// and by row/back clicks.
+export function openSkill(name) {
+  state.skill = name || null;
+  syncHash(); // mirror #/skills/<name> into the URL (no-op while a route is applying)
+  // Detail pages start at the top; the roster keeps its scroll.
+  if (state.skill) window.scrollTo(0, 0);
+  if (skReport) paintSkills();
+}
+
+// Find a row by name (the URL may carry a stale/unknown skill after a re-analyze).
+function skFind(name) {
+  var rows = (skReport && skReport.rows) || [];
+  for (var i = 0; i < rows.length; i++) if (rows[i].name === name) return rows[i];
+  return null;
+}
+
 function paintSkills() {
   var box = $('#skills-health');
   if (!box || !skReport) return;
@@ -53,6 +72,18 @@ function paintSkills() {
     return;
   }
 
+  // A skill is selected → render its full detail page instead of the roster.
+  if (state.skill) {
+    var row = skFind(state.skill);
+    if (row) { paintSkillPage(box, row); return; }
+    // Unknown skill (stale link) — fall through to the roster rather than error.
+    state.skill = null;
+  }
+
+  paintRoster(box, d);
+}
+
+function paintRoster(box, d) {
   var rows = d.rows || [];
   var caption = 'Per-skill health over the last ' + esc(String(d.windowDays)) + ' days, from your real sessions. ' +
     'Frequency and errors are measured; the friction proxy is adjacency, not a quality verdict. No per-skill cost is shown — tokens aren\'t attributable to a single tool call.';
@@ -100,6 +131,11 @@ function renderSkFilterbar() {
   Array.prototype.forEach.call(bar.querySelectorAll('#sk-seg button'), function (b) {
     b.onclick = function () { skFilter = this.getAttribute('data-filter'); paintSkills(); };
   });
+  // Tiles also filter (they carry data-filter). Scoped to this tab's container.
+  var host = $('#skills-health');
+  if (host) Array.prototype.forEach.call(host.querySelectorAll('.sk-tile-click'), function (t) {
+    t.onclick = function () { skFilter = this.getAttribute('data-filter'); paintSkills(); };
+  });
 }
 
 function renderSkRoster(rows) {
@@ -112,67 +148,109 @@ function renderSkRoster(rows) {
   }
   host.innerHTML = shown.map(skRow).join('');
 
-  // Row click → toggle the detail accordion (single-open). Scoped to this host.
+  // Row click → open the skill's detail page. Scoped to this host.
   Array.prototype.forEach.call(host.querySelectorAll('.sk-row-head'), function (el) {
-    el.onclick = function () {
-      var name = this.getAttribute('data-name');
-      skOpen = (skOpen === name) ? null : name;
-      renderSkRoster(rows); // repaint to open/close; cheap
-    };
-  });
-  // "View sessions →" inside an open detail → drill into the Sessions tab.
-  Array.prototype.forEach.call(host.querySelectorAll('.sk-view-sessions'), function (el) {
-    el.onclick = function (e) {
-      e.stopPropagation();
-      filterBySkill(this.getAttribute('data-name'));
-    };
+    el.onclick = function () { openSkill(this.getAttribute('data-name')); };
   });
 }
 
 function skRow(r) {
   var v = VERDICTS[r.verdict] || VERDICTS.idle;
-  var isOpen = skOpen === r.name;
+  return '<div class="sk-row">' +
+    '<div class="sk-row-head" data-name="' + esc(r.name) + '" title="' + esc(v.tip) + '">' +
+      '<span class="sk-dot" style="background:' + v.color + '"></span>' +
+      '<span class="sk-name">' + esc(r.name) + '</span>' +
+      '<span class="sk-verdict" style="color:' + v.color + '">' + esc(v.label) + '</span>' +
+      '<span class="sk-spark">' + sparkline(r.spark) + '</span>' +
+      '<span class="sk-metric"><span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">calls</span></span>' +
+      '<span class="sk-metric"><span class="sk-mv">' + num(r.sessions) + '</span><span class="sk-ml">sessions</span></span>' +
+      '<span class="sk-caret">›</span>' +
+    '</div>' +
+    '</div>';
+}
+
+// ---- Per-skill detail page --------------------------------------------------
+
+function paintSkillPage(box, r) {
+  var v = VERDICTS[r.verdict] || VERDICTS.idle;
   var errRate = r.calls > 0 ? Math.round((r.errorCalls / r.calls) * 100) : 0;
   var fricRate = r.calls > 0 ? Math.round((r.frictionAdjacent / r.calls) * 100) : 0;
 
-  var head = '<div class="sk-row-head" data-name="' + esc(r.name) + '" title="' + esc(v.tip) + '">' +
-    '<span class="sk-dot" style="background:' + v.color + '"></span>' +
-    '<span class="sk-name">' + esc(r.name) + '</span>' +
-    '<span class="sk-verdict" style="color:' + v.color + '">' + esc(v.label) + '</span>' +
-    '<span class="sk-spark">' + sparkline(r.spark) + '</span>' +
-    '<span class="sk-metric"><span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">calls</span></span>' +
-    '<span class="sk-metric"><span class="sk-mv">' + num(r.sessions) + '</span><span class="sk-ml">sessions</span></span>' +
-    '<span class="sk-caret">' + (isOpen ? '▾' : '▸') + '</span>' +
+  var html = '';
+  // Back link + heading with the verdict dot.
+  html += '<div class="sk-page-head">' +
+    '<button class="sk-back" id="sk-back">← All skills</button>' +
+    '</div>';
+  html += '<div class="sk-page-title">' +
+    '<span class="sk-dot sk-dot-lg" style="background:' + v.color + '"></span>' +
+    '<h2 class="sk-page-name">' + esc(r.name) + '</h2>' +
+    '<span class="sk-verdict sk-verdict-lg" style="color:' + v.color + '" title="' + esc(v.tip) + '">' + esc(v.label) + '</span>' +
     '</div>';
 
-  if (!isOpen) return '<div class="sk-row">' + head + '</div>';
+  // Description (or its absence).
+  if (r.description) html += '<div class="sk-desc">' + esc(r.description) + '</div>';
+  else html += '<div class="sk-desc sk-desc-none">No description in SKILL.md frontmatter.</div>';
 
-  // Expanded detail: description, scope/install info, and the honest metric grid.
-  var detail = '<div class="sk-detail">';
-  if (r.description) detail += '<div class="sk-desc">' + esc(r.description) + '</div>';
-  else detail += '<div class="sk-desc sk-desc-none">No description in SKILL.md frontmatter.</div>';
+  // Headline metrics as full-size stat tiles (matches the product's KPI tiles).
+  html += '<div class="sk-page-tiles">' +
+    pageTile(num(r.calls), 'Invocations', 'in the last ' + num(skReport.windowDays) + ' days') +
+    pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
+    pageTile(r.calls > 0 ? errRate + '%' : '—', 'Own-call error rate', r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls errored' : 'no calls to measure') +
+    pageTile(r.calls > 0 ? fricRate + '%' : '—', 'Friction-adjacent · PROXY', r.calls > 0 ? num(r.frictionAdjacent) + ' calls followed by an error' : 'no calls to measure') +
+    '</div>';
 
-  detail += '<div class="sk-facts">';
-  detail += fact('Install scope', r.installed ? (r.scope === 'global' ? 'Global' : 'Project') : 'Not installed');
-  if (r.installedRepos && r.installedRepos.length) detail += fact('Installed in', r.installedRepos.join(', '));
-  if (r.usedRepos && r.usedRepos.length) detail += fact('Used in', r.usedRepos.join(', '));
+  // Trend sparkline (larger than the roster's inline one).
+  html += '<div class="sk-page-sect">' +
+    '<div class="sk-sect-h">Usage trend</div>' +
+    '<div class="sk-page-spark">' + sparkline(r.spark, 260, 44) + '</div>' +
+    '<div class="sk-sect-note">Invocations bucketed across the ' + num(skReport.windowDays) + '-day window, oldest → newest.</div>' +
+    '</div>';
+
+  // Facts grid: install/usage locations + timeline.
+  html += '<div class="sk-page-sect">' +
+    '<div class="sk-sect-h">Details</div>' +
+    '<div class="sk-facts">';
+  html += fact('Install scope', r.installed ? (r.scope === 'global' ? 'Global' : 'Project') : 'Not installed (seen running)');
+  if (r.installedRepos && r.installedRepos.length) html += fact('Installed in', r.installedRepos.join(', '));
+  if (r.usedRepos && r.usedRepos.length) html += fact('Used in', r.usedRepos.join(', '));
   if (r.calls > 0) {
-    detail += fact('Own-call error rate', errRate + '% (' + num(r.errorCalls) + '/' + num(r.calls) + ')');
-    detail += fact('Friction-adjacent', fricRate + '% (' + num(r.frictionAdjacent) + '/' + num(r.calls) + ')', 'proxy',
-      'A skill invocation followed by an errored tool call within the same session. Adjacency only — NOT a judgment that the skill was wrong.');
-    detail += fact('Last used', r.lastUsedAt ? String(r.lastUsedAt).slice(0, 10) : '—');
+    html += fact('First used', r.firstUsedAt ? String(r.firstUsedAt).slice(0, 10) : '—');
+    html += fact('Last used', r.lastUsedAt ? String(r.lastUsedAt).slice(0, 10) : '—');
   }
-  detail += '</div>';
+  html += '</div></div>';
 
-  // Verdict-specific guidance (the actionable line).
-  detail += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
-
+  // The friction proxy needs its honesty caveat spelled out on the page.
   if (r.calls > 0) {
-    detail += '<div class="sk-actions"><a class="sk-view-sessions" data-name="' + esc(r.name) + '">View sessions that used it →</a></div>';
+    html += '<div class="sk-page-sect">' +
+      '<div class="sk-sect-h">What “friction-adjacent” means</div>' +
+      '<div class="sk-sect-note sk-sect-note-block">A skill invocation counts as friction-adjacent when an errored tool call followed it within the same session. ' +
+      'This is <b>adjacency only</b> — not a judgment that the skill was wrong, and not a cost. It is a signal to go read the sessions, not a verdict.</div>' +
+      '</div>';
   }
-  detail += '</div>';
 
-  return '<div class="sk-row sk-row-open">' + head + detail + '</div>';
+  // Verdict-specific guidance.
+  html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
+
+  // Drill into the sessions that used it.
+  if (r.calls > 0) {
+    html += '<div class="sk-actions"><a class="sk-view-sessions" data-name="' + esc(r.name) + '">View sessions that used it →</a></div>';
+  }
+
+  box.innerHTML = html;
+
+  // Wire the (container-scoped) handlers.
+  var back = box.querySelector('#sk-back');
+  if (back) back.onclick = function () { openSkill(null); };
+  var vs = box.querySelector('.sk-view-sessions');
+  if (vs) vs.onclick = function () { filterBySkill(this.getAttribute('data-name')); };
+}
+
+function pageTile(value, label, sub) {
+  return '<div class="sk-tile">' +
+    '<div class="sk-tile-v">' + value + '</div>' +
+    '<div class="sk-tile-l">' + esc(label) + '</div>' +
+    (sub ? '<div class="sk-tile-s">' + esc(sub) + '</div>' : '') +
+    '</div>';
 }
 
 function fact(label, value, tag?, tip?) {
@@ -200,18 +278,21 @@ function advice(r) {
 }
 
 // Tiny inline SVG sparkline of per-bucket invocation counts. Flat baseline when
-// there's no usage. Bars (not a line) read clearly at this size.
-function sparkline(spark) {
+// there's no usage. Bars (not a line) read clearly at this size. Width/height are
+// parameterized so the roster (small) and the detail page (larger) share it.
+function sparkline(spark, w?, h?) {
+  var width = w || 90, height = h || 20;
   var vals = spark || [];
   var max = 0;
   for (var i = 0; i < vals.length; i++) if (vals[i] > max) max = vals[i];
-  if (!max) return '<svg class="sk-spark-svg" width="90" height="20" aria-hidden="true"><line x1="0" y1="19" x2="90" y2="19" stroke="var(--line)" stroke-width="1"/></svg>';
-  var n = vals.length, bw = 90 / n, bars = '';
+  var base = height - 1;
+  if (!max) return '<svg class="sk-spark-svg" width="' + width + '" height="' + height + '" aria-hidden="true"><line x1="0" y1="' + base + '" x2="' + width + '" y2="' + base + '" stroke="var(--line)" stroke-width="1"/></svg>';
+  var n = vals.length, bw = width / n, bars = '';
   for (var j = 0; j < n; j++) {
-    var h = vals[j] ? Math.max(2, Math.round((vals[j] / max) * 18)) : 0;
-    if (!h) continue;
-    bars += '<rect x="' + (j * bw).toFixed(1) + '" y="' + (19 - h) + '" width="' + Math.max(1, bw - 1).toFixed(1) +
-      '" height="' + h + '" fill="var(--emerald)"></rect>';
+    var bh = vals[j] ? Math.max(2, Math.round((vals[j] / max) * (height - 2))) : 0;
+    if (!bh) continue;
+    bars += '<rect x="' + (j * bw).toFixed(1) + '" y="' + (base - bh) + '" width="' + Math.max(1, bw - 1).toFixed(1) +
+      '" height="' + bh + '" fill="var(--emerald)"></rect>';
   }
-  return '<svg class="sk-spark-svg" width="90" height="20" aria-hidden="true">' + bars + '</svg>';
+  return '<svg class="sk-spark-svg" width="' + width + '" height="' + height + '" aria-hidden="true">' + bars + '</svg>';
 }
