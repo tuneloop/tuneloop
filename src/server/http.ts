@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
-import { skillHealth } from './skill-health'
+import { skillHealth, skillInvocations } from './skill-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -193,11 +193,18 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     // rate, and a labelled friction-adjacency proxy. No cost claim. `days` windows the
     // usage facts (default 30; 'all' = all-time); a `from`+`to` ISO pair overrides it
     // with a custom range. The installed inventory is always current — only usage windows.
-    const daysRaw = url.searchParams.get('days')
-    const days = daysRaw === 'all' ? null : Number.isFinite(parseInt(daysRaw ?? '', 10)) ? parseInt(daysRaw!, 10) : 30
-    const from = url.searchParams.get('from') ?? undefined
-    const to = url.searchParams.get('to') ?? undefined
-    sendJson(res, 200, skillHealth(store, { days, from, to }))
+    sendJson(res, 200, skillHealth(store, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/skill-invocations') {
+    // Every invocation of one skill in the window (session + tool-call idx per row) —
+    // the per-skill drill-down list. `name` required; same window params as skill-health.
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillInvocations(store, name, skillWindowFrom(url.searchParams)))
     return
   }
   if (path === '/api/error-categories') {
@@ -609,6 +616,14 @@ function windowFromDays(daysRaw: string | null): { from?: string; to?: string } 
   const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 7
   const now = Date.now()
   return { from: new Date(now - days * 86_400_000).toISOString(), to: new Date(now).toISOString() }
+}
+
+// The Skills tab window from query params: `days` (number | 'all', default 30) or a
+// `from`+`to` ISO custom range that overrides it. Shape matches SkillHealthWindow.
+function skillWindowFrom(params: URLSearchParams): { days: number | null; from?: string; to?: string } {
+  const daysRaw = params.get('days')
+  const days = daysRaw === 'all' ? null : Number.isFinite(parseInt(daysRaw ?? '', 10)) ? parseInt(daysRaw!, 10) : 30
+  return { days, from: params.get('from') ?? undefined, to: params.get('to') ?? undefined }
 }
 
 // The dashboard SPA is built by tsup into dist/client (app.js + index.html +

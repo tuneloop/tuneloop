@@ -11,7 +11,7 @@
 // tab's global .facet-filter/.srow handlers can't clobber them (and vice-versa).
 import { state, $, esc, num, get } from './core';
 import { syncHash } from './router';
-import { filterBySkill } from './sessions';
+import { filterBySkill, openDetail } from './sessions';
 
 // Usage-window presets for the Skills tab (mirrors the Sessions time bar). The
 // installed inventory is always current — only the invocation side windows.
@@ -325,12 +325,16 @@ function paintSkillPage(box, r) {
     pageTile(r.calls > 0 ? fricRate + '%' : '—', 'Friction-adjacent · PROXY', r.calls > 0 ? num(r.frictionAdjacent) + ' calls followed by an error' : 'no calls to measure') +
     '</div>';
 
-  // Trend sparkline (larger than the roster's inline one).
-  html += '<div class="sk-page-sect">' +
-    '<div class="sk-sect-h">Usage trend</div>' +
-    '<div class="sk-page-spark">' + sparkline(r.spark, 260, 44) + '</div>' +
-    '<div class="sk-sect-note">Invocations bucketed across the ' + (skReport.windowDays == null ? 'full history' : num(skReport.windowDays) + '-day window') + ', oldest → newest.</div>' +
-    '</div>';
+  // Usage trend — a labeled bar chart (count axis + real calendar date ticks + a JS
+  // hover tooltip). Only meaningful when it was actually used.
+  if (r.calls > 0) {
+    html += '<div class="sk-page-sect">' +
+      '<div class="sk-sect-h">Usage trend</div>' +
+      '<div class="sk-trend" id="sk-trend">' + trendChart(r.spark, skReport.sparkBuckets) + '</div>' +
+      '<div class="sk-sect-note">Invocations per ' + trendGranLabel(skReport.sparkBuckets) + ', ' +
+        (skReport.windowDays == null ? 'across your full history' : 'over the last ' + num(skReport.windowDays) + ' days') + '. Hover a bar for its exact count.</div>' +
+      '</div>';
+  }
 
   // Facts grid: install/usage locations + timeline.
   html += '<div class="sk-page-sect">' +
@@ -357,9 +361,15 @@ function paintSkillPage(box, r) {
   // Verdict-specific guidance.
   html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
 
-  // Drill into the sessions that used it.
+  // Invocations list — every call, each opening the session scrolled to that call.
   if (r.calls > 0) {
-    html += '<div class="sk-actions"><a class="sk-view-sessions" data-name="' + esc(r.name) + '">View sessions that used it →</a></div>';
+    html += '<div class="sk-page-sect">' +
+      '<div class="sk-sect-h">Invocations</div>' +
+      '<div class="sk-sect-note">Each row opens the session and scrolls to where the skill was invoked.' +
+        (r.calls > 100 ? ' Showing the 100 most recent of ' + num(r.calls) + '.' : '') + '</div>' +
+      '<div class="sk-invocations" id="sk-invocations"><div class="sk-empty">Loading invocations…</div></div>' +
+      '<div class="sk-actions"><a class="sk-view-sessions" data-name="' + esc(r.name) + '">Open these in the Sessions tab →</a></div>' +
+      '</div>';
   }
 
   box.innerHTML = html;
@@ -369,6 +379,50 @@ function paintSkillPage(box, r) {
   if (back) back.onclick = function () { openSkill(null); };
   var vs = box.querySelector('.sk-view-sessions');
   if (vs) vs.onclick = function () { filterBySkill(this.getAttribute('data-name')); };
+
+  if (r.calls > 0) {
+    wireTrendTooltip();
+    // Load the invocations list async (keeps the page paint instant).
+    loadInvocations(r.name);
+  }
+}
+
+// Fetch + render the invocations list for a skill, in the current window. Each row
+// opens the session drawer scrolled to that skill's tool call (txtool-<idx>).
+function loadInvocations(name) {
+  var host = $('#sk-invocations');
+  if (!host) return;
+  get('/api/skill-invocations?name=' + encodeURIComponent(name) + '&' + skWinQuery()).then(function (list) {
+    // The page may have navigated away (or to another skill) while this was in flight.
+    if (state.skill !== name) return;
+    host = $('#sk-invocations');
+    if (!host) return;
+    var rows = list || [];
+    if (!rows.length) { host.innerHTML = '<div class="sk-empty">No invocations in this window.</div>'; return; }
+    host.innerHTML = rows.map(invocationRow).join('');
+    Array.prototype.forEach.call(host.querySelectorAll('.sk-inv'), function (el) {
+      el.onclick = function () {
+        openDetail(this.getAttribute('data-session'), { toolTarget: parseInt(this.getAttribute('data-idx'), 10) });
+      };
+    });
+  }).catch(function () {
+    var h = $('#sk-invocations');
+    if (h) h.innerHTML = '<div class="sk-empty">Could not load invocations.</div>';
+  });
+}
+
+function invocationRow(o) {
+  var when = o.ts ? String(o.ts).slice(0, 10) : '—';
+  var tags = '';
+  if (o.isError) tags += '<span class="sk-inv-tag sk-inv-err">errored</span>';
+  if (o.frictionAfter) tags += '<span class="sk-inv-tag sk-inv-fric" title="An errored tool call followed within a few steps — adjacency, not a verdict.">friction after</span>';
+  return '<button class="sk-inv" data-session="' + esc(o.sessionId) + '" data-idx="' + esc(String(o.idx)) + '">' +
+    '<span class="sk-inv-title">' + esc(o.title || o.sessionId) + '</span>' +
+    '<span class="sk-inv-tags">' + tags + '</span>' +
+    (o.repo ? '<span class="sk-inv-repo">' + esc(o.repo) + '</span>' : '') +
+    '<span class="sk-inv-date">' + esc(when) + '</span>' +
+    '<span class="sk-inv-go">open ↗</span>' +
+    '</button>';
 }
 
 function pageTile(value, label, sub) {
@@ -424,4 +478,96 @@ function sparkline(spark, w?, h?) {
       '" height="' + bh + '" fill="var(--emerald)"></rect>';
   }
   return '<svg class="sk-spark-svg" width="' + width + '" height="' + height + '" aria-hidden="true">' + bars + '</svg>';
+}
+
+// The trend granularity word for the caption, inferred from the bucket width.
+function trendGranLabel(buckets) {
+  if (!buckets || buckets.length < 1) return 'period';
+  var days = (buckets[0].endMs - buckets[0].startMs) / 86400000;
+  return days <= 1.5 ? 'day' : days <= 8 ? 'week' : 'month';
+}
+
+// A bucket's full date-range label for the tooltip: "Jul 8" (day) or "Jul 8 – Jul 14".
+function bucketRange(b) {
+  var fmt = function (ms) { return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }); };
+  var days = (b.endMs - b.startMs) / 86400000;
+  return days <= 1.5 ? fmt(b.startMs) : fmt(b.startMs) + ' – ' + fmt(b.endMs - 86400000);
+}
+
+// The Usage-trend bar chart. Bars align 1:1 with the report's calendar buckets; every
+// bar carries data-* so wireTrendTooltip() can show an exact "date: N invocations" on
+// hover. A count Y-axis (0/mid/max) + evenly-spaced date x-ticks make it readable — a
+// real chart, not the roster's bare sparkline. Sized generously for the detail page.
+function trendChart(spark, buckets) {
+  var vals = spark || [];
+  var n = buckets && buckets.length ? buckets.length : vals.length;
+  var max = 0;
+  for (var i = 0; i < n; i++) if ((vals[i] || 0) > max) max = vals[i];
+  max = max || 1;
+  var W = 860, H = 220, padL = 34, padR = 12, padT = 14, padB = 34;
+  var plotW = W - padL - padR, plotH = H - padT - padB;
+  var base = padT + plotH, bw = plotW / n;
+  var yOf = function (v) { return padT + (1 - v / max) * plotH; };
+  var svg = '<svg class="sk-trend-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
+
+  // Y gridlines + integer count labels. Cap the tick set so counts stay whole.
+  var yTicks = max <= 4 ? range0(max) : [0, Math.round(max / 2), max];
+  yTicks.forEach(function (v) {
+    var y = yOf(v);
+    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="var(--line)"/>';
+    svg += '<text class="sk-trend-ax" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + v + '</text>';
+  });
+
+  // Bars — every bucket (0-height buckets just render nothing but hold their slot),
+  // each an invisible full-height hit target + the visible bar, both carrying data-*.
+  var xStep = Math.max(1, Math.ceil(n / 8)); // ~8 x-labels max
+  for (var b = 0; b < n; b++) {
+    var x = padL + b * bw, w = Math.max(2, bw - 3), bx = x + (bw - w) / 2;
+    var c = vals[b] || 0;
+    var bk = buckets[b];
+    var range = bk ? bucketRange(bk) : '';
+    var tipCount = c + ' invocation' + (c === 1 ? '' : 's');
+    // Full-height transparent hover zone so hovering the empty space above a short bar still works.
+    svg += '<rect class="sk-trend-hit" x="' + x.toFixed(1) + '" y="' + padT + '" width="' + bw.toFixed(1) + '" height="' + plotH +
+      '" fill="transparent" data-range="' + esc(range) + '" data-count="' + esc(tipCount) + '"></rect>';
+    if (c > 0) {
+      var top = yOf(c);
+      svg += '<rect class="sk-trend-bar" x="' + bx.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + w.toFixed(1) +
+        '" height="' + (base - top).toFixed(1) + '" rx="2" fill="var(--emerald)"></rect>';
+    }
+    // Evenly-spaced date ticks along the x-axis.
+    if (bk && (b % xStep === 0 || b === n - 1)) {
+      var lbl = new Date(bk.startMs).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      var anchor = b === 0 ? 'start' : b === n - 1 ? 'end' : 'middle';
+      var tx = anchor === 'start' ? padL : anchor === 'end' ? W - padR : x + bw / 2;
+      svg += '<text class="sk-trend-ax" x="' + tx.toFixed(1) + '" y="' + (H - 12) + '" text-anchor="' + anchor + '">' + esc(lbl) + '</text>';
+    }
+  }
+  svg += '</svg>';
+  return svg;
+}
+
+// [0..max] inclusive, integers — the small-range Y tick set.
+function range0(max) { var a = []; for (var i = 0; i <= max; i++) a.push(i); return a; }
+
+// Wire the trend chart's floating tooltip: hovering any bucket hit-zone shows a
+// positioned box with the date range + exact invocation count. One shared tooltip
+// element, positioned at the cursor; hidden on mouseleave.
+function wireTrendTooltip() {
+  var wrap = $('#sk-trend');
+  if (!wrap) return;
+  var tip = document.createElement('div');
+  tip.className = 'sk-trend-tip';
+  tip.style.display = 'none';
+  wrap.appendChild(tip);
+  Array.prototype.forEach.call(wrap.querySelectorAll('.sk-trend-hit'), function (hit) {
+    hit.onmousemove = function (e) {
+      tip.innerHTML = '<b>' + esc(hit.getAttribute('data-range')) + '</b><br>' + esc(hit.getAttribute('data-count'));
+      tip.style.display = 'block';
+      var wr = wrap.getBoundingClientRect();
+      tip.style.left = (e.clientX - wr.left + 12) + 'px';
+      tip.style.top = (e.clientY - wr.top + 12) + 'px';
+    };
+    hit.onmouseleave = function () { tip.style.display = 'none'; };
+  });
 }

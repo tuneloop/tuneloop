@@ -32,8 +32,53 @@ import {
 const SOURCE = 'claude-code'
 /** How many tool calls after a skill engagement we scan for an error, for the friction proxy. */
 const FRICTION_LOOKAHEAD = 3
-/** Sparkline granularity. */
-const SPARK_BUCKETS = 12
+
+const DAY_MS = 86_400_000
+
+/** One trend bucket on the shared x-axis: its start (ms) and a human date label. */
+export interface SparkBucket {
+  startMs: number
+  endMs: number
+  label: string
+}
+
+/**
+ * Build the shared trend x-axis: calendar-aligned buckets spanning [sinceMs, untilMs].
+ * Granularity scales with the span so bars stay readable — daily for short windows,
+ * weekly for medium, monthly for long. Every bucket in the range is emitted (including
+ * empty ones) so the timeline is continuous. Labels are date-formatted for the axis.
+ */
+function buildSparkBuckets(sinceMs: number, untilMs: number): SparkBucket[] {
+  const spanDays = (untilMs - sinceMs) / DAY_MS
+  const gran: 'day' | 'week' | 'month' = spanDays <= 31 ? 'day' : spanDays <= 182 ? 'week' : 'month'
+  const out: SparkBucket[] = []
+  const fmtDay = (ms: number) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
+  const fmtMonth = (ms: number) => new Date(ms).toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' })
+
+  if (gran === 'month') {
+    // Calendar months from the month containing sinceMs through untilMs.
+    const d = new Date(sinceMs)
+    let y = d.getUTCFullYear()
+    let m = d.getUTCMonth()
+    while (true) {
+      const startMs = Date.UTC(y, m, 1)
+      const endMs = Date.UTC(m === 11 ? y + 1 : y, (m + 1) % 12, 1)
+      if (startMs > untilMs) break
+      out.push({ startMs, endMs, label: fmtMonth(startMs) })
+      m = (m + 1) % 12
+      if (m === 0) y++
+    }
+    return out
+  }
+
+  // Day/week: fixed-width chunks aligned to the UTC day containing sinceMs.
+  const step = gran === 'day' ? DAY_MS : 7 * DAY_MS
+  const first = Date.UTC(new Date(sinceMs).getUTCFullYear(), new Date(sinceMs).getUTCMonth(), new Date(sinceMs).getUTCDate())
+  for (let s = first; s <= untilMs; s += step) {
+    out.push({ startMs: s, endMs: s + step, label: fmtDay(s) })
+  }
+  return out
+}
 
 /** An installed skill with the metadata the roster shows. */
 interface InstalledSkill {
@@ -64,7 +109,7 @@ export interface SkillHealthRow {
   frictionAdjacent: number
   firstUsedAt: string | null
   lastUsedAt: string | null
-  /** Per-bucket invocation counts for the sparkline, oldest→newest, length SPARK_BUCKETS. */
+  /** Per-bucket invocation counts, oldest→newest, aligned 1:1 with report.sparkBuckets. */
   spark: number[]
   /**
    * Usage status — the PRIMARY, mutually-exclusive axis. Window-scoped and factual:
@@ -122,6 +167,9 @@ export interface SkillHealthReport {
   rows: SkillHealthRow[]
   /** True when no config snapshot has been captured — the installed side is unknown. */
   noConfig: boolean
+  /** The shared trend x-axis: each row's `spark` array aligns 1:1 with these calendar
+   *  buckets, so the client can label bars + tooltips with real date ranges. */
+  sparkBuckets: SparkBucket[]
 }
 
 /** Load installed skills (with descriptions) from the current config snapshots. */
@@ -203,8 +251,13 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
   ) as InvokedDetail[]
 }
 
-/** Per-skill sparkline: invocation counts bucketed into SPARK_BUCKETS even slices over the window. */
-function querySpark(store: Store, sinceIso: string, sinceMs: number, spanMs: number, untilIso?: string): Map<string, number[]> {
+/**
+ * Per-skill trend: invocation counts folded into the shared calendar buckets. Each
+ * skill's array is aligned to `buckets` (same length/order), so a bar's index maps to
+ * a real date range for the axis + tooltip. A ts is placed in the last bucket whose
+ * startMs <= ts (buckets are contiguous and sorted).
+ */
+function querySpark(store: Store, sinceIso: string, buckets: SparkBucket[], untilIso?: string): Map<string, number[]> {
   const rows = store.queryAll(
     `SELECT t.name AS name, t.ts AS ts
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
@@ -215,13 +268,18 @@ function querySpark(store: Store, sinceIso: string, sinceMs: number, spanMs: num
     untilIso ?? null,
     untilIso ?? null,
   ) as Array<{ name: string; ts: string }>
-  const bucketMs = spanMs / SPARK_BUCKETS
   const out = new Map<string, number[]>()
+  const n = buckets.length
   for (const { name, ts } of rows) {
     const t = Date.parse(ts)
     if (Number.isNaN(t)) continue
-    const b = Math.min(SPARK_BUCKETS - 1, Math.max(0, Math.floor((t - sinceMs) / bucketMs)))
-    const arr = out.get(name) ?? new Array(SPARK_BUCKETS).fill(0)
+    // Find the bucket containing t (linear scan from the end; buckets are contiguous).
+    let b = -1
+    for (let i = n - 1; i >= 0; i--) {
+      if (t >= buckets[i]!.startMs) { b = i; break }
+    }
+    if (b < 0) b = 0
+    const arr = out.get(name) ?? new Array(n).fill(0)
     arr[b]++
     out.set(name, arr)
   }
@@ -321,10 +379,11 @@ function resolveWindow(store: Store, win: SkillHealthWindow): ResolvedWindow {
  */
 export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHealthReport {
   const { sinceIso, untilIso, sinceMs, spanMs, windowDays } = resolveWindow(store, win)
+  const sparkBuckets = buildSparkBuckets(sinceMs, sinceMs + spanMs)
 
   const installed = loadInstalledSkills(store)
   const invokedDetail = queryInvokedDetail(store, sinceIso, untilIso)
-  const spark = querySpark(store, sinceIso, sinceMs, spanMs, untilIso)
+  const spark = querySpark(store, sinceIso, sparkBuckets, untilIso)
   const sessionCounts = loadSessionCounts(store, sinceIso, untilIso)
 
   // Reuse the detector's classify to get remove(=dead)/scope verdicts, skill-side only.
@@ -359,7 +418,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         frictionAdjacent: 0,
         firstUsedAt: null,
         lastUsedAt: null,
-        spark: spark.get(name) ?? new Array(SPARK_BUCKETS).fill(0),
+        spark: spark.get(name) ?? new Array(sparkBuckets.length).fill(0),
         status: 'unused',
         enoughData: false,
         flags: [],
@@ -435,6 +494,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     totalNotInConfig: rows.filter((r) => has(r, 'not-in-config')).length,
     rows,
     noConfig: installed.length === 0,
+    sparkBuckets,
   }
 }
 
@@ -443,6 +503,69 @@ function rankRows(a: SkillHealthRow, b: SkillHealthRow): number {
   if (b.calls !== a.calls) return b.calls - a.calls
   const order = { used: 0, unused: 1 }
   return order[a.status] - order[b.status] || a.name.localeCompare(b.name)
+}
+
+/** One invocation of a skill — a row in the per-skill "invocations" drill-down list. */
+export interface SkillInvocation {
+  sessionId: string
+  title: string | null
+  /** Tool-call idx within its session — the transcript anchor (txtool-<idx>) to scroll to. */
+  idx: number
+  repo: string | null
+  ts: string | null
+  /** True when its own tool call errored. */
+  isError: boolean
+  /** Proxy: an errored tool call followed within FRICTION_LOOKAHEAD calls, same session. */
+  frictionAfter: boolean
+}
+
+/** Cap on the invocations list (mirrors errorOccurrences). The page notes the true
+ * total from the roster row's `calls`, so we only need the capped page here. */
+const MAX_INVOCATIONS = 100
+
+/**
+ * Every invocation of one skill in the window, newest first — the list behind the
+ * per-skill "Invocations" drill-down. Each row carries session_id + the tool-call idx
+ * so the client can open the session drawer scrolled to that exact call (txtool-<idx>).
+ * Matches the invoked name exactly OR as a plugin-namespaced `<plugin>:<name>` (same
+ * reconciliation as skillMatches), so a namespaced invocation still lists under its skill.
+ * Main-thread only, matching the roster's counts. Capped at MAX_INVOCATIONS.
+ */
+export function skillInvocations(store: Store, name: string, win: SkillHealthWindow = {}): SkillInvocation[] {
+  const { sinceIso, untilIso } = resolveWindow(store, win)
+  const title = `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='title'), NULLIF(s.title, ''), NULLIF(s.first_prompt, ''))`
+  const rows = store.queryAll(
+    `SELECT t.session_id AS sessionId, ${title} AS title, t.idx AS idx, s.repo AS repo,
+            t.ts AS ts, t.is_error AS isError,
+            (CASE WHEN EXISTS (
+               SELECT 1 FROM tool_calls e WHERE e.session_id = t.session_id
+                 AND e.idx > t.idx AND e.idx <= t.idx + ? AND e.is_error = 1
+             ) THEN 1 ELSE 0 END) AS frictionAfter
+     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     WHERE t.action = 'skill' AND t.is_sidechain = 0
+       AND (t.name = ? OR t.name LIKE ?)
+       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
+     ORDER BY s.started_at DESC, t.idx ASC
+     LIMIT ?`,
+    FRICTION_LOOKAHEAD,
+    name,
+    '%:' + name, // plugin-namespaced form (<plugin>:<name>)
+    SOURCE,
+    sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
+    MAX_INVOCATIONS,
+  ) as Array<{ sessionId: string; title: string | null; idx: number; repo: string | null; ts: string | null; isError: number; frictionAfter: number }>
+
+  return rows.map((r) => ({
+    sessionId: r.sessionId,
+    title: r.title,
+    idx: r.idx,
+    repo: r.repo,
+    ts: r.ts,
+    isError: r.isError === 1,
+    frictionAfter: r.frictionAfter === 1,
+  }))
 }
 
 function minIso(a: string | null, b: string | null): string | null {

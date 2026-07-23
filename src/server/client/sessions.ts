@@ -960,7 +960,11 @@ export function openDetail(id, focus?: any) {
           '<div class="tx-error-h">⚠ ' + esc(tl.name) + '</div>' +
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
-      return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '">' +
+      // Every tool call with a known idx gets a stable anchor (txtool-<idx>), so a
+      // deep-link can scroll to ANY tool call — not just failed ones (which also carry
+      // the txerr-<idx> error panel above). Used by the skill-invocations drill-in.
+      var toolId = tl.idx != null ? ' id="txtool-' + tl.idx + '"' : '';
+      return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '"' + toolId + '>' +
         row + body + errPanel + '</div>';
     }
 
@@ -1502,6 +1506,21 @@ export function openDetail(id, focus?: any) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       flashOnSettle(el);
     }
+    // Reveal ANY tool call by its idx (txtool-<idx>) — used by the skill-invocations
+    // drill-in, which scrolls to a skill's tool block whether or not it errored. Same
+    // collapsed-group reveal + scroll + flash as revealErr.
+    function revealTool(idx) {
+      var el = document.getElementById('txtool-' + idx);
+      if (!el) return;
+      var rest = el.closest && el.closest('.tool-rest');
+      if (rest && !rest.classList.contains('on')) {
+        rest.classList.add('on');
+        var mb = rest.nextElementSibling as any;
+        if (mb && mb.classList.contains('tool-more')) mb.style.display = 'none';
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      flashOnSettle(el);
+    }
     var errIdx = -1;
     function gotoErr(next) {
       if (!errIds.length) return;
@@ -1814,6 +1833,14 @@ export function openDetail(id, focus?: any) {
     }
     activeReveal = revealErrorTarget;
     if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
+
+    // Reveal a specific tool call by idx (skill-invocation drill-in). Skill calls are
+    // main-thread, so switch to the main scope + transcript tab, then revealTool.
+    if (focus && focus.toolTarget != null && hasTx) {
+      showTab('transcript');
+      if (activeScope !== 'main') switchScope('main');
+      requestAnimationFrame(function () { revealTool(focus.toolTarget); });
+    }
 
     // Land on a specific user turn by its main-thread seq (insight evidence links
     // pass the occurrence's turn_seq pointer). Degrades to a normal open when the
