@@ -22,6 +22,7 @@
     "dist",
     "extensions",
     "skills",
+    "config.json",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"

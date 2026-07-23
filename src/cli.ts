@@ -33,6 +33,7 @@ program
     [],
   )
   .option('--db <path>', 'path to the tuneloop SQLite store')
+  .option('--config <path>', 'JSON config selecting which processors/detectors run (default: all — see config.json)')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
   .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, bedrock, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
@@ -47,6 +48,7 @@ program
       options: {
         source: string[]
         db?: string
+        config?: string
         limit?: number
         port?: number
         serve?: boolean
@@ -64,6 +66,7 @@ program
         dirs: dirList,
         sources: options.source,
         db: options.db,
+        configPath: options.config,
         limit: options.limit,
         verbose: options.verbose,
         llm: { provider: options.llmProvider, model: options.llmModel, heavyModel: options.llmModelHeavy, baseURL: options.llmBaseUrl },

@@ -11,6 +11,7 @@ import type { SourceAdapter } from '../adapters/types'
 import type { EnvCategory } from '../store/types'
 import { runDetectors } from '../core/detector-runner'
 import { getAdapters, getDetectors, getProcessors } from '../core/registry'
+import { loadPipelineConfig, resolvePipeline } from '../pipeline-config'
 import { orderProcessors, runProcessors } from '../core/runner'
 import { createLlmClient, startLlmTrace, endLlmTrace, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
@@ -31,6 +32,8 @@ export interface AnalyzeOptions {
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
   limit?: number
+  /** Path to a JSON pipeline config selecting which processors/detectors run; unset = the shipped default (everything). */
+  configPath?: string
   /** Non-secret LLM flag overrides (provider/model/base-url); the key stays env-only. */
   llm?: LlmOverrides
 }
@@ -43,6 +46,17 @@ export interface AnalyzeOptions {
 export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const log = createLogger(opts.verbose ? 'debug' : 'info')
   let config = loadConfig({ db: opts.db, llm: opts.llm })
+
+  // Which processors + detectors run this invocation. `--config` selects a JSON
+  // file; without it, the shipped default (everything) is read. Resolved up front
+  // so a bad --config path fails before any work, and unknown-name / missing-dep
+  // warnings surface early.
+  const { processors, detectors } = resolvePipeline(
+    loadPipelineConfig(opts.configPath),
+    { processors: getProcessors(), detectors: getDetectors() },
+    log,
+  )
+  log.debug(`pipeline: ${processors.length} processor(s), ${detectors.length} detector(s)`)
 
   // No enrichment provider configured: on an interactive terminal, offer a
   // run-only setup (paste a key; it lives only in this process, nothing is
@@ -74,7 +88,6 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     [config.llm.model, config.llm.heavyModel].some((m) => m && !priceFor(config.llm!.provider, m))
   if (unpricedLlmModel) await loadOpenRouterPrices(config.dataDir, log)
 
-  const processors = getProcessors()
   store.registerFacets('intrinsic', INTRINSIC_FACETS)
   store.registerMeasures('intrinsic', INTRINSIC_MEASURES)
   for (const p of processors) {
@@ -372,7 +385,6 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Run detectors (cross-session pattern detection) after all processors complete.
   // Step 2/2: a shared bar whose total grows as each LLM detector declares its delta
   // (starts at 0 — S-tier detectors add nothing and it completes instantly).
-  const detectors = getDetectors()
   if (detectors.length > 0) {
     log.debug(`Running ${detectors.length} detector(s)...`)
     const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
