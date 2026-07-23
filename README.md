@@ -59,7 +59,24 @@ Handy flags:
 
 - `--no-serve` — build the store and exit, no dashboard
 - `--port <n>` — serve on a different port
+- `--config <path>` — a JSON file selecting which processors/detectors run (see below)
 - `npx tuneloop serve` — open the dashboard over an already-analyzed store, without re-analyzing
+
+### Choosing what runs
+
+By default `analyze` runs every built-in processor and detector. To run only a
+subset, copy the shipped [`config.json`](./config.json) — it lists everything —
+delete or disable what you don't want, and pass it with `--config`:
+
+```bash
+npx tuneloop analyze --config ./my-config.json
+```
+
+Each entry is keyed by name with an `enabled` flag; omit a whole section
+(`processors` or `detectors`) to keep all of that kind. A processor's
+dependencies are pulled in automatically, so you can't accidentally starve one
+of its inputs. See [ARCHITECTURE.md](./ARCHITECTURE.md#built-in-processors) for
+the full list and what each does.
 
 ## What you get
 
