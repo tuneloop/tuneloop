@@ -763,26 +763,26 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .drawer-back:hover { border-color: var(--emerald); color: var(--emerald); }
 
 /* ---- Skill Health tab (all classes sk-prefixed; see skills.ts) ------------- */
-.sk-caption { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 4px 0 18px; max-width: 900px; }
-.sk-empty { color: var(--muted); font-size: 14px; padding: 24px 0; }
+.sk-empty { color: var(--muted); font-size: 14px; padding: 24px 0; max-width: 620px; line-height: 1.5; }
 
-.sk-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 22px; }
+/* Stat tiles — used only on the per-skill detail page (roster has no tiles). */
 .sk-tile { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
 .sk-tile-v { font-size: 26px; font-family: ui-monospace, Menlo, monospace; color: var(--ink); line-height: 1; }
 .sk-tile-l { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
 .sk-tile-s { font-size: 11px; color: var(--gray); margin-top: 2px; }
-.sk-tile-click { cursor: pointer; transition: border-color .12s; }
-.sk-tile-click:hover { border-color: var(--emerald); }
 
-.sk-timebar { display: flex; align-items: center; gap: 10px; margin: 2px 0 16px; }
-.sk-filterbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+/* Filter toolbar reuses the Sessions .filters / .flt-* / .seg tokens verbatim; the
+   status <select> just needs the shared filter-select styling (matched by .filters select). */
 
 .sk-roster { display: flex; flex-direction: column; gap: 8px; }
 .sk-row { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .sk-row-head { display: flex; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; }
 .sk-row-head:hover { background: #faf8f2; }
 .sk-dot { flex: none; width: 9px; height: 9px; border-radius: 999px; }
-.sk-name { flex: 1 1 auto; font-weight: 600; font-size: 14px; color: var(--ink); font-family: ui-monospace, Menlo, monospace; }
+.sk-name { flex: none; font-weight: 600; font-size: 14px; color: var(--ink); font-family: ui-monospace, Menlo, monospace; }
+.sk-flags { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; }
+.sk-flag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.sk-flag-lg { font-size: 11px; padding: 2px 10px; }
 .sk-verdict { flex: none; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; min-width: 96px; }
 .sk-spark { flex: none; display: inline-flex; align-items: flex-end; }
 .sk-spark-svg { display: block; }

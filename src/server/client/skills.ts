@@ -16,42 +16,67 @@ import { filterBySkill } from './sessions';
 // Usage-window presets for the Skills tab (mirrors the Sessions time bar). The
 // installed inventory is always current — only the invocation side windows.
 var SK_TIME_PRESETS = [
-  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }
+  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
 ];
 
 // Cached report, keyed on the window it was fetched for. A window change refetches
 // (the numbers are window-dependent); an unchanged window repaints from cache.
 var skReport = null;
-var skReportWin = null; // the state.skillWin the cache was fetched for
+var skReportKey = null; // the window signature the cache was fetched for
 var skLoading = false;
-// Active roster filter: '' = all, or a verdict key.
-var skFilter = '';
+// Roster controls (client-side, applied over the cached rows):
+//   skStatus '' = default (used only) | 'all' | a status key | a flag key
+//   skSearch = case-insensitive substring on the skill name
+var skStatus = '';
+var skSearch = '';
 
-// Verdict presentation: label + dot color + one-line meaning for the legend/tooltip.
-var VERDICTS = {
-  active: { label: 'Active', color: 'var(--emerald)', tip: 'Installed and invoked in the window.' },
-  scope: { label: 'Scope down', color: 'var(--amber)', tip: 'Global, but used in only a few repos — candidate to move into just those.' },
-  dead: { label: 'Unused', color: 'var(--red)', tip: 'Installed but never invoked, with enough sessions observed to trust that.' },
-  idle: { label: 'Too little data', color: 'var(--gray)', tip: 'Installed and unused, but too few sessions to judge — we abstain.' },
-  unregistered: { label: 'Not in config', color: '#3b6ea5', tip: 'Seen running, but not in any current config snapshot (a plugin, or removed/relocated since it ran).' }
+// Status presentation (the mutually-exclusive usage axis): dot color + meaning.
+var STATUS = {
+  used: { label: 'Used', color: 'var(--emerald)', tip: 'Invoked at least once in the window.' },
+  unused: { label: 'Unused', color: 'var(--red)', tip: 'Installed but never invoked, with enough sessions observed to trust that.' },
+  'too-little-data': { label: 'Too little data', color: 'var(--gray)', tip: 'Installed and unused, but too few sessions in this window to judge — we abstain. Widen the window.' }
 };
+// Flag presentation (refinements shown as chips on a used skill).
+var FLAGS = {
+  'scope-down': { label: 'Scope down', color: 'var(--amber)', tip: 'Global, but used in only a few repos — candidate to move into just those.' },
+  'not-in-config': { label: 'Not in config', color: '#3b6ea5', tip: 'Seen running, but not in any current config snapshot (removed/relocated since it ran, or a CLI-bundled skill we can\'t see on disk).' }
+};
+function hasFlag(r, f) { return (r.flags || []).indexOf(f) >= 0; }
 
-// The current window as the API `days` query value ('all' or a number string).
-function skWinParam() { return state.skillWin === 'all' ? 'all' : String(state.skillWin); }
+// The API query fragment for the current window. Custom → from/to; else days=.
+function skWinQuery() {
+  if (state.skillWin === 'custom' && state.skillFrom && state.skillTo) {
+    return 'from=' + encodeURIComponent(new Date(state.skillFrom).toISOString()) +
+      '&to=' + encodeURIComponent(new Date(state.skillTo + 'T23:59:59').toISOString());
+  }
+  return 'days=' + encodeURIComponent(state.skillWin === 'all' ? 'all' : String(state.skillWin));
+}
+
+// A signature that changes whenever the fetched data would differ — the cache key.
+function skWinKey() {
+  return state.skillWin === 'custom' ? 'custom:' + state.skillFrom + ':' + state.skillTo : String(state.skillWin);
+}
 
 // The skills screen's URL query slice: the usage window (30d is the default, omitted).
 export function getSkillParams(): Record<string, string> {
   var q: Record<string, string> = {};
-  if (state.skillWin === 'all') q.win = 'all';
+  if (state.skillWin === 'custom') {
+    if (state.skillFrom) q.from = state.skillFrom;
+    if (state.skillTo) q.to = state.skillTo;
+  } else if (state.skillWin === 'all') q.win = 'all';
   else if (state.skillWin !== 30) q.win = String(state.skillWin);
   return q;
 }
 
-// Restore the window from a URL query (router → state), then open name (or roster).
-// Kept separate from openSkill so the router can apply the whole skills route atomically.
+// Restore the window from a URL query (router → state). A from/to pair → custom range;
+// else the win preset. Kept separate from openSkill so the router applies it atomically.
 function applySkillWin(query: Record<string, string>) {
   var win = query && query.win;
-  if (win === 'all') state.skillWin = 'all';
+  if (query && (query.from || query.to)) {
+    state.skillWin = 'custom';
+    state.skillFrom = query.from || '';
+    state.skillTo = query.to || '';
+  } else if (win === 'all') state.skillWin = 'all';
   else if (win === '7' || win === '14' || win === '90') state.skillWin = parseInt(win, 10);
   else state.skillWin = 30; // default (win=30 or absent)
 }
@@ -62,27 +87,27 @@ export function renderSkills() {
   var box = $('#skills-health');
   if (!box) return;
   // Cache hit for the current window → repaint, no fetch.
-  if (skReport && skReportWin === state.skillWin) { paintSkills(); return; }
+  if (skReport && skReportKey === skWinKey()) { paintSkills(); return; }
   loadSkills();
 }
 
 // Fetch the report for the current window and repaint. Guards against overlapping
-// fetches (a fast preset click) by tracking the in-flight window.
+// fetches (a fast preset click) by tracking the in-flight window signature.
 function loadSkills() {
   var box = $('#skills-health');
   if (!box) return;
-  var want = state.skillWin;
+  var want = skWinKey();
   skLoading = true;
   box.innerHTML = '<div class="sk-empty">Loading skill health…</div>';
-  get('/api/skill-health?days=' + encodeURIComponent(skWinParam())).then(function (d) {
+  get('/api/skill-health?' + skWinQuery()).then(function (d) {
     // Ignore a stale response if the window changed while this was in flight.
-    if (state.skillWin !== want) return;
+    if (skWinKey() !== want) return;
     skReport = d || { rows: [] };
-    skReportWin = want;
+    skReportKey = want;
     skLoading = false;
     paintSkills();
   }).catch(function () {
-    if (state.skillWin !== want) return;
+    if (skWinKey() !== want) return;
     skLoading = false;
     box.innerHTML = '<div class="sk-empty">Could not load skill health.</div>';
   });
@@ -98,15 +123,19 @@ export function openSkill(name, query?) {
   // Detail pages start at the top; the roster keeps its scroll.
   if (state.skill) window.scrollTo(0, 0);
   // Fetch if the window changed (or first load); else repaint from cache.
-  if (!skReport || skReportWin !== state.skillWin) loadSkills();
+  if (!skReport || skReportKey !== skWinKey()) loadSkills();
   else paintSkills();
 }
 
 // Change the usage window: update state, sync the URL, refetch. Wired to the time bar.
+// A custom range only fetches once both dates are set.
 function setSkillWin(win) {
-  if (state.skillWin === win) return;
   state.skillWin = win;
   syncHash();
+  if (win === 'custom' && (!state.skillFrom || !state.skillTo)) {
+    paintSkills(); // reveal the date inputs; don't fetch until both are filled
+    return;
+  }
   loadSkills();
 }
 
@@ -140,97 +169,97 @@ function paintSkills() {
   paintRoster(box, d);
 }
 
-// The window phrase for captions: "over the last 30 days" / "over all time".
-function winPhrase(d) {
-  return d.windowDays == null ? 'over all time' : 'over the last ' + esc(String(d.windowDays)) + ' days';
-}
-
 function paintRoster(box, d) {
-  var rows = d.rows || [];
-  var caption = 'Per-skill health ' + winPhrase(d) + ', from your real sessions. ' +
-    'Frequency and errors are measured; the friction proxy is adjacency, not a quality verdict. No per-skill cost is shown — tokens aren\'t attributable to a single tool call.';
-  // Honest note: short windows often lack the sessions needed to trust "unused",
-  // so those skills report "too little data" rather than "unused" — by design.
-  if (d.totalIdle > 0 && (d.windowDays != null && d.windowDays <= 14)) {
-    caption += ' In a short window there\'s often too little data to judge whether an unused skill is truly dead — those show as “too little data”. Widen the window for a firmer read.';
-  }
-
   box.innerHTML =
-    '<div class="metric-head"><h2>Skill Health</h2></div>' +
-    '<div class="sk-timebar" id="sk-timebar"></div>' +
-    '<div class="sk-caption">' + caption + '</div>' +
-    skTiles(d) +
-    '<div class="sk-filterbar" id="sk-filterbar"></div>' +
+    '<div class="panel-head"><h2>Skill Health</h2></div>' +
+    '<div class="filters sk-filters" id="sk-filters"></div>' +
     '<div class="sk-roster" id="sk-roster"></div>';
 
-  renderSkTimebar();
-  renderSkFilterbar();
-  renderSkRoster(rows);
+  renderSkFilters(d);
+  renderSkRoster(d.rows || []);
 }
 
-// Time window segmented control (mirrors the Sessions time bar). Reuses .seg/.flt-seg.
-function renderSkTimebar() {
-  var bar = $('#sk-timebar');
+// Filter toolbar — mirrors the Sessions bar (same .filters / .flt-* / .seg tokens and
+// two-row layout): row 1 is Time presets (+ custom range) and the search box; row 2 is
+// the Status dropdown. Skill-relevant filters only — session-level facets (work-type,
+// outcomes) don't map to a per-skill aggregate.
+function renderSkFilters(d) {
+  var bar = $('#sk-filters');
   if (!bar) return;
+
   var segBtns = SK_TIME_PRESETS.map(function (p) {
     return '<button type="button" data-d="' + p.d + '"' +
       (String(p.d) === String(state.skillWin) ? ' class="on"' : '') + '>' + p.l + '</button>';
   }).join('');
-  bar.innerHTML = '<span class="flt-grp"><span class="flt-lbl">Usage window</span>' +
-    '<div class="seg flt-seg" id="sk-time">' + segBtns + '</div></span>';
+
+  var statusOpts = [['', 'Used (default)'], ['all', 'All statuses'], ['unused', 'Unused'],
+    ['too-little-data', 'Too little data'], ['scope-down', 'Scope down'], ['not-in-config', 'Not in config']]
+    .map(function (o) {
+      return '<option value="' + esc(o[0]) + '"' + (o[0] === skStatus ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+    }).join('');
+
+  bar.innerHTML =
+    '<div class="flt-row">' +
+      '<span class="flt-grp"><span class="flt-lbl">Time</span>' +
+        '<div class="seg flt-seg" id="sk-time">' + segBtns + '</div>' +
+        '<span class="flt-dates" id="sk-dates"' + (state.skillWin === 'custom' ? '' : ' hidden') + '>' +
+          '<input type="date" id="sk-from" value="' + esc(state.skillFrom) + '" />' +
+          '<span class="flt-dash">→</span>' +
+          '<input type="date" id="sk-to" value="' + esc(state.skillTo) + '" />' +
+        '</span>' +
+      '</span>' +
+      '<input id="sk-search" class="flt-search" placeholder="search skill name" value="' + esc(skSearch) + '" />' +
+    '</div>' +
+    '<div class="flt-row flt-row-facets">' +
+      '<span class="flt-grp"><span class="flt-lbl">Status</span>' +
+        '<select id="sk-status">' + statusOpts + '</select></span>' +
+    '</div>';
+
+  // Time presets + custom-range dates.
   Array.prototype.forEach.call(bar.querySelectorAll('#sk-time button'), function (b) {
     b.onclick = function () {
-      var d = this.getAttribute('data-d');
-      setSkillWin(d === 'all' ? 'all' : parseInt(d, 10));
+      var v = this.getAttribute('data-d');
+      setSkillWin(v === 'all' || v === 'custom' ? v : parseInt(v, 10));
     };
   });
-}
+  var from = $('#sk-from'), to = $('#sk-to');
+  if (from) from.onchange = function () { state.skillFrom = this.value; setSkillWin('custom'); };
+  if (to) to.onchange = function () { state.skillTo = this.value; setSkillWin('custom'); };
 
-// Summary tiles — the at-a-glance counts. Each (except Installed) is a clickable
-// filter into the roster.
-function skTiles(d) {
-  var tile = function (key, label, value, sub) {
-    var clickable = key ? ' sk-tile-click" data-filter="' + esc(key) : '';
-    return '<div class="sk-tile' + clickable + '">' +
-      '<div class="sk-tile-v">' + num(value) + '</div>' +
-      '<div class="sk-tile-l">' + esc(label) + '</div>' +
-      (sub ? '<div class="sk-tile-s">' + esc(sub) + '</div>' : '') +
-      '</div>';
+  // Status filter.
+  $('#sk-status').onchange = function () { skStatus = this.value; paintSkills(); };
+
+  // Name search (debounced, client-side over the cached rows).
+  var t;
+  $('#sk-search').oninput = function () {
+    var v = this.value;
+    clearTimeout(t);
+    t = setTimeout(function () { skSearch = v; renderSkRoster((skReport && skReport.rows) || []); }, 150);
   };
-  return '<div class="sk-tiles">' +
-    tile('', 'Installed', d.totalInstalled, 'skills on disk') +
-    tile('active', 'Active', d.totalActive, 'used in window') +
-    tile('scope', 'Scope down', d.totalScope, 'used in few repos') +
-    tile('dead', 'Unused', d.totalDead, 'never invoked') +
-    tile('idle', 'Too little data', d.totalIdle, 'unused, thin data') +
-    tile('unregistered', 'Not in config', d.totalUnregistered, 'ran, not installed') +
-    '</div>';
 }
 
-function renderSkFilterbar() {
-  var bar = $('#sk-filterbar');
-  if (!bar) return;
-  var chips = [['', 'All']].concat(Object.keys(VERDICTS).map(function (k) { return [k, VERDICTS[k].label]; }));
-  bar.innerHTML = '<span class="sr-lbl">Show</span><span class="seg" id="sk-seg">' +
-    chips.map(function (c) {
-      return '<button class="' + (c[0] === skFilter ? 'on' : '') + '" data-filter="' + esc(c[0]) + '">' + esc(c[1]) + '</button>';
-    }).join('') + '</span>';
-  Array.prototype.forEach.call(bar.querySelectorAll('#sk-seg button'), function (b) {
-    b.onclick = function () { skFilter = this.getAttribute('data-filter'); paintSkills(); };
-  });
-  // Tiles also filter (they carry data-filter). Scoped to this tab's container.
-  var host = $('#skills-health');
-  if (host) Array.prototype.forEach.call(host.querySelectorAll('.sk-tile-click'), function (t) {
-    t.onclick = function () { skFilter = this.getAttribute('data-filter'); paintSkills(); };
-  });
+// Apply the status filter + name search to the rows. Default (skStatus '') = used only.
+function filterRows(rows) {
+  var out = rows;
+  if (skStatus === '') out = out.filter(function (r) { return r.status === 'used'; });
+  else if (skStatus === 'scope-down' || skStatus === 'not-in-config') out = out.filter(function (r) { return hasFlag(r, skStatus); });
+  else if (skStatus !== 'all') out = out.filter(function (r) { return r.status === skStatus; });
+  if (skSearch) {
+    var q = skSearch.toLowerCase();
+    out = out.filter(function (r) { return r.name.toLowerCase().indexOf(q) >= 0; });
+  }
+  return out;
 }
 
 function renderSkRoster(rows) {
   var host = $('#sk-roster');
   if (!host) return;
-  var shown = skFilter ? rows.filter(function (r) { return r.verdict === skFilter; }) : rows;
+  var shown = filterRows(rows);
   if (!shown.length) {
-    host.innerHTML = '<div class="sk-empty">No skills in this view.</div>';
+    var msg = skStatus === '' && !skSearch
+      ? 'No skills were used in this window. Widen the window, or pick a status above to see installed-but-unused skills.'
+      : 'No skills match this view.';
+    host.innerHTML = '<div class="sk-empty">' + msg + '</div>';
     return;
   }
   host.innerHTML = shown.map(skRow).join('');
@@ -242,12 +271,17 @@ function renderSkRoster(rows) {
 }
 
 function skRow(r) {
-  var v = VERDICTS[r.verdict] || VERDICTS.idle;
+  var s = STATUS[r.status] || STATUS['too-little-data'];
+  // Flag chips (scope-down / not-in-config) shown after the status label.
+  var chips = (r.flags || []).map(function (f) {
+    var fl = FLAGS[f];
+    return fl ? '<span class="sk-flag" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(fl.tip) + '">' + esc(fl.label) + '</span>' : '';
+  }).join('');
   return '<div class="sk-row">' +
-    '<div class="sk-row-head" data-name="' + esc(r.name) + '" title="' + esc(v.tip) + '">' +
-      '<span class="sk-dot" style="background:' + v.color + '"></span>' +
+    '<div class="sk-row-head" data-name="' + esc(r.name) + '" title="' + esc(s.tip) + '">' +
+      '<span class="sk-dot" style="background:' + s.color + '"></span>' +
       '<span class="sk-name">' + esc(r.name) + '</span>' +
-      '<span class="sk-verdict" style="color:' + v.color + '">' + esc(v.label) + '</span>' +
+      '<span class="sk-flags">' + chips + '</span>' +
       '<span class="sk-spark">' + sparkline(r.spark) + '</span>' +
       '<span class="sk-metric"><span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">calls</span></span>' +
       '<span class="sk-metric"><span class="sk-mv">' + num(r.sessions) + '</span><span class="sk-ml">sessions</span></span>' +
@@ -259,19 +293,24 @@ function skRow(r) {
 // ---- Per-skill detail page --------------------------------------------------
 
 function paintSkillPage(box, r) {
-  var v = VERDICTS[r.verdict] || VERDICTS.idle;
+  var s = STATUS[r.status] || STATUS['too-little-data'];
   var errRate = r.calls > 0 ? Math.round((r.errorCalls / r.calls) * 100) : 0;
   var fricRate = r.calls > 0 ? Math.round((r.frictionAdjacent / r.calls) * 100) : 0;
+  var chips = (r.flags || []).map(function (f) {
+    var fl = FLAGS[f];
+    return fl ? '<span class="sk-flag sk-flag-lg" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(fl.tip) + '">' + esc(fl.label) + '</span>' : '';
+  }).join('');
 
   var html = '';
-  // Back link + heading with the verdict dot.
+  // Back link + heading with the status dot and any flag chips.
   html += '<div class="sk-page-head">' +
     '<button class="sk-back" id="sk-back">← All skills</button>' +
     '</div>';
   html += '<div class="sk-page-title">' +
-    '<span class="sk-dot sk-dot-lg" style="background:' + v.color + '"></span>' +
+    '<span class="sk-dot sk-dot-lg" style="background:' + s.color + '"></span>' +
     '<h2 class="sk-page-name">' + esc(r.name) + '</h2>' +
-    '<span class="sk-verdict sk-verdict-lg" style="color:' + v.color + '" title="' + esc(v.tip) + '">' + esc(v.label) + '</span>' +
+    '<span class="sk-verdict sk-verdict-lg" style="color:' + s.color + '" title="' + esc(s.tip) + '">' + esc(s.label) + '</span>' +
+    chips +
     '</div>';
 
   // Description (or its absence).
@@ -347,22 +386,24 @@ function fact(label, value, tag?, tip?) {
     '<div class="sk-fact-v">' + esc(value) + '</div></div>';
 }
 
-// The one actionable sentence per verdict.
+// The one actionable sentence — status first, then the most useful flag hint.
 function advice(r) {
-  switch (r.verdict) {
-    case 'dead':
-      return 'Never invoked in the window. Consider removing it to trim startup overhead — or, if you expected it to fire, its description may not be matching your prompts.';
-    case 'idle':
-      return 'Installed but unused — too few sessions here to say whether that\'s disuse or just quiet. Revisit once you\'ve worked more in these repos.';
-    case 'scope':
-      return r.scopeToRepos && r.scopeToRepos.length
-        ? 'Used in only: ' + r.scopeToRepos.join(', ') + '. Consider scoping it to those repos so the rest stop loading it.'
-        : 'Used in only a few of your repos — consider scoping it down.';
-    case 'unregistered':
-      return 'Seen running but not found in your current config — likely a plugin-provided skill, or one removed/relocated since it last ran.';
-    default:
-      return 'Actively used. Frequency and error rate above are measured from real sessions.';
+  if (r.status === 'unused') {
+    return 'Never invoked in the window. Consider removing it to trim startup overhead — or, if you expected it to fire, its description may not be matching your prompts.';
   }
+  if (r.status === 'too-little-data') {
+    return 'Installed but unused — too few sessions here to say whether that\'s disuse or just quiet. Revisit once you\'ve worked more in these repos, or widen the window.';
+  }
+  // Used: lead with the actionable flag if present.
+  if (hasFlag(r, 'scope-down')) {
+    return r.scopeToRepos && r.scopeToRepos.length
+      ? 'Used, but only in: ' + r.scopeToRepos.join(', ') + '. Consider scoping it to those repos so the rest stop loading it.'
+      : 'Used in only a few of your repos — consider scoping it down.';
+  }
+  if (hasFlag(r, 'not-in-config')) {
+    return 'Used, but not found in your current config — a skill removed/relocated since it last ran, or a CLI-bundled skill we can\'t see on disk.';
+  }
+  return 'Actively used. Frequency and error rate above are measured from real sessions.';
 }
 
 // Tiny inline SVG sparkline of per-bucket invocation counts. Flat baseline when

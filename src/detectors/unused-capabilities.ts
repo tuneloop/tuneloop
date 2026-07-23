@@ -81,7 +81,7 @@ export interface InvokedCap {
  * look like broad adoption. `source` restricts to one harness's sessions (the MCP
  * name grammar and skill action are harness-specific); omitted counts every source.
  */
-export function queryInvoked(store: Store, sinceIso: string, source?: string): InvokedCap[] {
+export function queryInvoked(store: Store, sinceIso: string, source?: string, untilIso?: string): InvokedCap[] {
   // The (kind, name) derivation happens in an inner SELECT so the outer GROUP BY
   // keys on the DERIVED name, not tool_calls.name — an alias named `name` would
   // otherwise bind to the real column and split servers back into their per-tool rows.
@@ -106,10 +106,13 @@ export function queryInvoked(store: Store, sinceIso: string, source?: string): I
        WHERE t.is_sidechain = 0
          AND t.action IN ('mcp_call', 'skill')
          AND s.started_at >= ?
+         AND (? IS NULL OR s.started_at < ?)
          AND (? IS NULL OR s.source = ?)
      )
      GROUP BY kind, name, repo`,
     sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
     source ?? null,
     source ?? null,
   ) as Array<{ kind: 'mcp' | 'skill'; name: string; repo: string | null; sessions: number }>

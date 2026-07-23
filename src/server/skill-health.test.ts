@@ -61,24 +61,25 @@ describe('skillHealth', () => {
     expect(r.rows).toEqual([])
   })
 
-  it('marks an installed-but-never-invoked skill dead once enough sessions are observed', () => {
+  it('marks an installed-but-never-invoked skill unused once enough sessions are observed', () => {
     seedInstalledGlobal(store, [{ name: 'deadskill', description: 'does nothing lately' }])
     // Enough total sessions to trust the absence (all in one repo, no skill calls).
     for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`s${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
     const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'deadskill')!
-    expect(row.verdict).toBe('dead')
+    expect(row.status).toBe('unused')
+    expect(row.flags).toEqual([])
     expect(row.description).toBe('does nothing lately')
-    expect(r.totalDead).toBe(1)
+    expect(r.totalUnused).toBe(1)
   })
 
-  it('marks an installed-but-unused skill idle when there is too little data to judge', () => {
+  it('marks an installed-but-unused skill too-little-data when there is too little to judge', () => {
     seedInstalledGlobal(store, [{ name: 'idleskill' }])
     // Below MIN_SESSIONS → absence is thin data, not disuse.
     seedSession('s0', 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
     const r = skillHealth(store, { nowMs: NOW })
-    expect(r.rows.find((x) => x.name === 'idleskill')!.verdict).toBe('idle')
-    expect(r.totalIdle).toBe(1)
+    expect(r.rows.find((x) => x.name === 'idleskill')!.status).toBe('too-little-data')
+    expect(r.totalTooLittleData).toBe(1)
   })
 
   it('counts invocations, sessions, and the friction-adjacency proxy', () => {
@@ -94,16 +95,19 @@ describe('skillHealth', () => {
     expect(row.calls).toBe(2)
     expect(row.sessions).toBe(2)
     expect(row.frictionAdjacent).toBe(1)
-    expect(row.verdict).not.toBe('dead')
+    expect(row.status).toBe('used')
+    expect(r.totalUsed).toBe(1)
   })
 
-  it('surfaces an invoked-but-unregistered skill (not in any snapshot)', () => {
+  it('flags an invoked-but-unregistered skill as used + not-in-config', () => {
     seedInstalledGlobal(store, [{ name: 'other' }])
     seedSession('a', 'repoA', 2, [{ name: 'ghostskill', action: 'skill' }])
     const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'ghostskill')!
-    expect(row.verdict).toBe('unregistered')
+    expect(row.status).toBe('used')
+    expect(row.flags).toContain('not-in-config')
     expect(row.installed).toBe(false)
+    expect(r.totalNotInConfig).toBe(1)
   })
 
   it('reconciles a plugin-namespaced invocation to its installed entry', () => {
@@ -115,6 +119,22 @@ describe('skillHealth', () => {
     const row = r.rows.find((x) => x.name === 'frontend-design')!
     expect(row.calls).toBe(1)
     expect(row.installed).toBe(true)
+  })
+
+  it('keeps a used-but-scopeable global skill as used, with a scope-down flag', () => {
+    // Regression: a global skill used in only a few of many repos must still count as
+    // USED (not be reclassified away into a 'scope' bucket that starved the used count).
+    seedInstalledGlobal(store, [{ name: 'browse' }])
+    // Used in one repo; several other repos have sessions but never invoke it → scopeable.
+    seedSession('u', 'repoA', 2, [{ name: 'browse', action: 'skill' }])
+    for (let i = 0; i < 6; i++) seedSession(`o${i}`, `repo${i}`, 2, [{ name: 'Bash', action: 'shell' }])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'browse')!
+    expect(row.status).toBe('used')
+    expect(row.flags).toContain('scope-down')
+    expect(row.scopeToRepos).toEqual(['repoA'])
+    expect(r.totalUsed).toBe(1)
+    expect(r.totalScopeDown).toBe(1)
   })
 
   it('windows the usage side: a short window excludes older invocations', () => {

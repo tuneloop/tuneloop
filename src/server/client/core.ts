@@ -37,10 +37,13 @@ export interface ClientState {
   // The skill whose detail page is open on the Skills tab (null = the roster).
   // Mirrored into the URL as #/skills/<name> so a skill page is shareable.
   skill: string | null
-  // Skills-tab usage window in days (7|14|30|90), or 'all'. Windows the invocation
-  // side only (the installed inventory is always current). Mirrored into the URL as
-  // ?win= so a windowed roster is shareable. Default 30.
-  skillWin: number | 'all'
+  // Skills-tab usage window in days (7|14|30|90), 'all', or 'custom' (uses
+  // skillFrom/skillTo). Windows the invocation side only (the installed inventory is
+  // always current). Mirrored into the URL as ?win= (+ ?from=&to= for custom) so a
+  // windowed roster is shareable. Default 30.
+  skillWin: number | 'all' | 'custom'
+  skillFrom: string // ISO date (yyyy-mm-dd) for a custom range
+  skillTo: string
   overview: any
   home: any // Explore (question-led) stats; null until fetched
   asked: any // the question the user clicked through from, for the grounding banner (null = none)
@@ -74,7 +77,7 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', skill: null, skillWin: 30, overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 7,

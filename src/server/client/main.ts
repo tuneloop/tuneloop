@@ -50,8 +50,9 @@ function init() {
       state.art = { q: route.query.q || '', sort: route.query.sort || 'created', dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
     }
     if (route.view === 'skills') {
-      var w = route.query.win;
-      state.skillWin = w === 'all' ? 'all' : (w === '7' || w === '14' || w === '90') ? parseInt(w, 10) : 30;
+      var q = route.query;
+      if (q.from || q.to) { state.skillWin = 'custom'; state.skillFrom = q.from || ''; state.skillTo = q.to || ''; }
+      else state.skillWin = q.win === 'all' ? 'all' : (q.win === '7' || q.win === '14' || q.win === '90') ? parseInt(q.win, 10) : 30;
     }
     renderArtKindSeg();
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail

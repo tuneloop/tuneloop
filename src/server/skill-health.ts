@@ -67,25 +67,37 @@ export interface SkillHealthRow {
   /** Per-bucket invocation counts for the sparkline, oldest→newest, length SPARK_BUCKETS. */
   spark: number[]
   /**
-   * The health verdict:
-   *  - active: installed and invoked in the window
-   *  - dead: installed, never invoked, AND enough sessions observed to trust the
-   *    absence (a "missed opportunity" / removal candidate) — the classify 'remove' verdict
-   *  - idle: installed, never invoked, but too few sessions to judge — we abstain
-   *    rather than call it dead (honest "not enough data")
-   *  - scope: global but used in only a few repos — candidate to scope down
-   *  - unregistered: invoked but not found in any current config snapshot (a plugin,
-   *    or a skill removed/relocated since it last ran)
+   * Usage status — the PRIMARY, mutually-exclusive axis (was conflated into `verdict`):
+   *  - used: invoked at least once in the window (the decision-relevant set)
+   *  - unused: installed, never invoked, AND enough sessions observed to trust the
+   *    absence — a removal candidate (the detector's 'remove' verdict)
+   *  - too-little-data: installed, never invoked, but too few sessions to judge — we
+   *    abstain rather than call it dead (honest "not enough data")
    */
-  verdict: 'active' | 'dead' | 'idle' | 'scope' | 'unregistered'
-  /** For verdict='scope': the repos it's actually used in. */
+  status: 'used' | 'unused' | 'too-little-data'
+  /**
+   * Refinement flags on a USED skill (orthogonal to status, so a used skill can still
+   * carry a hint) — was folded into `verdict`, which starved the "used" count:
+   *  - scope-down: global but invoked in only a few repos — candidate to scope down
+   *  - not-in-config: invoked but absent from every current config snapshot (a skill
+   *    removed/relocated since it ran, or a CLI-bundled skill we can't see on disk)
+   */
+  flags: Array<'scope-down' | 'not-in-config'>
+  /** For the 'scope-down' flag: the repos it's actually used in. */
   scopeToRepos?: string[]
 }
 
-/** The time window a report was computed over. `days` is null for the all-time window. */
+/**
+ * The time window a report was computed over. A custom `from`/`to` range (ISO)
+ * takes precedence; otherwise `days` (null = all-time; default 30) applies.
+ */
 export interface SkillHealthWindow {
-  /** Preset length in days, or null for all-time. Default 30. */
+  /** Preset length in days, or null for all-time. Default 30. Ignored when from/to set. */
   days?: number | null
+  /** Custom range lower bound (ISO). When set (with `to`), overrides `days`. */
+  from?: string
+  /** Custom range upper bound (ISO). When set (with `from`), overrides `days`. */
+  to?: string
   /** Evaluation "now" (ms). Defaults to Date.now(). */
   nowMs?: number
 }
@@ -94,11 +106,13 @@ export interface SkillHealthReport {
   /** The window length in days, or null when all-time (UI shows "all time"). */
   windowDays: number | null
   totalInstalled: number
-  totalActive: number
-  totalDead: number
-  totalIdle: number
-  totalScope: number
-  totalUnregistered: number
+  /** Primary status counts. */
+  totalUsed: number
+  totalUnused: number
+  totalTooLittleData: number
+  /** Flag counts (subsets of `used`, so they overlap totalUsed — not a partition). */
+  totalScopeDown: number
+  totalNotInConfig: number
   rows: SkillHealthRow[]
   /** True when no config snapshot has been captured — the installed side is unknown. */
   noConfig: boolean
@@ -156,7 +170,7 @@ interface InvokedDetail {
  * correlated subquery: for each skill call, is there an errored tool call in the same
  * session within the next FRICTION_LOOKAHEAD idx positions? Main-thread only.
  */
-function queryInvokedDetail(store: Store, sinceIso: string): InvokedDetail[] {
+function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): InvokedDetail[] {
   return store.queryAll(
     `SELECT t.name AS name,
             s.repo AS repo,
@@ -173,23 +187,27 @@ function queryInvokedDetail(store: Store, sinceIso: string): InvokedDetail[] {
             MAX(t.ts) AS lastUsedAt
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND s.source = ? AND s.started_at >= ?
+       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
      GROUP BY t.name, s.repo`,
     FRICTION_LOOKAHEAD,
     SOURCE,
     sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
   ) as InvokedDetail[]
 }
 
 /** Per-skill sparkline: invocation counts bucketed into SPARK_BUCKETS even slices over the window. */
-function querySpark(store: Store, sinceIso: string, sinceMs: number, spanMs: number): Map<string, number[]> {
+function querySpark(store: Store, sinceIso: string, sinceMs: number, spanMs: number, untilIso?: string): Map<string, number[]> {
   const rows = store.queryAll(
     `SELECT t.name AS name, t.ts AS ts
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND s.source = ? AND s.started_at >= ? AND t.ts IS NOT NULL`,
+       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?) AND t.ts IS NOT NULL`,
     SOURCE,
     sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
   ) as Array<{ name: string; ts: string }>
   const bucketMs = spanMs / SPARK_BUCKETS
   const out = new Map<string, number[]>()
@@ -205,12 +223,14 @@ function querySpark(store: Store, sinceIso: string, sinceMs: number, spanMs: num
 }
 
 /** Distinct-session count per repo in the window — the trust denominator for verdicts. */
-function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> {
+function loadSessionCounts(store: Store, sinceIso: string, untilIso?: string): Map<string, number> {
   const rows = store.queryAll(
     `SELECT repo, COUNT(*) AS n FROM sessions
-     WHERE source = ? AND started_at >= ? AND repo IS NOT NULL GROUP BY repo`,
+     WHERE source = ? AND started_at >= ? AND (? IS NULL OR started_at < ?) AND repo IS NOT NULL GROUP BY repo`,
     SOURCE,
     sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
   ) as Array<{ repo: string; n: number }>
   return new Map(rows.map((r) => [r.repo, r.n]))
 }
@@ -228,15 +248,40 @@ function earliestSessionMs(store: Store): number | null {
   return Number.isNaN(t) ? null : t
 }
 
+interface ResolvedWindow {
+  sinceIso: string
+  /** Upper bound (ISO), or undefined for an open range (presets/all-time). */
+  untilIso?: string
+  sinceMs: number
+  spanMs: number
+  /** null = all-time; -1 = a custom range (UI shows the dates, not "N days"). */
+  windowDays: number | null
+}
+
 /**
  * Resolve a requested window into the concrete bounds the queries need: the ISO
- * lower bound (`sinceIso`), the sparkline span (`spanMs`) and its start (`sinceMs`),
- * and the `windowDays` echoed back to the client (null = all-time). For all-time we
- * anchor the span at the earliest session (falling back to WINDOW_DAYS when the store
- * is empty) so the sparkline still covers the real data range.
+ * lower bound (`sinceIso`), an optional upper bound (`untilIso`, set only for a custom
+ * range), the sparkline span (`spanMs`) and its start (`sinceMs`), and the `windowDays`
+ * echoed to the client. A custom from/to range wins; else `days` (null = all-time). For
+ * all-time we anchor the span at the earliest session (falling back to WINDOW_DAYS when
+ * the store is empty) so the sparkline still covers the real data range.
  */
-function resolveWindow(store: Store, win: SkillHealthWindow): { sinceIso: string; sinceMs: number; spanMs: number; windowDays: number | null } {
+function resolveWindow(store: Store, win: SkillHealthWindow): ResolvedWindow {
   const nowMs = win.nowMs ?? Date.now()
+  // Custom range takes precedence when both bounds are valid dates.
+  if (win.from && win.to) {
+    const sinceMs = Date.parse(win.from)
+    const untilMs = Date.parse(win.to)
+    if (!Number.isNaN(sinceMs) && !Number.isNaN(untilMs) && untilMs > sinceMs) {
+      return {
+        sinceIso: new Date(sinceMs).toISOString(),
+        untilIso: new Date(untilMs).toISOString(),
+        sinceMs,
+        spanMs: untilMs - sinceMs,
+        windowDays: -1, // sentinel: a custom range
+      }
+    }
+  }
   if (win.days === null) {
     const earliest = earliestSessionMs(store)
     const sinceMs = earliest ?? nowMs - WINDOW_DAYS * 86_400_000
@@ -257,23 +302,28 @@ function resolveWindow(store: Store, win: SkillHealthWindow): { sinceIso: string
  * seen running but absent from every snapshot is surfaced as 'unregistered' (not
  * dropped) — it's real usage we can't tie to a config entry.
  *
+ * Each row carries a mutually-exclusive `status` (used / unused / too-little-data)
+ * plus orthogonal `flags` (scope-down, not-in-config) — a USED skill can still carry
+ * a scope-down hint, which the old single `verdict` enum couldn't express (it starved
+ * the "used" bucket by claiming every used-but-scopeable skill as 'scope').
+ *
  * `win` selects the time window (default 30 days; `days: null` = all-time). The
  * installed inventory is always current — only the invocation/usage facts window.
- * NOTE: the dead/scope verdicts lean on the detector's MIN_SESSIONS trust gate, so a
- * short window with thin data will honestly report 'idle' ("too little data") rather
- * than 'dead' — that's the abstain-when-unsure behaviour, not a regression.
+ * NOTE: the unused/too-little-data split leans on the detector's MIN_SESSIONS trust
+ * gate, so a short window with thin data honestly reports 'too-little-data' rather
+ * than 'unused' — that's the abstain-when-unsure behaviour, not a regression.
  */
 export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHealthReport {
-  const { sinceIso, sinceMs, spanMs, windowDays } = resolveWindow(store, win)
+  const { sinceIso, untilIso, sinceMs, spanMs, windowDays } = resolveWindow(store, win)
 
   const installed = loadInstalledSkills(store)
-  const invokedDetail = queryInvokedDetail(store, sinceIso)
-  const spark = querySpark(store, sinceIso, sinceMs, spanMs)
-  const sessionCounts = loadSessionCounts(store, sinceIso)
+  const invokedDetail = queryInvokedDetail(store, sinceIso, untilIso)
+  const spark = querySpark(store, sinceIso, sinceMs, spanMs, untilIso)
+  const sessionCounts = loadSessionCounts(store, sinceIso, untilIso)
 
   // Reuse the detector's classify to get remove(=dead)/scope verdicts, skill-side only.
   const installedCaps: InstalledCap[] = installed.map((s) => ({ kind: 'skill', name: s.name, scope: s.scope, repo: s.repo }))
-  const invokedCaps = queryInvoked(store, sinceIso, SOURCE).filter((c) => c.kind === 'skill')
+  const invokedCaps = queryInvoked(store, sinceIso, SOURCE, untilIso).filter((c) => c.kind === 'skill')
   const classified = classify(installedCaps, invokedCaps, sessionCounts)
   // Verdict + scope targets per installed skill name (a name can be classified once per install entry;
   // keep the strongest signal: scope target if any, else remove).
@@ -304,7 +354,8 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         firstUsedAt: null,
         lastUsedAt: null,
         spark: spark.get(name) ?? new Array(SPARK_BUCKETS).fill(0),
-        verdict: 'active',
+        status: 'too-little-data',
+        flags: [],
       }
       rowsByName.set(name, row)
     }
@@ -339,48 +390,52 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     if (!match && row.spark.every((n) => n === 0)) row.spark = spark.get(iv.name) ?? row.spark
   }
 
-  // Assign verdicts.
+  // Assign the status axis + refinement flags (orthogonal — a used skill can still
+  // carry a scope-down / not-in-config hint).
   for (const row of rowsByName.values()) {
     row.installedRepos = [...new Set(row.installedRepos)].sort()
     row.usedRepos = [...new Set(row.usedRepos)].sort()
-    if (!row.installed) {
-      row.verdict = 'unregistered'
-      continue
-    }
     const v = verdictByName.get(row.name)
+
     if (row.calls > 0) {
-      // Invoked in the window. 'scope' still applies (global used in only a few repos);
-      // otherwise it's simply active.
-      row.verdict = v?.verdict === 'scope' ? (row.scopeToRepos = v.scopeToRepos, 'scope') : 'active'
+      // Invoked in the window → used, regardless of scope/config hints.
+      row.status = 'used'
+      if (!row.installed) row.flags.push('not-in-config')
+      if (v?.verdict === 'scope') {
+        row.scopeToRepos = v.scopeToRepos
+        row.flags.push('scope-down')
+      }
     } else if (v?.verdict === 'remove') {
       // classify emits 'remove' only once there's enough data to trust the absence.
-      row.verdict = 'dead'
+      row.status = 'unused'
     } else {
       // Installed, never invoked, but too little data to call it dead — abstain.
-      row.verdict = 'idle'
+      // (An uninstalled row with no calls can't occur — a row exists only from an
+      // install entry or an invocation, and no-calls means it came from install.)
+      row.status = 'too-little-data'
     }
   }
 
   const rows = [...rowsByName.values()].sort(rankRows)
-  const totalInstalled = rows.filter((r) => r.installed).length
+  const has = (r: SkillHealthRow, f: 'scope-down' | 'not-in-config') => r.flags.indexOf(f) >= 0
   return {
     windowDays,
-    totalInstalled,
-    totalActive: rows.filter((r) => r.verdict === 'active').length,
-    totalDead: rows.filter((r) => r.verdict === 'dead').length,
-    totalIdle: rows.filter((r) => r.verdict === 'idle').length,
-    totalScope: rows.filter((r) => r.verdict === 'scope').length,
-    totalUnregistered: rows.filter((r) => r.verdict === 'unregistered').length,
+    totalInstalled: rows.filter((r) => r.installed).length,
+    totalUsed: rows.filter((r) => r.status === 'used').length,
+    totalUnused: rows.filter((r) => r.status === 'unused').length,
+    totalTooLittleData: rows.filter((r) => r.status === 'too-little-data').length,
+    totalScopeDown: rows.filter((r) => has(r, 'scope-down')).length,
+    totalNotInConfig: rows.filter((r) => has(r, 'not-in-config')).length,
     rows,
     noConfig: installed.length === 0,
   }
 }
 
-/** Roster order: most-used first, then by verdict priority, then name. */
+/** Roster order: most-used first, then used-before-unused, then name. */
 function rankRows(a: SkillHealthRow, b: SkillHealthRow): number {
   if (b.calls !== a.calls) return b.calls - a.calls
-  const order = { active: 0, scope: 1, unregistered: 2, dead: 3, idle: 4 }
-  return order[a.verdict] - order[b.verdict] || a.name.localeCompare(b.name)
+  const order = { used: 0, unused: 1, 'too-little-data': 2 }
+  return order[a.status] - order[b.status] || a.name.localeCompare(b.name)
 }
 
 function minIso(a: string | null, b: string | null): string | null {
