@@ -663,17 +663,6 @@ function migrate(db: DB): void {
   if (tableExists('theme_events') && !has('theme_events', 'occurred_at')) {
     db.exec('ALTER TABLE theme_events ADD COLUMN occurred_at TEXT')
   }
-  // kitchen-sink v2: one aggregate insight (signal_key 'kitchen-sink') replaces the old
-  // per-session rows (signal_key 'kitchen-sink:<id>'). The LIKE ':%' matches only those
-  // v1 rows, never the new key; evidence cascades. Idempotent (no-op once cleared).
-  if (tableExists('insights')) {
-    db.exec("DELETE FROM insights WHERE detector = 'kitchen-sink' AND signal_key LIKE 'kitchen-sink:%'")
-    // cache-miss / context-exhaustion / unused-capabilities: now emit ONE cross-repo
-    // insight (repo '*') instead of one per repo. Drop the orphaned per-repo rows once —
-    // the detectors no longer re-emit them, so they'd linger. Evidence cascades. Idempotent.
-    db.exec("DELETE FROM insights WHERE detector IN ('cache-miss','context-exhaustion','unused-capabilities') AND repo != '*'")
-  }
-
   // Split cache creation by TTL. The old `tok_cache_create` held the whole write
   // and was priced entirely at the 5m rate, so renaming it to `_5m` (rather than
   // adding a column beside it) states what those rows already meant, and leaves
