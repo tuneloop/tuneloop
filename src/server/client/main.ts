@@ -10,6 +10,7 @@ import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
 import { renderInsights, reopenInsight, clearCellSelection } from './insights'
+import { renderSkills } from './skills'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose } from './sessions'
@@ -52,6 +53,7 @@ function init() {
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail
     renderHighlights(); // pre-render the Highlights tab so it's ready whether we land there or tab in later
     renderInsights(); // same for the Insights tab (refetches only after its own mutations)
+    renderSkills(); // pre-render the Skills tab (fetches its report once)
     setView(landHighlights ? 'highlights' : route.view);
     if (route.session) openDetail(route.session); // deep-linked drawer
   });

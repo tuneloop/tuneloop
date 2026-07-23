@@ -1856,6 +1856,19 @@ export function filterByErrorCategory(category) {
   setTimePreset(state.days === 'all' ? 'all' : state.days);
 }
 
+// Drill-in from the Skills tab: jump to the Sessions list filtered to one skill,
+// over the same window. The skill facet is a session-level predicate ("sessions
+// that used skill X"); its filter control is the standard facet-filter select.
+export function filterBySkill(skill) {
+  setView('sessions');
+  buildFilters();
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter[data-key="skill"]'), function (s) {
+    s.value = skill || '';
+  });
+  applyFilters();
+  setTimePreset(state.days === 'all' ? 'all' : state.days);
+}
+
 export function closeDrawer() {
   $('#drawer').classList.remove('on'); $('#overlay').classList.remove('on');
   activeReveal = null;
@@ -1986,7 +1999,7 @@ function linkAcSelect(inp: HTMLInputElement, menu: HTMLElement, sessionId: strin
 }
 
 export function setView(name) {
-  ['highlights', 'insights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'insights', 'skills', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {

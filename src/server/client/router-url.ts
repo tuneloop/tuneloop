@@ -15,7 +15,7 @@
 // defaults rather than erroring, so a stale or hand-mangled hash always resolves.
 
 export interface Route {
-  view: 'highlights' | 'insights' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string // dashboard sub-selection (which KPI is expanded)
   artKind: string // artifacts sub-selection (feature | pr)
   session: string | null // open drawer target, or null (mirror of query.session)
@@ -24,7 +24,7 @@ export interface Route {
 
 /** The path-level slice of client state that maps to the URL path. */
 export interface NavState {
-  view: 'highlights' | 'insights' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string | null
   artKind: string
 }
@@ -33,7 +33,7 @@ export interface NavState {
 // but it is NOT the parse fallback — an empty or unknown hash still resolves to
 // 'dashboard' (see parseHash). main.ts decides to LAND on highlights when the hash
 // is empty; an explicit deep link to any other view wins.
-export const VIEWS = ['highlights', 'insights', 'dashboard', 'artifacts', 'sessions']
+export const VIEWS = ['highlights', 'insights', 'skills', 'dashboard', 'artifacts', 'sessions']
 export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions', 'ops']
 export const ART_KINDS = ['feature', 'pr']
 export const DEFAULT_METRIC = 'success_rate'
@@ -89,7 +89,9 @@ export function serializeRoute(nav: NavState, query: Record<string, string>): st
       ? '#/highlights'
       : nav.view === 'insights'
         ? '#/insights'
-        : nav.view === 'artifacts'
+        : nav.view === 'skills'
+          ? '#/skills'
+          : nav.view === 'artifacts'
           ? '#/artifacts/' + (nav.artKind || DEFAULT_ARTKIND)
           : nav.view === 'sessions'
             ? '#/sessions'

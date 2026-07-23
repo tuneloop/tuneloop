@@ -761,3 +761,46 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .drawer-back { flex: none; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
   padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; margin-right: 4px; }
 .drawer-back:hover { border-color: var(--emerald); color: var(--emerald); }
+
+/* ---- Skill Health tab (all classes sk-prefixed; see skills.ts) ------------- */
+.sk-caption { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 4px 0 18px; max-width: 900px; }
+.sk-empty { color: var(--muted); font-size: 14px; padding: 24px 0; }
+
+.sk-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 22px; }
+.sk-tile { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.sk-tile-v { font-size: 26px; font-weight: 600; font-family: Georgia, serif; color: var(--ink); line-height: 1; }
+.sk-tile-l { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
+.sk-tile-s { font-size: 11px; color: var(--gray); margin-top: 2px; }
+.sk-tile-click { cursor: pointer; transition: border-color .12s; }
+.sk-tile-click:hover { border-color: var(--emerald); }
+
+.sk-filterbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+
+.sk-roster { display: flex; flex-direction: column; gap: 8px; }
+.sk-row { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.sk-row-open { border-color: var(--emerald); }
+.sk-row-head { display: flex; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; }
+.sk-row-head:hover { background: #faf8f2; }
+.sk-dot { flex: none; width: 9px; height: 9px; border-radius: 999px; }
+.sk-name { flex: 1 1 auto; font-weight: 600; font-size: 14px; color: var(--ink); font-family: ui-monospace, Menlo, monospace; }
+.sk-verdict { flex: none; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; min-width: 96px; }
+.sk-spark { flex: none; display: inline-flex; align-items: flex-end; }
+.sk-spark-svg { display: block; }
+.sk-metric { flex: none; display: flex; flex-direction: column; align-items: flex-end; min-width: 58px; }
+.sk-mv { font-family: ui-monospace, Menlo, monospace; font-size: 14px; color: var(--ink); }
+.sk-ml { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.sk-caret { flex: none; color: var(--muted); width: 14px; text-align: center; }
+
+.sk-detail { padding: 4px 16px 16px; border-top: 1px solid var(--line); }
+.sk-desc { font-size: 13px; line-height: 1.55; color: var(--ink); margin: 12px 0 14px; max-width: 820px; }
+.sk-desc-none { color: var(--gray); font-style: italic; }
+.sk-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.sk-fact-l { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.sk-fact-v { font-size: 14px; color: var(--ink); margin-top: 3px; }
+.sk-tag { display: inline-block; font-size: 9px; background: var(--track); color: var(--muted); border-radius: 4px;
+  padding: 1px 5px; letter-spacing: .04em; vertical-align: middle; }
+.sk-advice { font-size: 13px; line-height: 1.5; color: var(--muted); background: #faf8f2;
+  border-left: 3px solid var(--line); border-radius: 0 6px 6px 0; padding: 10px 14px; margin-top: 4px; }
+.sk-actions { margin-top: 12px; }
+.sk-view-sessions { font-size: 13px; color: var(--emerald); cursor: pointer; text-decoration: none; }
+.sk-view-sessions:hover { text-decoration: underline; }
