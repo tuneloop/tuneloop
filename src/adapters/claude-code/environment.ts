@@ -459,10 +459,30 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-/** Immediate child directory names of `dir` (non-recursive); [] if `dir` is missing. */
+/**
+ * Immediate child directory names of `dir` (non-recursive); [] if `dir` is missing.
+ * A symlink whose target is a directory counts — `readdir(withFileTypes)` reports a
+ * symlink as isSymbolicLink() (NOT isDirectory), so a skill dir linked in from
+ * elsewhere (e.g. `~/.claude/skills/x -> ~/.agents/skills/x`) would otherwise be
+ * dropped. We stat() those entries (stat follows links) to include the real dirs.
+ */
 async function listDirs(dir: string): Promise<string[]> {
   try {
-    return (await readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name)
+    const entries = await readdir(dir, { withFileTypes: true })
+    const names: string[] = []
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        names.push(e.name)
+      } else if (e.isSymbolicLink()) {
+        // Follow the link; keep it only if it resolves to a directory (and still exists).
+        try {
+          if ((await stat(join(dir, e.name))).isDirectory()) names.push(e.name)
+        } catch {
+          /* broken/dangling symlink — skip */
+        }
+      }
+    }
+    return names
   } catch {
     return []
   }
