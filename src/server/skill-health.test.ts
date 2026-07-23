@@ -61,25 +61,28 @@ describe('skillHealth', () => {
     expect(r.rows).toEqual([])
   })
 
-  it('marks an installed-but-never-invoked skill unused once enough sessions are observed', () => {
+  it('marks an installed-but-never-invoked skill unused, with enoughData once sessions suffice', () => {
     seedInstalledGlobal(store, [{ name: 'deadskill', description: 'does nothing lately' }])
     // Enough total sessions to trust the absence (all in one repo, no skill calls).
     for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`s${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
     const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'deadskill')!
     expect(row.status).toBe('unused')
+    expect(row.enoughData).toBe(true) // safe to advise removal
     expect(row.flags).toEqual([])
     expect(row.description).toBe('does nothing lately')
     expect(r.totalUnused).toBe(1)
   })
 
-  it('marks an installed-but-unused skill too-little-data when there is too little to judge', () => {
+  it('marks an unused skill as unused with enoughData=false when there is too little to judge', () => {
     seedInstalledGlobal(store, [{ name: 'idleskill' }])
-    // Below MIN_SESSIONS → absence is thin data, not disuse.
+    // Below MIN_SESSIONS → still "unused in this window", but not enough to advise removal.
     seedSession('s0', 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
     const r = skillHealth(store, { nowMs: NOW })
-    expect(r.rows.find((x) => x.name === 'idleskill')!.status).toBe('too-little-data')
-    expect(r.totalTooLittleData).toBe(1)
+    const row = r.rows.find((x) => x.name === 'idleskill')!
+    expect(row.status).toBe('unused')
+    expect(row.enoughData).toBe(false) // widen the window before advising removal
+    expect(r.totalUnused).toBe(1)
   })
 
   it('counts invocations, sessions, and the friction-adjacency proxy', () => {

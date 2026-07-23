@@ -33,8 +33,7 @@ var skSearch = '';
 // Status presentation (the mutually-exclusive usage axis): dot color + meaning.
 var STATUS = {
   used: { label: 'Used', color: 'var(--emerald)', tip: 'Invoked at least once in the window.' },
-  unused: { label: 'Unused', color: 'var(--red)', tip: 'Installed but never invoked, with enough sessions observed to trust that.' },
-  'too-little-data': { label: 'Too little data', color: 'var(--gray)', tip: 'Installed and unused, but too few sessions in this window to judge — we abstain. Widen the window.' }
+  unused: { label: 'Unused', color: 'var(--red)', tip: 'Installed but not invoked in the window.' }
 };
 // Flag presentation (refinements shown as chips on a used skill).
 var FLAGS = {
@@ -193,7 +192,7 @@ function renderSkFilters(d) {
   }).join('');
 
   var statusOpts = [['', 'Used (default)'], ['all', 'All statuses'], ['unused', 'Unused'],
-    ['too-little-data', 'Too little data'], ['scope-down', 'Scope down'], ['not-in-config', 'Not in config']]
+    ['scope-down', 'Scope down'], ['not-in-config', 'Not in config']]
     .map(function (o) {
       return '<option value="' + esc(o[0]) + '"' + (o[0] === skStatus ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
     }).join('');
@@ -271,7 +270,7 @@ function renderSkRoster(rows) {
 }
 
 function skRow(r) {
-  var s = STATUS[r.status] || STATUS['too-little-data'];
+  var s = STATUS[r.status] || STATUS.unused;
   // Flag chips (scope-down / not-in-config) shown after the status label.
   var chips = (r.flags || []).map(function (f) {
     var fl = FLAGS[f];
@@ -293,7 +292,7 @@ function skRow(r) {
 // ---- Per-skill detail page --------------------------------------------------
 
 function paintSkillPage(box, r) {
-  var s = STATUS[r.status] || STATUS['too-little-data'];
+  var s = STATUS[r.status] || STATUS.unused;
   var errRate = r.calls > 0 ? Math.round((r.errorCalls / r.calls) * 100) : 0;
   var fricRate = r.calls > 0 ? Math.round((r.frictionAdjacent / r.calls) * 100) : 0;
   var chips = (r.flags || []).map(function (f) {
@@ -386,13 +385,14 @@ function fact(label, value, tag?, tip?) {
     '<div class="sk-fact-v">' + esc(value) + '</div></div>';
 }
 
-// The one actionable sentence — status first, then the most useful flag hint.
+// The one actionable sentence — status first, then the most useful flag hint. For an
+// unused skill the advice depends on enoughData: only recommend removal once enough
+// sessions have been observed to trust the absence (else suggest widening the window).
 function advice(r) {
   if (r.status === 'unused') {
-    return 'Never invoked in the window. Consider removing it to trim startup overhead — or, if you expected it to fire, its description may not be matching your prompts.';
-  }
-  if (r.status === 'too-little-data') {
-    return 'Installed but unused — too few sessions here to say whether that\'s disuse or just quiet. Revisit once you\'ve worked more in these repos, or widen the window.';
+    return r.enoughData
+      ? 'Not invoked in this window. Consider removing it to trim startup overhead — or, if you expected it to fire, its description may not be matching your prompts.'
+      : 'Not invoked in this window — but too few sessions here to say whether that\'s real disuse or just a quiet stretch. Widen the window before deciding to remove it.';
   }
   // Used: lead with the actionable flag if present.
   if (hasFlag(r, 'scope-down')) {

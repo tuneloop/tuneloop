@@ -67,14 +67,21 @@ export interface SkillHealthRow {
   /** Per-bucket invocation counts for the sparkline, oldest→newest, length SPARK_BUCKETS. */
   spark: number[]
   /**
-   * Usage status — the PRIMARY, mutually-exclusive axis (was conflated into `verdict`):
-   *  - used: invoked at least once in the window (the decision-relevant set)
-   *  - unused: installed, never invoked, AND enough sessions observed to trust the
-   *    absence — a removal candidate (the detector's 'remove' verdict)
-   *  - too-little-data: installed, never invoked, but too few sessions to judge — we
-   *    abstain rather than call it dead (honest "not enough data")
+   * Usage status — the PRIMARY, mutually-exclusive axis. Window-scoped and factual:
+   *  - used: invoked at least once in the window
+   *  - unused: installed, never invoked in the window
+   * (There is no separate "too little data" status — "unused in the last 7 days" is a
+   * true statement regardless of sample size. Confidence lives in `enoughData` below,
+   * which only gates the *removal advice*, not the label.)
    */
-  status: 'used' | 'unused' | 'too-little-data'
+  status: 'used' | 'unused'
+  /**
+   * For an UNUSED skill: whether enough sessions were observed in the window to trust
+   * the absence (the detector's MIN_SESSIONS gate). true → safe to advise removal;
+   * false → "unused here, but too few sessions to say it's truly dead — widen first".
+   * Always true for used skills (irrelevant there).
+   */
+  enoughData: boolean
   /**
    * Refinement flags on a USED skill (orthogonal to status, so a used skill can still
    * carry a hint) — was folded into `verdict`, which starved the "used" count:
@@ -106,10 +113,9 @@ export interface SkillHealthReport {
   /** The window length in days, or null when all-time (UI shows "all time"). */
   windowDays: number | null
   totalInstalled: number
-  /** Primary status counts. */
+  /** Primary status counts (used + unused = installed-or-seen). */
   totalUsed: number
   totalUnused: number
-  totalTooLittleData: number
   /** Flag counts (subsets of `used`, so they overlap totalUsed — not a partition). */
   totalScopeDown: number
   totalNotInConfig: number
@@ -302,16 +308,16 @@ function resolveWindow(store: Store, win: SkillHealthWindow): ResolvedWindow {
  * seen running but absent from every snapshot is surfaced as 'unregistered' (not
  * dropped) — it's real usage we can't tie to a config entry.
  *
- * Each row carries a mutually-exclusive `status` (used / unused / too-little-data)
- * plus orthogonal `flags` (scope-down, not-in-config) — a USED skill can still carry
- * a scope-down hint, which the old single `verdict` enum couldn't express (it starved
- * the "used" bucket by claiming every used-but-scopeable skill as 'scope').
+ * Each row carries a mutually-exclusive `status` (used / unused) plus orthogonal
+ * `flags` (scope-down, not-in-config) — a USED skill can still carry a scope-down hint,
+ * which the old single `verdict` enum couldn't express (it starved the "used" bucket by
+ * claiming every used-but-scopeable skill as 'scope').
  *
  * `win` selects the time window (default 30 days; `days: null` = all-time). The
  * installed inventory is always current — only the invocation/usage facts window.
- * NOTE: the unused/too-little-data split leans on the detector's MIN_SESSIONS trust
- * gate, so a short window with thin data honestly reports 'too-little-data' rather
- * than 'unused' — that's the abstain-when-unsure behaviour, not a regression.
+ * NOTE: "unused" is window-scoped and factual ("not invoked in the last N days"); the
+ * detector's MIN_SESSIONS gate sets `enoughData`, which decides only whether we advise
+ * removal (enough sessions to trust the absence) vs. suggest widening the window.
  */
 export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHealthReport {
   const { sinceIso, untilIso, sinceMs, spanMs, windowDays } = resolveWindow(store, win)
@@ -354,7 +360,8 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         firstUsedAt: null,
         lastUsedAt: null,
         spark: spark.get(name) ?? new Array(SPARK_BUCKETS).fill(0),
-        status: 'too-little-data',
+        status: 'unused',
+        enoughData: false,
         flags: [],
       }
       rowsByName.set(name, row)
@@ -400,19 +407,20 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     if (row.calls > 0) {
       // Invoked in the window → used, regardless of scope/config hints.
       row.status = 'used'
+      row.enoughData = true
       if (!row.installed) row.flags.push('not-in-config')
       if (v?.verdict === 'scope') {
         row.scopeToRepos = v.scopeToRepos
         row.flags.push('scope-down')
       }
-    } else if (v?.verdict === 'remove') {
-      // classify emits 'remove' only once there's enough data to trust the absence.
-      row.status = 'unused'
     } else {
-      // Installed, never invoked, but too little data to call it dead — abstain.
+      // Installed, never invoked in the window → unused (a true, window-scoped fact).
+      // `enoughData` marks whether we've seen enough sessions to *advise removal*:
+      // classify emits 'remove' only past MIN_SESSIONS, so it's our confidence gate.
       // (An uninstalled row with no calls can't occur — a row exists only from an
       // install entry or an invocation, and no-calls means it came from install.)
-      row.status = 'too-little-data'
+      row.status = 'unused'
+      row.enoughData = v?.verdict === 'remove'
     }
   }
 
@@ -423,7 +431,6 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     totalInstalled: rows.filter((r) => r.installed).length,
     totalUsed: rows.filter((r) => r.status === 'used').length,
     totalUnused: rows.filter((r) => r.status === 'unused').length,
-    totalTooLittleData: rows.filter((r) => r.status === 'too-little-data').length,
     totalScopeDown: rows.filter((r) => has(r, 'scope-down')).length,
     totalNotInConfig: rows.filter((r) => has(r, 'not-in-config')).length,
     rows,
@@ -434,7 +441,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
 /** Roster order: most-used first, then used-before-unused, then name. */
 function rankRows(a: SkillHealthRow, b: SkillHealthRow): number {
   if (b.calls !== a.calls) return b.calls - a.calls
-  const order = { used: 0, unused: 1, 'too-little-data': 2 }
+  const order = { used: 0, unused: 1 }
   return order[a.status] - order[b.status] || a.name.localeCompare(b.name)
 }
 
