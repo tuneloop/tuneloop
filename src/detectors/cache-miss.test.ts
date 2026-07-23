@@ -79,6 +79,19 @@ function seedDecoupled(
   })
 }
 
+// Seed a session whose turns land in a specific past week (bucket for the trend
+// detector): weeksAgo=0 is the current 7 days, weeksAgo=2 is two weeks back, etc.
+function seedAtWeek(
+  db: ReturnType<typeof openDb>,
+  id: string,
+  usage: UsageSpec[],
+  weeksAgo: number,
+  over: { repo?: string; provider?: string; model?: string } = {},
+) {
+  const base = Date.now() - (weeksAgo * 7 + 2) * DAY_MS // +2 days keeps it mid-bucket
+  seedDecoupled(db, id, usage, new Date(base).toISOString(), base, over)
+}
+
 // Cold session: after a 10-min break the next turn reads nothing back and
 // re-writes the whole 200k context → miss, premium 200k × $11.5/Mtok = $2.30.
 // The turn after reads it all back → hit. Per session: 2 classified turns,
@@ -329,5 +342,50 @@ describe('cache-miss detector', () => {
     // event-ts window drops them because the misses are ancient.
     for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, coldSession, startedYesterday, missedLongAgo)
     expect(cacheMiss.run(ctx)).toEqual([])
+  })
+})
+
+describe('cache-miss trend (deviation vs the repo\'s own baseline)', () => {
+  const trend = (insights: InsightInput[]) => insights.find((i) => i.signalKey === 'cache-miss-trend')
+
+  it('surfaces a trend insight when miss cost spikes above an established baseline', () => {
+    const { db, ctx } = setup()
+    // Baseline: the repo was active (warm, ~$0 misses) two and three weeks back.
+    for (let i = 0; i < 6; i++) seedAtWeek(db, `wa${i}`, warmSession, 2)
+    for (let i = 0; i < 6; i++) seedAtWeek(db, `wb${i}`, warmSession, 3)
+    // Current week: a burst of cold sessions — the spike (12 × $2.30 = $27.60).
+    for (let i = 0; i < 12; i++) seedAtWeek(db, `c${i}`, coldSession, 0)
+    const t = trend(cacheMiss.run(ctx) as InsightInput[])
+    expect(t).toBeDefined()
+    expect(t!.repo).toBe('*')
+    expect(t!.description).toContain('o/r')
+    expect(t!.count).toBe(12) // one miss per cold session, all in the current week
+  })
+
+  it('does not call a cold-start repo a spike — no baseline to deviate from', () => {
+    const { db, ctx } = setup()
+    // Everything is in the current week; there is no prior activity to be elevated over.
+    for (let i = 0; i < 12; i++) seedAtWeek(db, `c${i}`, coldSession, 0)
+    expect(trend(cacheMiss.run(ctx) as InsightInput[])).toBeUndefined()
+  })
+
+  it('does not fire a trend on steady leakage — that is the level card\'s job', () => {
+    const { db, ctx } = setup()
+    // Same cold volume every week for six weeks → this week is not elevated over baseline.
+    for (let w = 0; w <= 5; w++) for (let i = 0; i < 10; i++) seedAtWeek(db, `w${w}s${i}`, coldSession, w)
+    expect(trend(cacheMiss.run(ctx) as InsightInput[])).toBeUndefined()
+  })
+
+  it('resolves a prior trend insight once the spike has passed', () => {
+    const { db, ctx } = setup()
+    db.prepare(
+      `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count, first_seen_at, last_seen_at, detector_version)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run('cm-trend-1', 'cache-miss', 'cache-miss-trend', '*', 'high', 'surfaced', 't', 'd', 5, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 2)
+    // A no-spike corpus (cold start only): the detector should resolve the stale card.
+    for (let i = 0; i < 12; i++) seedAtWeek(db, `c${i}`, coldSession, 0)
+    cacheMiss.run(ctx)
+    const row = db.prepare("SELECT state FROM insights WHERE signal_key = 'cache-miss-trend'").get() as { state: string }
+    expect(row.state).toBe('resolved')
   })
 })
