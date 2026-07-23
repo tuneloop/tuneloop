@@ -222,6 +222,23 @@ sessions runs about **$0.60** with Claude Haiku. This cost shows up as **Analysi
 spend** in the summary, priced from a built-in table with an OpenRouter public
 price list filling gaps (cached under `~/.tuneloop/`).
 
+**Two model tiers (optional).** By default one model does everything. The work
+splits into two shapes, though: per-session enrichment is one call per session
+(the volume — a cheap model is the right call), while the pattern **detectors**
+make a handful of cross-session synthesis calls where reasoning quality shows up
+in the insights. Set `TUNELOOP_LLM_MODEL_HEAVY` (or `--llm-model-heavy`) to give
+the detector pass a stronger sibling model on the same provider:
+
+```bash
+TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
+  npx tuneloop analyze --llm-model claude-haiku-4-5 --llm-model-heavy claude-sonnet-5
+```
+
+Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
+differs. Leave it unset and detectors keep using the base model, unchanged.
+Changing it re-analyzes the full corpus for LLM detectors, since extractions made
+by the old model aren't comparable to the new one's.
+
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the
 server with `OLLAMA_CONTEXT_LENGTH=8192 ollama serve` and use a tool-strong ≥7B

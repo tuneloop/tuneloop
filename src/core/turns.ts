@@ -40,6 +40,19 @@ export function isRealUserText(text: string): boolean {
 }
 
 /**
+ * Event-level form of isRealUserText, and the one to prefer when you hold the
+ * event: it also honours the source's own `isMeta` flag.
+ *
+ * The text heuristic can only catch injected turns that LOOK injected (a
+ * `<command-name>` tag, a caveat preamble). An expanded skill body doesn't — it
+ * reads as a well-written prompt, because it is one; only the flag distinguishes
+ * it. Sources that don't mark their injections still get the heuristic.
+ */
+export function isRealUserEvent(ev: { isMeta?: boolean; text: string }): boolean {
+  return !ev.isMeta && isRealUserText(ev.text)
+}
+
+/**
  * The session's first REAL human turn, in full — the fallback session title
  * when neither the adapter nor LLM enrichment supplied one. Skips sidechain and
  * injected/machinery turns and collapses whitespace to a single line, but does
@@ -48,10 +61,8 @@ export function isRealUserText(text: string): boolean {
  */
 export function firstUserPrompt(s: Session): string | null {
   for (const ev of s.events) {
-    if (ev.kind !== 'user' || ev.isSidechain) continue
-    const t = stripReminders(ev.text)
-    if (!t || isSyntheticUser(t)) continue
-    const clean = t.replace(/\s+/g, ' ').trim()
+    if (ev.kind !== 'user' || ev.isSidechain || !isRealUserEvent(ev)) continue
+    const clean = stripReminders(ev.text).replace(/\s+/g, ' ').trim()
     if (clean) return clean
   }
   return null
@@ -80,9 +91,8 @@ export interface UserTurn {
 export function userTurnEvents(s: Session): UserTurn[] {
   const out: UserTurn[] = []
   for (const ev of s.events) {
-    if (ev.kind !== 'user' || ev.isSidechain) continue
-    const t = stripReminders(ev.text)
-    if (t && !isSyntheticUser(t)) out.push({ text: t, seq: ev.seq, ts: ev.ts })
+    if (ev.kind !== 'user' || ev.isSidechain || !isRealUserEvent(ev)) continue
+    out.push({ text: stripReminders(ev.text), seq: ev.seq, ts: ev.ts })
   }
   return out
 }

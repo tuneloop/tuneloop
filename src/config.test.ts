@@ -37,6 +37,27 @@ describe('LLM key resolution', () => {
   })
 })
 
+describe('heavy model resolution', () => {
+  it('is undefined when nothing sets it (detectors reuse the base client)', () => {
+    vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', undefined)
+    const llm = loadConfig({ llm: { provider: 'ollama' } }).llm
+    expect(llm?.heavyModel).toBeUndefined()
+  })
+
+  it('reads TUNELOOP_LLM_MODEL_HEAVY', () => {
+    vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'claude-opus-4-8')
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm
+    expect(llm?.heavyModel).toBe('claude-opus-4-8')
+    expect(llm?.model).toBe('claude-haiku-4-5') // base model untouched
+  })
+
+  it('the heavyModel override wins over env', () => {
+    vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'from-env')
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', heavyModel: 'from-flag' } }).llm
+    expect(llm?.heavyModel).toBe('from-flag')
+  })
+})
+
 describe('keyless presets', () => {
   it('ollama gets its placeholder key (the OpenAI SDK rejects an empty one)', () => {
     unsetKeys()

@@ -88,6 +88,19 @@ function fakeLlmClient(data: Record<string, unknown>): LlmClient {
   }
 }
 
+/** Like fakeLlmClient, but the Nth call throws — a transient error mid-loop. */
+function flakyLlmClient(data: Record<string, unknown>, failOnCall: number): LlmClient {
+  let calls = 0
+  return {
+    provider: 'fake',
+    model: 'fake',
+    async completeStructured() {
+      if (++calls === failOnCall) throw new Error('429 rate limited')
+      return { data, usage: { ...emptyUsage(), input: 100, output: 20 } }
+    },
+  }
+}
+
 function ctxWith(store: Store, llm: LlmClient | null): DetectorContext {
   return { store, log: { debug() {}, info() {}, warn() {} }, llmEnabled: llm != null, llm } as unknown as DetectorContext
 }
@@ -608,6 +621,36 @@ describe('kitchenSink.run (end to end)', () => {
     const result = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
     expect(result.insights).toEqual([])
     expect(result.cost).toBeUndefined()
+  })
+
+  it('a mid-loop judge failure keeps the judgments already paid for', async () => {
+    const { store } = setup()
+    ingestCandidate(store, 'kc:1')
+    ingestCandidate(store, 'kc:2')
+    // Second judge call throws (a 429 lands here). Whichever candidate that is,
+    // the run must keep the verdict it already paid for rather than discarding it.
+    const llm = flakyLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, 2)
+    const result = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
+    expect(result.seen).toHaveLength(1) // only the successfully judged session
+    expect(result.insights).toHaveLength(1) // the aggregate still persists
+    expect(result.cost?.inTokens).toBe(100) // the call that ran is still accounted for
+  })
+
+  it('leaves the failed candidate unseen so the next run retries and merges it', async () => {
+    const { store } = setup()
+    ingestCandidate(store, 'kc:1')
+    ingestCandidate(store, 'kc:2')
+    const flaky = flakyLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'x' }, 2)
+    const r1 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, flaky)))
+    store.persistInsights('kitchen-sink', kitchenSink.version, r1.insights)
+    store.markDetectorSessionSeen('kitchen-sink', r1.seen ?? [])
+
+    // The candidate that failed is still unseen, so a healthy run picks it up and
+    // the aggregate reaches both — no session is silently dropped by the failure.
+    const healthy = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'x' })
+    const r2 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, healthy)))
+    expect(r2.seen).toHaveLength(1)
+    expect(r2.insights[0]!.count).toBe(2)
   })
 
   it('reports step-2 progress: declares its delta and ticks once per candidate', async () => {

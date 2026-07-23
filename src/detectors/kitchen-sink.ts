@@ -395,7 +395,19 @@ export const kitchenSink: Detector = {
         ctx.progress?.unitDone(0) // unit consumed (no digest → skipped), keep the bar's total honest
         continue
       }
-      const judged = await judge(ctx.llm, digest.digest, digest.blocks)
+      let judged
+      try {
+        judged = await judge(ctx.llm, digest.digest, digest.blocks)
+      } catch (err) {
+        // One candidate failing must not discard the verdicts this run already paid
+        // for: throwing here loses every judgment, every `seen` mark, and the whole
+        // run's accumulated usage — so the next analyze re-judges and re-pays for all
+        // of them. Skip it instead; unseen means it's retried next run anyway. Same
+        // per-unit convention as recurring-themes' extraction loop.
+        ctx.log.warn(`kitchen-sink: judge failed for ${c.sessionId}: ${(err as Error).message}`)
+        ctx.progress?.unitDone(0) // unit consumed (judged nothing), keep the bar's total honest
+        continue
+      }
       usage = addUsage(usage, judged.usage)
       seen.push({ sessionId: c.sessionId, contentHash: c.contentHash })
       if (judged.verdict.isKitchenSink) positives.push(toEvidence(c, judged.verdict, digest.blocks))

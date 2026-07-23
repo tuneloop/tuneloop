@@ -57,6 +57,7 @@ export class Progress {
     this.state.worked++
     this.state.costUsd += costUsd
     this.state.avgMs = this.state.worked > 0 ? totalElapsedMs / this.state.worked : null
+    this.absorbOverrun()
     this.render()
   }
 
@@ -77,7 +78,23 @@ export class Progress {
           ? elapsedMs
           : this.state.avgMs + (elapsedMs - this.state.avgMs) / this.state.worked
     }
+    this.absorbOverrun()
     this.render()
+  }
+
+  /**
+   * Let the denominator catch up when more units complete than were declared.
+   *
+   * Callers declare a total up front from cheap metadata (the recurring-themes
+   * detector weights its delta by the windows implied by a stored followup count)
+   * but tick from live data (windows actually run against the hydrated transcript).
+   * When those disagree the ticks win — they're what really happened — so the bar
+   * grows to match instead of reading 21/20. Growing only, like addUnits(): the
+   * bar must never regress.
+   */
+  private absorbOverrun() {
+    if (this.state.current > this.state.total) this.state.total = this.state.current
+    if (this.state.worked > this.state.needingWork) this.state.needingWork = this.state.worked
   }
 
   /** Erase the bar line. Deregisters this bar so the logger stops clearing for it. */
@@ -92,9 +109,13 @@ export class Progress {
     if (!this.stream.isTTY) return
     activeBar = this // this bar now owns the line; the logger clears it before writing
     const { current, total, needingWork, worked, avgMs, costUsd } = this.state
-    const pct = total > 0 ? Math.round((current / total) * 100) : 0
+    // Clamped independently of absorbOverrun(): rendering must not be able to throw,
+    // whatever state it is handed. An unclamped fill throws RangeError on a negative
+    // repeat count, and in the detector phase that lands in runDetectors' catch —
+    // costing the detector every insight of a run it had already paid for.
+    const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0
     const barLen = 20
-    const filled = total > 0 ? Math.round((current / total) * barLen) : 0
+    const filled = total > 0 ? clamp(Math.round((current / total) * barLen), 0, barLen) : 0
     const bar = '█'.repeat(filled) + '░'.repeat(barLen - filled)
 
     let line = this.label ? `  ${this.label} ` : '  '
@@ -102,7 +123,7 @@ export class Progress {
 
     if (avgMs != null) {
       const avgSec = (avgMs / 1000).toFixed(1)
-      const remaining = needingWork - worked
+      const remaining = Math.max(0, needingWork - worked)
       const etaMs = remaining * avgMs
       line += ` | ${avgSec}s/session | ~ETA: ${formatDuration(etaMs)}`
     }
@@ -112,7 +133,7 @@ export class Progress {
       // ones) and cheaper units often finish first, so an early est-total can read
       // ~10x low. Only show it once enough units have landed for the average to
       // settle; until then show spend-so-far alone rather than a misleading figure
-      const remaining = needingWork - worked
+      const remaining = Math.max(0, needingWork - worked)
       const estReady = worked >= Math.max(3, Math.ceil(0.1 * needingWork))
       if (estReady) {
         const estTotal = costUsd + remaining * (costUsd / worked)
@@ -126,6 +147,10 @@ export class Progress {
     this.stream.cursorTo(0)
     this.stream.write(line)
   }
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n))
 }
 
 function formatDuration(ms: number): string {

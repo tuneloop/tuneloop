@@ -702,8 +702,15 @@ export class Store {
       .all() as Array<{ name: string; calls: number; errors: number }>
 
     // Enrichment spend = every LLM call analyze made: processor enrichment AND
-    // detector (tier P/X) passes. Both record cost_usd per run; sum both, or the
-    // detectors' spend (extraction/reconcile/fix — often the bulk) is invisible.
+    // detector (tier P/X) passes. Sum both, or the detectors' spend
+    // (extraction/reconcile/fix — often the bulk) is invisible.
+    //
+    // The two halves mean subtly different things. detector_runs is an append-only
+    // log, so its sum is LIFETIME detector spend, including re-extractions forced by
+    // a version bump or a heavy-model swap. processor_runs holds one row per
+    // (session, processor) and is overwritten on re-run, so its sum is what the
+    // current store cost to produce. Detectors have to be a lifetime total: their
+    // runs are incremental, so the last run's cost is a top-up, not the bill.
     const analysisCostUsd =
       (this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }).s +
       (this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM detector_runs').get() as { s: number }).s
@@ -2923,10 +2930,24 @@ export class Store {
   }
 
   detectorRun(detector: string): DetectorRunRow | undefined {
-    const row = this.db.prepare('SELECT version, status, ran_at as ranAt FROM detector_runs WHERE detector = ?').get(detector) as
-      | { version: number; status: string | null; ranAt: string }
-      | undefined
-    return row ? { version: row.version, status: row.status, ranAt: row.ranAt } : undefined
+    const row = this.db
+      .prepare('SELECT version, status, model, ran_at as ranAt FROM detector_runs WHERE detector = ? ORDER BY id DESC LIMIT 1')
+      .get(detector) as { version: number; status: string | null; model: string | null; ranAt: string } | undefined
+    return row ? { version: row.version, status: row.status, model: row.model, ranAt: row.ranAt } : undefined
+  }
+
+  /**
+   * The model of this detector's last SUCCESSFUL run — the one whose extractions are
+   * actually in the store. Distinct from `detectorRun().model`, which is the latest
+   * run's and is null after an error: a failed run may have burned tokens, but it
+   * persisted nothing, so it can't speak for what the stored insights were made with.
+   * Null when the detector has never succeeded, or ran without an LLM (S-tier).
+   */
+  detectorLastSuccessfulModel(detector: string): string | null {
+    const row = this.db
+      .prepare("SELECT model FROM detector_runs WHERE detector = ? AND status = 'ok' AND model IS NOT NULL ORDER BY id DESC LIMIT 1")
+      .get(detector) as { model: string } | undefined
+    return row?.model ?? null
   }
 
   /**
@@ -3255,13 +3276,18 @@ export class Store {
         if (existing) {
           // Re-detection of a resolved insight means the problem came back — reopen it.
           const reopened = existing.state === 'resolved'
-          // first_seen_at: overwrite only when the detector supplies a real earliest
-          // occurrence (COALESCE keeps the stored value otherwise — never clobber a
-          // real creation time with the run time for detectors that don't source it).
+          // first_seen_at only ever moves EARLIER. COALESCE alone kept the stored value
+          // when the detector supplied nothing, but let any supplied value win — and
+          // rolling-window detectors recompute their earliest occurrence over a trailing
+          // 30 days, so theirs marches forward every run. A chronic insight would keep
+          // reporting "first seen ≤30 days ago" and lose its origin date for good.
+          // MIN is safe here only because the column is NOT NULL: SQLite's multi-arg
+          // min() returns NULL if any argument is NULL, and the COALESCE covers the
+          // other argument (a detector that sources no occurrence time binds null).
           this.db
             .prepare(
               `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
-               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = COALESCE(?, first_seen_at), last_seen_at = ?, detector_version = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
                state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
                state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
                WHERE id = ?`,
@@ -3313,19 +3339,25 @@ export class Store {
       }
       this.db
         .prepare(
-          `INSERT OR REPLACE INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+          `INSERT INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
            VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)`,
         )
         .run(detector, version, cost?.model ?? null, cost?.inTokens ?? null, cost?.outTokens ?? null, cost?.usd ?? null, now)
     })()
   }
 
+  /**
+   * Append a failed run to the log. Model and cost columns are explicitly NULL:
+   * the run produced nothing, so it carries no accounting of its own — and because
+   * this appends rather than upserts, it cannot blank the columns of the successful
+   * run before it (which `detectorLastSuccessfulModel` and the spend total read).
+   */
   persistDetectorError(detector: string, version: number): void {
     const now = new Date().toISOString()
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO detector_runs (detector, version, status, in_tokens, out_tokens, cost_usd, ran_at)
-         VALUES (?, ?, 'error', NULL, NULL, NULL, ?)`,
+        `INSERT INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+         VALUES (?, ?, 'error', NULL, NULL, NULL, NULL, ?)`,
       )
       .run(detector, version, now)
   }
