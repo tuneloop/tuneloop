@@ -45,10 +45,13 @@ function init() {
     state.artKind = route.artKind;
     state.metric = route.metric; // the KPI tile that's expanded (default success_rate)
     state.skill = route.skill; // the open per-skill page (null = the roster)
-    // Restore the artifacts table's search/sort only when we're landing there
-    // (the query params are scoped to the active view).
+    // Restore per-view query state only when landing there (query is view-scoped).
     if (route.view === 'artifacts') {
       state.art = { q: route.query.q || '', sort: route.query.sort || 'created', dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
+    }
+    if (route.view === 'skills') {
+      var w = route.query.win;
+      state.skillWin = w === 'all' ? 'all' : (w === '7' || w === '14' || w === '90') ? parseInt(w, 10) : 30;
     }
     renderArtKindSeg();
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail

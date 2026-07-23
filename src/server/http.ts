@@ -191,7 +191,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   if (path === '/api/skill-health') {
     // Per-skill health from real sessions: frequency, trend, dead/scope verdict,
     // own-call error rate, and a labelled friction-adjacency proxy. No cost claim.
-    sendJson(res, 200, skillHealth(store))
+    // `days` windows the usage facts (default 30; 'all' = all-time). The installed
+    // inventory is always current — only the invocation side is windowed.
+    const daysRaw = url.searchParams.get('days')
+    const days = daysRaw === 'all' ? null : Number.isFinite(parseInt(daysRaw ?? '', 10)) ? parseInt(daysRaw!, 10) : 30
+    sendJson(res, 200, skillHealth(store, { days }))
     return
   }
   if (path === '/api/error-categories') {

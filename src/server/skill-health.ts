@@ -82,8 +82,17 @@ export interface SkillHealthRow {
   scopeToRepos?: string[]
 }
 
+/** The time window a report was computed over. `days` is null for the all-time window. */
+export interface SkillHealthWindow {
+  /** Preset length in days, or null for all-time. Default 30. */
+  days?: number | null
+  /** Evaluation "now" (ms). Defaults to Date.now(). */
+  nowMs?: number
+}
+
 export interface SkillHealthReport {
-  windowDays: number
+  /** The window length in days, or null when all-time (UI shows "all time"). */
+  windowDays: number | null
   totalInstalled: number
   totalActive: number
   totalDead: number
@@ -207,16 +216,55 @@ function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> 
 }
 
 /**
+ * The earliest session start for this source, as ms — the natural lower bound for
+ * the all-time window's sparkline span. Null when there are no sessions.
+ */
+function earliestSessionMs(store: Store): number | null {
+  const row = store.queryOne(
+    `SELECT MIN(started_at) AS earliest FROM sessions WHERE source = ?`,
+    SOURCE,
+  ) as { earliest: string | null } | undefined
+  const t = row?.earliest ? Date.parse(row.earliest) : NaN
+  return Number.isNaN(t) ? null : t
+}
+
+/**
+ * Resolve a requested window into the concrete bounds the queries need: the ISO
+ * lower bound (`sinceIso`), the sparkline span (`spanMs`) and its start (`sinceMs`),
+ * and the `windowDays` echoed back to the client (null = all-time). For all-time we
+ * anchor the span at the earliest session (falling back to WINDOW_DAYS when the store
+ * is empty) so the sparkline still covers the real data range.
+ */
+function resolveWindow(store: Store, win: SkillHealthWindow): { sinceIso: string; sinceMs: number; spanMs: number; windowDays: number | null } {
+  const nowMs = win.nowMs ?? Date.now()
+  if (win.days === null) {
+    const earliest = earliestSessionMs(store)
+    const sinceMs = earliest ?? nowMs - WINDOW_DAYS * 86_400_000
+    // Guard against a zero/negative span if the only session is "now".
+    const spanMs = Math.max(nowMs - sinceMs, 86_400_000)
+    return { sinceIso: new Date(sinceMs).toISOString(), sinceMs, spanMs, windowDays: null }
+  }
+  const days = win.days && win.days > 0 ? win.days : WINDOW_DAYS
+  const spanMs = days * 86_400_000
+  const sinceMs = nowMs - spanMs
+  return { sinceIso: new Date(sinceMs).toISOString(), sinceMs, spanMs, windowDays: days }
+}
+
+/**
  * Build the skill-health report. Installed skills come from config snapshots (with
  * descriptions); invocation facts from tool_calls. The remove/scope verdict reuses the
  * unused-capabilities `classify` policy so the two features never disagree. A skill
  * seen running but absent from every snapshot is surfaced as 'unregistered' (not
  * dropped) — it's real usage we can't tie to a config entry.
+ *
+ * `win` selects the time window (default 30 days; `days: null` = all-time). The
+ * installed inventory is always current — only the invocation/usage facts window.
+ * NOTE: the dead/scope verdicts lean on the detector's MIN_SESSIONS trust gate, so a
+ * short window with thin data will honestly report 'idle' ("too little data") rather
+ * than 'dead' — that's the abstain-when-unsure behaviour, not a regression.
  */
-export function skillHealth(store: Store, nowMs: number = Date.now()): SkillHealthReport {
-  const spanMs = WINDOW_DAYS * 86_400_000
-  const sinceMs = nowMs - spanMs
-  const sinceIso = new Date(sinceMs).toISOString()
+export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHealthReport {
+  const { sinceIso, sinceMs, spanMs, windowDays } = resolveWindow(store, win)
 
   const installed = loadInstalledSkills(store)
   const invokedDetail = queryInvokedDetail(store, sinceIso)
@@ -316,7 +364,7 @@ export function skillHealth(store: Store, nowMs: number = Date.now()): SkillHeal
   const rows = [...rowsByName.values()].sort(rankRows)
   const totalInstalled = rows.filter((r) => r.installed).length
   return {
-    windowDays: WINDOW_DAYS,
+    windowDays,
     totalInstalled,
     totalActive: rows.filter((r) => r.verdict === 'active').length,
     totalDead: rows.filter((r) => r.verdict === 'dead').length,

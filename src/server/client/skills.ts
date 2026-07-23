@@ -13,8 +13,17 @@ import { state, $, esc, num, get } from './core';
 import { syncHash } from './router';
 import { filterBySkill } from './sessions';
 
-// Cached report (one fetch; re-render is cheap). Refetched only if the store changes.
+// Usage-window presets for the Skills tab (mirrors the Sessions time bar). The
+// installed inventory is always current — only the invocation side windows.
+var SK_TIME_PRESETS = [
+  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }
+];
+
+// Cached report, keyed on the window it was fetched for. A window change refetches
+// (the numbers are window-dependent); an unchanged window repaints from cache.
 var skReport = null;
+var skReportWin = null; // the state.skillWin the cache was fetched for
+var skLoading = false;
 // Active roster filter: '' = all, or a verdict key.
 var skFilter = '';
 
@@ -27,30 +36,78 @@ var VERDICTS = {
   unregistered: { label: 'Not in config', color: '#3b6ea5', tip: 'Seen running, but not in any current config snapshot (a plugin, or removed/relocated since it ran).' }
 };
 
+// The current window as the API `days` query value ('all' or a number string).
+function skWinParam() { return state.skillWin === 'all' ? 'all' : String(state.skillWin); }
+
+// The skills screen's URL query slice: the usage window (30d is the default, omitted).
+export function getSkillParams(): Record<string, string> {
+  var q: Record<string, string> = {};
+  if (state.skillWin === 'all') q.win = 'all';
+  else if (state.skillWin !== 30) q.win = String(state.skillWin);
+  return q;
+}
+
+// Restore the window from a URL query (router → state), then open name (or roster).
+// Kept separate from openSkill so the router can apply the whole skills route atomically.
+function applySkillWin(query: Record<string, string>) {
+  var win = query && query.win;
+  if (win === 'all') state.skillWin = 'all';
+  else if (win === '7' || win === '14' || win === '90') state.skillWin = parseInt(win, 10);
+  else state.skillWin = 30; // default (win=30 or absent)
+}
+
 // Called once from main.ts to pre-render the tab (fetch + paint). Safe to call
-// again; it repaints from cache without refetching.
+// again; it repaints from cache without refetching when the window is unchanged.
 export function renderSkills() {
   var box = $('#skills-health');
   if (!box) return;
-  if (skReport) { paintSkills(); return; }
+  // Cache hit for the current window → repaint, no fetch.
+  if (skReport && skReportWin === state.skillWin) { paintSkills(); return; }
+  loadSkills();
+}
+
+// Fetch the report for the current window and repaint. Guards against overlapping
+// fetches (a fast preset click) by tracking the in-flight window.
+function loadSkills() {
+  var box = $('#skills-health');
+  if (!box) return;
+  var want = state.skillWin;
+  skLoading = true;
   box.innerHTML = '<div class="sk-empty">Loading skill health…</div>';
-  get('/api/skill-health').then(function (d) {
+  get('/api/skill-health?days=' + encodeURIComponent(skWinParam())).then(function (d) {
+    // Ignore a stale response if the window changed while this was in flight.
+    if (state.skillWin !== want) return;
     skReport = d || { rows: [] };
+    skReportWin = want;
+    skLoading = false;
     paintSkills();
   }).catch(function () {
+    if (state.skillWin !== want) return;
+    skLoading = false;
     box.innerHTML = '<div class="sk-empty">Could not load skill health.</div>';
   });
 }
 
-// Open a skill's detail page (or return to the roster when name is null). Mirrors
-// openMetric: set state, sync the URL, repaint. Called by the router on navigation
-// and by row/back clicks.
-export function openSkill(name) {
+// Open a skill's detail page (or return to the roster when name is null). `query`
+// (optional) carries the URL window on a router-driven navigation. Mirrors openMetric:
+// set state, sync the URL, repaint. Called by the router and by row/back clicks.
+export function openSkill(name, query?) {
+  if (query) applySkillWin(query);
   state.skill = name || null;
-  syncHash(); // mirror #/skills/<name> into the URL (no-op while a route is applying)
+  syncHash(); // mirror #/skills/<name>?win= into the URL (no-op while a route is applying)
   // Detail pages start at the top; the roster keeps its scroll.
   if (state.skill) window.scrollTo(0, 0);
-  if (skReport) paintSkills();
+  // Fetch if the window changed (or first load); else repaint from cache.
+  if (!skReport || skReportWin !== state.skillWin) loadSkills();
+  else paintSkills();
+}
+
+// Change the usage window: update state, sync the URL, refetch. Wired to the time bar.
+function setSkillWin(win) {
+  if (state.skillWin === win) return;
+  state.skillWin = win;
+  syncHash();
+  loadSkills();
 }
 
 // Find a row by name (the URL may carry a stale/unknown skill after a re-analyze).
@@ -83,20 +140,50 @@ function paintSkills() {
   paintRoster(box, d);
 }
 
+// The window phrase for captions: "over the last 30 days" / "over all time".
+function winPhrase(d) {
+  return d.windowDays == null ? 'over all time' : 'over the last ' + esc(String(d.windowDays)) + ' days';
+}
+
 function paintRoster(box, d) {
   var rows = d.rows || [];
-  var caption = 'Per-skill health over the last ' + esc(String(d.windowDays)) + ' days, from your real sessions. ' +
+  var caption = 'Per-skill health ' + winPhrase(d) + ', from your real sessions. ' +
     'Frequency and errors are measured; the friction proxy is adjacency, not a quality verdict. No per-skill cost is shown — tokens aren\'t attributable to a single tool call.';
+  // Honest note: short windows often lack the sessions needed to trust "unused",
+  // so those skills report "too little data" rather than "unused" — by design.
+  if (d.totalIdle > 0 && (d.windowDays != null && d.windowDays <= 14)) {
+    caption += ' In a short window there\'s often too little data to judge whether an unused skill is truly dead — those show as “too little data”. Widen the window for a firmer read.';
+  }
 
   box.innerHTML =
     '<div class="metric-head"><h2>Skill Health</h2></div>' +
+    '<div class="sk-timebar" id="sk-timebar"></div>' +
     '<div class="sk-caption">' + caption + '</div>' +
     skTiles(d) +
     '<div class="sk-filterbar" id="sk-filterbar"></div>' +
     '<div class="sk-roster" id="sk-roster"></div>';
 
+  renderSkTimebar();
   renderSkFilterbar();
   renderSkRoster(rows);
+}
+
+// Time window segmented control (mirrors the Sessions time bar). Reuses .seg/.flt-seg.
+function renderSkTimebar() {
+  var bar = $('#sk-timebar');
+  if (!bar) return;
+  var segBtns = SK_TIME_PRESETS.map(function (p) {
+    return '<button type="button" data-d="' + p.d + '"' +
+      (String(p.d) === String(state.skillWin) ? ' class="on"' : '') + '>' + p.l + '</button>';
+  }).join('');
+  bar.innerHTML = '<span class="flt-grp"><span class="flt-lbl">Usage window</span>' +
+    '<div class="seg flt-seg" id="sk-time">' + segBtns + '</div></span>';
+  Array.prototype.forEach.call(bar.querySelectorAll('#sk-time button'), function (b) {
+    b.onclick = function () {
+      var d = this.getAttribute('data-d');
+      setSkillWin(d === 'all' ? 'all' : parseInt(d, 10));
+    };
+  });
 }
 
 // Summary tiles — the at-a-glance counts. Each (except Installed) is a clickable
@@ -192,8 +279,9 @@ function paintSkillPage(box, r) {
   else html += '<div class="sk-desc sk-desc-none">No description in SKILL.md frontmatter.</div>';
 
   // Headline metrics as full-size stat tiles (matches the product's KPI tiles).
+  var winSub = skReport.windowDays == null ? 'over all time' : 'in the last ' + num(skReport.windowDays) + ' days';
   html += '<div class="sk-page-tiles">' +
-    pageTile(num(r.calls), 'Invocations', 'in the last ' + num(skReport.windowDays) + ' days') +
+    pageTile(num(r.calls), 'Invocations', winSub) +
     pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
     pageTile(r.calls > 0 ? errRate + '%' : '—', 'Own-call error rate', r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls errored' : 'no calls to measure') +
     pageTile(r.calls > 0 ? fricRate + '%' : '—', 'Friction-adjacent · PROXY', r.calls > 0 ? num(r.frictionAdjacent) + ' calls followed by an error' : 'no calls to measure') +
@@ -203,7 +291,7 @@ function paintSkillPage(box, r) {
   html += '<div class="sk-page-sect">' +
     '<div class="sk-sect-h">Usage trend</div>' +
     '<div class="sk-page-spark">' + sparkline(r.spark, 260, 44) + '</div>' +
-    '<div class="sk-sect-note">Invocations bucketed across the ' + num(skReport.windowDays) + '-day window, oldest → newest.</div>' +
+    '<div class="sk-sect-note">Invocations bucketed across the ' + (skReport.windowDays == null ? 'full history' : num(skReport.windowDays) + '-day window') + ', oldest → newest.</div>' +
     '</div>';
 
   // Facts grid: install/usage locations + timeline.

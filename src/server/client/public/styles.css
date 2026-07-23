@@ -774,6 +774,7 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .sk-tile-click { cursor: pointer; transition: border-color .12s; }
 .sk-tile-click:hover { border-color: var(--emerald); }
 
+.sk-timebar { display: flex; align-items: center; gap: 10px; margin: 2px 0 16px; }
 .sk-filterbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
 
 .sk-roster { display: flex; flex-direction: column; gap: 8px; }

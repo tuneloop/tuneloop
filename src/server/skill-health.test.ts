@@ -56,7 +56,7 @@ describe('skillHealth', () => {
   afterEach(() => store.close())
 
   it('returns noConfig when no skills snapshot exists', () => {
-    const r = skillHealth(store, NOW)
+    const r = skillHealth(store, { nowMs: NOW })
     expect(r.noConfig).toBe(true)
     expect(r.rows).toEqual([])
   })
@@ -65,7 +65,7 @@ describe('skillHealth', () => {
     seedInstalledGlobal(store, [{ name: 'deadskill', description: 'does nothing lately' }])
     // Enough total sessions to trust the absence (all in one repo, no skill calls).
     for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`s${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
-    const r = skillHealth(store, NOW)
+    const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'deadskill')!
     expect(row.verdict).toBe('dead')
     expect(row.description).toBe('does nothing lately')
@@ -76,7 +76,7 @@ describe('skillHealth', () => {
     seedInstalledGlobal(store, [{ name: 'idleskill' }])
     // Below MIN_SESSIONS → absence is thin data, not disuse.
     seedSession('s0', 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
-    const r = skillHealth(store, NOW)
+    const r = skillHealth(store, { nowMs: NOW })
     expect(r.rows.find((x) => x.name === 'idleskill')!.verdict).toBe('idle')
     expect(r.totalIdle).toBe(1)
   })
@@ -89,7 +89,7 @@ describe('skillHealth', () => {
       { name: 'Bash', action: 'shell', error: true },
     ])
     seedSession('b', 'repoA', 2, [{ name: 'usedskill', action: 'skill' }])
-    const r = skillHealth(store, NOW)
+    const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'usedskill')!
     expect(row.calls).toBe(2)
     expect(row.sessions).toBe(2)
@@ -100,7 +100,7 @@ describe('skillHealth', () => {
   it('surfaces an invoked-but-unregistered skill (not in any snapshot)', () => {
     seedInstalledGlobal(store, [{ name: 'other' }])
     seedSession('a', 'repoA', 2, [{ name: 'ghostskill', action: 'skill' }])
-    const r = skillHealth(store, NOW)
+    const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'ghostskill')!
     expect(row.verdict).toBe('unregistered')
     expect(row.installed).toBe(false)
@@ -109,11 +109,31 @@ describe('skillHealth', () => {
   it('reconciles a plugin-namespaced invocation to its installed entry', () => {
     seedInstalledGlobal(store, [{ name: 'frontend-design', description: 'design' }])
     seedSession('a', 'repoA', 2, [{ name: 'frontend-design:frontend-design', action: 'skill' }])
-    const r = skillHealth(store, NOW)
+    const r = skillHealth(store, { nowMs: NOW })
     // Folded onto the installed name, not surfaced as a separate unregistered row.
     expect(r.rows.filter((x) => x.name.includes('frontend-design')).length).toBe(1)
     const row = r.rows.find((x) => x.name === 'frontend-design')!
     expect(row.calls).toBe(1)
     expect(row.installed).toBe(true)
+  })
+
+  it('windows the usage side: a short window excludes older invocations', () => {
+    seedInstalledGlobal(store, [{ name: 'usedskill' }])
+    seedSession('recent', 'repoA', 2, [{ name: 'usedskill', action: 'skill' }]) // 2 days ago
+    seedSession('old', 'repoA', 40, [{ name: 'usedskill', action: 'skill' }]) // 40 days ago
+    // 30-day window (default) sees only the recent call.
+    expect(skillHealth(store, { nowMs: NOW }).rows.find((x) => x.name === 'usedskill')!.calls).toBe(1)
+    // 7-day window still sees only the recent call; a 90-day window sees both.
+    expect(skillHealth(store, { days: 7, nowMs: NOW }).rows.find((x) => x.name === 'usedskill')!.calls).toBe(1)
+    expect(skillHealth(store, { days: 90, nowMs: NOW }).rows.find((x) => x.name === 'usedskill')!.calls).toBe(2)
+  })
+
+  it('echoes the window length back (null for all-time) and counts all-time usage', () => {
+    seedInstalledGlobal(store, [{ name: 'usedskill' }])
+    seedSession('old', 'repoA', 400, [{ name: 'usedskill', action: 'skill' }]) // beyond any preset
+    expect(skillHealth(store, { days: 30, nowMs: NOW }).windowDays).toBe(30)
+    const all = skillHealth(store, { days: null, nowMs: NOW })
+    expect(all.windowDays).toBeNull()
+    expect(all.rows.find((x) => x.name === 'usedskill')!.calls).toBe(1)
   })
 })
