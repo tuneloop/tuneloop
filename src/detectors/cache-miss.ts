@@ -49,6 +49,8 @@ interface RepoAgg {
   breakMisses: number // misses that followed a >5-min break (descriptive, not causal)
   wasteUsd: number
   sessionWaste: Map<string, number>
+  firstMissTs: string | null // earliest/latest miss-turn timestamp — the real occurrence window
+  lastMissTs: string | null
 }
 
 const pct = (x: number) => `${Math.round(x * 100)}%`
@@ -91,6 +93,8 @@ export const cacheMiss: Detector = {
       let misses = 0
       let breakMisses = 0
       let wasteUsd = 0
+      let firstMissTs: string | null = null
+      let lastMissTs: string | null = null
       let prevCtx = 0 // what a warm turn would read back
       let prevTs: number | null = null
       for (const f of facts) {
@@ -109,6 +113,12 @@ export const cacheMiss: Detector = {
           classified++
           if (f.reads < prevCtx * HIT_READ_SHARE) {
             misses++
+            // Real occurrence time for this miss (rows arrive in idx order, so the
+            // first/last we see are the earliest/latest miss). Skip rows with no ts.
+            if (f.ts) {
+              if (firstMissTs === null) firstMissTs = f.ts
+              lastMissTs = f.ts
+            }
             if (prevTs !== null && !Number.isNaN(ts) && ts - prevTs > LONG_BREAK_MS) breakMisses++
             // Premium actually paid: un-read prior context re-bought at uncached
             // rates, capped at what this turn really paid. Unpriced model → miss counts, $0.
@@ -133,7 +143,7 @@ export const cacheMiss: Detector = {
       const repo = facts[0]!.repo
       let agg = repos.get(repo)
       if (!agg) {
-        agg = { sessions: 0, classified: 0, misses: 0, breakMisses: 0, wasteUsd: 0, sessionWaste: new Map() }
+        agg = { sessions: 0, classified: 0, misses: 0, breakMisses: 0, wasteUsd: 0, sessionWaste: new Map(), firstMissTs: null, lastMissTs: null }
         repos.set(repo, agg)
       }
       agg.sessions++
@@ -142,44 +152,73 @@ export const cacheMiss: Detector = {
       agg.breakMisses += breakMisses
       agg.wasteUsd += wasteUsd
       if (wasteUsd > 0) agg.sessionWaste.set(facts[0]!.sessionId, wasteUsd)
+      // Widen the repo's miss window (sessions arrive in id order, not time order,
+      // so compare rather than assign).
+      if (firstMissTs && (agg.firstMissTs === null || firstMissTs < agg.firstMissTs)) agg.firstMissTs = firstMissTs
+      if (lastMissTs && (agg.lastMissTs === null || lastMissTs > agg.lastMissTs)) agg.lastMissTs = lastMissTs
     }
 
-    const insights: InsightInput[] = []
-    for (const [repo, a] of repos) {
-      if (a.sessions < MIN_SESSIONS) continue
-      const missRate = a.misses / a.classified
-      if (missRate < MIN_MISS_RATE || a.wasteUsd < MIN_WASTE_USD) continue
+    // Qualifying repos (each gated on its own MIN_SESSIONS/miss-rate/waste, so a thin
+    // or clean repo never enters the aggregate), then fold them into ONE cross-repo
+    // insight. Per-repo figures survive as each evidence session's note.
+    const qualifying = [...repos.entries()].filter(
+      ([, a]) => a.sessions >= MIN_SESSIONS && a.misses / a.classified >= MIN_MISS_RATE && a.wasteUsd >= MIN_WASTE_USD,
+    )
+    if (qualifying.length === 0) return []
 
-      const waste = a.wasteUsd.toFixed(2)
-      const evidence = [...a.sessionWaste.entries()]
-        .sort((x, y) => y[1] - x[1])
-        .map(([sessionId]) => ({ sessionId }))
-      insights.push({
-        signalKey: 'cache-misses',
-        repo,
-        severity: a.wasteUsd >= SEVERITY_USD.high ? 'high' : a.wasteUsd >= SEVERITY_USD.medium ? 'medium' : 'low',
-        title: 'Frequent prompt-cache misses',
-        description:
-          `Across ${a.sessions} sessions in the last ${WINDOW_DAYS} days, ${pct(missRate)} of turns with ` +
-          `substantial prior context found the prompt cache cold and re-bought context that was already ` +
-          `paid for — an estimated $${waste} premium over warm-cache rates. ${a.breakMisses} of the ` +
-          `${a.misses} misses came more than 5 minutes after the previous message.`,
-        evidence,
-        count: a.misses,
-        fix: {
-          type: 'behavioral-nudge',
-          label: 'Reduce cache misses',
-          content:
-            `A cache miss re-buys previously cached context instead of reading it back at the cheap cached ` +
-            `rate (an estimated $${waste} across these sessions). The usual culprits: idle breaks that ` +
-            `outlive the provider's cache lifetime, and ` +
-            `mid-stream changes to config or model — editing CLAUDE.md, toggling MCP servers, or switching ` +
-            `models rewrites the cached prefix. Batch quick follow-ups while the cache is warm, and settle ` +
-            `config and model choices before long working sessions.`,
-        },
-      })
+    let sessions = 0
+    let classified = 0
+    let misses = 0
+    let breakMisses = 0
+    let wasteUsd = 0
+    let firstMissTs: string | null = null
+    let lastMissTs: string | null = null
+    const sessionWaste: Array<{ sessionId: string; repo: string; waste: number }> = []
+    for (const [repo, a] of qualifying) {
+      sessions += a.sessions
+      classified += a.classified
+      misses += a.misses
+      breakMisses += a.breakMisses
+      wasteUsd += a.wasteUsd
+      if (a.firstMissTs && (firstMissTs === null || a.firstMissTs < firstMissTs)) firstMissTs = a.firstMissTs
+      if (a.lastMissTs && (lastMissTs === null || a.lastMissTs > lastMissTs)) lastMissTs = a.lastMissTs
+      for (const [sessionId, w] of a.sessionWaste) sessionWaste.push({ sessionId, repo, waste: w })
     }
-    return insights
+    // Worst-wasting sessions first. Each evidence row notes its repo + premium — the
+    // per-repo detail the single aggregate row would otherwise lose.
+    const evidence = sessionWaste
+      .sort((x, y) => y.waste - x.waste)
+      .map((s) => ({ sessionId: s.sessionId, note: `${s.repo} · $${s.waste.toFixed(2)} premium` }))
+
+    const waste = wasteUsd.toFixed(2)
+    const missRate = misses / classified
+    const repoLabel = qualifying.length === 1 ? qualifying[0]![0] : `${qualifying.length} repos`
+    return [{
+      signalKey: 'cache-misses',
+      repo: '*',
+      severity: wasteUsd >= SEVERITY_USD.high ? 'high' : wasteUsd >= SEVERITY_USD.medium ? 'medium' : 'low',
+      title: 'Frequent prompt-cache misses',
+      description:
+        `Across ${sessions} sessions in ${repoLabel} in the last ${WINDOW_DAYS} days, ${pct(missRate)} of turns ` +
+        `with substantial prior context found the prompt cache cold and re-bought context that was already ` +
+        `paid for — an estimated $${waste} premium over warm-cache rates. ${breakMisses} of the ` +
+        `${misses} misses came more than 5 minutes after the previous message.`,
+      evidence,
+      count: misses,
+      firstSeenAt: firstMissTs ?? undefined,
+      lastSeenAt: lastMissTs ?? undefined,
+      fix: {
+        type: 'behavioral-nudge',
+        label: 'Reduce cache misses',
+        content:
+          `A cache miss re-buys previously cached context instead of reading it back at the cheap cached ` +
+          `rate (an estimated $${waste} across these sessions). The usual culprits: idle breaks that ` +
+          `outlive the provider's cache lifetime, and ` +
+          `mid-stream changes to config or model — editing CLAUDE.md, toggling MCP servers, or switching ` +
+          `models rewrites the cached prefix. Batch quick follow-ups while the cache is warm, and settle ` +
+          `config and model choices before long working sessions.`,
+      },
+    }]
   },
 }
 

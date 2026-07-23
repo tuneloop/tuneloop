@@ -543,6 +543,30 @@ describe('summary.enrichmentRan', () => {
     store.persistResult('s1', 'enrich-session', 1, 'h1', 'some-llm', {})
     expect(store.summary().enrichmentRan).toBe(true)
   })
+
+  it('is true when only an LLM detector ran (model recorded), no LLM processor', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    expect(store.summary().enrichmentRan).toBe(false)
+    // An LLM detector records its model; an S-tier detector would leave it null.
+    store.persistInsights('recurring-themes', 1, [], { inTokens: 100, outTokens: 20, usd: 0.5, model: 'some-llm' })
+    expect(store.summary().enrichmentRan).toBe(true)
+  })
+})
+
+describe('summary.analysisCostUsd', () => {
+  it('sums BOTH processor enrichment and detector LLM cost', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seedSession(store, db, 's1')
+    // A processor enrichment run (cost via selfCost) + a detector run, each with cost.
+    store.persistResult('s1', 'enrich-session', 1, 'h1', 'some-llm', {
+      selfCost: { tokens: { input: 50, output: 10, cacheCreate5m: 0, cacheCreate1h: 0, cacheRead: 0 }, usd: 0.30 },
+    })
+    store.persistInsights('recurring-themes', 1, [], { inTokens: 100, outTokens: 20, usd: 1.20, model: 'some-llm' })
+    expect(store.summary().analysisCostUsd).toBeCloseTo(1.50, 5)
+  })
 })
 
 describe('pruneOrphanedBranchSessions', () => {

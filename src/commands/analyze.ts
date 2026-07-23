@@ -12,7 +12,7 @@ import type { EnvCategory } from '../store/types'
 import { runDetectors } from '../core/detector-runner'
 import { getAdapters, getDetectors, getProcessors } from '../core/registry'
 import { orderProcessors, runProcessors } from '../core/runner'
-import { createLlmClient, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
+import { createLlmClient, startLlmTrace, endLlmTrace, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
@@ -68,7 +68,11 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
 
   // Fetch the OpenRouter price backfill only to price an enrichment model the
   // static table lacks; static-only runs stay offline.
-  if (config.llm && !priceFor(config.llm.provider, config.llm.model)) await loadOpenRouterPrices(config.dataDir, log)
+  // Both tiers need a price: the heavy model is what detector cost is billed at.
+  const unpricedLlmModel =
+    config.llm &&
+    [config.llm.model, config.llm.heavyModel].some((m) => m && !priceFor(config.llm!.provider, m))
+  if (unpricedLlmModel) await loadOpenRouterPrices(config.dataDir, log)
 
   const processors = getProcessors()
   store.registerFacets('intrinsic', INTRINSIC_FACETS)
@@ -84,10 +88,27 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   } catch (err) {
     log.warn((err as Error).message)
   }
+  // Two-tier model routing: `llm` drives the per-session processors (one call per
+  // session — the volume, hence the cheap model), `heavyLlm` drives the detector
+  // pass (a handful of cross-session synthesis calls, where reasoning quality pays).
+  // Unset TUNELOOP_LLM_MODEL_HEAVY → the same client does both, as it always has.
+  // A build failure here degrades to the base client rather than losing detectors.
+  let heavyLlm = llm
+  if (llm && config.llm?.heavyModel && config.llm.heavyModel !== llm.model) {
+    try {
+      heavyLlm = createLlmClient({ ...config.llm, model: config.llm.heavyModel })
+    } catch (err) {
+      log.warn(`heavy model unusable (${(err as Error).message}); detectors fall back to ${llm.model}`)
+    }
+  }
   const llmEnabled = !!llm
   const llmModel = llm?.model ?? null
   if (llmEnabled) {
-    log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
+    // Open a run-level Langfuse trace (no-op without LANGFUSE_* env keys) so every
+    // LLM call this run nests under it — a personal prompt-debugging aid
+    await startLlmTrace('analyze', { provider: llm!.provider, model: llm!.model, heavyModel: heavyLlm!.model })
+    const heavyNote = heavyLlm!.model === llm!.model ? '' : `, detectors ${heavyLlm!.model}`
+    log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}${heavyNote}). Session data goes to your configured provider.`)
   } else if (prompted) {
     // The interactive offer above was declined (or the client failed to build
     // and warned) — a full hint would repeat what the prompt just explained.
@@ -268,7 +289,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       `${totalNeedingWork} ${totalNeedingWork === 1 ? 'needs' : 'need'} processing.`,
   )
 
-  const progress = new Progress(sessionsToProcess.length, totalNeedingWork)
+  const progress = new Progress(sessionsToProcess.length, totalNeedingWork, process.stderr, 'Step 1/2 · Processing sessions')
 
   // Repo roots touched this run, per source — the environment reader's project
   // scope keys (one snapshot per unique repo, not per session).
@@ -349,10 +370,14 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   }
 
   // Run detectors (cross-session pattern detection) after all processors complete.
+  // Step 2/2: a shared bar whose total grows as each LLM detector declares its delta
+  // (starts at 0 — S-tier detectors add nothing and it completes instantly).
   const detectors = getDetectors()
   if (detectors.length > 0) {
     log.debug(`Running ${detectors.length} detector(s)...`)
-    await runDetectors({ detectors, store, log, llmEnabled, llm })
+    const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
+    await runDetectors({ detectors, store, log, llmEnabled, llm: heavyLlm, progress: detectorProgress })
+    detectorProgress.clear()
   }
 
   // Interpret fix-marker sightings AFTER detectors, so sightings scanned before
@@ -375,6 +400,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
   if (promptedProvider && llmEnabled) printPersistHint(promptedProvider)
+  await endLlmTrace() // flush buffered Langfuse events before exit (no-op if tracing off)
   store.close()
 }
 

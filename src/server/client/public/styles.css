@@ -289,7 +289,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-tr.srow:hover { background: #fbf8f1; cursor: pointer; }
+tr.srow:hover, tr.ins-row:hover { background: #fbf8f1; cursor: pointer; }
 .pr-title { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .b-success { background: #e2f0e8; color: var(--emerald); }
@@ -307,8 +307,8 @@ tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .sr-tbl td { vertical-align: middle; }
 .sr-tbl .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; margin-right: 7px; vertical-align: middle; }
 .sr-tbl tr.off td { opacity: .42; }
-/* Sessions table: keep every row to a single line. */
-tr.srow td { vertical-align: middle; }
+/* Sessions + Insights tables: keep every row to a single line. */
+tr.srow td, tr.ins-row td { vertical-align: middle; }
 .nowrap { white-space: nowrap; }
 .s-title { display: inline-block; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-rest { display: none; }
@@ -699,31 +699,65 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .site-footer a:hover { text-decoration: underline; }
 .site-footer .dot { color: var(--line); }
 
-/* Insights tab — the detector ledger. One card per insight. */
-.ins-card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 14px; }
-.ins-head { display: flex; align-items: center; gap: 10px; }
-.ins-title { font-family: Georgia, "Times New Roman", serif; font-size: 17px; font-weight: 600; }
-.sev-high { background: #f4ddd6; color: var(--red); }
-.sev-medium { background: #f6ecd2; color: var(--amber); }
-.sev-low { background: #ece9e1; color: var(--gray); }
+/* Insights tab — the detector ledger, as a filterable/sortable TABLE (mirrors the
+   Sessions table for a consistent feel). Reuses the generic table/th/td/.srow rules;
+   the classes below are insight-specific hooks (severity dot in the title cell, the
+   sortable-header arrow, the inline Copy-fix button). Full fix + occurrences live in
+   the drawer detail (openInsight). */
+.ins-row-title-wrap { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ins-row-title { max-width: 420px; }
+.ins-row-repo { flex: 0 0 auto; }
+.ins-row-rec { color: var(--gray); }
+/* Sortable column headers. */
+th.ins-th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+th.ins-th-sort:hover { color: var(--ink); }
+.ins-sort { color: var(--line); font-size: 10px; }
+.ins-sort.on { color: var(--emerald); }
+/* Selected row (its detail drawer is open). */
+tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
+
+/* Severity dot (cell label row + detail header). */
+.ins-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+.ins-dot.sev-high { background: var(--red); }
+.ins-dot.sev-medium { background: var(--amber); }
+.ins-dot.sev-low { background: var(--gray); }
+
+/* Lifecycle state (grid + detail). */
 .ins-state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .ins-state.st-fix_issued { color: var(--amber); }
 .ins-state.st-adopted, .ins-state.st-resolved { color: var(--emerald); }
-.ins-head .ins-dismiss { margin-left: auto; }
+
+/* ---- insight detail (rendered into the shared right drawer) ---- */
+.ins-detail-head .drawer-head-top h2 { display: flex; align-items: center; gap: 9px; }
+.ins-detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+.ins-detail-body { padding-top: 4px; }
+.ins-desc { font-size: 14px; margin: 8px 0 14px; }
+.ins-section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 18px 0 8px; }
 .ins-btn { border: 1px solid var(--line); background: var(--paper); border-radius: 6px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .ins-btn:hover { border-color: var(--emerald); color: var(--emerald); }
-.ins-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
-.ins-desc { font-size: 14px; margin-top: 8px; max-width: 860px; }
-.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 12px; max-width: 860px; }
+.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 4px; }
 .ins-fix-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .ins-fix-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .ins-fix-prose { font-size: 13px; }
-/* Code blocks in cards live outside the transcript's .text.md scope, so they need
-   their own base treatment; paper bg inside the track-colored fix box for contrast. */
 .ins-desc pre.md-code, .ins-fix pre.md-code { margin: 6px 0; padding: 8px 10px; background: var(--track); border-radius: 6px; overflow-x: auto; }
-.ins-fix pre.md-code { margin: 0; background: var(--paper); }
+.ins-fix pre.md-code { margin: 0; background: var(--paper); max-height: 420px; overflow-y: auto; }
 .ins-desc pre.md-code code, .ins-fix pre.md-code code { background: none; padding: 0; font-size: 11.5px; line-height: 1.45; word-break: normal; }
-.ins-evidence { margin-top: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-.ins-ev-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-right: 4px; }
-.ins-ev { border: 0; background: var(--track); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; cursor: pointer; }
-.ins-ev:hover { background: #dfe9e0; color: var(--emerald); }
+
+/* Occurrences: one clickable row per stored event → its transcript turn. */
+.ins-occ-list { display: flex; flex-direction: column; gap: 8px; }
+.ins-occ { text-align: left; width: 100%; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; transition: border-color .12s, background .12s; }
+.ins-occ:hover { border-color: var(--emerald); background: var(--track); }
+.ins-occ-note { font-size: 13px; line-height: 1.4; }
+.ins-occ-src { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.ins-occ-arrow { color: var(--emerald); flex: 0 0 auto; }
+.ins-occ-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ins-occ-turn { flex: 0 0 auto; margin-left: auto; white-space: nowrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; background: var(--track); border-radius: 4px; padding: 0 5px; }
+.ins-occ:hover .ins-occ-turn { background: var(--paper); }
+.ins-detail-actions { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ins-detail-actions .ins-dismiss:hover { border-color: var(--red); color: var(--red); }
+
+/* "← Insights" back link in the transcript drawer header (opened from an occurrence). */
+.drawer-back { flex: none; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
+  padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; margin-right: 4px; }
+.drawer-back:hover { border-color: var(--emerald); color: var(--emerald); }

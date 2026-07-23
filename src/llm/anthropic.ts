@@ -27,11 +27,15 @@ export function anthropicShapedClient(
     provider,
     model,
     async completeStructured(req: StructuredRequest): Promise<LlmResult> {
-      const { system, user, schema, toolName, maxTokens = 1024 } = req
+      const { system, user, schema, toolName, maxTokens = 1024, cacheSystem } = req
+      // cacheSystem → send system as a cacheable block (repeat calls read it at ~10% cost).
+      const systemParam = cacheSystem
+        ? [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }]
+        : system
       const resp = await client.messages.create({
         model,
         max_tokens: maxTokens,
-        system,
+        system: systemParam,
         messages: [{ role: 'user', content: user }],
         tools: [{ name: toolName, description: 'Record the structured analysis.', input_schema: schema as Anthropic.Tool.InputSchema }],
         tool_choice: { type: 'tool', name: toolName },
