@@ -1,10 +1,11 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
+import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_SHARE } from '../core/thresholds'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 18
+const SCHEMA_VERSION = 19
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -497,6 +498,89 @@ CREATE INDEX IF NOT EXISTS ix_env_snapshots_lookup
   ON environment_snapshots(source, scope, scope_key, category, captured_at);
 `
 
+/**
+ * Read-time views that turn `usage_facts` into the events the detectors and the
+ * read path classify over. These are the SHARED definition of "a compaction" /
+ * "a cache miss": the predicate lives here, in SQL, rather than inside one
+ * detector's run loop, so nothing else in the product has to reimplement it.
+ *
+ * The thresholds are interpolated from `../core/thresholds` (decision 4) so a
+ * view literal can never drift from the detector that owns the concept.
+ *
+ * Applied on every `openDb` with `DROP VIEW IF EXISTS` then an UNCONDITIONAL
+ * `CREATE VIEW` — NEVER `CREATE VIEW IF NOT EXISTS`. On a definition change (a
+ * threshold edit, a bug fix) the `IF NOT EXISTS` form is a silent no-op and an
+ * existing store keeps the stale view forever, with nothing recording which
+ * (landmine 5). Recreating unconditionally is cheap (views hold no data).
+ */
+function buildUsageViews(): string {
+  return `
+DROP VIEW IF EXISTS usage_turns;
+CREATE VIEW usage_turns AS
+WITH live AS (
+  SELECT u.session_id, u.idx, u.ts, u.model, u.is_sidechain, s.provider, s.started_at,
+         COALESCE(NULLIF(s.repo,''), NULLIF(s.cwd,''), '_unknown') AS repo,
+         COALESCE(u.tok_input,0) AS input, COALESCE(u.tok_output,0) AS output,
+         COALESCE(u.tok_cache_create_5m,0) AS creates_5m,
+         COALESCE(u.tok_cache_create_1h,0) AS creates_1h,
+         COALESCE(u.tok_cache_read,0) AS reads
+  FROM usage_facts u JOIN sessions s ON s.id = u.session_id
+  -- All-zero rows aren't API calls (content flushes, ingest-deduped repeats). Dropped
+  -- HERE so the LAGs below mean "previous real turn", matching the JS loops' \`continue\`
+  -- BEFORE prevOcc/prevCtx update (landmine 1).
+  WHERE COALESCE(u.tok_input,0) + COALESCE(u.tok_output,0) + COALESCE(u.tok_cache_create_5m,0)
+      + COALESCE(u.tok_cache_create_1h,0) + COALESCE(u.tok_cache_read,0) > 0
+)
+SELECT session_id, idx, ts, model, provider, repo, is_sidechain, started_at,
+       input, output, creates_5m, creates_1h, reads,
+       creates_5m + creates_1h AS creates,
+       -- Occupancy excludes output: the reply isn't part of the prompt.
+       input + reads + creates_5m + creates_1h AS occupancy,
+       -- What the next warm turn would read back: reads plus what THIS turn cached
+       -- (creates, or billed input under read-discount caching).
+       reads + CASE WHEN creates_5m + creates_1h > 0 THEN creates_5m + creates_1h ELSE input END AS new_ctx,
+       LAG(input + reads + creates_5m + creates_1h) OVER w AS prev_occupancy,
+       LAG(reads + CASE WHEN creates_5m + creates_1h > 0 THEN creates_5m + creates_1h ELSE input END) OVER w AS prev_ctx,
+       LAG(ts) OVER w AS prev_ts,
+       -- Unordered window p → whole-session max. MAX(...) OVER w (ordered) would be a
+       -- RUNNING max, failing early turns that later turns pass (landmine 3).
+       MAX(creates_5m + creates_1h + reads) OVER p AS session_cache_tokens
+FROM live
+-- Partition on (session_id, is_sidechain): sidechain rows share the session and
+-- interleave by idx; without it a subagent turn becomes a main turn's "previous"
+-- (landmine 2). All subagents share is_sidechain=1 — no per-agent series here.
+WINDOW w AS (PARTITION BY session_id, is_sidechain ORDER BY idx),
+       p AS (PARTITION BY session_id, is_sidechain);
+
+DROP VIEW IF EXISTS compaction_event;
+CREATE VIEW compaction_event AS
+SELECT session_id, idx, ts, repo, model, prev_occupancy, occupancy,
+       prev_occupancy - occupancy AS dropped_tokens
+FROM usage_turns
+WHERE is_sidechain = 0
+  AND prev_occupancy >= ${PEAK_FLOOR}
+  AND occupancy <= prev_occupancy * ${DROP_SHARE};
+
+DROP VIEW IF EXISTS cache_classified_turn;   -- the DENOMINATOR; miss rate needs both halves
+CREATE VIEW cache_classified_turn AS
+SELECT session_id, idx, ts, repo, model, provider,
+       prev_ctx, reads, input, creates_5m, creates_1h, creates,
+       CASE WHEN reads < prev_ctx * ${HIT_READ_SHARE} THEN 1 ELSE 0 END AS is_miss,
+       -- 2-arg MIN() returns NULL if EITHER arg is NULL (landmine 4 / the B4 trap);
+       -- safe only because the WHERE guarantees prev_ctx is non-null.
+       MIN(prev_ctx - reads, CASE WHEN creates > 0 THEN creates ELSE input END) AS avoidable_tokens,
+       CAST((julianday(ts) - julianday(prev_ts)) * 86400000 AS INTEGER) AS gap_ms
+FROM usage_turns
+WHERE is_sidechain = 0
+  AND session_cache_tokens > 0        -- provider reports caching at all
+  AND prev_ctx >= ${MIN_CONTEXT_TOKENS}
+  AND new_ctx >= prev_ctx * ${SHRUNK_CTX_SHARE};   -- a rewrite is neither hit nor miss
+
+DROP VIEW IF EXISTS cache_miss_event;
+CREATE VIEW cache_miss_event AS SELECT * FROM cache_classified_turn WHERE is_miss = 1;
+`
+}
+
 export function openDb(path: string): DB {
   mkdirSync(dirname(path), { recursive: true })
   const db = new Database(path)
@@ -504,6 +588,7 @@ export function openDb(path: string): DB {
   db.pragma('foreign_keys = ON')
   migrate(db) // add columns to pre-existing tables before SCHEMA (its indexes reference them)
   db.exec(SCHEMA)
+  db.exec(buildUsageViews()) // after SCHEMA: the views read the tables it defines
   db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(
     'schema_version',
     String(SCHEMA_VERSION),

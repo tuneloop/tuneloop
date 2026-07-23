@@ -1,5 +1,6 @@
 import { registerDetector } from '../core/registry'
 import type { Detector, InsightInput } from '../core/detector'
+import { HIT_READ_SHARE, MIN_CONTEXT_TOKENS, SHRUNK_CTX_SHARE } from '../core/thresholds'
 import { priceFor } from '../pricing/pricing'
 
 /**
@@ -20,11 +21,9 @@ import { priceFor } from '../pricing/pricing'
 const WINDOW_DAYS = 30
 const MIN_SESSIONS = 10 // per repo in the window — fewer and the rates are noise
 const LONG_BREAK_MS = 5 * 60_000 // descriptive split only — no cache-lifetime claim
-const MIN_CONTEXT_TOKENS = 10_000 // below this the dollars are noise — our floor, not a provider rule
-const HIT_READ_SHARE = 0.5 // a hit reads back at least this share of its prior context
-// New context under half the previous one is a rewrite (compaction/rewind),
-// not a cold cache — neither hit nor miss.
-const SHRUNK_CTX_SHARE = 0.5
+// MIN_CONTEXT_TOKENS, HIT_READ_SHARE, SHRUNK_CTX_SHARE moved to ../core/thresholds:
+// the cache_classified_turn / cache_miss_event views classify off the same values,
+// so a single definition keeps the detector and the view from drifting (decision 4).
 const MIN_MISS_RATE = 0.25
 const MIN_WASTE_USD = 1
 const SEVERITY_USD = { high: 10, medium: 3 }

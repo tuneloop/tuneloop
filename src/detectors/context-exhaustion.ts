@@ -1,5 +1,6 @@
 import { registerDetector } from '../core/registry'
 import type { Detector, InsightInput } from '../core/detector'
+import { DROP_SHARE, PEAK_FLOOR } from '../core/thresholds'
 
 /**
  * Flags repos where sessions run into the context window and get compacted.
@@ -20,14 +21,11 @@ import type { Detector, InsightInput } from '../core/detector'
 
 const WINDOW_DAYS = 30
 const MIN_SESSIONS = 10 // per repo in the window — fewer and the pattern is anecdote, not signal
-// A compaction is a turn where occupancy drops >60% (occ <= 0.4 × prev) from a
-// prior turn of at least PEAK_FLOOR tokens. Occupancy is the whole prompt and a
-// conversation is append-only, so it only grows turn to turn; a drop this large
-// means content left the prompt — a removal event (auto-compaction, or a manual
-// /compact//clear, which is counted the same). The floor is a small-session noise
-// gate; both thresholds are absolute, applied uniformly across models and harnesses.
-const DROP_SHARE = 0.4 // occupancy must fall to at most 40% of the previous turn's (a >60% drop)
-const PEAK_FLOOR = 100_000 // ...from a turn at least this large
+// DROP_SHARE / PEAK_FLOOR moved to ../core/thresholds: the compaction_event view
+// classifies off the same values, so a single definition keeps the detector and
+// the view from drifting (decision 4). The rationale for the compaction rule —
+// a >60% occupancy drop (occ <= DROP_SHARE × prev) from a prior turn of at least
+// PEAK_FLOOR tokens, an absolute gate applied uniformly across models — lives there.
 const MIN_COMPACTED_SESSIONS = 1 // surface a repo once any session compacted (gated by MIN_SESSIONS corpus)
 // Severity by how entrenched the pattern is (share of the repo's sessions that compacted).
 const SEVERITY_SHARE = { high: 0.3, medium: 0.1 }
