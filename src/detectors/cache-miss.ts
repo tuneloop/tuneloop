@@ -1,6 +1,5 @@
 import { registerDetector } from '../core/registry'
 import type { Detector, InsightInput } from '../core/detector'
-import { HIT_READ_SHARE, MIN_CONTEXT_TOKENS, SHRUNK_CTX_SHARE } from '../core/thresholds'
 import { priceFor } from '../pricing/pricing'
 
 /**
@@ -12,6 +11,13 @@ import { priceFor } from '../pricing/pricing'
  * (read-discount caching, OpenAI). Comparing a turn's reads against what the
  * previous turn left cached classifies it directly, across harnesses and providers.
  *
+ * The classification itself lives in SQL: the `cache_classified_turn` /
+ * `cache_miss_event` views (src/store/db.ts) are scanned GLOBALLY and this detector
+ * presents a recent WINDOW over them (decision 1). The view yields `avoidable_tokens`
+ * plus the rate inputs; dollars stay here because `priceFor` is a JS table with no
+ * SQL equivalent (decision 2). The window keys off each turn's OWN timestamp, not its
+ * session's start (decision 7), so a card ages out when the misses stop.
+ *
  * The detector makes no causal claim about WHY a miss happened — cache lifetimes are
  * per-request API choices we can't read, and config churn needs env snapshots.
  * It reports the observed miss rate, the premium actually paid, and a
@@ -21,24 +27,31 @@ import { priceFor } from '../pricing/pricing'
 const WINDOW_DAYS = 30
 const MIN_SESSIONS = 10 // per repo in the window — fewer and the rates are noise
 const LONG_BREAK_MS = 5 * 60_000 // descriptive split only — no cache-lifetime claim
-// MIN_CONTEXT_TOKENS, HIT_READ_SHARE, SHRUNK_CTX_SHARE moved to ../core/thresholds:
-// the cache_classified_turn / cache_miss_event views classify off the same values,
-// so a single definition keeps the detector and the view from drifting (decision 4).
 const MIN_MISS_RATE = 0.25
 const MIN_WASTE_USD = 1
 const SEVERITY_USD = { high: 10, medium: 3 }
 
-interface FactRow {
+// One row per repo from cache_classified_turn — the denominator (miss rate) and the
+// session count the qualifying gate needs.
+interface ClassifiedAgg {
+  repo: string
+  classified: number
+  sessions: number // distinct sessions with at least one classified turn
+}
+
+// One row per miss from cache_miss_event, carrying the rate inputs the view can't
+// price (priceFor is a JS table). `gapMs` is the view's turn-to-turn gap.
+interface MissRow {
   sessionId: string
   repo: string
   provider: string
   model: string | null
   ts: string | null
-  input: number
-  output: number // not cached (see prevCtx) — used only for the zero-row check
-  creates5m: number // cache-write tokens, split by TTL (disjoint)
+  avoidableTokens: number
+  creates5m: number
   creates1h: number
-  reads: number
+  input: number
+  gapMs: number | null
 }
 
 interface RepoAgg {
@@ -60,101 +73,66 @@ export const cacheMiss: Detector = {
   tier: 'S',
   run(ctx) {
     const since = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
-    // Main thread only — sidechains are separate conversations with their own cache prefixes.
-    const rows = ctx.store.queryAll(
-      `SELECT u.session_id AS sessionId,
-              COALESCE(NULLIF(s.repo, ''), NULLIF(s.cwd, ''), '_unknown') AS repo,
-              s.provider, u.model, u.ts,
-              COALESCE(u.tok_input, 0) AS input,
-              COALESCE(u.tok_output, 0) AS output,
-              COALESCE(u.tok_cache_create_5m, 0) AS creates5m,
-              COALESCE(u.tok_cache_create_1h, 0) AS creates1h,
-              COALESCE(u.tok_cache_read, 0) AS reads
-       FROM usage_facts u JOIN sessions s ON s.id = u.session_id
-       WHERE u.is_sidechain = 0 AND s.started_at >= ?
-       ORDER BY u.session_id, u.idx`,
-      since,
-    ) as FactRow[]
 
-    const bySession = new Map<string, FactRow[]>()
-    for (const r of rows) {
-      const list = bySession.get(r.sessionId) ?? []
-      list.push(r)
-      bySession.set(r.sessionId, list)
-    }
+    // Denominator + session count, per repo, over the recent window. The views scan
+    // globally; `ts >= since` is the read-time window on the turn's own timestamp.
+    const classifiedRows = ctx.store.queryAll(
+      `SELECT repo, COUNT(*) AS classified, COUNT(DISTINCT session_id) AS sessions
+       FROM cache_classified_turn
+       WHERE ts >= ?
+       GROUP BY repo`,
+      since,
+    ) as ClassifiedAgg[]
+    if (classifiedRows.length === 0) return []
+
+    // Numerator: the miss turns, with the rate inputs to price each in JS.
+    const missRows = ctx.store.queryAll(
+      `SELECT session_id AS sessionId, repo, provider, model, ts,
+              avoidable_tokens AS avoidableTokens,
+              creates_5m AS creates5m, creates_1h AS creates1h, input,
+              gap_ms AS gapMs
+       FROM cache_miss_event
+       WHERE ts >= ?`,
+      since,
+    ) as MissRow[]
 
     const repos = new Map<string, RepoAgg>()
-    for (const facts of bySession.values()) {
-      // No cache tokens anywhere → provider doesn't report caching, indistinguishable from cold.
-      if (!facts.some((f) => f.creates5m > 0 || f.creates1h > 0 || f.reads > 0)) continue
+    for (const c of classifiedRows) {
+      repos.set(c.repo, {
+        sessions: c.sessions,
+        classified: c.classified,
+        misses: 0,
+        breakMisses: 0,
+        wasteUsd: 0,
+        sessionWaste: new Map(),
+        firstMissTs: null,
+        lastMissTs: null,
+      })
+    }
 
-      let classified = 0
-      let misses = 0
-      let breakMisses = 0
-      let wasteUsd = 0
-      let firstMissTs: string | null = null
-      let lastMissTs: string | null = null
-      let prevCtx = 0 // what a warm turn would read back
-      let prevTs: number | null = null
-      for (const f of facts) {
-        // Whole cache write, both TTLs — a turn's context is cached across both.
-        const creates = f.creates5m + f.creates1h
-        // All-zero rows aren't API calls (content flushes, ingest-deduped repeat lines).
-        if (f.input + f.output + creates + f.reads === 0) continue
-
-        const ts = f.ts ? Date.parse(f.ts) : NaN
-        // What the next warm turn would read back: reads plus what this turn
-        // cached (creates, or billed input under read-discount caching). Output
-        // and any uncached input tail aren't cached yet — paid next turn either
-        // way, so they belong in neither the expectation nor the waste.
-        const newCtx = f.reads + (creates > 0 ? creates : f.input)
-        if (prevCtx >= MIN_CONTEXT_TOKENS && newCtx >= prevCtx * SHRUNK_CTX_SHARE) {
-          classified++
-          if (f.reads < prevCtx * HIT_READ_SHARE) {
-            misses++
-            // Real occurrence time for this miss (rows arrive in idx order, so the
-            // first/last we see are the earliest/latest miss). Skip rows with no ts.
-            if (f.ts) {
-              if (firstMissTs === null) firstMissTs = f.ts
-              lastMissTs = f.ts
-            }
-            if (prevTs !== null && !Number.isNaN(ts) && ts - prevTs > LONG_BREAK_MS) breakMisses++
-            // Premium actually paid: un-read prior context re-bought at uncached
-            // rates, capped at what this turn really paid. Unpriced model → miss counts, $0.
-            const rePaid = creates > 0 ? creates : f.input
-            const avoidable = Math.min(prevCtx - f.reads, rePaid)
-            const price = f.model ? priceFor(f.provider, f.model) : undefined
-            if (price && avoidable > 0) {
-              // Rate the re-buy at what it was actually paid at
-              const paidRate =
-                creates > 0
-                  ? (f.creates5m * price.cache_write_5m + f.creates1h * price.cache_write_1h) / creates
-                  : price.input
-              wasteUsd += (avoidable * (paidRate - price.cache_read)) / 1_000_000
-            }
-          }
-        }
-        prevCtx = newCtx
-        if (!Number.isNaN(ts)) prevTs = ts
+    for (const m of missRows) {
+      const agg = repos.get(m.repo)
+      if (!agg) continue // every miss is a classified turn, so its repo is always present
+      agg.misses++
+      if (m.gapMs !== null && m.gapMs > LONG_BREAK_MS) agg.breakMisses++
+      // Premium actually paid: the view already capped avoidable_tokens at what this
+      // turn re-bought; rate it at what it was paid at. Unpriced model → miss counts, $0.
+      const creates = m.creates5m + m.creates1h
+      const price = m.model ? priceFor(m.provider, m.model) : undefined
+      if (price && m.avoidableTokens > 0) {
+        const paidRate =
+          creates > 0
+            ? (m.creates5m * price.cache_write_5m + m.creates1h * price.cache_write_1h) / creates
+            : price.input
+        const w = (m.avoidableTokens * (paidRate - price.cache_read)) / 1_000_000
+        agg.wasteUsd += w
+        if (w > 0) agg.sessionWaste.set(m.sessionId, (agg.sessionWaste.get(m.sessionId) ?? 0) + w)
       }
-      if (classified === 0) continue
-
-      const repo = facts[0]!.repo
-      let agg = repos.get(repo)
-      if (!agg) {
-        agg = { sessions: 0, classified: 0, misses: 0, breakMisses: 0, wasteUsd: 0, sessionWaste: new Map(), firstMissTs: null, lastMissTs: null }
-        repos.set(repo, agg)
+      // Real occurrence window for the card's first/last-seen.
+      if (m.ts) {
+        if (agg.firstMissTs === null || m.ts < agg.firstMissTs) agg.firstMissTs = m.ts
+        if (agg.lastMissTs === null || m.ts > agg.lastMissTs) agg.lastMissTs = m.ts
       }
-      agg.sessions++
-      agg.classified += classified
-      agg.misses += misses
-      agg.breakMisses += breakMisses
-      agg.wasteUsd += wasteUsd
-      if (wasteUsd > 0) agg.sessionWaste.set(facts[0]!.sessionId, wasteUsd)
-      // Widen the repo's miss window (sessions arrive in id order, not time order,
-      // so compare rather than assign).
-      if (firstMissTs && (agg.firstMissTs === null || firstMissTs < agg.firstMissTs)) agg.firstMissTs = firstMissTs
-      if (lastMissTs && (agg.lastMissTs === null || lastMissTs > agg.lastMissTs)) agg.lastMissTs = lastMissTs
     }
 
     // Qualifying repos (each gated on its own MIN_SESSIONS/miss-rate/waste, so a thin

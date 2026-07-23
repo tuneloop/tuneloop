@@ -57,6 +57,28 @@ function seedSession(
   })
 }
 
+// Like seedSession, but decouples the session's started_at from its turn
+// timestamps — to exercise the event-ts window (decision 7), where a card is
+// dated by when a turn happened, not by when its session began.
+function seedDecoupled(
+  db: ReturnType<typeof openDb>,
+  id: string,
+  usage: UsageSpec[],
+  startedAtIso: string,
+  tsBaseMs: number,
+  over: { repo?: string; provider?: string; model?: string } = {},
+) {
+  db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)').run(
+    id, id, 'claude-code', over.provider ?? 'anthropic', over.repo ?? 'o/r', '/repo', startedAtIso,
+  )
+  const ins = db.prepare(
+    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,0)',
+  )
+  usage.forEach((u, idx) => {
+    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(tsBaseMs + u.atMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.creates1h ?? 0, u.reads ?? 0)
+  })
+}
+
 // Cold session: after a 10-min break the next turn reads nothing back and
 // re-writes the whole 200k context → miss, premium 200k × $11.5/Mtok = $2.30.
 // The turn after reads it all back → hit. Per session: 2 classified turns,
@@ -285,5 +307,27 @@ describe('cache-miss detector', () => {
     ])
     const insights = cacheMiss.run(ctx) as InsightInput[]
     expect(insights[0]!.evidence[0]!.sessionId).toBe('whale')
+  })
+
+  it('windows by the turn\'s own timestamp, so a session that began long ago but is active now still counts (decision 7)', () => {
+    const { db, ctx } = setup()
+    const beganOutsideWindow = new Date(Date.now() - 40 * DAY_MS).toISOString()
+    const missedYesterday = Date.now() - DAY_MS
+    // The old started_at scan dropped every one of these sessions; the event-ts
+    // window keeps them because the misses themselves are recent.
+    for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, coldSession, beganOutsideWindow, missedYesterday)
+    const insights = cacheMiss.run(ctx) as InsightInput[]
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.count).toBe(10)
+  })
+
+  it('excludes turns older than the window even when the session started recently (decision 7)', () => {
+    const { db, ctx } = setup()
+    const startedYesterday = new Date(Date.now() - DAY_MS).toISOString()
+    const missedLongAgo = Date.now() - 40 * DAY_MS
+    // The old started_at scan would have counted these (recent session start); the
+    // event-ts window drops them because the misses are ancient.
+    for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, coldSession, startedYesterday, missedLongAgo)
+    expect(cacheMiss.run(ctx)).toEqual([])
   })
 })
