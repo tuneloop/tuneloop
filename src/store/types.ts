@@ -161,7 +161,8 @@ export interface ProcessorRunRow {
  * Harness-neutral category vocabulary for config snapshots. Deliberately abstract,
  * not per-harness fields: the storage layer is shared, only the reader is
  * per-harness. A harness populates ONLY the categories it has — an absent category
- * simply produces no rows (Pi, e.g., has no sub-agents or skills, so writes neither).
+ * simply produces no rows (Pi, e.g., ships no built-in MCP or sub-agents, so writes
+ * neither `mcp` nor `agents`).
  *
  *  settings     — permissions / plugins / equivalent. Concept is universal; the
  *                 file format is not (CC=JSON, Codex=TOML, OpenCode=JSON).
@@ -172,7 +173,8 @@ export interface ProcessorRunRow {
  *                 must never file AGENTS.md here.
  *  skills       — custom skills / commands. Ragged across harnesses: CC = SKILL.md
  *                 dirs, Codex = shell SKILL.md bundles, OpenCode = a skill tool,
- *                 Pi = none. Same label, different mechanism — reader is per-harness.
+ *                 Pi = SKILL.md dirs + root `.md` files. Same label, different
+ *                 mechanism — reader is per-harness.
  *  instructions — the project-instructions file: CLAUDE.md (CC) / AGENTS.md (Codex,
  *                 OpenCode). The generic name for "always-on instructions the user wrote".
  */

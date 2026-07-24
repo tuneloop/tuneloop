@@ -50,10 +50,10 @@ absent category simply produces no rows.
 | Category       | Universal?             | Notes                                                                                                                          |
 | -------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `settings`     | Concept yes, format no | CC=JSON, Codex=TOML, OpenCode=JSON. Keys differ entirely per harness.                                                          |
-| `mcp`          | **Yes**                | All supported harnesses (CC, Codex, OpenCode, Pi) have MCP.                                                                    |
+| `mcp`          | **Yes**                | CC, Codex, OpenCode have MCP. Pi ships no built-in MCP → no rows.                                                              |
 | `agents`       | Mostly                 | Sub-agent *definitions*. Pi has no sub-agents → no rows.                                                                       |
-| `skills`       | Ragged                 | CC = `SKILL.md` dirs, Codex = shell `SKILL.md` bundles, OpenCode = a `skill` tool, Pi = none. Same label, different mechanism. |
-| `instructions` | **Yes**                | The project-instructions file: `CLAUDE.md` (CC) / `AGENTS.md` (Codex, OpenCode).                                               |
+| `skills`       | Ragged                 | CC = `SKILL.md` dirs, Codex = shell `SKILL.md` bundles, OpenCode = a `skill` tool, Pi = `SKILL.md` dirs + root `.md` files. Same label, different mechanism. |
+| `instructions` | **Yes**                | The project-instructions file: `CLAUDE.md` (CC) / `AGENTS.md` (Codex, OpenCode, Pi).                                          |
 
 
 The **reader is fully per-harness** — there is no shared parsing (JSON vs TOML, `mcp__<server>`
@@ -916,3 +916,78 @@ requirements, memories, plugin caches and plugin-provided skills, app definition
 auth files, and installed/bundled skill catalogs are intentionally deferred. Base and project
 config files remain independent source records rather than a flattened effective object.
 
+
+# Part 5 — Pi reader
+
+Pi is the next adapter to implement the snapshot contract. The storage lifecycle is unchanged:
+capture global scope once, capture each observed repository root once, append only on content
+change, and write tombstones only after a successful read. The adapter adds
+`readPiEnvironment(projectPath?)`; there is no schema migration or session parse-version bump.
+
+Discovery follows the current Pi documentation for [settings](../../settings.md),
+[skills](../../skills.md), and context files (`quickstart.md`, `usage.md`).
+
+## Narrow category coverage
+
+Pi is deliberately minimal: it ships **no built-in MCP and no sub-agents** (`usage.md`: "does not
+include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash"). The
+reader therefore emits only three of the five categories — `settings`, `skills`, and
+`instructions` — and never `mcp` or `agents`. Users who want those workflows install them as
+extensions or packages, which are captured indirectly through the `settings` resource pointers.
+
+## Scope and home resolution
+
+Pi's agent home is `$PI_CODING_AGENT_DIR` (which points AT the agent dir, e.g. `~/.pi/agent`, not
+its parent), defaulting to `~/.pi/agent`. Global scope reads that home. The home-level
+`~/.agents/skills` directory is a *sibling* of `~/.pi` and does **not** follow
+`$PI_CODING_AGENT_DIR`; it is always resolved from the OS home.
+
+Project scope walks the repository once (`scanProject`) collecting every `.pi/` dir, every
+`.agents/` dir, and every `AGENTS.md`/`CLAUDE.md`. Nested `.pi`/`.agents` in monorepo sub-packages
+are captured and kept separate; the walk prunes `node_modules`, `.git`, build/vendor trees, and
+other dot-directories so vendored config never leaks in. `.pi`/`.agents` themselves are registered
+but not descended into — their subtrees are skill directories, not more config dirs.
+
+## Payloads by category
+
+### `settings`
+
+Sources are `<piHome>/settings.json` for global scope and every discovered project
+`.pi/settings.json` for project scope, keyed by relative path. A fixed allowlist keeps only
+non-secret posture: model + thinking config (`defaultProvider`, `defaultModel`,
+`defaultThinkingLevel`, `thinkingBudgets`, `hideThinkingBlock`, `showCacheMissNotices`,
+`enabledModels`), trust posture (`defaultProjectTrust`), context management (`compaction`,
+`branchSummary`, `retry`), delivery (`steeringMode`, `followUpMode`, `transport`), `warnings`,
+and resource pointers (`packages`, `extensions`, `skills`, `prompts`, `themes`,
+`enableSkillCommands`). `httpProxy` is kept only as a redacted endpoint identity (userinfo, query,
+and fragment stripped). Everything else — themes and other pure-UI display options,
+`externalEditor`, `shellPath`/`shellCommandPrefix`/`npmCommand` execution plumbing, `sessionDir`,
+`trackingId`, telemetry flags — is dropped by omission. A file whose fields are all dropped
+contributes no entry.
+
+### `skills`
+
+Global scope scans `<piHome>/skills` and `~/.agents/skills`. Project scope scans `<repo>/.pi/skills`
+and `<repo>/.agents/skills` in every such directory found. Per Pi's discovery rules, `.pi` skill
+dirs discover direct root `.md` files as individual skills, all locations discover `SKILL.md`
+directories recursively, and `.agents` skill dirs ignore root `.md` files. The payload is
+`{ "skills": [...], "count": n }`; each entry retains `name`, optional `description`, full `body`,
+`bodyHash`, `kind: "skill"`, and the source `dir`. Pi lets the frontmatter `name` differ from the
+directory, so it is authoritative with the directory/file base name as fallback. Skills reached
+through symlinks are deduplicated by real path.
+
+Settings-listed skill directories, package-contributed skills, and CLI `--skill` paths are deferred
+for v1 — the two on-disk conventions above cover the common case.
+
+### `instructions`
+
+Global scope reads `<piHome>/AGENTS.md` and `<piHome>/CLAUDE.md`. Project scope stores every
+`AGENTS.md`/`CLAUDE.md` found under the repo (Pi walks up from cwd loading these, so nested files
+represent sessions launched from those directories). Each entry is keyed by relative path and
+holds the full `body` plus `hash`. Empty files are omitted.
+
+## Deferred Pi surfaces (v1)
+
+`models.json` (custom providers), `keybindings.json`, `auth.json`, package/extension *contents*
+(only their settings pointers are captured), settings-referenced and CLI-supplied skill paths, and
+prompt/theme resource contents are intentionally deferred.
