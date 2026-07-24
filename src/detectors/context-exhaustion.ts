@@ -150,14 +150,14 @@ export const contextExhaustion: Detector = {
       signalKey: 'context-exhaustion',
       repo: '*',
       severity: share >= SEVERITY_SHARE.high ? 'high' : share >= SEVERITY_SHARE.medium ? 'medium' : 'low',
-      title: `${compactedCount} session${compactedCount === 1 ? '' : 's'} hit the context limit and compacted`,
+      title: `${compactedCount} session${compactedCount === 1 ? '' : 's'} grew large enough to trigger compaction`,
       description:
-        `In the last ${WINDOW_DAYS} days, ${compactedCount} of ${sessions} sessions in ${repoLabel} ran the ` +
-        `context window up to the limit and were auto-compacted (${totalCompactions} compaction` +
+        `In the last ${WINDOW_DAYS} days, ${compactedCount} of ${sessions} sessions in ${repoLabel} grew ` +
+        `large enough to trigger context compaction (${totalCompactions} event` +
         `${totalCompactions === 1 ? '' : 's'} total). Compaction summarizes and discards earlier ` +
-        `context — the agent loses the thread of work it did before the reset, which tends to show up ` +
+        `context — the agent loses the thread of earlier work, which tends to show up ` +
         `as repeated exploration or dropped requirements. The worst session compacted ${top.compactions} ` +
-        `time${top.compactions === 1 ? '' : 's'}, peaking near ${Math.round(top.peak / 1000)}K tokens of context.`,
+        `time${top.compactions === 1 ? '' : 's'}, peaking near ${Math.round(top.peak / 1000)}K tokens.`,
       // Each row notes its repo + compaction count — the per-repo detail the single row would lose.
       evidence: worst.map((s) => ({
         sessionId: s.sessionId,

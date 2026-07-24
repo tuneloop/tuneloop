@@ -154,7 +154,7 @@ describe('context-exhaustion detector', () => {
     const insights = contextExhaustion.run(ctx) as InsightInput[]
     expect(insights).toHaveLength(1)
     // 3 compactions × 10 sessions = 30 total; copy reflects the total and the worst session.
-    expect(insights[0]!.description).toContain('30 compactions total')
+    expect(insights[0]!.description).toContain('30 events total')
     expect(insights[0]!.description).toContain('3 times')
   })
 
