@@ -240,7 +240,11 @@ const MAX_EVIDENCE = 10
  * tracks the total flagged count, not any cost. Evidence draws sample sessions from the
  * repos the suggestions touch (scope targets + the project repos with dead caps).
  */
-export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<string, string[]>): InsightInput[] {
+export function buildCards(
+  classified: Classified[],
+  scopeInvocations: Map<string, EvidenceRef[]>,
+  sampleSessionsByRepo: Map<string, string[]>,
+): InsightInput[] {
   if (classified.length === 0) return []
 
   const globals = classified.filter((c) => c.cap.scope === 'global')
@@ -259,10 +263,6 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
     sections.push(`Remove from ${repo}'s config:\n${capList(byRepo.get(repo)!.map((c) => c.cap))}`)
   }
 
-  // Evidence: sessions from the repos the suggestions touch — scope targets (concrete
-  // "used here" pointers) plus every project repo with dead caps.
-  const evidenceRepos = new Set([...globals.flatMap((c) => c.scopeToRepos ?? []), ...byRepo.keys()])
-
   const total = classified.length
   return [{
     signalKey: 'unused-caps',
@@ -272,7 +272,7 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
     description:
       [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ') +
       ` Each loads into a session's startup and adds to its overhead. Apply the fix below to trim your config.`,
-    evidence: sampleEvidence(evidenceRepos, sampleSessionsByRepo),
+    evidence: collectEvidence(globals, byRepo, scopeInvocations, sampleSessionsByRepo),
     count: total,
     fix: {
       type: 'config-snippet',
@@ -282,10 +282,28 @@ export function buildCards(classified: Classified[], sampleSessionsByRepo: Map<s
   }]
 }
 
-/** Up to MAX_EVIDENCE session pointers drawn from the given repos' samples. */
-function sampleEvidence(repos: Set<string>, sampleSessionsByRepo: Map<string, string[]>): EvidenceRef[] {
+/**
+ * The card's evidence, capped at MAX_EVIDENCE. Scope verdicts lead with their REAL
+ * invocation pointers (the sessions that ran the capability in each target repo, each
+ * noting the capability + repo and landing on the call) — positive proof of the "used
+ * here" claim, so it isn't crowded out. A project-scoped dead cap has no invocation to
+ * point at, so those repos fall back to recent sessions (bare session-level pointers).
+ */
+function collectEvidence(
+  globals: Classified[],
+  byRepo: Map<string, Classified[]>,
+  scopeInvocations: Map<string, EvidenceRef[]>,
+  sampleSessionsByRepo: Map<string, string[]>,
+): EvidenceRef[] {
   const out: EvidenceRef[] = []
-  for (const repo of repos) {
+  for (const c of globals) {
+    if (c.verdict !== 'scope') continue
+    for (const ref of scopeInvocations.get(capIdentity(c.cap)) ?? []) {
+      if (out.length >= MAX_EVIDENCE) return out
+      out.push(ref)
+    }
+  }
+  for (const repo of [...byRepo.keys()].sort()) {
     for (const sessionId of sampleSessionsByRepo.get(repo) ?? []) {
       if (out.length >= MAX_EVIDENCE) return out
       out.push({ sessionId })
@@ -417,8 +435,57 @@ const CAP_CATEGORIES = [
   { category: 'skills', kind: 'skill' as const, parse: parseInstalledSkills },
 ]
 
+/** Evidence-note label for a capability's use: "<repo> · uses MCP server sentry". */
+function invocationNote(cap: InstalledCap, repo: string): string {
+  return `${repo} · uses ${cap.kind === 'mcp' ? 'MCP server' : 'skill'} ${cap.name}`
+}
+
+/**
+ * Real invocation evidence for each scope verdict: the sessions that ACTUALLY ran the
+ * capability in each target repo — positive proof of the "you use it here" claim the
+ * card makes — keyed by `capIdentity`. Reads the `capability_invocation` view (so skill
+ * names reconcile through `capNameMatches`, matching a plugin-namespaced invocation) and
+ * joins `block_tool`/`blocks` for the turn the call sits in, so the evidence link lands
+ * on the invocation exchange, not the session top. Distinct sessions, most recent first,
+ * capped at MAX_EVIDENCE per capability.
+ */
+export function buildScopeEvidence(store: Store, scopes: Classified[], sinceIso: string): Map<string, EvidenceRef[]> {
+  const out = new Map<string, EvidenceRef[]>()
+  const repos = [...new Set(scopes.flatMap((c) => c.scopeToRepos ?? []))]
+  if (repos.length === 0) return out
+  // Per (kind, invoked-name, repo, session): the earliest block seq the call maps to
+  // (null when unmapped → the link degrades to session-level), newest session first.
+  const rows = store.queryAll(
+    `SELECT ci.kind, ci.name AS invokedName, ci.repo, ci.session_id AS sessionId, MIN(b.start_seq) AS seq
+     FROM capability_invocation ci
+     LEFT JOIN block_tool bt ON bt.session_id = ci.session_id AND bt.tool_idx = ci.idx
+     LEFT JOIN blocks b ON b.session_id = bt.session_id AND b.idx = bt.block_idx
+     WHERE ci.is_sidechain = 0 AND ci.source = ? AND ci.ts >= ? AND ci.repo IN (${repos.map(() => '?').join(',')})
+     GROUP BY ci.kind, ci.name, ci.repo, ci.session_id
+     ORDER BY MAX(ci.ts) DESC`,
+    SOURCE,
+    sinceIso,
+    ...repos,
+  ) as Array<{ kind: 'mcp' | 'skill'; invokedName: string; repo: string; sessionId: string; seq: number | null }>
+
+  for (const c of scopes) {
+    const refs: EvidenceRef[] = []
+    const seen = new Set<string>() // a session can invoke twice (or under two names) — count it once
+    for (const repo of c.scopeToRepos ?? []) {
+      for (const r of rows) {
+        if (r.repo !== repo || r.kind !== c.cap.kind || !capNameMatches(c.cap, r.invokedName) || seen.has(r.sessionId)) continue
+        seen.add(r.sessionId)
+        if (refs.length >= MAX_EVIDENCE) break
+        refs.push({ sessionId: r.sessionId, turnIdx: r.seq ?? undefined, note: invocationNote(c.cap, repo) })
+      }
+    }
+    if (refs.length > 0) out.set(capIdentity(c.cap), refs)
+  }
+  return out
+}
+
 /** Stable identity of an installed capability, for set membership across snapshots. */
-function capIdentity(cap: InstalledCap): string {
+export function capIdentity(cap: InstalledCap): string {
   return `${cap.scope}\u0000${cap.repo ?? ''}\u0000${cap.kind}\u0000${cap.name}`
 }
 
@@ -537,7 +604,10 @@ export const unusedCapabilities: Detector = {
     const classified = classify(installed, invoked, sessionCounts).filter(
       (c) => c.verdict !== 'remove' || removalEligible.has(capIdentity(c.cap)),
     )
-    const cards = buildCards(classified, loadSampleSessions(ctx.store, sinceIso))
+    // Scope verdicts get REAL invocation evidence (the sessions that ran the capability
+    // in each target repo); project-remove repos fall back to recent sessions.
+    const scopeInvocations = buildScopeEvidence(ctx.store, classified.filter((c) => c.verdict === 'scope'), sinceIso)
+    const cards = buildCards(classified, scopeInvocations, loadSampleSessions(ctx.store, sinceIso))
     // Stamp last-seen as of the most recent examined session, so the card doesn't
     // default to the analyze-run time. A structural finding has no first-seen moment.
     const lastSeenAt = latestSessionStart(ctx.store, sinceIso) ?? undefined

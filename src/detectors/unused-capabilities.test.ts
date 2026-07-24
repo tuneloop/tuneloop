@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { buildCards, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
-import type { DetectorContext, InsightInput } from '../core/detector'
+import { buildCards, capIdentity, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
+import type { DetectorContext, EvidenceRef, InsightInput } from '../core/detector'
 
 const DAY_MS = 86_400_000
 
@@ -349,9 +349,10 @@ describe('buildCards', () => {
   const remove = (cap: InstalledCap): Classified => ({ cap, verdict: 'remove' })
   const scope = (cap: InstalledCap, repos: string[]): Classified => ({ cap, verdict: 'scope', scopeToRepos: repos })
   const samples = new Map([['web', ['s1', 's2']], ['api', ['s3']]])
+  const noInv = new Map<string, EvidenceRef[]>() // no scope-invocation evidence supplied
 
   it('returns no cards for no verdicts', () => {
-    expect(buildCards([], samples)).toEqual([])
+    expect(buildCards([], noInv, samples)).toEqual([])
   })
 
   it('folds globals and every project repo into one cross-repo card', () => {
@@ -361,7 +362,7 @@ describe('buildCards', () => {
       remove(pcap('mcp', 'pg', 'web')),
       remove(pcap('skill', 'lint', 'api')),
     ]
-    const cards = buildCards(classified, samples)
+    const cards = buildCards(classified, noInv, samples)
     expect(cards).toHaveLength(1)
     expect(cards[0]!.repo).toBe('*')
     expect(cards[0]!.signalKey).toBe('unused-caps')
@@ -376,6 +377,7 @@ describe('buildCards', () => {
   it('global snippet lists removals and scoping moves with target repos', () => {
     const cards = buildCards(
       [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'frontend-design'), ['web', 'docs'])],
+      noInv,
       samples,
     )
     const global = cards.find((c) => c.repo === '*')!
@@ -386,7 +388,7 @@ describe('buildCards', () => {
   })
 
   it('names the project repo and lists its capabilities in the fix', () => {
-    const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], samples)
+    const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], noInv, samples)
     const card = cards[0]!
     expect(card.repo).toBe('*')
     expect(card.description).toContain('web')
@@ -395,27 +397,39 @@ describe('buildCards', () => {
   })
 
   it('severity is medium at 3+ items, low below', () => {
-    const three = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b')), remove(gcap('mcp', 'c'))], samples)
+    const three = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b')), remove(gcap('mcp', 'c'))], noInv, samples)
     expect(three[0]!.severity).toBe('medium')
-    const two = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b'))], samples)
+    const two = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b'))], noInv, samples)
     expect(two[0]!.severity).toBe('low')
   })
 
-  it('draws global evidence from the repos the scope suggestions point at', () => {
-    const cards = buildCards([scope(gcap('mcp', 'sentry'), ['web'])], samples)
+  it('scope evidence comes from the capability’s invocations, leading the list', () => {
+    const cap = gcap('mcp', 'sentry')
+    const scopeInv = new Map<string, EvidenceRef[]>([[capIdentity(cap), [
+      { sessionId: 'inv1', turnIdx: 4, note: 'web · uses MCP server sentry' },
+      { sessionId: 'inv2', note: 'web · uses MCP server sentry' },
+    ]]])
+    // A project-remove repo is also present; its recent-session evidence fills AFTER the scope pointers.
+    const cards = buildCards([scope(cap, ['web']), remove(pcap('mcp', 'pg', 'api'))], scopeInv, samples)
     const global = cards.find((c) => c.repo === '*')!
-    expect(global.evidence).toEqual([{ sessionId: 's1' }, { sessionId: 's2' }])
+    expect(global.evidence).toEqual([
+      { sessionId: 'inv1', turnIdx: 4, note: 'web · uses MCP server sentry' },
+      { sessionId: 'inv2', note: 'web · uses MCP server sentry' },
+      { sessionId: 's3' }, // api project-remove fallback (recent session, bare pointer)
+    ])
   })
 
-  it('caps evidence at 10 sessions', () => {
-    const many = new Map([['web', Array.from({ length: 25 }, (_, i) => `s${i}`)]])
-    const cards = buildCards([scope(gcap('mcp', 'sentry'), ['web'])], many)
+  it('caps evidence at 10 invocation sessions', () => {
+    const cap = gcap('mcp', 'sentry')
+    const refs = Array.from({ length: 25 }, (_, i) => ({ sessionId: `s${i}`, note: 'web · uses MCP server sentry' }))
+    const cards = buildCards([scope(cap, ['web'])], new Map([[capIdentity(cap), refs]]), samples)
     expect(cards.find((c) => c.repo === '*')!.evidence).toHaveLength(10)
   })
 
   it('carries no token or dollar figures in any copy', () => {
     const cards = buildCards(
       [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'fd'), ['web']), remove(pcap('mcp', 'pg', 'api'))],
+      noInv,
       samples,
     )
     for (const c of cards) {
@@ -545,6 +559,39 @@ describe('unusedCapabilities.run (end to end)', () => {
     seedRepo(db, 'docs', 8) // used in 1 of 4 repos → minority
     const global = run(store).find((c) => c.repo === '*')!
     expect(global.fix.content).toContain('- MCP server: sentry → move to web')
+  })
+
+  it('scope evidence points at the sessions that invoked the capability, noting it and the repo', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__issues' }])
+    seedRepo(db, 'api', 8)
+    seedRepo(db, 'cli', 8)
+    seedRepo(db, 'docs', 8) // used in 1 of 4 repos → scope to web
+    const global = run(store).find((c) => c.repo === '*')!
+    expect(global.fix.content).toContain('- MCP server: sentry → move to web')
+    // Evidence is the web sessions that actually ran sentry, not arbitrary recent ones.
+    expect(global.evidence.length).toBeGreaterThan(0)
+    expect(global.evidence.every((e) => e.sessionId.startsWith('web-'))).toBe(true)
+    expect(global.evidence.every((e) => e.note === 'web · uses MCP server sentry')).toBe(true)
+    expect(global.evidence.every((e) => e.turnIdx === undefined)).toBe(true) // no block mapping seeded
+  })
+
+  it('lands scope evidence on the invocation’s block turn when the call is mapped', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    seedRepo(db, 'api', 8)
+    seedRepo(db, 'cli', 8)
+    seedRepo(db, 'docs', 8)
+    // web-0's sentry call (tool_calls.idx 0) sits in a block opening at user-turn seq 7.
+    db.prepare('INSERT INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,?,?,?,?,?)')
+      .run('web-0', 0, 7, 12, 'user_turn', 'test')
+    db.prepare('INSERT INTO block_tool (session_id, tool_idx, block_idx, producer) VALUES (?,?,?,?)')
+      .run('web-0', 0, 0, 'test')
+    const global = run(store).find((c) => c.repo === '*')!
+    const web0 = global.evidence.find((e) => e.sessionId === 'web-0')!
+    expect(web0.turnIdx).toBe(7)
   })
 
   it('keeps a global server used across most repos', () => {
