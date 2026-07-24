@@ -77,6 +77,19 @@ describe('parseInstalledMcp', () => {
     expect(parseInstalledMcp({ '.mcp.json': {} })).toEqual([]) // no servers key
     expect(parseInstalledMcp({ '.mcp.json': { servers: null } })).toEqual([])
   })
+
+  it('excludes servers explicitly disabled (enabled: false) — dormant, no startup overhead', () => {
+    // Codex/OpenCode snapshots retain `enabled: false`. A disabled server isn't loaded, so
+    // it can't be "unused" in a way worth removing. Absent flag (CC, or unset) = enabled.
+    const payload = {
+      'config.toml': { servers: {
+        live: { type: 'stdio', enabled: true },
+        dormant: { type: 'http', url: 'https://x', enabled: false },
+        implicit: { type: 'stdio' }, // no enabled field → on by default
+      } },
+    }
+    expect(parseInstalledMcp(payload).sort()).toEqual(['implicit', 'live'])
+  })
 })
 
 describe('parseInstalledSkills', () => {

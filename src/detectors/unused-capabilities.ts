@@ -485,7 +485,13 @@ export function parseInstalledMcp(payload: unknown): string[] {
   for (const file of Object.values(payload as Record<string, unknown>)) {
     const servers = (file as Record<string, unknown> | null)?.servers
     if (!servers || typeof servers !== 'object') continue
-    for (const name of Object.keys(servers as Record<string, unknown>)) names.add(name)
+    for (const [name, def] of Object.entries(servers as Record<string, unknown>)) {
+      // A server explicitly disabled (Codex/OpenCode snapshots retain `enabled: false`) is
+      // not loaded, so it adds no startup overhead — never flag it for removal/scoping. An
+      // absent flag (Claude Code, or an unset value) means enabled by default → included.
+      if ((def as Record<string, unknown> | null)?.enabled === false) continue
+      names.add(name)
+    }
   }
   return [...names]
 }
