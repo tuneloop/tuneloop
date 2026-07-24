@@ -761,4 +761,158 @@ Same allowlist-not-blocklist principle. OpenCode-specific **never-store**: the `
 dir's `auth.json` (never touched). Instruction/agent/skill/command bodies are stored (user-authored
 content, not secrets — the adoption signal needs them), consistent with CC.
 
+---
+
+# Part 4 — Codex reader
+
+Codex is the next adapter to implement the same five-category snapshot contract. The storage
+lifecycle is unchanged: capture global scope once, capture each observed repository root once,
+append only on content change, and write tombstones only after a successful read. The adapter adds
+`readCodexEnvironment(projectPath?)`; there is no schema migration or session parse-version bump.
+
+The discovery rules follow the current Codex documentation for the
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
+[skills](https://learn.chatgpt.com/docs/build-skills),
+[custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents), and
+[MCP](https://learn.chatgpt.com/docs/extend/mcp).
+
+## Scope and source precedence
+
+`$CODEX_HOME` is read from the environment and defaults to `~/.codex`. Global scope reads the base
+`$CODEX_HOME/config.toml`. Project scope discovers every `.codex/config.toml` below the repository
+root, including nested package/service layers, and keeps each file separate in the payload. This
+represents sessions launched below the root even though environment capture is keyed by repository.
+
+Codex normally resolves project config from repository root toward the launch directory, with the
+closest layer winning. The snapshot deliberately does not flatten those layers: file-keyed entries
+preserve their origin and make additions/removals attributable. Nested instruction fallback settings
+are applied only to their directory and descendants.
+
+TOML is parsed with `smol-toml`, not a partial in-tree parser. If a present global or project
+`config.toml` is invalid, that scope's read throws. The capture layer then keeps the last successful
+snapshot rather than mistaking a parse failure for deletion and writing tombstones. Invalid
+standalone agent TOMLs are local failures and are omitted individually.
+
+## Payloads by category
+
+### `settings`
+
+Sources are `$CODEX_HOME/config.toml` for global scope and every discovered project
+`.codex/config.toml` for project scope. The payload is keyed by source file:
+
+```json
+{
+  ".codex/config.toml": {
+    "approval_policy": "on-request",
+    "approvals_reviewer": "auto_review",
+    "sandbox_mode": "workspace-write",
+    "sandbox_workspace_write": { "network_access": true },
+    "web_search": "cached",
+    "features": {
+      "apps": true,
+      "hooks": false,
+      "memories": true,
+      "code_mode": {
+        "enabled": true,
+        "excluded_tool_namespaces": ["mcp__codex_apps"],
+        "direct_only_tool_namespaces": ["mcp__history"]
+      }
+    }
+  }
+}
+```
+
+Only explicit values are captured. Granular approval policy retains only its documented boolean
+prompt categories. The `apps`, `hooks`, and `memories` entries above are enablement flags from
+`[features]`; per-app configuration, hook definitions/commands, and memory contents are excluded.
+An otherwise valid config that retains no allowlisted setting contributes no `settings` category.
+
+### `mcp`
+
+`mcp_servers` is read independently from each config file. Server type is derived as `http` when a
+`url` exists and `stdio` when a `command` exists. The payload retains only type, a redacted URL, and
+an explicitly configured enabled state:
+
+```json
+{
+  ".codex/config.toml": {
+    "servers": {
+      "docs": { "type": "http", "url": "https://example.com/mcp", "enabled": true },
+      "local": { "type": "stdio", "enabled": false }
+    }
+  }
+}
+```
+
+URL userinfo, query strings, and fragments are removed. Unparseable URLs are omitted rather than
+stored verbatim. Commands, arguments, working directories, environment/environment-variable names,
+headers, authentication, bearer-token configuration, OAuth scopes, tool policy, and timeouts are
+never stored.
+
+### `agents`
+
+Global scope scans TOML files under `$CODEX_HOME/agents`. Project scope scans every nested
+`.codex/agents` directory. The reader also honors `[agents.<name>].config_file` references; relative
+paths resolve beside the defining `config.toml`. Each valid file must contain Codex's required
+`name`, `description`, and `developer_instructions` fields.
+
+The harness-neutral payload remains `{ "agents": [...], "count": n }`. Each entry retains:
+
+- `name` and `description`
+- `developer_instructions` as `body`, plus `bodyHash`
+- optional `model`, `model_reasoning_effort`, and `sandbox_mode`
+- `dir`, the source directory relative to the scope when possible
+
+Nested MCP servers, skills, and all other session config in an agent file are dropped. Referenced
+project paths and symlink targets must remain inside the repository; global config may reference
+user-owned paths outside `$CODEX_HOME`.
+
+### `skills`
+
+Global scope scans `~/.agents/skills/<name>/SKILL.md`. Project scope scans
+`.agents/skills/<name>/SKILL.md` in every directory below the repository root. Safe
+`[[skills.config]]` paths add skills or disable a discovered skill by canonical file path. Relative
+paths resolve beside the defining config.
+
+The payload remains `{ "skills": [...], "count": n }`. Entries retain `name`, optional
+`description`, full `body`, `bodyHash`, `kind: "skill"`, and the source `dir`. Skill-directory
+symlinks are followed, then files are deduplicated by real path. Configured project paths and
+project symlink targets that escape the repository are ignored.
+
+Plugin caches, plugin-contributed skills, admin/system skills, and bundled system skills are not
+part of v1.
+
+### `instructions`
+
+Global scope uses the first non-empty `$CODEX_HOME/AGENTS.override.md`, otherwise
+`$CODEX_HOME/AGENTS.md`. For every project directory, precedence is:
+
+1. `AGENTS.override.md`
+2. `AGENTS.md`
+3. the active `project_doc_fallback_filenames`, in configured order
+
+At most one non-empty file per directory is stored. Each entry is keyed by scope-relative path and
+contains the full `body` plus `hash`. Nested project configs replace fallback filename lists only
+for their directory and descendants. The snapshot keeps complete files rather than applying the
+runtime context-size cap because diff/adoption analysis needs the durable source content.
+
+## Determinism and security
+
+Config files, server names, project directories, agents, skills, and safe namespace lists are
+sorted before emission. Realpath deduplication prevents a skill or agent reached through multiple
+symlinks from causing false snapshot churn.
+
+The reader uses fixed allowlists. It never opens `auth.json` or another credential store and never
+returns provider configuration, API keys, environment values or names, shell commands/arguments,
+headers, tokens, OAuth/auth configuration, hooks bodies, or MCP timeouts. Full bodies are retained
+only for the three user-authored content surfaces where they are the adoption signal: agents,
+skills, and instruction files.
+
+## Deferred Codex surfaces (v1)
+
+Profile TOMLs, CLI `--config` overrides, runtime-only session overrides, system/managed config and
+requirements, memories, plugin caches and plugin-provided skills, app definitions, hook bodies,
+auth files, and installed/bundled skill catalogs are intentionally deferred. Base and project
+config files remain independent source records rather than a flattened effective object.
 
