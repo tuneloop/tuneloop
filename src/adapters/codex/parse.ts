@@ -13,7 +13,8 @@ import type {
   ToolCall,
   UserMessage,
 } from '../../core/model'
-import { mapAction, shellPatchBody } from './actions'
+import { synthSkillCall } from '../skill-invocation'
+import { explicitSkillName, mapAction, shellPatchBody } from './actions'
 import { extractExecEnvelope } from './exec-envelope'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
@@ -23,7 +24,10 @@ import { extractExecEnvelope } from './exec-envelope'
 // 5: split exec-envelope outputs by block count (any JS shape) + strip runtime preamble.
 // 6: extract the patch body for a shell `apply_patch` inside an exec envelope too.
 // 7: link guardian approval sidechains that report a top-level `parent_thread_id`.
-export const PARSE_VERSION = 7
+// 8: capture EXPLICIT `$skill-name` invocations. Codex injects the skill body as a
+//    role:user <skill> envelope and answers directly (no shell SKILL.md read), so the
+//    shell-read heuristic misses it — synthesize a skill tool call from the envelope.
+export const PARSE_VERSION = 8
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -207,6 +211,10 @@ export async function parseCodex(path: string): Promise<Session | null> {
           }
           events.push(ev)
         }
+        // Explicit `$skill-name`: the injected <skill> envelope names the skill, but no
+        // tool call is emitted — synthesize one so capability usage sees the invocation.
+        const skill = explicitSkillName(text)
+        if (skill) toolCalls.push(synthSkillCall(skill, { id: `skill-${toolCalls.length}`, ts, isSidechain: isSubagent }))
       }
     } else if (p.type === 'reasoning') {
       const summary = summaryText(p.summary)

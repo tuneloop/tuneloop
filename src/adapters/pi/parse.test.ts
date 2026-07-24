@@ -630,3 +630,48 @@ describe('findBranchPaths', () => {
     expect(branches[2]!.uniqueIds).toEqual(new Set(['d']))
   })
 })
+
+describe('pi adapter — skill invocation capture', () => {
+  let dir: string
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'pi-test-'))
+  })
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  const usage = { input: 3, output: 12, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } }
+
+  it('captures an explicit /skill: invocation (<skill name=…> envelope) as a skill tool call and marks it isMeta', async () => {
+    const path = join(dir, 'explicit.jsonl')
+    const lines = [
+      JSON.stringify({ type: 'session', version: 3, id: 'sess-skill-exp', timestamp: '2026-07-24T13:00:00.000Z', cwd: '/repo' }),
+      JSON.stringify({ type: 'model_change', id: 'e1', parentId: null, timestamp: '2026-07-24T13:00:00.001Z', provider: 'anthropic', modelId: 'claude-opus-4-8' }),
+      // The /skill:hello-test path: Pi injects the skill body as a user message wrapped
+      // in <skill name="…" location="…">…</skill>. No tool call — synthesize one.
+      JSON.stringify({ type: 'message', id: 'e2', parentId: 'e1', timestamp: '2026-07-24T13:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: '<skill name="hello-test" location="/repo/.pi/skills/hello-test/SKILL.md">\n# Hello Test\n</skill>' }], timestamp: 1784000001000 } }),
+      JSON.stringify({ type: 'message', id: 'e3', parentId: 'e2', timestamp: '2026-07-24T13:00:02.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Hello, World!' }], provider: 'anthropic', model: 'claude-opus-4-8', usage, timestamp: 1784000002000 } }),
+    ]
+    writeFileSync(path, lines.join('\n'))
+    const session = single(await parsePi(path))!
+    const skills = session.toolCalls.filter((t) => t.action === 'skill')
+    expect(skills.map((s) => s.name)).toEqual(['hello-test'])
+    const users = session.events.filter((e) => e.kind === 'user')
+    expect(users.map((u) => (u.kind === 'user' ? !!u.isMeta : null))).toEqual([true])
+  })
+
+  it('captures an implicit skill invocation (read of a SKILL.md under skills/) as a skill tool call', async () => {
+    const path = join(dir, 'implicit.jsonl')
+    const lines = [
+      JSON.stringify({ type: 'session', version: 3, id: 'sess-skill-imp', timestamp: '2026-07-24T13:10:00.000Z', cwd: '/repo' }),
+      JSON.stringify({ type: 'model_change', id: 'e1', parentId: null, timestamp: '2026-07-24T13:10:00.001Z', provider: 'anthropic', modelId: 'claude-opus-4-8' }),
+      JSON.stringify({ type: 'message', id: 'e2', parentId: 'e1', timestamp: '2026-07-24T13:10:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'run the hello test skill' }], timestamp: 1784000601000 } }),
+      // Pi engages a skill by READING its SKILL.md — reclassify that read as a skill.
+      JSON.stringify({ type: 'message', id: 'e3', parentId: 'e2', timestamp: '2026-07-24T13:10:02.000Z', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'tc1', name: 'read', arguments: { path: '/repo/.pi/skills/hello-test/SKILL.md' } }], provider: 'anthropic', model: 'claude-opus-4-8', usage, timestamp: 1784000602000 } }),
+      JSON.stringify({ type: 'message', id: 'e4', parentId: 'e3', timestamp: '2026-07-24T13:10:03.000Z', message: { role: 'toolResult', toolCallId: 'tc1', toolName: 'read', content: [{ type: 'text', text: '---\nname: hello-test\n---\n# Hello' }], isError: false, timestamp: 1784000603000 } }),
+    ]
+    writeFileSync(path, lines.join('\n'))
+    const session = single(await parsePi(path))!
+    const skill = session.toolCalls.find((t) => t.id === 'tc1')
+    expect(skill?.action).toBe('skill')
+    expect(skill?.name).toBe('hello-test')
+  })
+})

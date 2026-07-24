@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { buildCards, capIdentity, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
+import { buildCards, capIdentity, classify, loadInvoked, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, queryInvokedOpencodeMcp, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
 import { insightId, type DetectorContext, type EvidenceRef, type InsightInput } from '../core/detector'
 
 const DAY_MS = 86_400_000
@@ -245,6 +245,76 @@ describe('skillMatches', () => {
   })
 })
 
+describe('queryInvokedOpencodeMcp (detector-layer reconcile)', () => {
+  const since = new Date(Date.now() - 30 * DAY_MS).toISOString()
+
+  // Seed an OpenCode session with raw tool calls (OpenCode MCP calls land as action='other').
+  function seedOpencode(
+    db: ReturnType<typeof openDb>,
+    id: string,
+    tools: Array<{ name: string; action: string; tsMs?: number; sidechain?: boolean }>,
+    repo: string | null = 'o/r',
+  ) {
+    const startMs = Date.now() - DAY_MS
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)').run(
+      id, id, 'opencode', 'anthropic', repo, '/repo', new Date(startMs).toISOString(),
+    )
+    const ins = db.prepare('INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,?,?)')
+    tools.forEach((t, idx) => ins.run(id, idx, t.name, t.action, t.sidechain ? 1 : 0, new Date(t.tsMs ?? startMs).toISOString()))
+  }
+
+  it('counts a <server>_<tool> other-call as a use of the installed server', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [{ name: 'atlassian_getJiraIssue', action: 'other' }])
+    const m = byKey(queryInvokedOpencodeMcp(store, since, ['atlassian']))
+    expect(m.get('mcp:atlassian:o/r')).toMatchObject({ kind: 'mcp', name: 'atlassian', repo: 'o/r', sessions: 1 })
+    expect([...m.values()]).toHaveLength(1)
+  })
+
+  it('does not match a built-in with an underscore, or a prefix without a "_" boundary', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [
+      { name: 'apply_patch', action: 'other' }, // built-in; no server named 'apply'
+      { name: 'atlassianfoo', action: 'other' }, // 'atlassian' prefix but no '_' boundary
+    ])
+    expect(queryInvokedOpencodeMcp(store, since, ['atlassian'])).toEqual([])
+  })
+
+  it('ignores calls outside the recency window', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 'old', [{ name: 'atlassian_x', action: 'other', tsMs: Date.now() - 40 * DAY_MS }])
+    expect(queryInvokedOpencodeMcp(store, since, ['atlassian'])).toEqual([])
+  })
+
+  it('only considers opencode sessions, and only action=other', () => {
+    const { db, store } = setupDb()
+    seedSession(db, 'cc1', [{ name: 'atlassian_getJiraIssue', action: 'other' }]) // claude-code source
+    seedOpencode(db, 'oc1', [{ name: 'atlassian_getJiraIssue', action: 'mcp_call' }]) // already-tagged: not ours
+    expect(queryInvokedOpencodeMcp(store, since, ['atlassian'])).toEqual([])
+  })
+
+  it('counts distinct sessions, ignores sidechains, and returns [] for an empty server list', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [{ name: 'atlassian_a', action: 'other' }])
+    seedOpencode(db, 's2', [
+      { name: 'atlassian_b', action: 'other' },
+      { name: 'atlassian_c', action: 'other', sidechain: true },
+    ])
+    const m = byKey(queryInvokedOpencodeMcp(store, since, ['atlassian']))
+    expect(m.get('mcp:atlassian:o/r')).toMatchObject({ sessions: 2 })
+    expect(queryInvokedOpencodeMcp(store, since, [])).toEqual([])
+  })
+
+  it('loadInvoked folds the reconcile into opencode invocations but leaves other sources untouched', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [{ name: 'atlassian_getJiraIssue', action: 'other' }])
+    const oc = byKey(loadInvoked(store, since, 'opencode', ['atlassian']))
+    expect(oc.get('mcp:atlassian:o/r')).toMatchObject({ kind: 'mcp', name: 'atlassian' })
+    // For a non-opencode source, loadInvoked is exactly queryInvoked — no reconcile applied.
+    expect(loadInvoked(store, since, 'claude-code', ['atlassian'])).toEqual(queryInvoked(store, since, 'claude-code'))
+  })
+})
+
 describe('classify', () => {
   const mcp = (name: string, scope: 'global' | 'project', repo?: string): InstalledCap => ({ kind: 'mcp', name, scope, repo })
   const skill = (name: string, scope: 'global' | 'project', repo?: string): InstalledCap => ({ kind: 'skill', name, scope, repo })
@@ -364,7 +434,7 @@ describe('buildCards', () => {
     const cards = buildCards(classified, noInv)
     expect(cards).toHaveLength(1)
     expect(cards[0]!.repo).toBe('*')
-    expect(cards[0]!.signalKey).toBe('unused-caps')
+    expect(cards[0]!.signalKey).toBe('unused-caps:claude-code')
     expect(cards[0]!.fix.type).toBe('fix-prompt')
     expect(cards[0]!.count).toBe(4) // total flagged items across all scopes
     // Fix carries the global section plus a per-repo removal section for each project.
@@ -431,7 +501,7 @@ describe('buildCards', () => {
     const fix = buildCards([remove(gcap('mcp', 'sentry'))], noInv)[0]!.fix
     expect(fix.type).toBe('fix-prompt')
     // The marker lets the fix session self-identify so the insight can flip to adopted.
-    expect(fix.content).toContain(`tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps')}`)
+    expect(fix.content).toContain(`tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps:claude-code')}`)
     // The concrete config edit still reads through — it IS the agent's task.
     expect(fix.content).toContain('- MCP server: sentry')
   })
@@ -518,7 +588,7 @@ describe('unusedCapabilities.run (end to end)', () => {
     // persistInsights throws if a fix-prompt does not embed its own (detector, repo,
     // signalKey) id — this locks the DETECTOR/SIGNAL_KEY/repo triple against drift.
     expect(() => store.persistInsights('unused-capabilities', 1, cards)).not.toThrow()
-    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')?.state).toBe('surfaced')
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')?.state).toBe('surfaced')
   })
 
   it('flags a global server never used, once past the session minimum', () => {
@@ -527,7 +597,7 @@ describe('unusedCapabilities.run (end to end)', () => {
     seedRepo(db, 'web', 12) // ≥ MIN_SESSIONS
     const cards = run(store)
     expect(cards).toHaveLength(1)
-    expect(cards[0]).toMatchObject({ repo: '*', signalKey: 'unused-caps', count: 1 })
+    expect(cards[0]).toMatchObject({ repo: '*', signalKey: 'unused-caps:claude-code', count: 1 })
     expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
   })
 
@@ -634,7 +704,7 @@ describe('unusedCapabilities.run (end to end)', () => {
   it('resolves a prior card once nothing is flagged and the window has enough sessions', () => {
     const { db, store } = setupDb()
     store.persistInsights('unused-capabilities', 1, [{
-      signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      signalKey: 'unused-caps:claude-code', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
       evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
     }])
     installGlobalMcp(store, ['sentry'])
@@ -642,13 +712,13 @@ describe('unusedCapabilities.run (end to end)', () => {
     seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
     seedRepo(db, 'api', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
     expect(run(store)).toEqual([])
-    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('resolved')
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')!.state).toBe('resolved')
   })
 
   it('does NOT resolve when the window has too few sessions — not enough data', () => {
     const { db, store } = setupDb()
     store.persistInsights('unused-capabilities', 1, [{
-      signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      signalKey: 'unused-caps:claude-code', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
       evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
     }])
     installGlobalMcp(store, ['sentry'])
@@ -656,20 +726,20 @@ describe('unusedCapabilities.run (end to end)', () => {
     // was cleaned up, so the stale card must stay surfaced.
     seedRepo(db, 'web', 5, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
     expect(run(store)).toEqual([])
-    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('surfaced')
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')!.state).toBe('surfaced')
   })
 
   it('resolves a prior card when nothing is installed (config emptied — the fix applied)', () => {
     const { store } = setupDb()
     store.persistInsights('unused-capabilities', 1, [{
-      signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      signalKey: 'unused-caps:claude-code', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
       evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
     }])
     // No installed capabilities (config emptied): with nothing installed there is nothing
     // that can be unused, so the surfaced card must resolve rather than linger — even
     // though this path returns before the usual session-count gate.
     expect(run(store)).toEqual([])
-    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('resolved')
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')!.state).toBe('resolved')
   })
 
   it('matches a plugin-namespaced skill invocation, so a used skill is not flagged', () => {
@@ -724,5 +794,52 @@ describe('unusedCapabilities.run (end to end)', () => {
     const cards = run(store)
     expect(cards).toHaveLength(1)
     expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
+  })
+
+  it('emits one insight per harness, keyed by source, with harness-specific wording', () => {
+    const { db, store } = setupDb()
+    // Claude Code: unused server 'sentry' across 12 sessions.
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 12)
+    // Codex: its own snapshot + 12 codex sessions, none using its 'pg' server.
+    store.recordEnvSnapshot({
+      source: 'codex', scope: 'global', scopeKey: '_global', category: 'mcp',
+      payload: { 'config.toml': { servers: { pg: { type: 'stdio' } } } },
+    }, OLD)
+    const sIns = db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+    for (let i = 0; i < 12; i++) sIns.run(`cx-${i}`, `cx-${i}`, 'codex', 'openai', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+
+    const cards = run(store)
+    const bySig = new Map(cards.map((c) => [c.signalKey, c]))
+    expect(new Set(cards.map((c) => c.signalKey))).toEqual(new Set(['unused-caps:claude-code', 'unused-caps:codex']))
+    // Each card names its own harness and edits its own config.
+    expect(bySig.get('unused-caps:claude-code')!.title).toContain('Claude Code')
+    expect(bySig.get('unused-caps:claude-code')!.fix.content).toContain('- MCP server: sentry')
+    expect(bySig.get('unused-caps:codex')!.title).toContain('Codex')
+    expect(bySig.get('unused-caps:codex')!.fix.content).toContain('- MCP server: pg')
+    // Codex's fix-prompt carries ITS OWN per-source adoption marker.
+    expect(bySig.get('unused-caps:codex')!.fix.content).toContain(
+      `tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps:codex')}`,
+    )
+    // Persisting two distinct-identity insights doesn't collide or throw.
+    expect(() => store.persistInsights('unused-capabilities', 1, cards)).not.toThrow()
+  })
+
+  it('does not flag OpenCode commands folded into the skills category as unused', () => {
+    const { db, store } = setupDb()
+    // OpenCode's `skills` snapshot mixes real skills with commands (kind:'command').
+    store.recordEnvSnapshot({
+      source: 'opencode', scope: 'global', scopeKey: '_global', category: 'skills',
+      payload: { skills: [
+        { name: 'deploy', kind: 'skill', body: 'x', bodyHash: 'h' },
+        { name: 'approve', kind: 'command', body: 'y', bodyHash: 'h2' },
+      ], count: 2 },
+    }, OLD)
+    const sIns = db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+    for (let i = 0; i < 12; i++) sIns.run(`oc-${i}`, `oc-${i}`, 'opencode', 'anthropic', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+    // Neither is invoked; only the real skill 'deploy' may be flagged — never the command.
+    const card = run(store).find((c) => c.signalKey === 'unused-caps:opencode')!
+    expect(card.fix.content).toContain('- skill: deploy')
+    expect(card.fix.content).not.toContain('approve')
   })
 })

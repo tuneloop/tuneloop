@@ -18,13 +18,32 @@ import { insightId, type Detector, type DetectorContext, type EvidenceRef, type 
 import { registerDetector } from '../core/registry'
 import type { Store } from '../store/store'
 
-/** The harness this detector reads: MCP-name grammar + config layout are CC-specific. */
-const SOURCE = 'claude-code'
-// Detector identity. The fix-prompt marker id is derived from (DETECTOR, repo, SIGNAL_KEY),
+// Detector identity. The fix-prompt marker id is derived from (DETECTOR, repo, signalKey),
 // and persistInsights re-derives it from the SAME triple to verify the marker is embedded —
-// so these must stay in lockstep with the Detector.name and the insight's signalKey below.
+// so DETECTOR and each per-source signalKey must stay in lockstep with the Detector.name and
+// the insight's signalKey below.
 const DETECTOR = 'unused-capabilities'
-const SIGNAL_KEY = 'unused-caps'
+
+/**
+ * One insight per harness, so each card edits that harness's own config (config files and
+ * loading model differ per harness). The source is carried in the signalKey; repo stays '*'
+ * (a cross-repo insight per harness), so the identity triple (DETECTOR, '*',
+ * `unused-caps:<source>`) is distinct per source.
+ */
+function signalKeyFor(source: string): string {
+  return `unused-caps:${source}`
+}
+
+/** Harness display name for card titles + fix-prompt wording. */
+const HARNESS_LABEL: Record<string, string> = {
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  opencode: 'OpenCode',
+  pi: 'Pi',
+}
+function harnessLabel(source: string): string {
+  return HARNESS_LABEL[source] ?? source
+}
 
 /** How far back invoked-capability usage is counted. */
 export const WINDOW_DAYS = 30
@@ -109,6 +128,53 @@ export function queryInvoked(store: Store, sinceIso: string, source?: string): I
     source ?? null,
     sinceIso,
   ) as InvokedCap[]
+}
+
+/**
+ * OpenCode records MCP tool calls as bare `<server>_<tool>` with no `mcp__` marker (see
+ * opencode/actions.ts), so the parser can't tag them and they land as `action='other'` —
+ * invisible to `capability_usage`. Reconcile them HERE, at detector read time, when both
+ * the tool calls and the installed server names (from snapshots) are already in the store:
+ * a `<server>_<tool>` call is a use of an installed MCP server when it equals the server
+ * name or starts with `<server>_`. Matched against the KNOWN installed `servers` (not
+ * "split on the first _", since server AND tool names contain underscores), longest server
+ * first so a server whose name is a prefix of another can't steal the shorter one's calls.
+ * A built-in with an underscore (`apply_patch`) matches only if a server is literally named
+ * to be its prefix — an accepted, near-impossible edge. In-window (`ts >= since`),
+ * main-thread only, grouped by (server, repo) with a DISTINCT-session count.
+ */
+export function queryInvokedOpencodeMcp(store: Store, sinceIso: string, servers: string[]): InvokedCap[] {
+  const known = [...new Set(servers)].filter(Boolean).sort((a, b) => b.length - a.length)
+  if (known.length === 0) return []
+  const rows = store.queryAll(
+    `SELECT t.name AS name, s.repo AS repo, t.session_id AS sessionId
+     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     WHERE s.source = 'opencode' AND t.action = 'other' AND t.is_sidechain = 0 AND t.ts >= ?`,
+    sinceIso,
+  ) as Array<{ name: string; repo: string | null; sessionId: string }>
+
+  // (server, repo) -> distinct sessions that invoked it.
+  const agg = new Map<string, { name: string; repo: string | null; sessions: Set<string> }>()
+  for (const r of rows) {
+    const server = known.find((s) => r.name === s || r.name.startsWith(s + '_'))
+    if (!server) continue
+    const key = `${server}\u0000${r.repo ?? ''}`
+    const entry = agg.get(key) ?? { name: server, repo: r.repo, sessions: new Set<string>() }
+    entry.sessions.add(r.sessionId)
+    agg.set(key, entry)
+  }
+  return [...agg.values()].map((e) => ({ kind: 'mcp', name: e.name, repo: e.repo, sessions: e.sessions.size }))
+}
+
+/**
+ * Invoked capabilities for one source: the shared `capability_usage` view, plus — for
+ * OpenCode only — the MCP calls the parser couldn't tag (reconciled by installed server
+ * name). Every other source flows through the view unchanged, so this is a no-op there.
+ */
+export function loadInvoked(store: Store, sinceIso: string, source: string, mcpServers: string[]): InvokedCap[] {
+  const invoked = queryInvoked(store, sinceIso, source)
+  if (source !== 'opencode') return invoked
+  return [...invoked, ...queryInvokedOpencodeMcp(store, sinceIso, mcpServers)]
 }
 
 /**
@@ -243,7 +309,11 @@ const MAX_EVIDENCE = 10
  * tracks the total flagged count, not any cost. Evidence draws sample sessions from the
  * repos the suggestions touch (scope targets + the project repos with dead caps).
  */
-export function buildCards(classified: Classified[], scopeInvocations: Map<string, EvidenceRef[]>): InsightInput[] {
+export function buildCards(
+  classified: Classified[],
+  scopeInvocations: Map<string, EvidenceRef[]>,
+  source = 'claude-code',
+): InsightInput[] {
   if (classified.length === 0) return []
 
   const globals = classified.filter((c) => c.cap.scope === 'global')
@@ -267,17 +337,17 @@ export function buildCards(classified: Classified[], scopeInvocations: Map<strin
   const total = classified.length
   const problem = [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ')
   return [{
-    signalKey: SIGNAL_KEY,
+    signalKey: signalKeyFor(source),
     repo: '*',
     severity: total >= SEVERITY_MEDIUM_COUNT ? 'medium' : 'low',
-    title: `${total} unused ${plural(total, 'capability', 'capabilities')} inflating startup`,
+    title: `${total} unused ${harnessLabel(source)} ${plural(total, 'capability', 'capabilities')} inflating startup`,
     description: `${problem} Each loads into a session's startup and adds to its overhead. Apply the fix below to trim your config.`,
     evidence: collectEvidence(globals, scopeInvocations),
     count: total,
     fix: {
       type: 'fix-prompt',
       label: 'Trim unused capabilities',
-      content: fixPromptContent(problem, sections),
+      content: fixPromptContent(problem, sections, source),
     },
   }]
 }
@@ -290,11 +360,11 @@ export function buildCards(classified: Classified[], scopeInvocations: Map<strin
  * agent can check. This is a fix-prompt, not a config-snippet, because relocating a
  * capability is agent work — editing/moving config across locations, not copying a blob.
  */
-function fixPromptContent(problem: string, sections: string[]): string {
+function fixPromptContent(problem: string, sections: string[], source: string): string {
   return [
-    `tuneloop-fix: ${insightId(DETECTOR, '*', SIGNAL_KEY)}`,
+    `tuneloop-fix: ${insightId(DETECTOR, '*', signalKeyFor(source))}`,
     '',
-    `${problem} Each loads into every Claude Code session's startup and adds to its overhead. Make these config changes:`,
+    `${problem} Each loads into every ${harnessLabel(source)} session's startup and adds to its overhead. Make these config changes:`,
     '',
     sections.join('\n\n'),
     '',
@@ -432,7 +502,13 @@ export function parseInstalledSkills(payload: unknown): string[] {
   if (!Array.isArray(skills)) return []
   const names: string[] = []
   for (const s of skills) {
-    const name = (s as Record<string, unknown> | null)?.name
+    const entry = s as Record<string, unknown> | null
+    // OpenCode folds COMMANDS into the skills category (`kind: 'command'`). Commands are
+    // user slash-commands with no tool-call invocation signal, so they'd always read as
+    // unused → a false removal. Only real skills belong to this detector; drop commands
+    // (untagged entries — CC/Codex/Pi skills — are kept).
+    if (entry?.kind === 'command') continue
+    const name = entry?.name
     if (typeof name === 'string' && name) names.push(name)
   }
   return names
@@ -460,7 +536,7 @@ function invocationNote(cap: InstalledCap, repo: string): string {
  * on the invocation exchange, not the session top. Distinct sessions, most recent first,
  * capped at MAX_EVIDENCE per capability.
  */
-export function buildScopeEvidence(store: Store, scopes: Classified[], sinceIso: string): Map<string, EvidenceRef[]> {
+export function buildScopeEvidence(store: Store, source: string, scopes: Classified[], sinceIso: string): Map<string, EvidenceRef[]> {
   const out = new Map<string, EvidenceRef[]>()
   const repos = [...new Set(scopes.flatMap((c) => c.scopeToRepos ?? []))]
   if (repos.length === 0) return out
@@ -474,7 +550,7 @@ export function buildScopeEvidence(store: Store, scopes: Classified[], sinceIso:
      WHERE ci.is_sidechain = 0 AND ci.source = ? AND ci.ts >= ? AND ci.repo IN (${repos.map(() => '?').join(',')})
      GROUP BY ci.kind, ci.name, ci.repo, ci.session_id
      ORDER BY MAX(ci.ts) DESC`,
-    SOURCE,
+    source,
     sinceIso,
     ...repos,
   ) as Array<{ kind: 'mcp' | 'skill'; invokedName: string; repo: string; sessionId: string; seq: number | null }>
@@ -517,6 +593,7 @@ export function capIdentity(cap: InstalledCap): string {
  */
 function loadInstalled(
   store: Store,
+  source: string,
   tenureCutoffIso: string,
 ): { installed: InstalledCap[]; ambiguous: Set<string>; removalEligible: Set<string> } {
   const installed: InstalledCap[] = []
@@ -524,10 +601,10 @@ function loadInstalled(
 
   const addScope = (scope: 'global' | 'project', scopeKey: string, repo?: string) => {
     for (const { category, kind, parse } of CAP_CATEGORIES) {
-      const current = store.envSnapshotCurrent(SOURCE, scope, scopeKey, category)
+      const current = store.envSnapshotCurrent(source, scope, scopeKey, category)
       for (const name of current ? parse(current.payload) : []) installed.push({ kind, name, scope, repo })
       // Names present in the snapshot as it stood at the tenure cutoff (if one that old exists).
-      const asOf = store.envSnapshotAsOf(SOURCE, scope, scopeKey, category, tenureCutoffIso)
+      const asOf = store.envSnapshotAsOf(source, scope, scopeKey, category, tenureCutoffIso)
       for (const name of asOf.row ? parse(asOf.row.payload) : []) removalEligible.add(capIdentity({ kind, name, scope, repo }))
     }
   }
@@ -538,7 +615,7 @@ function loadInstalled(
   const projectKeys = (
     store.queryAll(
       `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
-      SOURCE,
+      source,
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
   const { byRepo, ambiguous } = mapScopeKeysToRepos(projectKeys)
@@ -553,25 +630,95 @@ function loadInstalled(
  * looked"), since a structural absence-of-use finding has no per-occurrence moment.
  * Null when the window has no sessions.
  */
-function latestSessionStart(store: Store, sinceIso: string): string | null {
+function latestSessionStart(store: Store, source: string, sinceIso: string): string | null {
   const row = store.queryOne(
     `SELECT MAX(started_at) AS latest FROM sessions WHERE source = ? AND started_at >= ?`,
-    SOURCE,
+    source,
     sinceIso,
   ) as { latest: string | null } | undefined
   return row?.latest ?? null
 }
 
 /** Distinct-session count per repo in the window (null-repo sessions excluded — they name no repo). */
-function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> {
+function loadSessionCounts(store: Store, source: string, sinceIso: string): Map<string, number> {
   const rows = store.queryAll(
     `SELECT repo, COUNT(*) AS n FROM sessions
      WHERE source = ? AND started_at >= ? AND repo IS NOT NULL
      GROUP BY repo`,
-    SOURCE,
+    source,
     sinceIso,
   ) as Array<{ repo: string; n: number }>
   return new Map(rows.map((r) => [r.repo, r.n]))
+}
+
+/**
+ * Sources to run for: any that captured an environment snapshot, UNION any that still have
+ * a surfaced insight of this detector. The union matters for resolution — if a source's
+ * config was fully emptied (no snapshot left to drive the loop), its stale card must still
+ * be visited so `runForSource` can resolve it (zero installed → nothing can be unused).
+ */
+function sourcesToRun(store: Store): string[] {
+  const fromEnv = (store.queryAll('SELECT DISTINCT source FROM environment_snapshots') as Array<{ source: string }>).map((r) => r.source)
+  const prefix = 'unused-caps:'
+  const fromInsights = (
+    store.queryAll(`SELECT DISTINCT signal_key FROM insights WHERE detector = ? AND state = 'surfaced'`, DETECTOR) as Array<{ signal_key: string }>
+  )
+    .map((r) => (r.signal_key.startsWith(prefix) ? r.signal_key.slice(prefix.length) : null))
+    .filter((s): s is string => s != null && s.length > 0)
+  return [...new Set([...fromEnv, ...fromInsights])]
+}
+
+/**
+ * Run the detector for ONE harness source: at most one cross-repo insight (keyed
+ * `unused-caps:<source>`, repo '*'), or a resolve of a prior one when nothing is flagged.
+ * The whole remove-vs-scope-vs-keep pipeline is per-source — installed set, invoked set,
+ * session counts, evidence, and card wording all read/label that one harness's data.
+ */
+function runForSource(ctx: DetectorContext, source: string, sinceIso: string, tenureCutoffIso: string): InsightInput[] {
+  const signalKey = signalKeyFor(source)
+  const { installed, ambiguous, removalEligible } = loadInstalled(ctx.store, source, tenureCutoffIso)
+  if (ambiguous.size > 0) {
+    ctx.log.debug(`unused-capabilities [${source}]: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
+  }
+  if (installed.length === 0) {
+    // Nothing installed for this source. Either its config was never captured or every
+    // capability was removed (the fix applied, config emptied). A surfaced card then has no
+    // basis (zero installed → nothing can be unused), so resolve it. resolveInsight is a
+    // no-op when nothing is surfaced, so a source with no prior card is unaffected.
+    ctx.store.resolveInsight(DETECTOR, '*', signalKey)
+    return []
+  }
+
+  // Invoked set for this source. `loadInvoked` also folds in OpenCode's MCP calls, which
+  // the parser can't tag (they land as `action='other'`); the installed server names are
+  // the allowlist that classifies them. A no-op for every non-OpenCode source.
+  const mcpServers = [...new Set(installed.filter((c) => c.kind === 'mcp').map((c) => c.name))]
+  const invoked = loadInvoked(ctx.store, sinceIso, source, mcpServers)
+  const sessionCounts = loadSessionCounts(ctx.store, source, sinceIso)
+  // A `remove` verdict means "never used across the window". Only trust it for a capability
+  // observed installed for at least MIN_REMOVAL_TENURE_DAYS — one observed more recently
+  // couldn't have appeared in the older sessions, so its absence isn't disuse. `scope`
+  // verdicts rest on positive use, so they're not gated.
+  const classified = classify(installed, invoked, sessionCounts).filter(
+    (c) => c.verdict !== 'remove' || removalEligible.has(capIdentity(c.cap)),
+  )
+  // Scope verdicts get REAL invocation evidence (the sessions that ran the capability in
+  // each target repo); project-remove repos fall back to recent sessions.
+  const scopeInvocations = buildScopeEvidence(ctx.store, source, classified.filter((c) => c.verdict === 'scope'), sinceIso)
+  const cards = buildCards(classified, scopeInvocations, source)
+  if (cards.length === 0) {
+    // Nothing flagged. Resolve a prior card only when the window held enough sessions to
+    // judge usage — the same MIN_SESSIONS bar the removal verdict needs. Below it, an empty
+    // result is thin data (a user back from a month off), not a cleaned-up config.
+    const windowSessions = [...sessionCounts.values()].reduce((n, c) => n + c, 0)
+    if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight(DETECTOR, '*', signalKey)
+    return []
+  }
+  // Stamp last-seen as of the most recent examined session, so the card doesn't default to
+  // the analyze-run time. A structural finding has no first-seen moment.
+  const lastSeenAt = latestSessionStart(ctx.store, source, sinceIso) ?? undefined
+  for (const card of cards) card.lastSeenAt = lastSeenAt
+  return cards
 }
 
 export const unusedCapabilities: Detector = {
@@ -582,48 +729,9 @@ export const unusedCapabilities: Detector = {
     const now = Date.now()
     const sinceIso = new Date(now - WINDOW_DAYS * 86_400_000).toISOString()
     const tenureCutoffIso = new Date(now - MIN_REMOVAL_TENURE_DAYS * 86_400_000).toISOString()
-    const { installed, ambiguous, removalEligible } = loadInstalled(ctx.store, tenureCutoffIso)
-    if (ambiguous.size > 0) {
-      ctx.log.debug(`unused-capabilities: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
-    }
-    if (installed.length === 0) {
-      // Nothing installed. Either the config was never captured (fresh store) or every
-      // capability was removed — e.g. the fix was applied and the config emptied. A
-      // surfaced card then has no basis (zero installed → nothing can be unused), so
-      // resolve it. resolveInsight is a no-op when nothing is surfaced, so the fresh
-      // -store case (no prior card) is unaffected; and a card can only exist if config
-      // once existed, so this can't fire on genuinely absent snapshots.
-      ctx.store.resolveInsight(DETECTOR, '*', SIGNAL_KEY)
-      return []
-    }
-
-    const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
-    const sessionCounts = loadSessionCounts(ctx.store, sinceIso)
-    // A `remove` verdict means "never used across the window". Only trust it for a
-    // capability we've observed installed for at least MIN_REMOVAL_TENURE_DAYS — one
-    // observed more recently couldn't have appeared in the older sessions, so its
-    // absence isn't disuse. `scope` verdicts rest on positive use, so they're not gated.
-    const classified = classify(installed, invoked, sessionCounts).filter(
-      (c) => c.verdict !== 'remove' || removalEligible.has(capIdentity(c.cap)),
-    )
-    // Scope verdicts get REAL invocation evidence (the sessions that ran the capability
-    // in each target repo); project-remove repos fall back to recent sessions.
-    const scopeInvocations = buildScopeEvidence(ctx.store, classified.filter((c) => c.verdict === 'scope'), sinceIso)
-    const cards = buildCards(classified, scopeInvocations)
-    if (cards.length === 0) {
-      // Nothing flagged. Resolve a prior card only when the window held enough sessions to
-      // judge usage — the same MIN_SESSIONS bar the removal verdict itself needs.
-      // Below it, an empty result is thin data (a user back from a month off), not a
-      // cleaned-up config, so the stale card stays rather than falsely resolving.
-      const windowSessions = [...sessionCounts.values()].reduce((n, c) => n + c, 0)
-      if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight(DETECTOR, '*', SIGNAL_KEY)
-      return []
-    }
-    // Stamp last-seen as of the most recent examined session, so the card doesn't
-    // default to the analyze-run time. A structural finding has no first-seen moment.
-    const lastSeenAt = latestSessionStart(ctx.store, sinceIso) ?? undefined
-    for (const card of cards) card.lastSeenAt = lastSeenAt
-    return cards
+    // One insight per harness that captured config — each card edits that harness's own
+    // config, so its remove/scope verdicts and wording must be that harness's alone.
+    return sourcesToRun(ctx.store).flatMap((source) => runForSource(ctx, source, sinceIso, tenureCutoffIso))
   },
 }
 

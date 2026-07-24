@@ -65,6 +65,18 @@ export function mapAction(name: string, input: unknown, namespace?: string): Map
   }
 }
 
+/**
+ * The skill name from an explicit `$skill-name` invocation, or null. Codex injects the
+ * skill as a role:user message `<skill>\n<name>NAME</name>\n<path>…</path>…` and then
+ * answers directly — no shell read of SKILL.md — so the shell-read heuristic (SKILL_RE)
+ * misses it. This is Codex's counterpart to the CC/Pi explicit-invocation envelopes.
+ */
+export function explicitSkillName(text: string): string | null {
+  if (!/^\s*<skill>/.test(text)) return null
+  const m = /<name>\s*([^<]+?)\s*<\/name>/.exec(text)
+  return m ? m[1]! : null
+}
+
 // `apply_patch` invoked as a shell command: at a command boundary (line start or after
 // a `;`/`&&`/`||`/`|`/`(` separator), followed by a heredoc/redirect/quoted-arg opener.
 // Anchoring on the boundary + opener avoids matching the literal phrase inside an echo or
