@@ -335,6 +335,20 @@ describe('insight first/last-seen from real occurrence times', () => {
     expect(t.lastSeenAt).toBe('2026-07-15T12:00:00Z') // latest, not extraction order
   })
 
+  it('themesWithEvents orders evidence by occurred_at (most recent first), not extraction/idx order', () => {
+    const { store } = setup()
+    const THEME = 'recurring-themes:global:ord'
+    // Seeded in idx order a,b,c but their real friction times are out of order. The
+    // fix pass slices the first MAX_FIX_OCCURRENCES, so this order decides what it sees.
+    store.persistThemeExtraction('s1', [{ id: THEME, label: 'T', type: 'other' }], [
+      { idx: 0, type: 'other', trigger: 'unprompted', description: 'a', themeId: THEME, occurredAt: '2026-06-10T09:00:00Z' },
+      { idx: 1, type: 'other', trigger: 'unprompted', description: 'b', themeId: THEME, occurredAt: '2026-07-15T12:00:00Z' },
+      { idx: 2, type: 'other', trigger: 'unprompted', description: 'c', themeId: THEME, occurredAt: '2026-06-25T08:00:00Z' },
+    ])
+    const t = store.themesWithEvents().find((x) => x.id === THEME)!
+    expect(t.evidence.map((e) => e.description)).toEqual(['b', 'c', 'a'])
+  })
+
   it('persistInsights stores supplied first/last-seen instead of the run time', () => {
     const { db, store } = setup()
     store.persistInsights('det', 1, [mkInsight({ firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-07-15T00:00:00Z' })])
@@ -445,5 +459,32 @@ describe('detector_runs — append-only run log', () => {
     const { store } = setup()
     store.persistDetectorError('det', 1)
     expect(store.detectorLastSuccessfulModel('det')).toBeNull()
+  })
+})
+
+describe('insights() cross-detector ranking', () => {
+  it('ranks by severity then recency — a high-count detector does not outrank a fresher one at equal severity', () => {
+    const { store } = setup()
+    const nudge = { type: 'behavioral-nudge' as const, label: 'l', content: 'c' }
+    // cache-miss: an enormous raw count but older last-seen.
+    store.persistInsights('cache-miss', 1, [mkInsight({
+      signalKey: 'cache-misses', severity: 'high', count: 5000, fix: nudge,
+      firstSeenAt: '2026-05-01T00:00:00Z', lastSeenAt: '2026-06-01T00:00:00Z',
+    })])
+    // recurring-themes: a tiny count but more recent. `count` is incomparable across
+    // detectors (misses vs theme events), so recency must decide at equal severity.
+    store.persistInsights('themes', 2, [mkInsight({
+      signalKey: 't1', severity: 'high', count: 3, fix: nudge,
+      firstSeenAt: '2026-07-01T00:00:00Z', lastSeenAt: '2026-07-20T00:00:00Z',
+    })])
+    expect(store.insights().map((i) => i.detector)).toEqual(['themes', 'cache-miss'])
+  })
+
+  it('severity still dominates recency', () => {
+    const { store } = setup()
+    const nudge = { type: 'behavioral-nudge' as const, label: 'l', content: 'c' }
+    store.persistInsights('a', 1, [mkInsight({ signalKey: 'k', severity: 'medium', fix: nudge, lastSeenAt: '2026-07-20T00:00:00Z' })])
+    store.persistInsights('b', 1, [mkInsight({ signalKey: 'k', severity: 'high', fix: nudge, lastSeenAt: '2026-06-01T00:00:00Z' })])
+    expect(store.insights().map((i) => i.detector)).toEqual(['b', 'a'])
   })
 })

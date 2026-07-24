@@ -336,6 +336,7 @@ function openInsight(r) {
     var body = $('#drawerBody');
     if (!body) return;
     body.innerHTML = detailHtml(r, occ);
+    body.setAttribute('data-insight-id', r.id); // tag which insight the drawer is showing
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
     wireDetail(r, occ);
@@ -344,10 +345,13 @@ function openInsight(r) {
   // Render immediately (fix is the priority payload); fill occurrences when they arrive.
   render(null);
   get('/api/insight/evidence?id=' + encodeURIComponent(r.id)).then(function (occ) {
-    occCache[r.id] = occ || [];
-    // Only re-render if this insight's detail is still the one on screen.
-    var open = document.querySelector('#drawerBody .ins-detail-body');
-    if (open) render(occCache[r.id]);
+    occCache[r.id] = Array.isArray(occ) ? occ : []; // never cache a non-array (e.g. an error body)
+    // Re-render only if the drawer still shows THIS insight — guards the open-A-then-B
+    // race (a slow response for A must not clobber B) and a close before the response lands.
+    var body = $('#drawerBody');
+    if (body && $('#drawer').classList.contains('on') && body.getAttribute('data-insight-id') === r.id) {
+      render(occCache[r.id]);
+    }
   });
 }
 
