@@ -205,6 +205,14 @@ per-source insights; OpenCode command exclusion).
 frontmatter name). Pi prompts are a non-issue — they live in the `settings` category, never
 in `skills`, so they were never in the installed-skills set.
 
+**Known limitation (deliberately deferred):** disabled MCP servers. `parseInstalledMcp`
+drops per-server `enabled: false` (Codex/OpenCode). Claude Code has no per-server flag —
+it disables `.mcp.json` servers at the settings level (`disabledMcpjsonServers` /
+`enabledMcpjsonServers` / `enableAllProjectMcpServers`), which the CC env reader does not
+capture. So a CC `.mcp.json` server that is disabled or never approved can still be flagged
+as unused. Closing it needs an env-reader change (capture those settings + re-ingest) plus a
+detector cross-reference; deferred for now.
+
 ## Implementation plan (phased)
 
 **Phase 0 — Parametrize by source (no behavior change).** Remove the hardcoded
