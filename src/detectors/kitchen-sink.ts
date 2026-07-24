@@ -386,12 +386,14 @@ export const kitchenSink: Detector = {
   needsLlm: true,
   async run(ctx): Promise<DetectorResult> {
     if (!ctx.llm) return { insights: [] }
-    let found = unseenCandidates(ctx.store)
+    const unseen = unseenCandidates(ctx.store)
     // --limit caps how many candidates this run judges. The first global run
     // backfills every historical candidate with an LLM, which can be large; the cap
     // lets a user throttle (or dry-run) it. Safe because each verdict is cached and
     // the card is rebuilt from the table, so the rest are picked up on later analyzes.
-    if (ctx.limit != null && found.length > ctx.limit) found = found.slice(0, ctx.limit)
+    // Keep the FULL unseen set (not just this run's slice) so the resolve gate below
+    // can tell whether the window's backfill is actually complete.
+    const found = ctx.limit != null && unseen.length > ctx.limit ? unseen.slice(0, ctx.limit) : unseen
     ctx.log.info(`kitchen-sink: ${found.length} unseen candidate session(s) after pre-gate`)
     ctx.progress?.addUnits(found.length) // declare this detector's step-2 delta
 
@@ -440,13 +442,17 @@ export const kitchenSink: Detector = {
     const card = ctx.store.kitchenSinkPositives(windowStart)
     const evidence = card.positives.map(positiveEvidence)
     const insight = buildAggregate(evidence, card.firstSeenAt ?? undefined, card.lastSeenAt ?? undefined)
-    // Empty window → resolve, but distinguish "clean now" from "not enough data":
-    // only resolve when the user was actually active in the window. A window empty
-    // because they were away (no sessions) is thin data, not a fixed habit — leave the
-    // card rather than tell a returning user they cleaned it up.
+    // Empty window → resolve, but only when the window's verdict set is actually final
+    // and there was real activity to judge:
+    //  - an in-window candidate still unseen (left over by --limit, or a load/judge
+    //    failure this run) could yet be a positive, so the backfill isn't done — hold;
+    //  - a window with no sessions at all is thin data, not a fixed habit — hold, rather
+    //    than tell a returning user they cleaned it up.
     if (!insight) {
+      const judgedIds = new Set(seen.map((s) => s.sessionId))
+      const unjudgedInWindow = unseen.some((c) => !judgedIds.has(c.sessionId) && c.startedAt != null && c.startedAt >= windowStart)
       const active = (ctx.store.queryOne('SELECT COUNT(*) AS n FROM sessions WHERE started_at >= ?', windowStart) as { n: number }).n > 0
-      if (active) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
+      if (active && !unjudgedInWindow) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
     }
 
     ctx.log.info(`kitchen-sink: ${evidence.length} flagged session(s) in the last ${WINDOW_DAYS} days`)

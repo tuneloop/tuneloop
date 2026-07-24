@@ -784,6 +784,26 @@ describe('kitchenSink.run (end to end)', () => {
     expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')!.state).toBe('surfaced')
   })
 
+  it('does NOT resolve while --limit leaves in-window candidates unjudged', async () => {
+    const { store } = setup()
+    store.persistInsights('kitchen-sink', kitchenSink.version, [staleAggregate()])
+    ingestCandidate(store, 'kc:1')
+    ingestCandidate(store, 'kc:2')
+    // limit=1 → one candidate judged (negative); the other stays an unseen in-window
+    // candidate that could yet be positive, so the backfill isn't done — don't resolve.
+    const neg = fakeLlmClient({ isKitchenSink: false, splitBlockIdx: -1, reason: 'coherent.' })
+    const r = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, neg, 1)))
+    expect(r.seen).toHaveLength(1)
+    expect(r.insights).toEqual([])
+    expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')!.state).toBe('surfaced')
+
+    // Runner marks the first seen; a follow-up run judges the rest → backfill complete
+    // and, still clean, the card resolves.
+    store.markDetectorSessionSeen('kitchen-sink', r.seen ?? [])
+    normalizeDetectorResult(await kitchenSink.run(ctxWith(store, neg, 1)))
+    expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')!.state).toBe('resolved')
+  })
+
   it('judges at most --limit candidates per run, leaving the rest unseen', async () => {
     const { store } = setup()
     ingestCandidate(store, 'kc:1')
