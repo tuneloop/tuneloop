@@ -1,5 +1,5 @@
 import { registerDetector } from '../core/registry'
-import type { Detector, InsightInput } from '../core/detector'
+import { insightId, type Detector, type InsightInput } from '../core/detector'
 
 /**
  * Flags repos where sessions run into the context window and get compacted.
@@ -119,12 +119,13 @@ export const contextExhaustion: Detector = {
       ([, a]) => a.sessions >= MIN_SESSIONS && a.compactedSessions.size >= MIN_COMPACTED_SESSIONS,
     )
     if (qualifying.length === 0) {
-      // Nothing qualifies. Distinguish "clean now" from "not enough data": resolve a
-      // prior card only when the window held enough active sessions to judge the pattern
-      // (the same MIN_SESSIONS bar the card needs). Below it — a user back from a month off
-      // — an empty result is thin data, not a fix, so leave the card rather than resolve it.
-      const windowSessions = [...repos.values()].reduce((n, a) => n + a.sessions, 0)
-      if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight('context-exhaustion', '*', 'context-exhaustion')
+      // Nothing qualifies. Resolve a prior card only when EVERY repo that contributed to
+      // it now has enough data (>= MIN_SESSIONS) to call clean — a corpus-wide total would
+      // resolve on data no single contributing repo has, and a different repo's data would
+      // falsely clear a still-quiet one. No prior card / no evidence → resolveInsight is a no-op.
+      const priorRepos = ctx.store.insightEvidenceRepos(insightId('context-exhaustion', '*', 'context-exhaustion'))
+      const enough = priorRepos.length > 0 && priorRepos.every((r) => (repos.get(r)?.sessions ?? 0) >= MIN_SESSIONS)
+      if (enough) ctx.store.resolveInsight('context-exhaustion', '*', 'context-exhaustion')
       return []
     }
 

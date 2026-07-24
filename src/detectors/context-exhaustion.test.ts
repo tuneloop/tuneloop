@@ -308,36 +308,39 @@ describe('context-exhaustion detector', () => {
     expect(contextExhaustion.run(ctx)).toEqual([])
   })
 
-  it('resolves a prior card when no repo qualifies this window', () => {
-    const { db, store, ctx } = setup()
-    // A previously surfaced card is on the dashboard.
+  // A previously-surfaced cross-repo card whose evidence points at one session in `repo`,
+  // so the resolve sweep can recover that repo as the previous contributor.
+  const seedPriorCard = (store: Store, evidenceSessionId: string) =>
     store.persistInsights('context-exhaustion', 1, [{
-      signalKey: 'context-exhaustion',
-      repo: '*',
-      severity: 'high',
-      title: 'stale',
-      description: 'stale',
-      evidence: [],
-      count: 5,
-      fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+      signalKey: 'context-exhaustion', repo: '*', severity: 'high', title: 'stale', description: 'stale',
+      evidence: [{ sessionId: evidenceSessionId }], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
     }])
+
+  it('resolves a prior card when its contributing repo now has enough clean sessions', () => {
+    const { db, store, ctx } = setup()
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, smallSession) // repo o/r, ≥ MIN, no compactions
+    seedPriorCard(store, 's0')
     expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
-    // This window has activity but no compactions → nothing qualifies → the empty path
-    // must resolve the stale card instead of leaving it frozen.
-    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, smallSession)
     expect(contextExhaustion.run(ctx)).toEqual([])
     expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('resolved')
   })
 
-  it('does NOT resolve when the window has too few sessions — not enough data', () => {
+  it('does NOT resolve when the contributing repo has too few sessions — not enough data', () => {
     const { db, store, ctx } = setup()
-    store.persistInsights('context-exhaustion', 1, [{
-      signalKey: 'context-exhaustion', repo: '*', severity: 'high', title: 'stale', description: 'stale',
-      evidence: [], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
-    }])
-    // Only a handful of sessions this window (a user back from a break): too little data
-    // to conclude "you fixed it", so the stale card must stay put, not resolve.
-    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, smallSession)
+    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, smallSession) // repo o/r, < MIN
+    seedPriorCard(store, 's0')
+    // A user back from a break: too little data to conclude "you fixed it".
+    expect(contextExhaustion.run(ctx)).toEqual([])
+    expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
+  })
+
+  it('does NOT resolve on a corpus-wide total when no single contributing repo has enough data', () => {
+    const { db, store, ctx } = setup()
+    // Contributing repo o/a has 5 sessions; o/b has 5. The sum clears MIN, but neither
+    // repo alone does — so o/a still lacks the data to call it clean.
+    for (let i = 0; i < 5; i++) seedSession(db, `a${i}`, smallSession, { repo: 'o/a' })
+    for (let i = 0; i < 5; i++) seedSession(db, `b${i}`, smallSession, { repo: 'o/b' })
+    seedPriorCard(store, 'a0')
     expect(contextExhaustion.run(ctx)).toEqual([])
     expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
   })

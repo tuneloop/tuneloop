@@ -3467,6 +3467,27 @@ export class Store {
     ).map((r) => ({ ...r, turnIdx: r.turnIdx === -1 ? null : r.turnIdx }))
   }
 
+  /**
+   * Distinct repos of the sessions in a cross-repo ('*') insight's evidence — the
+   * repos that CONTRIBUTED to the last-surfaced card. A resolve sweep uses this to ask
+   * whether each previously-contributing repo now has enough data to call clean, rather
+   * than trusting a corpus-wide total that many sub-threshold repos could reach together
+   * (or a different repo's data that says nothing about a still-quiet contributor). Uses
+   * the same repo derivation the detectors do (repo ▸ cwd ▸ '_unknown'). Empty when the
+   * insight has no evidence (e.g. never surfaced) or its evidence sessions were pruned.
+   */
+  insightEvidenceRepos(insightId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT COALESCE(NULLIF(s.repo,''), NULLIF(s.cwd,''), '_unknown') AS repo
+           FROM insight_evidence e JOIN sessions s ON s.id = e.session_id
+           WHERE e.insight_id = ?`,
+        )
+        .all(insightId) as Array<{ repo: string }>
+    ).map((r) => r.repo)
+  }
+
   insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {
     let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count,
                fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version

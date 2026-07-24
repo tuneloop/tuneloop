@@ -30,9 +30,11 @@ function setup() {
 }
 
 // A previously-surfaced card, seeded so the empty-path resolve has something to act on.
-const staleCard = (signalKey: string): InsightInput => ({
+// `evidenceSessionId` names one contributing session (must already exist for the FK), so
+// the resolve sweep can recover its repo as the previous contributor.
+const staleCard = (signalKey: string, evidenceSessionId: string): InsightInput => ({
   signalKey, repo: '*', severity: 'high', title: 'stale', description: 'stale',
-  evidence: [], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+  evidence: [{ sessionId: evidenceSessionId }], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
 })
 
 interface UsageSpec {
@@ -186,20 +188,32 @@ describe('cache-miss detector', () => {
     expect(cacheMiss.run(ctx)).toEqual([])
   })
 
-  it('resolves a prior card when the window has enough sessions but no misses (clean now)', () => {
+  it('resolves a prior card when its contributing repo now has enough clean sessions', () => {
     const { db, store, ctx } = setup()
-    store.persistInsights('cache-miss', 5, [staleCard('cache-misses')])
-    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, warmSession) // ≥ MIN_SESSIONS, all warm
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, warmSession) // repo o/r, ≥ MIN, all warm
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses', 's0')])
     expect(cacheMiss.run(ctx)).toEqual([])
     expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('resolved')
   })
 
-  it('does NOT resolve when too few sessions saw activity — not enough data', () => {
+  it('does NOT resolve when the contributing repo has too few sessions — not enough data', () => {
     const { db, store, ctx } = setup()
-    store.persistInsights('cache-miss', 5, [staleCard('cache-misses')])
-    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, warmSession) // < MIN_SESSIONS
+    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, warmSession) // repo o/r, < MIN
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses', 's0')])
     expect(cacheMiss.run(ctx)).toEqual([])
     // A user back from a month off shouldn't be told they fixed it.
+    expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('surfaced')
+  })
+
+  it('does NOT resolve on a corpus-wide total when no single contributing repo has enough data', () => {
+    const { db, store, ctx } = setup()
+    // Prior card contributed by o/a. This window: o/a and o/b each have 5 warm sessions —
+    // the sum clears MIN, but neither repo alone does, so o/a still lacks the data to
+    // call it clean and the card must stay surfaced.
+    for (let i = 0; i < 5; i++) seedSession(db, `a${i}`, warmSession, { repo: 'o/a' })
+    for (let i = 0; i < 5; i++) seedSession(db, `b${i}`, warmSession, { repo: 'o/b' })
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses', 'a0')])
+    expect(cacheMiss.run(ctx)).toEqual([])
     expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('surfaced')
   })
 

@@ -1,5 +1,5 @@
 import { registerDetector } from '../core/registry'
-import type { Detector, InsightInput } from '../core/detector'
+import { insightId, type Detector, type InsightInput } from '../core/detector'
 import { priceFor } from '../pricing/pricing'
 
 /**
@@ -181,13 +181,14 @@ export const cacheMiss: Detector = {
       ([, a]) => a.sessions >= MIN_SESSIONS && a.wasteUsd >= MIN_WASTE_USD,
     )
     if (qualifying.length === 0) {
-      // Nothing qualifies. Distinguish "clean now" from "not enough data": resolve
-      // a prior card only when the window actually held enough sessions to judge the rate
-      // (the same MIN_SESSIONS bar the card needs). Below it — a user back from a month
-      // off — an empty result is thin data, not a fix, so leave the card as it was rather
-      // than tell them they cleaned it up.
-      const windowSessions = [...repos.values()].reduce((n, a) => n + a.sessions, 0)
-      if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight('cache-miss', '*', 'cache-misses')
+      // Nothing qualifies. Resolve a prior card only when EVERY repo that contributed to
+      // it now has enough data (>= MIN_SESSIONS) to call clean. A corpus-wide total would
+      // resolve on data no single contributing repo has (two 5-session repos clearing a
+      // 10-session bar), and a different repo's data would tell a user their still-quiet
+      // repo was fixed. No prior card / no evidence → resolveInsight is a no-op.
+      const priorRepos = ctx.store.insightEvidenceRepos(insightId('cache-miss', '*', 'cache-misses'))
+      const enough = priorRepos.length > 0 && priorRepos.every((r) => (repos.get(r)?.sessions ?? 0) >= MIN_SESSIONS)
+      if (enough) ctx.store.resolveInsight('cache-miss', '*', 'cache-misses')
     } else {
       results.push(buildLevelInsight(qualifying))
     }
