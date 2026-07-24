@@ -29,6 +29,12 @@ function setup() {
   return { db, store, ctx }
 }
 
+// A previously-surfaced card, seeded so the empty-path resolve has something to act on.
+const staleCard = (signalKey: string): InsightInput => ({
+  signalKey, repo: '*', severity: 'high', title: 'stale', description: 'stale',
+  evidence: [], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+})
+
 interface UsageSpec {
   atMs: number // offset from session start
   input?: number
@@ -178,6 +184,23 @@ describe('cache-miss detector', () => {
     const { db, ctx } = setup()
     for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, warmSession)
     expect(cacheMiss.run(ctx)).toEqual([])
+  })
+
+  it('resolves a prior card when the window has enough sessions but no misses (clean now)', () => {
+    const { db, store, ctx } = setup()
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses')])
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, warmSession) // ≥ MIN_SESSIONS, all warm
+    expect(cacheMiss.run(ctx)).toEqual([])
+    expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('resolved')
+  })
+
+  it('does NOT resolve when too few sessions saw activity — not enough data (W7)', () => {
+    const { db, store, ctx } = setup()
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses')])
+    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, warmSession) // < MIN_SESSIONS
+    expect(cacheMiss.run(ctx)).toEqual([])
+    // A user back from a month off shouldn't be told they fixed it.
+    expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('surfaced')
   })
 
   it('does not call a big-paste turn a miss: reads decide, not creates or timing', () => {

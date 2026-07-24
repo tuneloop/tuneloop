@@ -179,9 +179,13 @@ export const cacheMiss: Detector = {
       ([, a]) => a.sessions >= MIN_SESSIONS && a.wasteUsd >= MIN_WASTE_USD,
     )
     if (qualifying.length === 0) {
-      // No steady leakage this window — resolve any prior card so a stale claim doesn't
-      // freeze on the dashboard (the N4 fix, applied at the empty path).
-      ctx.store.resolveInsight('cache-miss', '*', 'cache-misses')
+      // Nothing qualifies. Distinguish "clean now" from "not enough data" (W7): resolve
+      // a prior card only when the window actually held enough sessions to judge the rate
+      // (the same MIN_SESSIONS bar the card needs). Below it — a user back from a month
+      // off — an empty result is thin data, not a fix, so leave the card as it was rather
+      // than tell them they cleaned it up.
+      const windowSessions = [...repos.values()].reduce((n, a) => n + a.sessions, 0)
+      if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight('cache-miss', '*', 'cache-misses')
     } else {
       results.push(buildLevelInsight(qualifying))
     }

@@ -631,6 +631,34 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(run(store)).toEqual([])
   })
 
+  it('resolves a prior card once nothing is flagged and the window has enough sessions (W7)', () => {
+    const { db, store } = setupDb()
+    store.persistInsights('unused-capabilities', 1, [{
+      signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    installGlobalMcp(store, ['sentry'])
+    // sentry now used across both repos → shared → nothing flagged. 16 sessions ≥ MIN_SESSIONS.
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    seedRepo(db, 'api', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    expect(run(store)).toEqual([])
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('resolved')
+  })
+
+  it('does NOT resolve when the window has too few sessions — not enough data (W7)', () => {
+    const { db, store } = setupDb()
+    store.persistInsights('unused-capabilities', 1, [{
+      signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    installGlobalMcp(store, ['sentry'])
+    // Nothing flagged (sentry used), but only 5 sessions — too thin to conclude the config
+    // was cleaned up, so the stale card must stay surfaced.
+    seedRepo(db, 'web', 5, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    expect(run(store)).toEqual([])
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('surfaced')
+  })
+
   it('matches a plugin-namespaced skill invocation, so a used skill is not flagged', () => {
     const { db, store } = setupDb()
     installGlobalSkills(store, ['frontend-design'])

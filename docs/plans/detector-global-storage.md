@@ -143,11 +143,27 @@ extract-per-session → reconcile → surface-over-the-whole-corpus flow can't b
 written rows inconsistent (design decision, 2026-07-24). The optional pre-run cost estimate is **deferred** —
 `--limit` gives the throttle; a token-count dry-run can follow if wanted.
 
-### W7 — Resolve sweep (after W2–W5)
+### W7 — Resolve sweep (after W2–W5) — LANDED 2026-07-24
 Verify each detector's empty path ends in `resolveInsight`. For W2/W3/W5 this should fall out of the design;
 confirm rather than assume. Where a detector still needs an explicit call, distinguish **"clean now"** from
 **"not enough data"** — `qualifying.length === 0` collapses both today, and resolving on the second tells a
 user back from a month off that they fixed everything.
+
+**As landed:** the empty path now resolves only when the window held enough activity to actually judge —
+"clean now" resolves, "not enough data" leaves the card. The bar is each detector's own denominator:
+- **cache-miss / context-exhaustion** already resolved at `qualifying.length === 0`; added the gate
+  `sum(repo sessions in window) >= MIN_SESSIONS` (the same volume bar the card needs).
+- **unused-capabilities** had **no** resolve path — a cleaned-up config froze the old aggregate. Added a
+  resolve at the empty path (`buildCards` returns `[]`), gated on `sum(window sessions) >= MIN_SESSIONS`,
+  the same bar the removal verdict itself requires. (The fix is a `fix-prompt` with a `tuneloop-fix:` marker,
+  so *running the fix* is already caught by the marker reconcile — this handles the case where the caps simply
+  went used/removed without the fix-prompt being run. The W4 note's config-snippet caveat is now moot.)
+- **kitchen-sink** resolves when the windowed verdict set is empty; gated on "any session in the window"
+  (candidates are rare, so activity, not candidate count, is the honest "we had data" signal — else a user who
+  genuinely reformed to small focused sessions would freeze the card forever).
+- **recurring-themes** — confirmed, no change: it resolves only via explicit fix-veto (`retireInsightForTheme`)
+  and never on absence of data, so it can't false-resolve. Its "fired last spring, never since, still surfaces"
+  staleness is the **decay** problem, which the "Explicitly deferred" section keeps out of scope.
 
 ## Landmines (each one bit during the SQL drafting)
 

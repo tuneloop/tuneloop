@@ -119,9 +119,12 @@ export const contextExhaustion: Detector = {
       ([, a]) => a.sessions >= MIN_SESSIONS && a.compactedSessions.size >= MIN_COMPACTED_SESSIONS,
     )
     if (qualifying.length === 0) {
-      // No qualifying compaction this window — resolve any prior card so a stale claim
-      // doesn't freeze on the dashboard (the N4 fix, applied at the empty path).
-      ctx.store.resolveInsight('context-exhaustion', '*', 'context-exhaustion')
+      // Nothing qualifies. Distinguish "clean now" from "not enough data" (W7): resolve a
+      // prior card only when the window held enough active sessions to judge the pattern
+      // (the same MIN_SESSIONS bar the card needs). Below it — a user back from a month off
+      // — an empty result is thin data, not a fix, so leave the card rather than resolve it.
+      const windowSessions = [...repos.values()].reduce((n, a) => n + a.sessions, 0)
+      if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight('context-exhaustion', '*', 'context-exhaustion')
       return []
     }
 

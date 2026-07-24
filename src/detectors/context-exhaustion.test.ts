@@ -328,4 +328,17 @@ describe('context-exhaustion detector', () => {
     expect(contextExhaustion.run(ctx)).toEqual([])
     expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('resolved')
   })
+
+  it('does NOT resolve when the window has too few sessions — not enough data (W7)', () => {
+    const { db, store, ctx } = setup()
+    store.persistInsights('context-exhaustion', 1, [{
+      signalKey: 'context-exhaustion', repo: '*', severity: 'high', title: 'stale', description: 'stale',
+      evidence: [], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    // Only a handful of sessions this window (a user back from a break): too little data
+    // to conclude "you fixed it", so the stale card must stay put, not resolve.
+    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, smallSession)
+    expect(contextExhaustion.run(ctx)).toEqual([])
+    expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
+  })
 })

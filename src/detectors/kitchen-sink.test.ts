@@ -6,7 +6,7 @@ import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { artifactCounts, buildAggregate, buildRequest, candidates, judge, kitchenSink, positiveEvidence, realUserTurns, sizeCutoff, unseenCandidates, verdictRow } from './kitchen-sink'
 import { normalizeDetectorResult } from '../core/detector'
-import type { DetectorContext } from '../core/detector'
+import type { DetectorContext, InsightInput } from '../core/detector'
 import { emptyUsage } from '../core/model'
 import type { CanonicalAction, Event, Session, ToolCall } from '../core/model'
 import type { Block } from '../core/blocks'
@@ -110,6 +110,12 @@ function flakyLlmClient(data: Record<string, unknown>, failOnCall: number): LlmC
 function ctxWith(store: Store, llm: LlmClient | null, limit?: number): DetectorContext {
   return { store, log: { debug() {}, info() {}, warn() {} }, llmEnabled: llm != null, llm, limit } as unknown as DetectorContext
 }
+
+// A previously-surfaced aggregate, so the empty-path resolve has a card to act on.
+const staleAggregate = (): InsightInput => ({
+  signalKey: 'kitchen-sink', repo: '*', severity: 'high', title: 'stale', description: 'stale',
+  evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+})
 
 // Ingest a real multi-block session (blob + matching blocks + 2 features) large
 // enough to clear MIN_TURNS. Each user turn opens a block (seqs 2k / 2k+1), so
@@ -756,6 +762,26 @@ describe('kitchenSink.run (end to end)', () => {
     expect(r.insights[0]!.evidence.map((e) => e.sessionId)).toEqual(['kc:recent'])
     // …but first-seen reaches back to the older (out-of-window) positive.
     expect(r.insights[0]!.firstSeenAt).toBe(old)
+  })
+
+  it('resolves a prior card when the window has sessions but none are kitchen-sinks (clean now, W7)', async () => {
+    const { store } = setup()
+    store.persistInsights('kitchen-sink', kitchenSink.version, [staleAggregate()])
+    ingestCandidate(store, 'kc:1') // a recent candidate — real activity in the window
+    const neg = fakeLlmClient({ isKitchenSink: false, splitBlockIdx: -1, reason: 'coherent.' })
+    const r = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, neg)))
+    expect(r.insights).toEqual([])
+    expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')!.state).toBe('resolved')
+  })
+
+  it('does NOT resolve when the window has no sessions — not enough data (W7)', async () => {
+    const { store } = setup()
+    store.persistInsights('kitchen-sink', kitchenSink.version, [staleAggregate()])
+    // Empty store: no sessions in the window at all (a user back from a month off).
+    const llm = fakeLlmClient({ isKitchenSink: false, splitBlockIdx: -1, reason: 'x' })
+    const r = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
+    expect(r.insights).toEqual([])
+    expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')!.state).toBe('surfaced')
   })
 
   it('judges at most --limit candidates per run, leaving the rest unseen', async () => {

@@ -441,7 +441,14 @@ export const kitchenSink: Detector = {
     const card = ctx.store.kitchenSinkPositives(windowStart)
     const evidence = card.positives.map(positiveEvidence)
     const insight = buildAggregate(evidence, card.firstSeenAt ?? undefined, card.lastSeenAt ?? undefined)
-    if (!insight) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
+    // Empty window → resolve, but distinguish "clean now" from "not enough data" (W7):
+    // only resolve when the user was actually active in the window. A window empty
+    // because they were away (no sessions) is thin data, not a fixed habit — leave the
+    // card rather than tell a returning user they cleaned it up.
+    if (!insight) {
+      const active = (ctx.store.queryOne('SELECT COUNT(*) AS n FROM sessions WHERE started_at >= ?', windowStart) as { n: number }).n > 0
+      if (active) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
+    }
 
     ctx.log.info(`kitchen-sink: ${evidence.length} flagged session(s) in the last ${WINDOW_DAYS} days`)
     const result: DetectorResult = { insights: insight ? [insight] : [], seen }

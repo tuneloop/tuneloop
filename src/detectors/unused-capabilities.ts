@@ -601,6 +601,15 @@ export const unusedCapabilities: Detector = {
     // in each target repo); project-remove repos fall back to recent sessions.
     const scopeInvocations = buildScopeEvidence(ctx.store, classified.filter((c) => c.verdict === 'scope'), sinceIso)
     const cards = buildCards(classified, scopeInvocations)
+    if (cards.length === 0) {
+      // Nothing flagged. Resolve a prior card only when the window held enough sessions to
+      // judge usage (W7) — the same MIN_SESSIONS bar the removal verdict itself needs.
+      // Below it, an empty result is thin data (a user back from a month off), not a
+      // cleaned-up config, so the stale card stays rather than falsely resolving.
+      const windowSessions = [...sessionCounts.values()].reduce((n, c) => n + c, 0)
+      if (windowSessions >= MIN_SESSIONS) ctx.store.resolveInsight(DETECTOR, '*', SIGNAL_KEY)
+      return []
+    }
     // Stamp last-seen as of the most recent examined session, so the card doesn't
     // default to the analyze-run time. A structural finding has no first-seen moment.
     const lastSeenAt = latestSessionStart(ctx.store, sinceIso) ?? undefined
