@@ -158,30 +158,23 @@ green over a real store, not just fixtures.
 
 Settled while landing W2, after seeing the real store: the absolute rate gate
 (`MIN_MISS_RATE`) suppressed **every** repo — a heavy user's 1–5 % cold-start rate never
-clears 25 % — while $132/mo of avoidable premium sat unsurfaced (aivue $76, newCo-X $57),
-and newCo-X had a genuine week-over-week spike the rate gate was blind to. So cache-miss
-now emits **both** card types (the choice below), off the same weekly view. The same
-decisions carry into W3 (`context-exhaustion`) except where noted.
+clears 25 % — while $132/mo of avoidable premium sat unsurfaced (aivue $76, newCo-X $57).
+So the level card is now gated on **dollars, not rate**.
 
-- **Bucket size → weekly (rolling 7-day).** Daily is too sparse (some aivue weeks < 250
-  classified turns). "Current" is the last 7 days; the baseline is the preceding
-  `TREND_BASELINE_WEEKS` (5) rolling windows.
-- **Minimum volume per bucket → "established baseline", not a turn count.** A repo may
-  spike only if it was active (had classified turns) in ≥ `TREND_MIN_ACTIVE_BASELINE_WEEKS`
-  (2) of the baseline weeks — otherwise a first week of misses is a *cold start*, not a
-  deviation. This is what `MIN_SESSIONS` was really protecting, relocated to the trend.
-  The **level** card keeps `MIN_SESSIONS = 10` as its own volume floor.
-- **What "elevated" means → current-week miss-$ ≥ max(`TREND_SPIKE_K` × baseline median,
-  `TREND_SPIKE_FLOOR_USD`).** K = 3, floor = $15. The median (over the 5 baseline weeks,
-  zeros included) is the "own trailing baseline"; the absolute floor is what stops a
-  pennies→few-dollars jump from firing on a huge ratio. Measured in **dollars**, not rate.
-- **Replace or supplement → BOTH, for cache-miss.** A dollar-gated **level** card
-  (`signalKey 'cache-misses'`, gated on `wasteUsd ≥ MIN_WASTE_USD`, rate gate retired) for
-  steady leakage, PLUS a deviation **trend** card (`signalKey 'cache-miss-trend'`) for
-  spikes. Both cross-repo (`repo '*'`; the trend names the spiking repo in its body).
-  Each resolves at its own empty path (the N4 fix, inline — doesn't wait for W7).
-  For `context-exhaustion` (W3) a level alert has no principled dollar threshold (no cost
-  units), so trend is likely the only honest form — decide when W3 lands.
+- **Replace or supplement → LEVEL card only, for cache-miss.** A dollar-gated card
+  (`signalKey 'cache-misses'`, `repo '*'`, gated on `sessions ≥ MIN_SESSIONS` and
+  `wasteUsd ≥ MIN_WASTE_USD`; the miss-rate gate is retired). It resolves at its empty path
+  (the N4 fix, inline — doesn't wait for W7). A weekly deviation/"spiking" card was
+  prototyped and **dropped**: two insights from one detector was too noisy for the value it
+  added, and the level card already carries the dollars that matter. The card text reports
+  the **share of sessions that saw a miss** (not a per-turn rate), the premium paid, and
+  the >5-min timing split.
+- **Deferred (not relitigated): the trend/deviation form.** The weekly-bucket +
+  own-baseline design (rolling 7-day current window, ≥2 active baseline weeks to have a
+  baseline, current ≥ max(K× median, $ floor)) was validated end-to-end against the real
+  store before removal. Revisit only if a "getting worse" signal is explicitly wanted, and
+  for `context-exhaustion` (W3), where a level alert has no principled dollar threshold (no
+  cost units) — trend may be the only honest form there.
 
 ## Explicitly deferred (write down so they aren't relitigated)
 
