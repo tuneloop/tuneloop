@@ -1,13 +1,23 @@
 import { registerDetector } from '../core/registry'
-import { insightId } from '../core/detector'
 import type { Detector, DetectorResult, EvidenceRef, InsightInput } from '../core/detector'
 import type { Store } from '../store/store'
+import type { KitchenSinkVerdictInput } from '../store/types'
 import type { LlmClient, StructuredRequest } from '../llm/types'
 import { addUsage, emptyUsage, type TokenUsage } from '../core/model'
 import type { Block } from '../core/blocks'
 import { costOfUsage } from '../pricing/pricing'
 
 const NAME = 'kitchen-sink'
+/**
+ * Bumping re-judges the whole corpus once (a P-tier one-time cost — cap it with
+ * `--limit`; see run()), so bump whenever the prompt or storage shape changes.
+ *  - v3: verdicts moved out of insight_evidence into their own `kitchen_sink_verdict`
+ *    table, candidate selection went global, and the card is windowed at read time.
+ *  - v4: the reason prose must avoid internal "block" numbering (the reader never
+ *    sees blocks) — re-judge to regenerate reasons written the old way.
+ */
+const VERSION = 4
+/** The card's presentation window: count/evidence/severity cover this trailing span. */
 const WINDOW_DAYS = 30
 /** Only sessions at or above this percentile of user-turn count are large enough to check. */
 const SIZE_PERCENTILE = 0.75
@@ -112,17 +122,27 @@ export interface Candidate {
 }
 
 /**
- * The cheap pre-gate: sessions in the last WINDOW_DAYS that are BOTH large
- * (at/above their repo's SIZE_PERCENTILE of user-turn count) AND advanced 2+
- * distinct features or 2+ distinct PRs. The size cutoff is computed per repo, so
- * a repo of naturally long sessions doesn't crowd out a repo of short ones. A
- * session with no blocks (no turn count) can't clear the size gate and is skipped.
+ * The size/artifact `since` bound. `''` sorts below every ISO timestamp, so the
+ * pre-gate scans ALL history: every historical candidate is judged
+ * once and its verdict cached, and the 30-day window is applied at READ time when
+ * the card is built (see run()), not here. Sessions with a NULL started_at are
+ * excluded either way (`NULL >= ''` is NULL) — they can't be windowed on the card.
+ */
+const ALL_TIME = ''
+
+/**
+ * The cheap pre-gate: sessions (of any age) that are BOTH large (at/above their
+ * repo's SIZE_PERCENTILE of user-turn count) AND advanced 2+ distinct features or
+ * 2+ distinct PRs. The size cutoff is computed per repo, so a repo of naturally
+ * long sessions doesn't crowd out a repo of short ones. A session with no blocks
+ * (no turn count) can't clear the size gate and is skipped. Selection is GLOBAL:
+ * the window that shapes the card is a read-time predicate, not a scan boundary.
  */
 export function candidates(store: Store): Candidate[] {
-  const since = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
   // content_hash NOT NULL: a null hash can't be tracked in detector_session_runs
   // (its `!=` comparison never re-surfaces a null), so such a session would freeze
-  // as permanently seen once judged. Skip it until it has a real hash.
+  // as permanently seen once judged. Skip it until it has a real hash. started_at
+  // NOT NULL so it can be placed in the read-time window.
   const repos = store.queryAll(
     `SELECT id AS sessionId,
             COALESCE(NULLIF(repo, ''), NULLIF(cwd, ''), '_unknown') AS repo,
@@ -130,12 +150,11 @@ export function candidates(store: Store): Candidate[] {
             started_at AS startedAt,
             ended_at AS endedAt
      FROM sessions
-     WHERE started_at >= ? AND content_hash IS NOT NULL`,
-    since,
+     WHERE content_hash IS NOT NULL AND started_at IS NOT NULL`,
   ) as Array<{ sessionId: string; repo: string; contentHash: string; startedAt: string | null; endedAt: string | null }>
 
-  const turns = realUserTurns(store, since)
-  const arts = artifactCounts(store, since)
+  const turns = realUserTurns(store, ALL_TIME)
+  const arts = artifactCounts(store, ALL_TIME)
 
   // Per-repo cutoff: gather every in-window session's turn count by repo.
   const turnsByRepo = new Map<string, number[]>()
@@ -226,6 +245,10 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
     `When true, set splitBlockIdx to the block index (1..${Math.max(1, nBlocks - 1)}) where the`,
     'FIRST unrelated objective begins — the block that should have opened a new session.',
     'It is never 0 (block 0 opens the first objective). Otherwise set it to -1.',
+    '',
+    'In `reason`, name what the two objectives actually were, in plain language',
+    '(e.g. "refactors the auth module, then writes unrelated marketing copy"). Do NOT',
+    'mention block numbers or indices — the reader sees a prose note, never the blocks.',
   ].join('\n')
 
   return {
@@ -239,7 +262,7 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
       properties: {
         isKitchenSink: { type: 'boolean', description: 'True only when 2+ blocks pursue unrelated objectives.' },
         splitBlockIdx: { type: 'integer', description: 'Block index (>= 1) where the first unrelated objective begins; -1 if not a kitchen sink.' },
-        reason: { type: 'string', description: 'One sentence explaining the judgment.' },
+        reason: { type: 'string', description: 'One sentence naming the two objectives in plain language; no block numbers or indices.' },
       },
     },
   }
@@ -280,15 +303,34 @@ export async function judge(llm: LlmClient, digest: string, blocks: Block[]): Pr
 }
 
 /**
- * One flagged session as an evidence occurrence in the aggregate. `turnIdx` is the
- * split block's opening seq (so the drawer opens where the session should have split);
- * `note` is the LLM's one-sentence reason, shown per occurrence.
+ * Turn one judged session into the row persisted in `kitchen_sink_verdict` — the
+ * verdict's permanent home (positive OR negative), resolving the split block to its
+ * opening main-thread seq now (at judge time, while we hold `blocks`) so the read
+ * path can rebuild evidence without re-hydrating. `model`/`detectorVersion` are
+ * stamped by the caller. A negative verdict carries no split point or seq.
  */
-export function toEvidence(c: Candidate, verdict: Verdict, blocks: Block[]): EvidenceRef {
-  const startSeq = blocks[verdict.splitBlockIdx]?.startSeq
-  const reason = verdict.reason.trim()
-  const note = `Block ${verdict.splitBlockIdx} began a separate objective${reason ? ` — ${reason}` : ''}`
-  return { sessionId: c.sessionId, ...(startSeq != null ? { turnIdx: startSeq } : {}), note }
+export function verdictRow(c: Candidate, verdict: Verdict, blocks: Block[]): Omit<KitchenSinkVerdictInput, 'model' | 'detectorVersion'> {
+  const reason = verdict.reason.trim() || null
+  if (!verdict.isKitchenSink) {
+    return { sessionId: c.sessionId, isKitchenSink: false, splitBlockIdx: null, splitSeq: null, reason }
+  }
+  return {
+    sessionId: c.sessionId,
+    isKitchenSink: true,
+    splitBlockIdx: verdict.splitBlockIdx,
+    splitSeq: blocks[verdict.splitBlockIdx]?.startSeq ?? null,
+    reason,
+  }
+}
+
+/**
+ * Rebuild one card occurrence from a stored positive verdict row. `turnIdx` is the
+ * split's opening seq (so the drawer opens where the session should have split);
+ * the note is the LLM's plain-language reason for THIS session, omitted when absent.
+ */
+export function positiveEvidence(row: { sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }): EvidenceRef {
+  const note = (row.reason ?? '').trim()
+  return { sessionId: row.sessionId, ...(row.splitSeq != null ? { turnIdx: row.splitSeq } : {}), ...(note ? { note } : {}) }
 }
 
 /**
@@ -320,73 +362,46 @@ export function buildAggregate(evidence: EvidenceRef[], firstSeenAt?: string, la
       content:
         `When you switch to an unrelated task, start a new session instead of continuing the current ` +
         `one, so the agent works from a clean context instead of dragging in the previous task. ` +
-        `Each occurrence below points at the block where that session began a separate objective — ` +
+        `Each occurrence below points at where that session began a separate objective — ` +
         `a natural place to have opened a fresh session.`,
     },
   }
 }
 
 /**
- * Fold this run's verdicts into the aggregate's prior evidence and return the FULL set.
- * We judge only the delta each run but persistInsights rewrites evidence wholesale, so
- * we read prior evidence back and merge by sessionId: positives set/overwrite, negatives
- * (re-judged and cleared) remove, untouched carry over.
- */
-export function mergeEvidence(
-  prior: Array<{ sessionId: string; turnIdx: number | null; note: string | null }>,
-  positives: EvidenceRef[],
-  negatives: Set<string>,
-): EvidenceRef[] {
-  const bySession = new Map<string, EvidenceRef>()
-  for (const p of prior) {
-    bySession.set(p.sessionId, {
-      sessionId: p.sessionId,
-      ...(p.turnIdx != null ? { turnIdx: p.turnIdx } : {}),
-      ...(p.note != null ? { note: p.note } : {}),
-    })
-  }
-  for (const e of positives) bySession.set(e.sessionId, e)
-  for (const id of negatives) bySession.delete(id)
-  return [...bySession.values()]
-}
-
-/** Min start … max end over the flagged sessions — the aggregate's real occurrence window. */
-function seenWindow(store: Store, sessionIds: string[]): { firstSeenAt?: string; lastSeenAt?: string } {
-  if (sessionIds.length === 0) return {}
-  const placeholders = sessionIds.map(() => '?').join(',')
-  const row = store.queryOne(
-    `SELECT MIN(started_at) AS first, MAX(COALESCE(ended_at, started_at)) AS last
-     FROM sessions WHERE id IN (${placeholders})`,
-    ...sessionIds,
-  ) as { first: string | null; last: string | null } | undefined
-  return { firstSeenAt: row?.first ?? undefined, lastSeenAt: row?.last ?? undefined }
-}
-
-/**
  * Flags sessions that pursued several unrelated objectives instead of being split.
- * A cheap SQL pre-gate picks candidates (large sessions spanning 2+ features/PRs) and
- * an LLM confirms they're genuinely unrelated. Surfaces ONE cross-repo insight; each
- * flagged session is an occurrence inside it. Judgment is incremental (only the unseen
- * delta is judged); the aggregate accumulates via mergeEvidence and resolves at zero.
+ * A cheap SQL pre-gate picks candidates (large sessions spanning 2+ features/PRs)
+ * globally, an LLM confirms they're genuinely unrelated, and each verdict is cached
+ * in `kitchen_sink_verdict`. Surfaces ONE cross-repo insight built each run as a
+ * windowed projection of that table (the last WINDOW_DAYS of positives): count,
+ * evidence and severity track only the window, so a flagged session ages off the
+ * card on its own, and the insight resolves when the window empties.
+ * Judging is incremental — only the unseen delta is judged — and, being a property
+ * of immutable session content, a verdict never goes stale.
  */
 export const kitchenSink: Detector = {
   name: NAME,
-  // v2: one aggregate insight instead of one row per session. The bump re-judges the
-  // corpus to repopulate the aggregate; migrate() clears the orphaned v1 rows.
-  version: 2,
+  version: VERSION,
   tier: 'P',
   needsLlm: true,
   async run(ctx): Promise<DetectorResult> {
     if (!ctx.llm) return { insights: [] }
-    const found = unseenCandidates(ctx.store)
+    const unseen = unseenCandidates(ctx.store)
+    // --limit caps how many candidates this run judges. The first global run
+    // backfills every historical candidate with an LLM, which can be large; the cap
+    // lets a user throttle (or dry-run) it. Safe because each verdict is cached and
+    // the card is rebuilt from the table, so the rest are picked up on later analyzes.
+    // Keep the FULL unseen set (not just this run's slice) so the resolve gate below
+    // can tell whether the window's backfill is actually complete.
+    const found = ctx.limit != null && unseen.length > ctx.limit ? unseen.slice(0, ctx.limit) : unseen
     ctx.log.info(`kitchen-sink: ${found.length} unseen candidate session(s) after pre-gate`)
     ctx.progress?.addUnits(found.length) // declare this detector's step-2 delta
 
-    // This run's verdicts, folded into the aggregate below.
-    const positives: EvidenceRef[] = []
-    const negatives = new Set<string>()
-    // Sessions actually judged, reported as `seen` so the runner marks them ONLY
-    // after a successful persist; a candidate we couldn't load stays unseen to retry.
+    // This run's verdicts (positive AND negative), persisted below before the card
+    // is rebuilt. Sessions actually judged are reported as `seen` so the runner marks
+    // them ONLY after a successful persist; a candidate we couldn't load/judge stays
+    // unseen to retry.
+    const verdicts: KitchenSinkVerdictInput[] = []
     const seen: Array<{ sessionId: string; contentHash: string }> = []
     let usage = emptyUsage()
     for (const c of found) {
@@ -410,22 +425,37 @@ export const kitchenSink: Detector = {
       }
       usage = addUsage(usage, judged.usage)
       seen.push({ sessionId: c.sessionId, contentHash: c.contentHash })
-      if (judged.verdict.isKitchenSink) positives.push(toEvidence(c, judged.verdict, digest.blocks))
-      else negatives.add(c.sessionId) // re-judged and cleared → drop from the aggregate
+      verdicts.push({ ...verdictRow(c, judged.verdict, digest.blocks), model: ctx.llm.model, detectorVersion: VERSION })
       // Tick the step-2 bar with this candidate's incremental judge spend.
       ctx.progress?.unitDone(costOfUsage(ctx.llm.provider, ctx.llm.model, judged.usage))
     }
 
-    // Fold this run's verdicts into the aggregate's stored evidence and rebuild the row.
-    const aggId = insightId(NAME, AGG_REPO, AGG_SIGNAL)
-    const prior = ctx.store.insightEvidence(aggId)
-    const evidence = mergeEvidence(prior, positives, negatives)
-    const { firstSeenAt, lastSeenAt } = seenWindow(ctx.store, evidence.map((e) => e.sessionId))
-    const insight = buildAggregate(evidence, firstSeenAt, lastSeenAt)
-    // Nothing flagged anymore → retire any prior aggregate so a stale row doesn't linger.
-    if (!insight) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
+    // Persist this run's verdicts BEFORE rebuilding the card, so the read below sees
+    // them. A positive re-judged negative flips its row and drops out of the window.
+    ctx.store.recordKitchenSinkVerdicts(verdicts)
 
-    ctx.log.info(`kitchen-sink: ${evidence.length} flagged session(s) after merge (${positives.length} new, ${negatives.size} cleared)`)
+    // Rebuild the aggregate from the verdict table, windowed to the last WINDOW_DAYS
+    // of sessions.started_at. This runs EVERY analyze regardless of what was judged,
+    // so a positive that ages out of the window drops off the card without being
+    // re-judged, and the insight resolves the moment the window empties.
+    const windowStart = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
+    const card = ctx.store.kitchenSinkPositives(windowStart)
+    const evidence = card.positives.map(positiveEvidence)
+    const insight = buildAggregate(evidence, card.firstSeenAt ?? undefined, card.lastSeenAt ?? undefined)
+    // Empty window → resolve, but only when the window's verdict set is actually final
+    // and there was real activity to judge:
+    //  - an in-window candidate still unseen (left over by --limit, or a load/judge
+    //    failure this run) could yet be a positive, so the backfill isn't done — hold;
+    //  - a window with no sessions at all is thin data, not a fixed habit — hold, rather
+    //    than tell a returning user they cleaned it up.
+    if (!insight) {
+      const judgedIds = new Set(seen.map((s) => s.sessionId))
+      const unjudgedInWindow = unseen.some((c) => !judgedIds.has(c.sessionId) && c.startedAt != null && c.startedAt >= windowStart)
+      const active = (ctx.store.queryOne('SELECT COUNT(*) AS n FROM sessions WHERE started_at >= ?', windowStart) as { n: number }).n > 0
+      if (active && !unjudgedInWindow) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
+    }
+
+    ctx.log.info(`kitchen-sink: ${evidence.length} flagged session(s) in the last ${WINDOW_DAYS} days`)
     const result: DetectorResult = { insights: insight ? [insight] : [], seen }
     // Only record cost when the LLM actually ran, so a no-op analyze (nothing
     // unseen) doesn't write a $0 detector_runs row or price an empty usage.

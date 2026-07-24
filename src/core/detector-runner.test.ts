@@ -215,6 +215,40 @@ describe('runDetectors — delta cache invalidation', () => {
   })
 })
 
+describe('runDetectors — --limit bounds detectors', () => {
+  it('skips X-tier detectors under a limit but still runs S/P-tier', async () => {
+    const { db, store, log } = setup()
+    let xRan = false
+    let pRan = false
+    const x: Detector = { name: 'crossx', version: 1, tier: 'X', run: () => { xRan = true; return [insight('a')] } }
+    const p: Detector = { name: 'perp', version: 1, tier: 'P', run: () => { pRan = true; return [insight('b')] } }
+    await runDetectors({ detectors: [x, p], store, log, llmEnabled: true, llm: null, limit: 5 })
+    expect(xRan).toBe(false) // cross-session detector never ran…
+    expect(pRan).toBe(true) // …but the per-session one did
+    // The skipped detector leaves no run row; the one that ran persists its insight.
+    expect(db.prepare("SELECT COUNT(*) AS n FROM detector_runs WHERE detector = 'crossx'").get()).toMatchObject({ n: 0 })
+    expect(store.insights({ detector: 'perp' })).toHaveLength(1)
+  })
+
+  it('passes the limit through to the detector context', async () => {
+    const { store, log } = setup()
+    let seenLimit: number | undefined = -1
+    const d: Detector = { name: 'reader', version: 1, tier: 'P', run: (ctx) => { seenLimit = ctx.limit; return [] } }
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: null, limit: 7 })
+    expect(seenLimit).toBe(7)
+  })
+
+  it('runs X-tier normally when no limit is set (ctx.limit undefined)', async () => {
+    const { store, log } = setup()
+    let seenLimit: number | undefined = -1
+    let xRan = false
+    const d: Detector = { name: 'crossx', version: 1, tier: 'X', run: (ctx) => { xRan = true; seenLimit = ctx.limit; return [] } }
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: null })
+    expect(xRan).toBe(true)
+    expect(seenLimit).toBeUndefined()
+  })
+})
+
 describe('runDetectors — shared step-2 progress aggregator', () => {
   // A minimal Progress stand-in recording the aggregated calls.
   function fakeProgress() {

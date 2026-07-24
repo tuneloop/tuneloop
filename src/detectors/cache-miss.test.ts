@@ -29,6 +29,14 @@ function setup() {
   return { db, store, ctx }
 }
 
+// A previously-surfaced card, seeded so the empty-path resolve has something to act on.
+// `evidenceSessionId` names one contributing session (must already exist for the FK), so
+// the resolve sweep can recover its repo as the previous contributor.
+const staleCard = (signalKey: string, evidenceSessionId: string): InsightInput => ({
+  signalKey, repo: '*', severity: 'high', title: 'stale', description: 'stale',
+  evidence: [{ sessionId: evidenceSessionId }], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+})
+
 interface UsageSpec {
   atMs: number // offset from session start
   input?: number
@@ -55,6 +63,37 @@ function seedSession(
   usage.forEach((u, idx) => {
     ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(startMs + u.atMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.creates1h ?? 0, u.reads ?? 0)
   })
+}
+
+// Like seedSession, but decouples the session's started_at from its turn
+// timestamps — to exercise the event-ts window, where a card is
+// dated by when a turn happened, not by when its session began.
+function seedDecoupled(
+  db: ReturnType<typeof openDb>,
+  id: string,
+  usage: UsageSpec[],
+  startedAtIso: string,
+  tsBaseMs: number,
+  over: { repo?: string; provider?: string; model?: string } = {},
+) {
+  db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)').run(
+    id, id, 'claude-code', over.provider ?? 'anthropic', over.repo ?? 'o/r', '/repo', startedAtIso,
+  )
+  const ins = db.prepare(
+    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,0)',
+  )
+  usage.forEach((u, idx) => {
+    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(tsBaseMs + u.atMs).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.creates1h ?? 0, u.reads ?? 0)
+  })
+}
+
+// Point a block at a session's miss turn (usage idx `usageIdx`) opening at `seq` —
+// the coordinate the transcript viewer lands evidence on.
+function seedBlock(db: ReturnType<typeof openDb>, sessionId: string, usageIdx: number, seq: number) {
+  db.prepare('INSERT INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,?,?,?,?,?)').run(
+    sessionId, 0, seq, seq + 5, 'user_turn', 'test',
+  )
+  db.prepare('INSERT INTO block_usage (session_id, usage_idx, block_idx, producer) VALUES (?,?,?,?)').run(sessionId, usageIdx, 0, 'test')
 }
 
 // Cold session: after a 10-min break the next turn reads nothing back and
@@ -84,17 +123,18 @@ describe('cache-miss detector', () => {
     expect(ins).toMatchObject({
       signalKey: 'cache-misses',
       repo: '*', // one cross-repo aggregate insight
-      severity: 'high', // 10 × $2.30 = $23.00 ≥ $10
+      severity: 'medium', // 10 × $2.30 = $23.00: clears the $20 floor, below the $50 high bar
       count: 10, // one miss per session
       fix: { type: 'behavioral-nudge' },
     })
     expect(ins.evidence).toHaveLength(10)
-    // Single qualifying repo → named directly; each evidence row notes its repo + premium.
+    // Single qualifying repo → named directly; each evidence row notes its repo, premium, misses.
     expect(ins.evidence[0]!.note).toContain('o/r · $')
+    expect(ins.evidence[0]!.note).toContain('1 cache miss') // one miss this session
     expect(ins.description).toContain('$23.00')
     expect(ins.description).toContain('10 sessions in o/r')
-    expect(ins.description).toContain('50%') // miss rate: 1 of 2 classified turns
-    expect(ins.description).toContain('10 of the 10 misses came more than 5 minutes after')
+    expect(ins.description).toContain('100% of sessions saw a cache-miss event') // 10 of 10 sessions
+    expect(ins.description).toContain('10 of the 10 misses came from messages sent more than 5 minutes after')
   })
 
   it('sources first/last-seen from the miss turns, not the analyze run', () => {
@@ -118,6 +158,7 @@ describe('cache-miss detector', () => {
     expect(last - first).toBeGreaterThanOrEqual(20 * MIN)
     expect(last - first).toBeLessThan(20 * MIN + 1000)
     expect(Date.now() - last).toBeGreaterThan(DAY_MS / 2) // clearly a past occurrence, not now
+    expect(ins.evidence[0]!.note).toContain('2 cache misses') // two misses this session, pluralized
   })
 
   it('reports mid-flow misses honestly in the timing split (no cause claimed)', () => {
@@ -132,7 +173,7 @@ describe('cache-miss detector', () => {
     const insights = cacheMiss.run(ctx) as InsightInput[]
     expect(insights).toHaveLength(1)
     expect(insights[0]!.count).toBe(20)
-    expect(insights[0]!.description).toContain('0 of the 20 misses came more than 5 minutes after')
+    expect(insights[0]!.description).toContain('0 of the 20 misses came from messages sent more than 5 minutes after')
   })
 
   it('stays silent below the minimum session count', () => {
@@ -145,6 +186,35 @@ describe('cache-miss detector', () => {
     const { db, ctx } = setup()
     for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, warmSession)
     expect(cacheMiss.run(ctx)).toEqual([])
+  })
+
+  it('resolves a prior card when its contributing repo now has enough clean sessions', () => {
+    const { db, store, ctx } = setup()
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, warmSession) // repo o/r, ≥ MIN, all warm
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses', 's0')])
+    expect(cacheMiss.run(ctx)).toEqual([])
+    expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('resolved')
+  })
+
+  it('does NOT resolve when the contributing repo has too few sessions — not enough data', () => {
+    const { db, store, ctx } = setup()
+    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, warmSession) // repo o/r, < MIN
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses', 's0')])
+    expect(cacheMiss.run(ctx)).toEqual([])
+    // A user back from a month off shouldn't be told they fixed it.
+    expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('surfaced')
+  })
+
+  it('does NOT resolve on a corpus-wide total when no single contributing repo has enough data', () => {
+    const { db, store, ctx } = setup()
+    // Prior card contributed by o/a. This window: o/a and o/b each have 5 warm sessions —
+    // the sum clears MIN, but neither repo alone does, so o/a still lacks the data to
+    // call it clean and the card must stay surfaced.
+    for (let i = 0; i < 5; i++) seedSession(db, `a${i}`, warmSession, { repo: 'o/a' })
+    for (let i = 0; i < 5; i++) seedSession(db, `b${i}`, warmSession, { repo: 'o/b' })
+    store.persistInsights('cache-miss', 5, [staleCard('cache-misses', 'a0')])
+    expect(cacheMiss.run(ctx)).toEqual([])
+    expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('surfaced')
   })
 
   it('does not call a big-paste turn a miss: reads decide, not creates or timing', () => {
@@ -229,21 +299,22 @@ describe('cache-miss detector', () => {
   it('prices read-discount caching (OpenAI-style): misses re-pay as input, not creates', () => {
     const { db, ctx } = setup()
     // gpt-5.2: input $2.5/Mtok, cache_read $0.25/Mtok → premium $2.25/Mtok un-read.
+    // Sized so 10 sessions clear the $20 floor (each re-buys 1M tokens at $2.25/Mtok = $2.25).
     for (let i = 0; i < 10; i++)
       seedSession(
         db, `s${i}`,
         [
-          { atMs: 0, input: 100_000 },
-          { atMs: 1 * MIN, reads: 100_000, input: 5_000 },
-          { atMs: 40 * MIN, input: 120_000 },
+          { atMs: 0, input: 1_000_000 },
+          { atMs: 1 * MIN, reads: 995_000, input: 5_000 },
+          { atMs: 40 * MIN, input: 1_200_000 },
         ],
         { provider: 'openai', model: 'gpt-5.2' },
       )
     const insights = cacheMiss.run(ctx) as InsightInput[]
     expect(insights).toHaveLength(1)
-    // premium = min(prevCtx 105k, input 120k) = 105k × $2.25/Mtok ≈ $0.236 × 10 sessions ≈ $2.36
-    expect(insights[0]!).toMatchObject({ severity: 'low', count: 10 })
-    expect(insights[0]!.description).toContain('$2.36')
+    // premium = min(prevCtx 1.0M, input 1.2M) = 1.0M × $2.25/Mtok = $2.25 × 10 sessions = $22.50
+    expect(insights[0]!).toMatchObject({ severity: 'medium', count: 10 })
+    expect(insights[0]!.description).toContain('$22.50')
   })
 
   it('prices the re-buy at the write TTL mix: a 1h-heavy miss costs more than a 5m one', () => {
@@ -275,6 +346,24 @@ describe('cache-miss detector', () => {
     expect([...notedRepos].sort()).toEqual(['o/a', 'o/b'])
   })
 
+  it('points evidence at the miss turn\'s block start, not the session top', () => {
+    const { db, ctx } = setup()
+    // coldSession's miss is usage idx 1; its block opens at user-turn seq 4.
+    for (let i = 0; i < 10; i++) {
+      seedSession(db, `s${i}`, coldSession)
+      seedBlock(db, `s${i}`, 1, 4)
+    }
+    const ins = (cacheMiss.run(ctx) as InsightInput[]).find((i) => i.signalKey === 'cache-misses')!
+    expect(ins.evidence[0]!.turnIdx).toBe(4) // the exchange where the miss happened, not message 1
+  })
+
+  it('leaves turnIdx unset when the miss turn has no block (degrades to session-level)', () => {
+    const { db, ctx } = setup()
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, coldSession) // no blocks seeded
+    const ins = (cacheMiss.run(ctx) as InsightInput[]).find((i) => i.signalKey === 'cache-misses')!
+    expect(ins.evidence[0]!.turnIdx).toBeUndefined()
+  })
+
   it('ranks evidence by wasted dollars', () => {
     const { db, ctx } = setup()
     for (let i = 0; i < 9; i++) seedSession(db, `s${i}`, coldSession)
@@ -285,5 +374,27 @@ describe('cache-miss detector', () => {
     ])
     const insights = cacheMiss.run(ctx) as InsightInput[]
     expect(insights[0]!.evidence[0]!.sessionId).toBe('whale')
+  })
+
+  it('windows by the turn\'s own timestamp, so a session that began long ago but is active now still counts', () => {
+    const { db, ctx } = setup()
+    const beganOutsideWindow = new Date(Date.now() - 40 * DAY_MS).toISOString()
+    const missedYesterday = Date.now() - DAY_MS
+    // The old started_at scan dropped every one of these sessions; the event-ts
+    // window keeps them because the misses themselves are recent.
+    for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, coldSession, beganOutsideWindow, missedYesterday)
+    const insights = cacheMiss.run(ctx) as InsightInput[]
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.count).toBe(10)
+  })
+
+  it('excludes turns older than the window even when the session started recently', () => {
+    const { db, ctx } = setup()
+    const startedYesterday = new Date(Date.now() - DAY_MS).toISOString()
+    const missedLongAgo = Date.now() - 40 * DAY_MS
+    // The old started_at scan would have counted these (recent session start); the
+    // event-ts window drops them because the misses are ancient.
+    for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, coldSession, startedYesterday, missedLongAgo)
+    expect(cacheMiss.run(ctx)).toEqual([])
   })
 })

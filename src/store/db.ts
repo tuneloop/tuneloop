@@ -1,10 +1,11 @@
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
+import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_SHARE } from '../core/thresholds'
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 18
+const SCHEMA_VERSION = 21
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -457,6 +458,28 @@ CREATE TABLE IF NOT EXISTS theme_events (
 );
 CREATE INDEX IF NOT EXISTS ix_theme_events_theme ON theme_events(theme_id);
 
+-- Kitchen-sink verdicts (kitchen-sink detector, tier P). The LLM's judgement of
+-- whether a session mixed unrelated objectives — expensive, non-reproducible, and a
+-- property of immutable session content — gets a permanent home here rather than
+-- living in insight_evidence (a DISPLAY table capped at EVIDENCE_CAP and coupled to
+-- the insight lifecycle: that coupling is exactly the bug this table avoids). One row per JUDGED
+-- session, positive AND negative, so the card is a pure projection — windowed
+-- positives, rebuilt every run, ageing out on their own. A positive re-judged
+-- negative just flips is_kitchen_sink (a plain upsert), dropping it from the card.
+-- split_seq is the main-thread seq the evidence points at; NULL for a negative verdict.
+CREATE TABLE IF NOT EXISTS kitchen_sink_verdict (
+  session_id       TEXT PRIMARY KEY,
+  is_kitchen_sink  INTEGER NOT NULL,   -- 1 = mixed unrelated work, 0 = coherent
+  split_block_idx  INTEGER,            -- block where the 2nd objective begins (NULL if coherent)
+  split_seq        INTEGER,            -- that block's opening main-thread seq (the evidence pointer)
+  reason           TEXT,               -- the LLM's one-sentence explanation
+  model            TEXT,               -- model that produced the verdict
+  detector_version INTEGER NOT NULL,   -- detector version at judge time
+  judged_at        TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_kitchen_sink_verdict_positive ON kitchen_sink_verdict(is_kitchen_sink);
+
 -- Append-only lifecycle history for insights. state_changed_at on the insights row
 -- only remembers the LAST transition; measurement ("fix applied Jul 25, recurrences
 -- since: 0") and reopen cycles need the full history. from_state NULL = first surface.
@@ -497,6 +520,136 @@ CREATE INDEX IF NOT EXISTS ix_env_snapshots_lookup
   ON environment_snapshots(source, scope, scope_key, category, captured_at);
 `
 
+/**
+ * Read-time views that turn `usage_facts` into the events the detectors and the
+ * read path classify over. These are the SHARED definition of "a compaction" /
+ * "a cache miss": the predicate lives here, in SQL, rather than inside one
+ * detector's run loop, so nothing else in the product has to reimplement it.
+ *
+ * The thresholds are interpolated from `../core/thresholds` so a view literal can
+ * never drift from the detector that owns the concept.
+ *
+ * Applied on every `openDb` with `DROP VIEW IF EXISTS` then an UNCONDITIONAL
+ * `CREATE VIEW` — NEVER `CREATE VIEW IF NOT EXISTS`. On a definition change (a
+ * threshold edit, a bug fix) the `IF NOT EXISTS` form is a silent no-op and an
+ * existing store keeps the stale view forever, with nothing recording which.
+ * Recreating unconditionally is cheap (views hold no data).
+ */
+function buildUsageViews(): string {
+  return `
+DROP VIEW IF EXISTS usage_turns;
+CREATE VIEW usage_turns AS
+WITH live AS (
+  SELECT u.session_id, u.idx, u.ts, u.model, u.is_sidechain, s.provider, s.started_at,
+         COALESCE(NULLIF(s.repo,''), NULLIF(s.cwd,''), '_unknown') AS repo,
+         COALESCE(u.tok_input,0) AS input, COALESCE(u.tok_output,0) AS output,
+         COALESCE(u.tok_cache_create_5m,0) AS creates_5m,
+         COALESCE(u.tok_cache_create_1h,0) AS creates_1h,
+         COALESCE(u.tok_cache_read,0) AS reads
+  FROM usage_facts u JOIN sessions s ON s.id = u.session_id
+  -- All-zero rows aren't API calls (content flushes, ingest-deduped repeats). Dropped
+  -- HERE so the LAGs below mean "previous real turn", matching the JS loops' \`continue\`
+  -- BEFORE prevOcc/prevCtx update.
+  WHERE COALESCE(u.tok_input,0) + COALESCE(u.tok_output,0) + COALESCE(u.tok_cache_create_5m,0)
+      + COALESCE(u.tok_cache_create_1h,0) + COALESCE(u.tok_cache_read,0) > 0
+)
+SELECT session_id, idx, ts, model, provider, repo, is_sidechain, started_at,
+       input, output, creates_5m, creates_1h, reads,
+       creates_5m + creates_1h AS creates,
+       -- Occupancy excludes output: the reply isn't part of the prompt.
+       input + reads + creates_5m + creates_1h AS occupancy,
+       -- What the next warm turn would read back: reads plus what THIS turn cached
+       -- (creates, or billed input under read-discount caching).
+       reads + CASE WHEN creates_5m + creates_1h > 0 THEN creates_5m + creates_1h ELSE input END AS new_ctx,
+       LAG(input + reads + creates_5m + creates_1h) OVER w AS prev_occupancy,
+       LAG(reads + CASE WHEN creates_5m + creates_1h > 0 THEN creates_5m + creates_1h ELSE input END) OVER w AS prev_ctx,
+       LAG(ts) OVER w AS prev_ts,
+       -- Unordered window p → whole-session max. MAX(...) OVER w (ordered) would be a
+       -- RUNNING max, failing early turns that later turns pass.
+       MAX(creates_5m + creates_1h + reads) OVER p AS session_cache_tokens
+FROM live
+-- Partition on (session_id, is_sidechain): sidechain rows share the session and
+-- interleave by idx; without it a subagent turn becomes a main turn's "previous".
+-- All subagents share is_sidechain=1 — no per-agent series here.
+WINDOW w AS (PARTITION BY session_id, is_sidechain ORDER BY idx),
+       p AS (PARTITION BY session_id, is_sidechain);
+
+DROP VIEW IF EXISTS compaction_event;
+CREATE VIEW compaction_event AS
+SELECT session_id, idx, ts, repo, model, prev_occupancy, occupancy,
+       prev_occupancy - occupancy AS dropped_tokens
+FROM usage_turns
+WHERE is_sidechain = 0
+  AND prev_occupancy >= ${PEAK_FLOOR}
+  AND occupancy <= prev_occupancy * ${DROP_SHARE};
+
+DROP VIEW IF EXISTS cache_classified_turn;   -- the DENOMINATOR; miss rate needs both halves
+CREATE VIEW cache_classified_turn AS
+SELECT session_id, idx, ts, repo, model, provider,
+       prev_ctx, reads, input, creates_5m, creates_1h, creates,
+       CASE WHEN reads < prev_ctx * ${HIT_READ_SHARE} THEN 1 ELSE 0 END AS is_miss,
+       -- 2-arg MIN() returns NULL if EITHER arg is NULL;
+       -- safe only because the WHERE guarantees prev_ctx is non-null.
+       MIN(prev_ctx - reads, CASE WHEN creates > 0 THEN creates ELSE input END) AS avoidable_tokens,
+       CAST((julianday(ts) - julianday(prev_ts)) * 86400000 AS INTEGER) AS gap_ms
+FROM usage_turns
+WHERE is_sidechain = 0
+  AND session_cache_tokens > 0        -- provider reports caching at all
+  AND prev_ctx >= ${MIN_CONTEXT_TOKENS}
+  AND new_ctx >= prev_ctx * ${SHRUNK_CTX_SHARE};   -- a rewrite is neither hit nor miss
+
+DROP VIEW IF EXISTS cache_miss_event;
+CREATE VIEW cache_miss_event AS SELECT * FROM cache_classified_turn WHERE is_miss = 1;
+`
+}
+
+/**
+ * Read-time views for capability usage — the shared definition of "this MCP server /
+ * skill was invoked", read by `unused-capabilities` (and available to anything else).
+ * The (kind, name) derivation — the MCP-server-from-tool-name grammar — lived only
+ * inside that detector's query; hoisting it here makes it the one definition.
+ *
+ * Same lifecycle contract as `buildUsageViews`: `DROP VIEW IF EXISTS` then an
+ * unconditional `CREATE VIEW` on every `openDb`. No thresholds here — the recency
+ * window is a read-time predicate the consumer applies (`last_invoked_at >= since`),
+ * since a capability used once long ago is not current use.
+ */
+function buildCapabilityViews(): string {
+  return `
+DROP VIEW IF EXISTS capability_invocation;
+CREATE VIEW capability_invocation AS
+WITH derived AS (
+  SELECT t.session_id, t.idx, t.ts, t.is_sidechain, s.source, s.repo,
+         CASE t.action WHEN 'mcp_call' THEN 'mcp' ELSE 'skill' END AS kind,
+         -- Installed unit is the SERVER: text between the 1st and 2nd '__' in
+         -- mcp__<server>__<tool>. Empty when there's no 2nd '__' — the substr length
+         -- would go negative, which SQLite reads backwards.
+         CASE t.action WHEN 'mcp_call' THEN
+                CASE WHEN instr(substr(t.name, 6), '__') > 0
+                     THEN substr(t.name, 6, instr(substr(t.name, 6), '__') - 1)
+                     ELSE '' END
+              ELSE t.name END AS name
+  FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+  WHERE t.action IN ('mcp_call', 'skill')
+)
+SELECT session_id, idx, ts, is_sidechain, source, repo, kind, name
+FROM derived WHERE name <> '';   -- drop malformed mcp names; don't emit a phantom "" capability
+
+DROP VIEW IF EXISTS capability_usage;
+CREATE VIEW capability_usage AS
+SELECT source, kind, name, repo,
+       COUNT(DISTINCT session_id) AS sessions,   -- adoption breadth, not chattiness
+       COUNT(*)                   AS calls,
+       -- strftime normalizes any offset to UTC before MIN/MAX, so mixed timestamp
+       -- formats can't produce a wrong "latest" — fixed at source, not per comparison.
+       MIN(strftime('%Y-%m-%dT%H:%M:%SZ', ts)) AS first_invoked_at,
+       MAX(strftime('%Y-%m-%dT%H:%M:%SZ', ts)) AS last_invoked_at
+FROM capability_invocation
+WHERE is_sidechain = 0   -- a subagent runs against its own context; we ask what the
+GROUP BY source, kind, name, repo;   -- user wired into their OWN sessions
+`
+}
+
 export function openDb(path: string): DB {
   mkdirSync(dirname(path), { recursive: true })
   const db = new Database(path)
@@ -504,6 +657,8 @@ export function openDb(path: string): DB {
   db.pragma('foreign_keys = ON')
   migrate(db) // add columns to pre-existing tables before SCHEMA (its indexes reference them)
   db.exec(SCHEMA)
+  db.exec(buildUsageViews()) // after SCHEMA: the views read the tables it defines
+  db.exec(buildCapabilityViews())
   db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(
     'schema_version',
     String(SCHEMA_VERSION),
@@ -578,17 +733,6 @@ function migrate(db: DB): void {
   if (tableExists('theme_events') && !has('theme_events', 'occurred_at')) {
     db.exec('ALTER TABLE theme_events ADD COLUMN occurred_at TEXT')
   }
-  // kitchen-sink v2: one aggregate insight (signal_key 'kitchen-sink') replaces the old
-  // per-session rows (signal_key 'kitchen-sink:<id>'). The LIKE ':%' matches only those
-  // v1 rows, never the new key; evidence cascades. Idempotent (no-op once cleared).
-  if (tableExists('insights')) {
-    db.exec("DELETE FROM insights WHERE detector = 'kitchen-sink' AND signal_key LIKE 'kitchen-sink:%'")
-    // cache-miss / context-exhaustion / unused-capabilities: now emit ONE cross-repo
-    // insight (repo '*') instead of one per repo. Drop the orphaned per-repo rows once —
-    // the detectors no longer re-emit them, so they'd linger. Evidence cascades. Idempotent.
-    db.exec("DELETE FROM insights WHERE detector IN ('cache-miss','context-exhaustion','unused-capabilities') AND repo != '*'")
-  }
-
   // Split cache creation by TTL. The old `tok_cache_create` held the whole write
   // and was priced entirely at the 5m rate, so renaming it to `_5m` (rather than
   // adding a column beside it) states what those rows already meant, and leaves

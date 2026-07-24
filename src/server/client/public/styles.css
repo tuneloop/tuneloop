@@ -738,6 +738,8 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 4px; }
 .ins-fix-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .ins-fix-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.ins-fix-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.ins-fix-hint::before { content: "↳ "; color: var(--emerald); }
 .ins-fix-prose { font-size: 13px; }
 .ins-desc pre.md-code, .ins-fix pre.md-code { margin: 6px 0; padding: 8px 10px; background: var(--track); border-radius: 6px; overflow-x: auto; }
 .ins-fix pre.md-code { margin: 0; background: var(--paper); max-height: 420px; overflow-y: auto; }

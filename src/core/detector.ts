@@ -82,6 +82,14 @@ export interface DetectorContext {
    * it). Shared across all detectors this run, so reports aggregate into one bar.
    */
   progress?: DetectorProgress
+  /**
+   * The run's `--limit`, when set — a cap for a bounded/cheap analyze. A P-tier
+   * detector judges at most this many candidates per run (its first global backfill
+   * can be large; the rest are picked up on later analyzes). Undefined = no cap.
+   * X-tier detectors don't see it: the runner skips them entirely under a limit,
+   * since their cross-session accumulation can't be partially bounded.
+   */
+  limit?: number
 }
 
 export interface EvidenceRef {

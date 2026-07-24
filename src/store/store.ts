@@ -12,7 +12,7 @@ import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
@@ -2992,6 +2992,76 @@ export class Store {
     this.db.prepare('DELETE FROM detector_session_runs WHERE detector = ?').run(detector)
   }
 
+  // ---- Kitchen-sink verdicts --------------------------------------------------
+
+  /**
+   * Upsert this run's kitchen-sink verdicts (positive AND negative) into their
+   * permanent home, keyed on session id. INSERT OR REPLACE so a session re-judged
+   * after a content change (or a corrected verdict) overwrites its prior row — a
+   * positive→negative flip is a plain upsert that drops it from the windowed card.
+   */
+  recordKitchenSinkVerdicts(verdicts: KitchenSinkVerdictInput[]): void {
+    if (verdicts.length === 0) return
+    const now = new Date().toISOString()
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO kitchen_sink_verdict
+         (session_id, is_kitchen_sink, split_block_idx, split_seq, reason, model, detector_version, judged_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    this.db.transaction(() => {
+      for (const v of verdicts) {
+        stmt.run(v.sessionId, v.isKitchenSink ? 1 : 0, v.splitBlockIdx, v.splitSeq, v.reason, v.model, v.detectorVersion, now)
+      }
+    })()
+  }
+
+  /**
+   * The kitchen-sink card's data, as a windowed projection of the verdict table:
+   * every POSITIVE session whose `started_at` falls in the trailing window
+   * (`windowStartIso` = now − WINDOW_DAYS), most-recent first — the evidence + count.
+   * `lastSeenAt` is the max over that windowed set; `firstSeenAt` is the earliest
+   * over ALL positives (whole history), so a chronic pattern keeps its true origin
+   * date even though the count/evidence are windowed. Both null when
+   * there are no positives at all.
+   */
+  kitchenSinkPositives(windowStartIso: string): {
+    positives: Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+    firstSeenAt: string | null
+    lastSeenAt: string | null
+  } {
+    // Windowed positives (the card's evidence + count), most-recent first.
+    const positives = this.db
+      .prepare(
+        `SELECT v.session_id AS sessionId, v.split_block_idx AS splitBlockIdx,
+                v.split_seq AS splitSeq, v.reason AS reason
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?
+         ORDER BY s.started_at DESC, v.session_id`,
+      )
+      .all(windowStartIso) as Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+
+    // last-seen over the WINDOWED positives (the card's set); first-seen over ALL
+    // positives (whole history) so a chronic pattern keeps its true origin date even
+    // though count/evidence are windowed. strftime normalizes any offset before
+    // MIN/MAX so mixed timestamp formats can't skew the result.
+    const windowed = this.db
+      .prepare(
+        `SELECT MAX(strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.ended_at, s.started_at))) AS lastSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?`,
+      )
+      .get(windowStartIso) as { lastSeen: string | null }
+    const allTime = this.db
+      .prepare(
+        `SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', s.started_at)) AS firstSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1`,
+      )
+      .get() as { firstSeen: string | null }
+
+    return { positives, firstSeenAt: allTime.firstSeen, lastSeenAt: windowed.lastSeen }
+  }
+
   // ---- Recurring-theme mining -------------------------------------------------
 
   /**
@@ -3388,10 +3458,34 @@ export class Store {
           `SELECT e.session_id AS sessionId, e.turn_idx AS turnIdx, e.note AS note,
                   ${titleExpr('s')} AS sessionTitle
            FROM insight_evidence e LEFT JOIN sessions s ON s.id = e.session_id
-           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.session_id, e.turn_idx`,
+           -- rowid = insertion order = the detector's emit order (cache-miss emits its
+           -- evidence dollar-descending, so the priciest sessions show first). added_at
+           -- stays primary so accumulating detectors still surface the most recent run.
+           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.rowid`,
         )
         .all(insightId) as Array<{ sessionId: string; turnIdx: number; note: string | null; sessionTitle: string | null }>
     ).map((r) => ({ ...r, turnIdx: r.turnIdx === -1 ? null : r.turnIdx }))
+  }
+
+  /**
+   * Distinct repos of the sessions in a cross-repo ('*') insight's evidence — the
+   * repos that CONTRIBUTED to the last-surfaced card. A resolve sweep uses this to ask
+   * whether each previously-contributing repo now has enough data to call clean, rather
+   * than trusting a corpus-wide total that many sub-threshold repos could reach together
+   * (or a different repo's data that says nothing about a still-quiet contributor). Uses
+   * the same repo derivation the detectors do (repo ▸ cwd ▸ '_unknown'). Empty when the
+   * insight has no evidence (e.g. never surfaced) or its evidence sessions were pruned.
+   */
+  insightEvidenceRepos(insightId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT COALESCE(NULLIF(s.repo,''), NULLIF(s.cwd,''), '_unknown') AS repo
+           FROM insight_evidence e JOIN sessions s ON s.id = e.session_id
+           WHERE e.insight_id = ?`,
+        )
+        .all(insightId) as Array<{ repo: string }>
+    ).map((r) => r.repo)
   }
 
   insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {

@@ -26,6 +26,17 @@ function fixBody(fix) {
   return '<pre class="md-code"><code>' + esc(fix.content) + '</code></pre>';
 }
 
+// Per fix.type: what to DO with the payload, so the user knows where it goes. `hint` is a
+// one-line instruction shown above the body (a fix-prompt is pasted into a coding agent, a
+// snippet applied to config, a command run in a shell); `copy` labels what Copy grabs. A
+// behavioral nudge is prose guidance — no payload to run, so no hint.
+function fixAffordance(type) {
+  if (type === 'fix-prompt') return { hint: 'Paste this into your coding agent.', copy: 'Copy prompt' };
+  if (type === 'config-snippet') return { hint: 'Apply this to your config.', copy: 'Copy' };
+  if (type === 'install-command') return { hint: 'Run this in your terminal.', copy: 'Copy command' };
+  return { hint: '', copy: 'Copy fix' };
+}
+
 // Session ids are `<source>:<uuid>` — a short uuid prefix labels an occurrence
 // when the session has no title.
 function shortSession(id) {
@@ -56,10 +67,12 @@ function detailHtml(r, occ) {
 
   var desc = '<div class="ins-desc">' + renderMd(r.description) + '</div>';
 
+  var aff = fixAffordance(r.fix && r.fix.type);
   var fix = r.fix && r.fix.content
     ? '<div class="ins-fix"><div class="ins-fix-head">' +
         '<span class="ins-fix-label">' + esc(r.fix.label || 'Suggested fix') + '</span>' +
-        '<button type="button" class="ins-btn ins-copy">Copy fix</button></div>' +
+        '<button type="button" class="ins-btn ins-copy">' + esc(aff.copy) + '</button></div>' +
+        (aff.hint ? '<div class="ins-fix-hint">' + esc(aff.hint) + '</div>' : '') +
         fixBody(r.fix) + '</div>'
     : '';
 
