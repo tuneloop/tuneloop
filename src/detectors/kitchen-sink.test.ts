@@ -38,7 +38,7 @@ const SINCE = new Date(Date.now() - 30 * 86_400_000).toISOString()
 
 // A no-millisecond UTC timestamp N days before now. SQLite's
 // strftime('%Y-%m-%dT%H:%M:%SZ', …) — which the store uses to normalize first/last
-// -seen (landmine 6) — drops milliseconds, so seeding with this form lets those
+// -seen — drops milliseconds, so seeding with this form lets those
 // assertions round-trip exactly. Compute each once and reuse (Date.now() drifts).
 const daysAgoZ = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 
@@ -160,8 +160,8 @@ describe('kitchen-sink detector', () => {
     expect(kitchenSink.name).toBe('kitchen-sink')
     expect(kitchenSink.tier).toBe('P')
     expect(kitchenSink.needsLlm).toBe(true)
-    // v3: verdicts live in their own table and the card is windowed at read time.
-    expect(kitchenSink.version).toBe(3)
+    // verdicts live in their own table and the card is windowed at read time.
+    expect(kitchenSink.version).toBe(4)
   })
 
   it('returns no insights on an empty store', async () => {
@@ -510,9 +510,9 @@ describe('verdictRow', () => {
 })
 
 describe('positiveEvidence', () => {
-  it('points the occurrence at the stored split seq, with the derived note (no block jargon)', () => {
-    const ev = positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: 'auth then export.' })
-    expect(ev).toEqual({ sessionId: 's1', turnIdx: 4, note: 'A separate, unrelated objective begins here — auth then export.' })
+  it('uses the plain-language reason as the note, verbatim (no preamble, no block jargon)', () => {
+    const ev = positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: 'auth fix then unrelated marketing copy.' })
+    expect(ev).toEqual({ sessionId: 's1', turnIdx: 4, note: 'auth fix then unrelated marketing copy.' })
   })
 
   it('omits turnIdx when the stored split seq is null', () => {
@@ -521,8 +521,8 @@ describe('positiveEvidence', () => {
     expect(ev.sessionId).toBe('s1')
   })
 
-  it('leaves the note clause off when the reason is null', () => {
-    expect(positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: null }).note).toBe('A separate, unrelated objective begins here')
+  it('omits the note entirely when the reason is null', () => {
+    expect(positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: null }).note).toBeUndefined()
   })
 })
 
@@ -743,12 +743,12 @@ describe('kitchenSink.run (end to end)', () => {
     // It WAS judged (global scan) and its verdict cached, but the card is empty…
     expect(result.seen).toEqual([{ sessionId: 'kc:old', contentHash: 'kc:old-hash' }])
     expect(result.insights).toEqual([])
-    // …and no stale claim is frozen — the aggregate is never surfaced (the N4 fix).
+    // …and no stale claim is frozen — the aggregate is never surfaced.
     store.persistInsights('kitchen-sink', kitchenSink.version, result.insights)
     expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')).toBeNull()
   })
 
-  it('windows the count but keeps first-seen at the earliest flagged session (decision 5)', async () => {
+  it('windows the count but keeps first-seen at the earliest flagged session', async () => {
     const { store } = setup()
     const old = daysAgoZ(50) // out of window
     const recent = daysAgoZ(3) // in window
@@ -764,7 +764,7 @@ describe('kitchenSink.run (end to end)', () => {
     expect(r.insights[0]!.firstSeenAt).toBe(old)
   })
 
-  it('resolves a prior card when the window has sessions but none are kitchen-sinks (clean now, W7)', async () => {
+  it('resolves a prior card when the window has sessions but none are kitchen-sinks (clean now)', async () => {
     const { store } = setup()
     store.persistInsights('kitchen-sink', kitchenSink.version, [staleAggregate()])
     ingestCandidate(store, 'kc:1') // a recent candidate — real activity in the window
@@ -774,7 +774,7 @@ describe('kitchenSink.run (end to end)', () => {
     expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')!.state).toBe('resolved')
   })
 
-  it('does NOT resolve when the window has no sessions — not enough data (W7)', async () => {
+  it('does NOT resolve when the window has no sessions — not enough data', async () => {
     const { store } = setup()
     store.persistInsights('kitchen-sink', kitchenSink.version, [staleAggregate()])
     // Empty store: no sessions in the window at all (a user back from a month off).

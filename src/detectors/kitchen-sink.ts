@@ -9,12 +9,14 @@ import { costOfUsage } from '../pricing/pricing'
 
 const NAME = 'kitchen-sink'
 /**
- * v3: verdicts moved out of insight_evidence into their own `kitchen_sink_verdict`
- * table, candidate selection went global, and the card is windowed at read time.
- * The bump re-judges the whole corpus once to backfill the verdict table (a P-tier
- * one-time cost — cap it with `--limit`; see run()).
+ * Bumping re-judges the whole corpus once (a P-tier one-time cost — cap it with
+ * `--limit`; see run()), so bump whenever the prompt or storage shape changes.
+ *  - v3: verdicts moved out of insight_evidence into their own `kitchen_sink_verdict`
+ *    table, candidate selection went global, and the card is windowed at read time.
+ *  - v4: the reason prose must avoid internal "block" numbering (the reader never
+ *    sees blocks) — re-judge to regenerate reasons written the old way.
  */
-const VERSION = 3
+const VERSION = 4
 /** The card's presentation window: count/evidence/severity cover this trailing span. */
 const WINDOW_DAYS = 30
 /** Only sessions at or above this percentile of user-turn count are large enough to check. */
@@ -121,7 +123,7 @@ export interface Candidate {
 
 /**
  * The size/artifact `since` bound. `''` sorts below every ISO timestamp, so the
- * pre-gate scans ALL history (decision 1): every historical candidate is judged
+ * pre-gate scans ALL history: every historical candidate is judged
  * once and its verdict cached, and the 30-day window is applied at READ time when
  * the card is built (see run()), not here. Sessions with a NULL started_at are
  * excluded either way (`NULL >= ''` is NULL) — they can't be windowed on the card.
@@ -243,6 +245,10 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
     `When true, set splitBlockIdx to the block index (1..${Math.max(1, nBlocks - 1)}) where the`,
     'FIRST unrelated objective begins — the block that should have opened a new session.',
     'It is never 0 (block 0 opens the first objective). Otherwise set it to -1.',
+    '',
+    'In `reason`, name what the two objectives actually were, in plain language',
+    '(e.g. "refactors the auth module, then writes unrelated marketing copy"). Do NOT',
+    'mention block numbers or indices — the reader sees a prose note, never the blocks.',
   ].join('\n')
 
   return {
@@ -256,7 +262,7 @@ export function buildRequest(digest: string, nBlocks: number): StructuredRequest
       properties: {
         isKitchenSink: { type: 'boolean', description: 'True only when 2+ blocks pursue unrelated objectives.' },
         splitBlockIdx: { type: 'integer', description: 'Block index (>= 1) where the first unrelated objective begins; -1 if not a kitchen sink.' },
-        reason: { type: 'string', description: 'One sentence explaining the judgment.' },
+        reason: { type: 'string', description: 'One sentence naming the two objectives in plain language; no block numbers or indices.' },
       },
     },
   }
@@ -297,16 +303,6 @@ export async function judge(llm: LlmClient, digest: string, blocks: Block[]): Pr
 }
 
 /**
- * The per-occurrence note shown for a flagged session, and why. It says "here"
- * rather than naming a block: the evidence row links to the exact turn (splitSeq),
- * and "block" is an internal segmentation concept the user never sees.
- */
-function noteFor(reason: string): string {
-  const r = reason.trim()
-  return `A separate, unrelated objective begins here${r ? ` — ${r}` : ''}`
-}
-
-/**
  * Turn one judged session into the row persisted in `kitchen_sink_verdict` — the
  * verdict's permanent home (positive OR negative), resolving the split block to its
  * opening main-thread seq now (at judge time, while we hold `blocks`) so the read
@@ -329,12 +325,12 @@ export function verdictRow(c: Candidate, verdict: Verdict, blocks: Block[]): Omi
 
 /**
  * Rebuild one card occurrence from a stored positive verdict row. `turnIdx` is the
- * split block's opening seq (so the drawer opens where the session should have
- * split); the note is derived from the block index + reason, same wording as when
- * it was judged.
+ * split's opening seq (so the drawer opens where the session should have split);
+ * the note is the LLM's plain-language reason for THIS session, omitted when absent.
  */
 export function positiveEvidence(row: { sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }): EvidenceRef {
-  return { sessionId: row.sessionId, ...(row.splitSeq != null ? { turnIdx: row.splitSeq } : {}), note: noteFor(row.reason ?? '') }
+  const note = (row.reason ?? '').trim()
+  return { sessionId: row.sessionId, ...(row.splitSeq != null ? { turnIdx: row.splitSeq } : {}), ...(note ? { note } : {}) }
 }
 
 /**
@@ -379,7 +375,7 @@ export function buildAggregate(evidence: EvidenceRef[], firstSeenAt?: string, la
  * in `kitchen_sink_verdict`. Surfaces ONE cross-repo insight built each run as a
  * windowed projection of that table (the last WINDOW_DAYS of positives): count,
  * evidence and severity track only the window, so a flagged session ages off the
- * card on its own, and the insight resolves when the window empties (the N4/N6 fix).
+ * card on its own, and the insight resolves when the window empties.
  * Judging is incremental — only the unseen delta is judged — and, being a property
  * of immutable session content, a verdict never goes stale.
  */
@@ -391,7 +387,7 @@ export const kitchenSink: Detector = {
   async run(ctx): Promise<DetectorResult> {
     if (!ctx.llm) return { insights: [] }
     let found = unseenCandidates(ctx.store)
-    // W6: --limit caps how many candidates this run judges. The first global run
+    // --limit caps how many candidates this run judges. The first global run
     // backfills every historical candidate with an LLM, which can be large; the cap
     // lets a user throttle (or dry-run) it. Safe because each verdict is cached and
     // the card is rebuilt from the table, so the rest are picked up on later analyzes.
@@ -444,7 +440,7 @@ export const kitchenSink: Detector = {
     const card = ctx.store.kitchenSinkPositives(windowStart)
     const evidence = card.positives.map(positiveEvidence)
     const insight = buildAggregate(evidence, card.firstSeenAt ?? undefined, card.lastSeenAt ?? undefined)
-    // Empty window → resolve, but distinguish "clean now" from "not enough data" (W7):
+    // Empty window → resolve, but distinguish "clean now" from "not enough data":
     // only resolve when the user was actually active in the window. A window empty
     // because they were away (no sessions) is thin data, not a fixed habit — leave the
     // card rather than tell a returning user they cleaned it up.
