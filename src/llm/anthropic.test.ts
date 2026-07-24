@@ -27,3 +27,28 @@ describe('Anthropic system prompt caching', () => {
     expect(create.mock.calls[0]![0].system).toBe('RULES')
   })
 })
+
+describe('Anthropic tool-call XML leak sanitization', () => {
+  it('strips tool-call XML that bled into a string param of the forced tool', async () => {
+    const create = vi.fn().mockResolvedValue({
+      content: [
+        {
+          type: 'tool_use',
+          name: 'draft_fix',
+          input: {
+            worth_surfacing: true,
+            fix_type: 'fix-prompt',
+            content: 'Verify state before acting.</content>\n<parameter name="reason">Recurring gap.</parameter>',
+          },
+        },
+      ],
+      usage: { input_tokens: 10, output_tokens: 2 },
+    })
+    const client = { messages: { create } } as unknown as AnthropicMessagesClient
+    const llm = anthropicShapedClient(client, 'anthropic', 'claude-x')
+    const { data } = await llm.completeStructured({ system: 's', user: 'u', schema: {}, toolName: 'draft_fix' })
+    expect(data.content).toBe('Verify state before acting.')
+    expect(data.fix_type).toBe('fix-prompt')
+    expect(data.worth_surfacing).toBe(true)
+  })
+})
