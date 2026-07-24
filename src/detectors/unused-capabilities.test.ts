@@ -171,7 +171,7 @@ describe('queryInvoked', () => {
     expect(queryInvoked(store, since)).toEqual([])
   })
 
-  it('windows by the tool call\'s own timestamp, not the session start (decision 7)', () => {
+  it('windows by the tool call\'s own timestamp, not the session start', () => {
     const { db, store } = setupDb()
     // A long-running session that began 40 days ago (outside the window) but invoked the
     // server yesterday. The old started_at scan dropped it — and would then read the
@@ -631,7 +631,7 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(run(store)).toEqual([])
   })
 
-  it('resolves a prior card once nothing is flagged and the window has enough sessions (W7)', () => {
+  it('resolves a prior card once nothing is flagged and the window has enough sessions', () => {
     const { db, store } = setupDb()
     store.persistInsights('unused-capabilities', 1, [{
       signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
@@ -645,7 +645,7 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('resolved')
   })
 
-  it('does NOT resolve when the window has too few sessions — not enough data (W7)', () => {
+  it('does NOT resolve when the window has too few sessions — not enough data', () => {
     const { db, store } = setupDb()
     store.persistInsights('unused-capabilities', 1, [{
       signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',

@@ -12,10 +12,9 @@ import {
 import { openDb, type DB } from './db'
 
 /**
- * W1 acceptance gate (see docs/plans/detector-global-storage.md → "Verification
- * harness"): the new SQL views must classify the SAME events as the detector loops
- * they replace — same session, same turn idx, same counts. A silent divergence here
- * would be very hard to spot after W2/W3 delete the loops, so we freeze the loops as
+ * View↔loop parity gate: the SQL views must classify the SAME events as the detector
+ * loops they replaced — same session, same turn idx, same counts. A silent divergence
+ * here would be very hard to spot once the loops are gone, so we freeze the loops as
  * instrumented reference ports and diff them against the views over a shared corpus.
  *
  * The reference ports below are line-for-line copies of the classification in
@@ -158,7 +157,7 @@ function sorted<V>(m: Map<string, V>): Array<[string, V]> {
 }
 
 // ---------------------------------------------------------------------------
-// (a) Synthetic corpus — deterministic, exercises every landmine, runs in CI.
+// (a) Synthetic corpus — deterministic, exercises every known pitfall, runs in CI.
 // ---------------------------------------------------------------------------
 
 let dir: string
@@ -204,13 +203,13 @@ function buildSyntheticCorpus(db: DB): void {
   seedTurn(db, 'comp', 2, { input: 130_000 })
   seedTurn(db, 'comp', 3, { input: 60_000 }) // 60k > 52k → NOT a compaction
 
-  // landmine 1: a zero row between two real turns must not fake a drop
+  // pitfall: a zero row between two real turns must not fake a drop
   seedSession(db, 'zero')
   seedTurn(db, 'zero', 0, { input: 100_000 })
   seedTurn(db, 'zero', 1, {}) // all-zero
   seedTurn(db, 'zero', 2, { input: 50_000 }) // 50k > 40k → not a compaction; the 0-row must be invisible
 
-  // landmine 2: an interleaved sidechain turn must not become a main turn's "previous"
+  // pitfall: an interleaved sidechain turn must not become a main turn's "previous"
   seedSession(db, 'side')
   seedTurn(db, 'side', 0, { input: 150_000, sidechain: 1 }) // subagent peak
   seedTurn(db, 'side', 1, { input: 40_000, sidechain: 0 }) // first MAIN turn — no real predecessor
@@ -221,7 +220,7 @@ function buildSyntheticCorpus(db: DB): void {
   seedTurn(db, 'cache', 1, { input: 25_000 }) // reads 0 of 20k prior → MISS
   seedTurn(db, 'cache', 2, { reads: 30_000 }) // reads 30k of 25k prior → HIT
 
-  // landmine 3: an early classified turn with no cache of its own is still gated by
+  // pitfall: an early classified turn with no cache of its own is still gated by
   // the WHOLE-session max, not a running max — a running max would drop it.
   seedSession(db, 'runmax')
   seedTurn(db, 'runmax', 0, { input: 20_000 }) // new_ctx 20k, no cache
@@ -264,7 +263,7 @@ function buildCapabilityCorpus(db: DB): void {
   seedCapSession(db, 'capcodex', 'codex', 'o/web', [{ name: 'mcp__sentry__a', action: 'mcp_call' }]) // other source → re-merged by SUM
 }
 
-describe('view↔detector diff (W1 acceptance) — synthetic corpus', () => {
+describe('view↔detector diff — synthetic corpus', () => {
   it('compaction_event matches the context-exhaustion loop event-for-event', () => {
     const db = openDb(join(dir, 'synthetic.db'))
     buildSyntheticCorpus(db)
@@ -305,7 +304,7 @@ describe('view↔detector diff (W1 acceptance) — synthetic corpus', () => {
 // ---------------------------------------------------------------------------
 
 const realStore = process.env.TUNELOOP_DIFF_STORE
-describe('view↔detector diff (W1 acceptance) — real store', () => {
+describe('view↔detector diff — real store', () => {
   it.runIf(!!realStore)('classification matches the JS loops over the real corpus', () => {
     const db = openDb(realStore as string)
     const comp = { sql: sqlCompactionEvents(db), ref: refCompactionEvents(db) }

@@ -215,7 +215,7 @@ describe('runDetectors — delta cache invalidation', () => {
   })
 })
 
-describe('runDetectors — --limit bounds detectors (W6)', () => {
+describe('runDetectors — --limit bounds detectors', () => {
   it('skips X-tier detectors under a limit but still runs S/P-tier', async () => {
     const { db, store, log } = setup()
     let xRan = false

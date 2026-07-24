@@ -3021,7 +3021,7 @@ export class Store {
    * (`windowStartIso` = now − WINDOW_DAYS), most-recent first — the evidence + count.
    * `lastSeenAt` is the max over that windowed set; `firstSeenAt` is the earliest
    * over ALL positives (whole history), so a chronic pattern keeps its true origin
-   * date even though the count/evidence are windowed (decision 5). Both null when
+   * date even though the count/evidence are windowed. Both null when
    * there are no positives at all.
    */
   kitchenSinkPositives(windowStartIso: string): {
@@ -3042,8 +3042,8 @@ export class Store {
 
     // last-seen over the WINDOWED positives (the card's set); first-seen over ALL
     // positives (whole history) so a chronic pattern keeps its true origin date even
-    // though count/evidence are windowed (decision 5). strftime normalizes any offset
-    // before MIN/MAX so mixed timestamp formats can't skew the result (landmine 6).
+    // though count/evidence are windowed. strftime normalizes any offset before
+    // MIN/MAX so mixed timestamp formats can't skew the result.
     const windowed = this.db
       .prepare(
         `SELECT MAX(strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.ended_at, s.started_at))) AS lastSeen

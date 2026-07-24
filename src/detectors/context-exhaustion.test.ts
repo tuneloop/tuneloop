@@ -60,7 +60,7 @@ function seedSession(
 }
 
 // Like seedSession, but decouples the session's started_at from its turn
-// timestamps — to exercise the event-ts window (decision 7), where a card is
+// timestamps — to exercise the event-ts window, where a card is
 // dated by when a compaction happened, not by when its session began. Turns are
 // stamped a minute apart from tsBaseMs, in idx order.
 function seedDecoupled(
@@ -286,7 +286,7 @@ describe('context-exhaustion detector', () => {
     expect(insights[0]!).toMatchObject({ severity: 'medium', count: 2 })
   })
 
-  it('windows by the compaction turn\'s own timestamp, so a session begun long ago but active now still counts (decision 7)', () => {
+  it('windows by the compaction turn\'s own timestamp, so a session begun long ago but active now still counts', () => {
     const { db, ctx } = setup()
     const beganOutsideWindow = new Date(Date.now() - 40 * DAY_MS).toISOString()
     const compactedYesterday = Date.now() - DAY_MS
@@ -298,7 +298,7 @@ describe('context-exhaustion detector', () => {
     expect(insights[0]!.count).toBe(10)
   })
 
-  it('excludes compactions older than the window even when the session started recently (decision 7)', () => {
+  it('excludes compactions older than the window even when the session started recently', () => {
     const { db, ctx } = setup()
     const startedYesterday = new Date(Date.now() - DAY_MS).toISOString()
     const compactedLongAgo = Date.now() - 40 * DAY_MS
@@ -308,7 +308,7 @@ describe('context-exhaustion detector', () => {
     expect(contextExhaustion.run(ctx)).toEqual([])
   })
 
-  it('resolves a prior card when no repo qualifies this window (N4)', () => {
+  it('resolves a prior card when no repo qualifies this window', () => {
     const { db, store, ctx } = setup()
     // A previously surfaced card is on the dashboard.
     store.persistInsights('context-exhaustion', 1, [{
@@ -329,7 +329,7 @@ describe('context-exhaustion detector', () => {
     expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('resolved')
   })
 
-  it('does NOT resolve when the window has too few sessions — not enough data (W7)', () => {
+  it('does NOT resolve when the window has too few sessions — not enough data', () => {
     const { db, store, ctx } = setup()
     store.persistInsights('context-exhaustion', 1, [{
       signalKey: 'context-exhaustion', repo: '*', severity: 'high', title: 'stale', description: 'stale',

@@ -462,7 +462,7 @@ CREATE INDEX IF NOT EXISTS ix_theme_events_theme ON theme_events(theme_id);
 -- whether a session mixed unrelated objectives — expensive, non-reproducible, and a
 -- property of immutable session content — gets a permanent home here rather than
 -- living in insight_evidence (a DISPLAY table capped at EVIDENCE_CAP and coupled to
--- the insight lifecycle: that coupling was the N6 root cause). One row per JUDGED
+-- the insight lifecycle: that coupling is exactly the bug this table avoids). One row per JUDGED
 -- session, positive AND negative, so the card is a pure projection — windowed
 -- positives, rebuilt every run, ageing out on their own. A positive re-judged
 -- negative just flips is_kitchen_sink (a plain upsert), dropping it from the card.
@@ -526,14 +526,14 @@ CREATE INDEX IF NOT EXISTS ix_env_snapshots_lookup
  * "a cache miss": the predicate lives here, in SQL, rather than inside one
  * detector's run loop, so nothing else in the product has to reimplement it.
  *
- * The thresholds are interpolated from `../core/thresholds` (decision 4) so a
- * view literal can never drift from the detector that owns the concept.
+ * The thresholds are interpolated from `../core/thresholds` so a view literal can
+ * never drift from the detector that owns the concept.
  *
  * Applied on every `openDb` with `DROP VIEW IF EXISTS` then an UNCONDITIONAL
  * `CREATE VIEW` — NEVER `CREATE VIEW IF NOT EXISTS`. On a definition change (a
  * threshold edit, a bug fix) the `IF NOT EXISTS` form is a silent no-op and an
- * existing store keeps the stale view forever, with nothing recording which
- * (landmine 5). Recreating unconditionally is cheap (views hold no data).
+ * existing store keeps the stale view forever, with nothing recording which.
+ * Recreating unconditionally is cheap (views hold no data).
  */
 function buildUsageViews(): string {
   return `
@@ -549,7 +549,7 @@ WITH live AS (
   FROM usage_facts u JOIN sessions s ON s.id = u.session_id
   -- All-zero rows aren't API calls (content flushes, ingest-deduped repeats). Dropped
   -- HERE so the LAGs below mean "previous real turn", matching the JS loops' \`continue\`
-  -- BEFORE prevOcc/prevCtx update (landmine 1).
+  -- BEFORE prevOcc/prevCtx update.
   WHERE COALESCE(u.tok_input,0) + COALESCE(u.tok_output,0) + COALESCE(u.tok_cache_create_5m,0)
       + COALESCE(u.tok_cache_create_1h,0) + COALESCE(u.tok_cache_read,0) > 0
 )
@@ -565,12 +565,12 @@ SELECT session_id, idx, ts, model, provider, repo, is_sidechain, started_at,
        LAG(reads + CASE WHEN creates_5m + creates_1h > 0 THEN creates_5m + creates_1h ELSE input END) OVER w AS prev_ctx,
        LAG(ts) OVER w AS prev_ts,
        -- Unordered window p → whole-session max. MAX(...) OVER w (ordered) would be a
-       -- RUNNING max, failing early turns that later turns pass (landmine 3).
+       -- RUNNING max, failing early turns that later turns pass.
        MAX(creates_5m + creates_1h + reads) OVER p AS session_cache_tokens
 FROM live
 -- Partition on (session_id, is_sidechain): sidechain rows share the session and
--- interleave by idx; without it a subagent turn becomes a main turn's "previous"
--- (landmine 2). All subagents share is_sidechain=1 — no per-agent series here.
+-- interleave by idx; without it a subagent turn becomes a main turn's "previous".
+-- All subagents share is_sidechain=1 — no per-agent series here.
 WINDOW w AS (PARTITION BY session_id, is_sidechain ORDER BY idx),
        p AS (PARTITION BY session_id, is_sidechain);
 
@@ -588,7 +588,7 @@ CREATE VIEW cache_classified_turn AS
 SELECT session_id, idx, ts, repo, model, provider,
        prev_ctx, reads, input, creates_5m, creates_1h, creates,
        CASE WHEN reads < prev_ctx * ${HIT_READ_SHARE} THEN 1 ELSE 0 END AS is_miss,
-       -- 2-arg MIN() returns NULL if EITHER arg is NULL (landmine 4 / the B4 trap);
+       -- 2-arg MIN() returns NULL if EITHER arg is NULL;
        -- safe only because the WHERE guarantees prev_ctx is non-null.
        MIN(prev_ctx - reads, CASE WHEN creates > 0 THEN creates ELSE input END) AS avoidable_tokens,
        CAST((julianday(ts) - julianday(prev_ts)) * 86400000 AS INTEGER) AS gap_ms
@@ -610,9 +610,9 @@ CREATE VIEW cache_miss_event AS SELECT * FROM cache_classified_turn WHERE is_mis
  * inside that detector's query; hoisting it here makes it the one definition.
  *
  * Same lifecycle contract as `buildUsageViews`: `DROP VIEW IF EXISTS` then an
- * unconditional `CREATE VIEW` on every `openDb` (landmine 5). No thresholds here — the
- * recency window is a read-time predicate the consumer applies (`last_invoked_at >=
- * since`), since a capability used once long ago is not current use (decision 6).
+ * unconditional `CREATE VIEW` on every `openDb`. No thresholds here — the recency
+ * window is a read-time predicate the consumer applies (`last_invoked_at >= since`),
+ * since a capability used once long ago is not current use.
  */
 function buildCapabilityViews(): string {
   return `
@@ -641,7 +641,7 @@ SELECT source, kind, name, repo,
        COUNT(DISTINCT session_id) AS sessions,   -- adoption breadth, not chattiness
        COUNT(*)                   AS calls,
        -- strftime normalizes any offset to UTC before MIN/MAX, so mixed timestamp
-       -- formats can't produce a wrong "latest" (landmine 6 / N10, fixed at source).
+       -- formats can't produce a wrong "latest" — fixed at source, not per comparison.
        MIN(strftime('%Y-%m-%dT%H:%M:%SZ', ts)) AS first_invoked_at,
        MAX(strftime('%Y-%m-%dT%H:%M:%SZ', ts)) AS last_invoked_at
 FROM capability_invocation

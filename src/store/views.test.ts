@@ -66,7 +66,7 @@ function cnt(db: DB, view: string, sessionId?: string): number {
 const viewSql = (db: DB, name: string): string =>
   (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = ?").get(name) as { sql: string }).sql
 
-describe('usage view infrastructure (W0)', () => {
+describe('usage view infrastructure', () => {
   it('creates all four usage views on openDb', () => {
     const db = openDb(':memory:')
     const views = (
@@ -92,7 +92,7 @@ describe('usage view infrastructure (W0)', () => {
 })
 
 describe('usage_turns view', () => {
-  it('filters all-zero rows before the LAG, so prev = previous REAL turn (landmine 1)', () => {
+  it('filters all-zero rows before the LAG, so prev = previous REAL turn', () => {
     const db = openDb(':memory:')
     seedSession(db, 's4')
     seedTurn(db, 's4', 0, { input: 100_000 })
@@ -129,7 +129,7 @@ describe('compaction_event view', () => {
     db.close()
   })
 
-  it('does not let a sidechain turn become a main turn\'s "previous" (landmine 2)', () => {
+  it('does not let a sidechain turn become a main turn\'s "previous"', () => {
     const db = openDb(':memory:')
     seedSession(db, 's3')
     seedTurn(db, 's3', 0, { input: 150_000, sidechain: 1 }) // subagent peak
@@ -141,7 +141,7 @@ describe('compaction_event view', () => {
     db.close()
   })
 
-  it('recreates views unconditionally on reopen, overriding a stale definition (landmine 5 / acceptance)', () => {
+  it('recreates views unconditionally on reopen, overriding a stale definition', () => {
     const path = join(dir, `reopen${n++}.db`)
     const db = openDb(path)
     seedCompactionCorpus(db)

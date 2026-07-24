@@ -13,10 +13,10 @@ import { priceFor } from '../pricing/pricing'
  *
  * The classification itself lives in SQL: the `cache_classified_turn` /
  * `cache_miss_event` views (src/store/db.ts) are scanned GLOBALLY and this detector
- * presents a recent WINDOW over them (decision 1). The view yields `avoidable_tokens`
+ * presents a recent WINDOW over them. The view yields `avoidable_tokens`
  * plus the rate inputs; dollars stay here because `priceFor` is a JS table with no
- * SQL equivalent (decision 2). The window keys off each turn's OWN timestamp, not its
- * session's start (decision 7), so a card ages out when the misses stop.
+ * SQL equivalent. The window keys off each turn's OWN timestamp, not its
+ * session's start, so a card ages out when the misses stop.
  *
  * The detector makes no causal claim about WHY a miss happened — cache lifetimes are
  * per-request API choices we can't read, and config churn needs env snapshots.
@@ -181,7 +181,7 @@ export const cacheMiss: Detector = {
       ([, a]) => a.sessions >= MIN_SESSIONS && a.wasteUsd >= MIN_WASTE_USD,
     )
     if (qualifying.length === 0) {
-      // Nothing qualifies. Distinguish "clean now" from "not enough data" (W7): resolve
+      // Nothing qualifies. Distinguish "clean now" from "not enough data": resolve
       // a prior card only when the window actually held enough sessions to judge the rate
       // (the same MIN_SESSIONS bar the card needs). Below it — a user back from a month
       // off — an empty result is thin data, not a fix, so leave the card as it was rather

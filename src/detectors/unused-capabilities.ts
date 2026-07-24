@@ -86,9 +86,9 @@ export interface InvokedCap {
  *
  * The view aggregates globally; recency is applied HERE as a read-time predicate:
  * `last_invoked_at >= since` keeps a capability only if its MOST RECENT invocation is
- * inside the window (decision 6 — a server used once long ago is not current use). That
+ * inside the window (a server used once long ago is not current use). That
  * timestamp is `MAX(tool_call.ts)`, so usage is dated by when the tool actually ran, not
- * by when its session began (decision 7): a long session that started before the window
+ * by when its session began: a long session that started before the window
  * but invoked the server yesterday still counts, where the old `s.started_at` scan
  * dropped it and then misread the live server as unused.
  *
@@ -603,7 +603,7 @@ export const unusedCapabilities: Detector = {
     const cards = buildCards(classified, scopeInvocations)
     if (cards.length === 0) {
       // Nothing flagged. Resolve a prior card only when the window held enough sessions to
-      // judge usage (W7) — the same MIN_SESSIONS bar the removal verdict itself needs.
+      // judge usage — the same MIN_SESSIONS bar the removal verdict itself needs.
       // Below it, an empty result is thin data (a user back from a month off), not a
       // cleaned-up config, so the stale card stays rather than falsely resolving.
       const windowSessions = [...sessionCounts.values()].reduce((n, c) => n + c, 0)

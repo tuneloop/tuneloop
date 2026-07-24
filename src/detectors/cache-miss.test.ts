@@ -64,7 +64,7 @@ function seedSession(
 }
 
 // Like seedSession, but decouples the session's started_at from its turn
-// timestamps — to exercise the event-ts window (decision 7), where a card is
+// timestamps — to exercise the event-ts window, where a card is
 // dated by when a turn happened, not by when its session began.
 function seedDecoupled(
   db: ReturnType<typeof openDb>,
@@ -194,7 +194,7 @@ describe('cache-miss detector', () => {
     expect(store.insightStatus('cache-miss', '*', 'cache-misses')!.state).toBe('resolved')
   })
 
-  it('does NOT resolve when too few sessions saw activity — not enough data (W7)', () => {
+  it('does NOT resolve when too few sessions saw activity — not enough data', () => {
     const { db, store, ctx } = setup()
     store.persistInsights('cache-miss', 5, [staleCard('cache-misses')])
     for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, warmSession) // < MIN_SESSIONS
@@ -362,7 +362,7 @@ describe('cache-miss detector', () => {
     expect(insights[0]!.evidence[0]!.sessionId).toBe('whale')
   })
 
-  it('windows by the turn\'s own timestamp, so a session that began long ago but is active now still counts (decision 7)', () => {
+  it('windows by the turn\'s own timestamp, so a session that began long ago but is active now still counts', () => {
     const { db, ctx } = setup()
     const beganOutsideWindow = new Date(Date.now() - 40 * DAY_MS).toISOString()
     const missedYesterday = Date.now() - DAY_MS
@@ -374,7 +374,7 @@ describe('cache-miss detector', () => {
     expect(insights[0]!.count).toBe(10)
   })
 
-  it('excludes turns older than the window even when the session started recently (decision 7)', () => {
+  it('excludes turns older than the window even when the session started recently', () => {
     const { db, ctx } = setup()
     const startedYesterday = new Date(Date.now() - DAY_MS).toISOString()
     const missedLongAgo = Date.now() - 40 * DAY_MS
