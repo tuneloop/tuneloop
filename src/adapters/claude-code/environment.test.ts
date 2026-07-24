@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { claudeHome, claudeJsonPath, splitFrontmatter, parseFrontmatter, toStringList, scanProject, resolvePluginDirs, readClaudeCodeEnvironment } from './environment'
 import { openDb } from '../../store/db'
 import { Store } from '../../store/store'
@@ -101,6 +101,23 @@ describe('readClaudeCodeEnvironment — empty', () => {
       expect(await readClaudeCodeEnvironment(empty)).toEqual([])
     } finally {
       rmSync(empty, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('readClaudeCodeEnvironment — symlinked skills', () => {
+  it('follows a symlinked skill dir and collapses duplicates by real path', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'cc-symlink-'))
+    try {
+      // A real skill, plus a sibling that is a symlink to it — both are discovered
+      // (listDirs follows symlinks) but collapse to one entry (realpath dedup).
+      mkdirSync(join(repo, '.claude', 'skills', 'real'), { recursive: true })
+      writeFileSync(join(repo, '.claude', 'skills', 'real', 'SKILL.md'), '---\ndescription: Real\n---\nReal body.\n')
+      symlinkSync(join(repo, '.claude', 'skills', 'real'), join(repo, '.claude', 'skills', 'dup'))
+      const skills = cat(await readClaudeCodeEnvironment(repo), 'skills') as { skills: Array<{ body: string }> }
+      expect(skills.skills.filter((s) => s.body.includes('Real body')).length).toBe(1)
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
     }
   })
 })

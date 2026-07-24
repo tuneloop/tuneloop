@@ -574,5 +574,191 @@ config-diff adoption check).
    specifically need them.
 6. **Allowlist, not blocklist** — a field is captured only if it appears in the tables above.
 
+---
+
+# Part 3 — OpenCode reader
+
+The storage layer, the harness-neutral category vocabulary, the two-phase capture (global once +
+per unique repo root), append-on-change, and deletion tombstones are all **inherited unchanged**
+from Parts 1–2. Adding OpenCode is therefore a single new reader:
+
+- `src/adapters/opencode/environment.ts` exporting `readOpencodeEnvironment(projectPath?)` →
+  `EnvCategorySnapshot[]`, plus
+- one line in `src/adapters/opencode/index.ts` (`readEnvironment: readOpencodeEnvironment`).
+
+No store, schema, or `analyze.ts` change is needed — `reposBySource` already resolves OpenCode
+repo roots from `session.project.cwd`, so project-scope capture runs the moment the hook exists.
+
+## Snapshots are independent per-harness views
+
+Every `environment_snapshots` row is keyed by `source` (the adapter id) as the leading PK column.
+The `claude-code` and `opencode` snapshots are **fully isolated** and are consumed independently —
+each is read only to advise *that* harness. Nothing is summed across sources, so there is **no
+double-counting** and therefore **no "skip" rule**: the OpenCode reader captures *every* location
+OpenCode honors, including its Claude-compatible and agent-compatible fallback dirs
+(`.claude/skills/`, `~/.claude/CLAUDE.md`, `.agents/skills/`, …). The same physical file
+appearing in both the `claude-code` and `opencode` snapshots is correct — they are two different
+harnesses' effective config, and advice about OpenCode must read off OpenCode's effective config.
+
+## Structural differences from Claude Code (why it isn't copy-paste)
+
+1. **Config home ≠ data home.** The adapter's `defaultRoots` is the *data* dir
+   (`~/.local/share/opencode`, which holds `opencode.db`). Config lives elsewhere, under
+   `opencodeConfigHome()`:
+   `$OPENCODE_CONFIG_DIR` → else `$XDG_CONFIG_HOME/opencode` → else `~/.config/opencode`.
+   An explicit config *file* override is `$OPENCODE_CONFIG`. Global-scope reads must use the
+   config home, never the data root.
+2. **One JSONC file feeds four categories.** `opencode.json` **or** `opencode.jsonc` packs
+   `permission` + `plugin` (settings), `mcp`, inline `agent` (agents), inline `command` (skills),
+   and `instructions` refs. A single parse fans out; the `.md`/`SKILL.md` scans layer on top.
+3. **JSONC parsing is new.** The repo has no JSONC support today. A small comment-/trailing-
+   comma-tolerant parse helper is required (JSON alone will not parse the user's `.jsonc`).
+   Variable substitution (`{env:…}`, `{file:…}`) is left literal — since secrets are dropped, a
+   substituted MCP url simply fails `redactUrl` and is dropped (safe).
+4. **Directory names vary; config keys are singular.** In the config file the keys are singular
+   (`agent`, `command`, `plugin`). On disk the docs read as plural (`agents/`, `commands/`,
+   `skills/`, `plugins/`), but OpenCode has used the singular dir names across versions — so the
+   reader scans **both** `agents/`+`agent/` and `commands/`+`command/` (missing dirs yield `[]`,
+   so scanning both is free and version-robust). `skills/` is confirmed plural.
+5. **`permission` is an object, not allow/deny/ask arrays** (`{ edit, bash, webfetch }` → enum
+   `ask|allow|deny`, or nested glob→enum). Different allowlist shape from CC.
+6. **`AGENTS.md` is `instructions`, not `agents`.** OpenCode's `agents/*.md` are sub-agent
+   definitions; `AGENTS.md` is the CLAUDE.md-equivalent.
+
+## Shared-helper extraction
+
+OpenCode's `SKILL.md` and frontmatter handling are identical to CC's. Rather than reimplement or
+import cross-adapter, extract the reusable primitives into **`src/adapters/env-shared.ts`** and
+have both readers import them: `splitFrontmatter`, `parseFrontmatter`, `toStringList`,
+`readSkillFile`, the agent-frontmatter parse, `redactUrl`, `readJsonIfExists`, `isUnder`,
+`listDirs`, `contentHash`-of-body. `claude-code/environment.ts` and `opencode/environment.ts`
+then share one implementation.
+
+## What we capture — by category (OpenCode)
+
+Where `$OC_HOME` = `opencodeConfigHome()` and `<repo>` is a project root. Each category's payload
+is **keyed by on-disk source** (file path / dir+name), so every location is distinguishable and
+the `content_hash` moves when any one changes.
+
+### 1. `settings`
+
+**Sources:** `$OC_HOME/opencode.json[c]` (global); `<repo>/opencode.json[c]` (project). Keyed by
+source file path.
+
+| Field                 | Capture                | Signal                                             |
+| --------------------- | ---------------------- | -------------------------------------------------- |
+| `permission`          | Yes (object as-is)     | Tool-approval posture — core adoption signal       |
+| `plugin`              | Yes (npm names / specs)| Ecosystem adoption (parallel to CC `enabledPlugins`)|
+| `model` / `small_model` / `default_agent` | Candidate (non-secret model posture) | Model-choice adoption — include if a detector needs it |
+
+**Dropped:** **`provider`** (holds API keys — never read), `keybinds`/`theme`/`tui`, `formatter`/
+`lsp`/`watcher`/`compaction`/`experimental`, and `mcp`/`agent`/`command` (their own categories).
+
+### 2. `mcp`
+
+**Sources:** the `mcp` object in the global and project `opencode.json[c]`. Keyed by source file →
+server name.
+
+| Field     | Capture                          | Notes                                             |
+| --------- | -------------------------------- | ------------------------------------------------- |
+| `type`    | Yes (`local` \| `remote`)        |                                                   |
+| `url`     | remote only, credential-stripped | via `redactUrl`; `{env:…}` → unparseable → dropped |
+| `enabled` | If present (bool)                |                                                   |
+
+**Dropped (secret-bearing / signal-free):** `command`, `cwd`, **`environment`**, **`headers`**,
+**`oauth`**, `timeout`.
+
+### 3. `agents`
+
+**Sources:** `agents/*.md` (`$OC_HOME/agents/`, `<repo>/.opencode/agents/`) **and** inline `agent`
+objects in `opencode.json[c]` (global + project). File entries key `name` off the filename; inline
+entries key off the config path + object key and tag `source: "config"`.
+
+| Field                         | Capture                | Signal                        |
+| ----------------------------- | ---------------------- | ----------------------------- |
+| `name`                        | Yes (filename / key)   | Agent catalog                 |
+| `description`                 | If present             | Purpose                       |
+| `mode` (`primary`/`subagent`/`all`) | If present       | Agent role                    |
+| `model`                       | If present             | Per-agent model preference    |
+| Body (markdown body / inline `prompt`) | Yes — full + hash | System prompt — adoption + diff |
+
+**Dropped:** `color`, `temperature`, `permission`, `steps`, `top_p`, `hidden`, `disable`, `tools`
+(deprecated), provider passthrough. (Docs list no `.claude/agents` fallback for agents — native
+locations only.)
+
+### 4. `skills`
+
+The harness-neutral `skills` category holds both OpenCode **skills** (`SKILL.md`) and **commands**
+(the user-invoked `/slash` prompts) — mirroring how CC folds commands into skills — with each entry
+tagged `kind: "skill" | "command"` so the two remain distinguishable.
+
+**Skill sources — all six searched `<name>/SKILL.md` locations (merged), keyed by (location, name):**
+
+| Scope   | Locations                                                              |
+| ------- | --------------------------------------------------------------------- |
+| Project | `.opencode/skills/`, `.claude/skills/`, `.agents/skills/`             |
+| Global  | `$OC_HOME/skills/`, `~/.claude/skills/`, `~/.agents/skills/`          |
+
+`name` = directory name (must equal frontmatter `name`); capture `description` + body + hash;
+`kind: "skill"`. `SKILL.md` shape is identical to CC → reuse `readSkillFile`.
+
+**Command sources:** `commands/*.md` (`$OC_HOME/commands/`, `<repo>/.opencode/commands/`) **and**
+inline `command` objects in the config. `name` = filename / key; capture `description`, `agent`,
+`model` + body (`template`) + hash; `kind: "command"`.
+
+**Dropped:** `subtask`; skill `license` / `compatibility` / `metadata` (low signal).
+
+### 5. `instructions`
+
+**Effective/active only** — apply OpenCode's fallback precedence and store *only* what OpenCode
+actually loads (a shadowed file OpenCode ignores is not stored). Keyed by file path; empty files
+omitted; bodies stored full + hash.
+
+| Scope   | Active source (in precedence order)                                                  |
+| ------- | ------------------------------------------------------------------------------------ |
+| Global  | `$OC_HOME/AGENTS.md`; **else** fallback `~/.claude/CLAUDE.md`                         |
+| Project | `<repo>/AGENTS.md` (+ nested `AGENTS.md` under the repo); **else** fallback `<repo>/CLAUDE.md` |
+| Both    | every file matched by the config `instructions[]` globs (always combined; local paths only — remote URLs deferred) |
+
+## Scope summary (OpenCode)
+
+| Category       | Global scope                                            | Project scope                                                        |
+| -------------- | ------------------------------------------------------- | -------------------------------------------------------------------- |
+| `settings`     | `$OC_HOME/opencode.json[c]`                             | `<repo>/opencode.json[c]`                                            |
+| `mcp`          | `mcp{}` in `$OC_HOME/opencode.json[c]`                  | `mcp{}` in `<repo>/opencode.json[c]`                                 |
+| `agents`       | `$OC_HOME/agents/*.md` + inline `agent{}`              | `<repo>/.opencode/agents/*.md` + inline `agent{}`                    |
+| `skills`       | 3 global `skills/<n>/SKILL.md` + `commands/*.md` + inline `command{}` | 3 project `skills/<n>/SKILL.md` + `.opencode/commands/*.md` + inline |
+| `instructions` | `$OC_HOME/AGENTS.md` (→ `~/.claude/CLAUDE.md`) + `instructions[]` | `<repo>/AGENTS.md` (+ nested; → `<repo>/CLAUDE.md`) + `instructions[]` |
+
+## Symlinks & deduplication (both readers)
+
+Skills, agents, and commands are commonly **symlinked** to share them across harness dirs (e.g.
+`~/.claude/skills/foo` → `~/.agents/skills/foo`). Two shared fixes make the readers handle this —
+they apply to the Claude Code reader as well, not just OpenCode:
+
+- **Follow symlinks.** `listDirs` and `walkFiles` (in `env-shared.ts` / `util/walk.ts`) previously
+  filtered on `Dirent.isDirectory()`, which is **false for a symlink-to-a-directory** — so a
+  symlinked skill dir was silently dropped even though the harness loads it. Both now resolve
+  symlinks (with a visited-realpath guard in `walkFiles` so a symlink cycle terminates).
+- **Dedupe by real path.** Because the same physical skill can be reached through several
+  locations (a real dir plus symlinks into it), each reader keeps a `Set` of source-file
+  realpaths and collapses entries that resolve to the same file — so a skill symlinked into
+  `.claude` **and** `.agents` appears once, not twice. Scan order lists likely-real locations
+  first, so the real location wins the surviving `dir` label. This mirrors the "effective, not
+  raw on-disk" choice made for instructions.
+
+## Out of scope (v1)
+
+Remote config (`.well-known/opencode`), `OPENCODE_CONFIG_CONTENT` inline overrides, managed
+system configs (`/Library/Application Support/opencode`, `/etc/opencode`), local plugin JS bodies
+in `plugins/` dirs (names captured via `settings.plugin`, not the code), remote-URL entries in
+`instructions[]`, and `tui.json`.
+
+## Security (delta from Part 2)
+
+Same allowlist-not-blocklist principle. OpenCode-specific **never-store**: the `provider` block
+(API keys), MCP `environment` / `headers` / `oauth`, any `{env:…}`-substituted value, and the data
+dir's `auth.json` (never touched). Instruction/agent/skill/command bodies are stored (user-authored
+content, not secrets — the adoption signal needs them), consistent with CC.
 
 
