@@ -601,6 +601,207 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
   }))
 }
 
+// ---- Skill drift & version comparison (the hero feature) ------------------
+// Reconstructs a skill's edit timeline from the append-on-change snapshot history
+// and reports usage/error/friction on each side of each edit. Deliberately EDIT-
+// anchored, not time-window-scoped: the parent tab's time filter governs the "how
+// is it doing lately" widgets, but "did the last change help?" is answered against
+// the versions' own lifetimes, so the filter must not clip it.
+//
+// Honesty guards (see [[correctness-over-coverage]]):
+//  - correlation, not causation: we say "changed AFTER the edit", never "the edit
+//    caused it". The client frames it that way too.
+//  - version history is only as granular as the analyze cadence — edits made between
+//    two analyze runs collapse into one boundary. The client shows this caveat.
+//  - a before/after delta is only surfaced when BOTH sides clear a small sample
+//    guard; otherwise we say "not enough data yet".
+
+/** Minimum invocations on EACH side of an edit before we'll show a before/after delta. */
+const MIN_DRIFT_CALLS = 3
+/** Cap (days) on each side of the symmetric before/after window. */
+const DRIFT_MAX_HALF_DAYS = 30
+
+/** Usage facts for one version's lifetime (or one side of an edit). */
+export interface SkillVersionUsage {
+  calls: number
+  sessions: number
+  errorCalls: number
+  frictionAdjacent: number
+}
+
+/** One captured version of a skill: its body hash + the window it was the live body. */
+export interface SkillVersion {
+  bodyHash: string
+  /** When this version first appeared in a snapshot (captured_at, ISO). */
+  startIso: string
+  /** When the next version appeared (the edit that ended this one), or null if current. */
+  endIso: string | null
+  /** True for the newest captured version (still on disk). */
+  current: boolean
+  /** Usage during THIS version's own full lifetime [startIso, endIso). */
+  usage: SkillVersionUsage
+  /** Whether this version's lifetime cleared MIN_DRIFT_CALLS (else "not enough data"). */
+  enoughData: boolean
+}
+
+/** The headline before/after around the most recent edit, on symmetric capped windows. */
+export interface SkillDriftDelta {
+  /** The edit boundary (the current version's startIso). */
+  editIso: string
+  /** Half-width actually used for each side (days), after capping. For the label. */
+  windowDays: number
+  before: SkillVersionUsage
+  after: SkillVersionUsage
+  /** True when BOTH sides cleared MIN_DRIFT_CALLS — the delta is only shown then. */
+  enoughData: boolean
+}
+
+export interface SkillDriftReport {
+  name: string
+  /** All captured versions, oldest→newest. Empty when there's no snapshot history. */
+  versions: SkillVersion[]
+  /** Before/after around the most recent edit; null when <2 versions. */
+  delta: SkillDriftDelta | null
+  /** True when only one version was ever captured (never edited in our history). */
+  singleVersion: boolean
+  /** True when we have no skills-snapshot history for this name at all. */
+  noHistory: boolean
+}
+
+/** Read a skill entry's body hash from a skills-category snapshot payload. */
+function bodyHashOf(payload: unknown, name: string): string | null {
+  const skills = (payload as { skills?: unknown } | null)?.skills
+  if (!Array.isArray(skills)) return null
+  for (const s of skills) {
+    const o = s as Record<string, unknown> | null
+    if (!o || o.name !== name) continue
+    if (typeof o.bodyHash === 'string') return o.bodyHash
+    if (typeof o.body === 'string') return o.body // fall back to the body itself as identity
+    return '' // present but bodyless — a stable (empty) identity
+  }
+  return null // the skill isn't in this snapshot
+}
+
+/**
+ * The skills-category snapshot history that contains `name`, oldest→newest. Prefers
+ * the global inventory (where most skills live); falls back to the first project
+ * scope whose history mentions the skill. Returns [] when no history mentions it.
+ */
+function skillSnapshotHistory(store: Store, name: string): Array<{ payload: unknown; capturedAt: string }> {
+  const globalHist = store.envSnapshotHistory(SOURCE, 'global', '_global', 'skills')
+  if (globalHist.some((r) => bodyHashOf(r.payload, name) !== null)) {
+    return globalHist.map((r) => ({ payload: r.payload, capturedAt: r.capturedAt }))
+  }
+  const projectKeys = (
+    store.queryAll(
+      `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
+      SOURCE,
+    ) as Array<{ scope_key: string }>
+  ).map((r) => r.scope_key)
+  for (const key of projectKeys) {
+    const hist = store.envSnapshotHistory(SOURCE, 'project', key, 'skills')
+    if (hist.some((r) => bodyHashOf(r.payload, name) !== null)) {
+      return hist.map((r) => ({ payload: r.payload, capturedAt: r.capturedAt }))
+    }
+  }
+  return []
+}
+
+/** Usage facts for one skill in [sinceIso, untilIso) — reused for versions + delta sides. */
+function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: string): SkillVersionUsage {
+  const row = store.queryOne(
+    `SELECT COUNT(*) AS calls,
+            COUNT(DISTINCT t.session_id) AS sessions,
+            SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls,
+            SUM(CASE WHEN EXISTS (
+                  SELECT 1 FROM tool_calls e
+                  WHERE e.session_id = t.session_id
+                    AND e.idx > t.idx AND e.idx <= t.idx + ?
+                    AND e.is_error = 1
+                ) THEN 1 ELSE 0 END) AS frictionAdjacent
+     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     WHERE t.action = 'skill' AND t.is_sidechain = 0
+       AND (t.name = ? OR t.name LIKE ?)
+       AND s.source = ? AND s.started_at >= ? AND s.started_at < ?`,
+    FRICTION_LOOKAHEAD,
+    name,
+    '%:' + name,
+    SOURCE,
+    sinceIso,
+    untilIso,
+  ) as { calls: number; sessions: number; errorCalls: number | null; frictionAdjacent: number | null }
+  return {
+    calls: row?.calls ?? 0,
+    sessions: row?.sessions ?? 0,
+    errorCalls: row?.errorCalls ?? 0,
+    frictionAdjacent: row?.frictionAdjacent ?? 0,
+  }
+}
+
+/**
+ * Build the drift report for one skill: its captured version timeline (each version's
+ * usage over its own lifetime) plus a before/after delta around the most recent edit,
+ * on symmetric, edit-bounded, capped windows so no window straddles two versions.
+ */
+export function skillDrift(store: Store, name: string, nowMs: number = Date.now()): SkillDriftReport {
+  const hist = skillSnapshotHistory(store, name)
+  if (hist.length === 0) return { name, versions: [], delta: null, singleVersion: false, noHistory: true }
+
+  // Collapse consecutive same-hash snapshots into version segments. A run of rows with
+  // the same body hash is one version, live from its first capture until the next
+  // differing capture (the edit boundary). A→B→A yields three segments (honest: the
+  // body was reverted, a distinct period).
+  const nowIso = new Date(nowMs).toISOString()
+  const segments: Array<{ bodyHash: string; startIso: string }> = []
+  for (const row of hist) {
+    const h = bodyHashOf(row.payload, name)
+    if (h === null) continue // skill absent from this snapshot (installed/removed later) — skip
+    const prev = segments[segments.length - 1]
+    if (!prev || prev.bodyHash !== h) segments.push({ bodyHash: h, startIso: row.capturedAt })
+  }
+  if (segments.length === 0) return { name, versions: [], delta: null, singleVersion: false, noHistory: true }
+
+  const versions: SkillVersion[] = segments.map((seg, i) => {
+    const next = segments[i + 1]
+    const endIso = next ? next.startIso : null
+    const usage = usageInWindow(store, name, seg.startIso, endIso ?? nowIso)
+    return {
+      bodyHash: seg.bodyHash,
+      startIso: seg.startIso,
+      endIso,
+      current: i === segments.length - 1,
+      usage,
+      enoughData: usage.calls >= MIN_DRIFT_CALLS,
+    }
+  })
+
+  const singleVersion = segments.length === 1
+  let delta: SkillDriftDelta | null = null
+  if (segments.length >= 2) {
+    // Most recent edit = boundary into the current (last) version.
+    const editIso = segments[segments.length - 1]!.startIso
+    const prevStartIso = segments[segments.length - 2]!.startIso
+    const editMs = Date.parse(editIso)
+    const prevLifeMs = editMs - Date.parse(prevStartIso) // how long the previous version was live
+    const thisLifeMs = nowMs - editMs // how long the current version has been live
+    // Symmetric + capped so a long-lived old version can't drown out a young new one.
+    const halfMs = Math.min(prevLifeMs, thisLifeMs, DRIFT_MAX_HALF_DAYS * DAY_MS)
+    const beforeSinceIso = new Date(editMs - halfMs).toISOString()
+    const afterUntilIso = new Date(editMs + halfMs).toISOString()
+    const before = usageInWindow(store, name, beforeSinceIso, editIso)
+    const after = usageInWindow(store, name, editIso, afterUntilIso)
+    delta = {
+      editIso,
+      windowDays: Math.max(1, Math.round(halfMs / DAY_MS)),
+      before,
+      after,
+      enoughData: before.calls >= MIN_DRIFT_CALLS && after.calls >= MIN_DRIFT_CALLS,
+    }
+  }
+
+  return { name, versions, delta, singleVersion, noHistory: false }
+}
+
 function minIso(a: string | null, b: string | null): string | null {
   if (!a) return b
   if (!b) return a

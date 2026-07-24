@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
-import { skillHealth, skillInvocations } from './skill-health'
+import { skillHealth, skillInvocations, skillDrift } from './skill-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -205,6 +205,18 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       return
     }
     sendJson(res, 200, skillInvocations(store, name, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/skill-drift') {
+    // Version timeline + before/after around the most recent edit for one skill.
+    // Deliberately NOT windowed by the time filter — it's anchored on edit boundaries
+    // (see skillDrift). `name` required.
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillDrift(store, name))
     return
   }
   if (path === '/api/error-categories') {

@@ -336,6 +336,14 @@ function paintSkillPage(box, r) {
       '</div>';
   }
 
+  // Skill drift & version comparison (the hero). Edit-anchored, so it ignores the time
+  // filter — loaded async into its own section, which stays hidden until there's a
+  // multi-version history to show (most skills have one version → no noise).
+  html += '<div class="sk-page-sect" id="sk-drift-sect" style="display:none">' +
+    '<div class="sk-sect-h">Version drift</div>' +
+    '<div id="sk-drift"></div>' +
+    '</div>';
+
   // Per-repo usage breakdown — the evidence behind a scope-down flag. Shows where the
   // skill actually fires, so "used in only these repos" is self-evident, not on faith.
   if (r.calls > 0 && r.perRepo && r.perRepo.length) {
@@ -395,6 +403,93 @@ function paintSkillPage(box, r) {
     // Load the invocations list async (keeps the page paint instant).
     loadInvocations(r.name);
   }
+  // Drift loads regardless of window (edit-anchored) — even an unused-in-window skill
+  // may have a meaningful version history worth showing.
+  loadDrift(r.name);
+}
+
+// Fetch + render the version-drift section for a skill. Edit-anchored (no window
+// params). Stays hidden unless there's a multi-version history to compare.
+function loadDrift(name) {
+  get('/api/skill-drift?name=' + encodeURIComponent(name)).then(function (d) {
+    if (state.skill !== name) return; // navigated away while in flight
+    var sect = $('#sk-drift-sect');
+    var host = $('#sk-drift');
+    if (!sect || !host) return;
+    // Only show the section when there's an actual edit to compare across.
+    if (!d || d.noHistory || d.singleVersion || !d.versions || d.versions.length < 2) return;
+    host.innerHTML = driftHtml(d);
+    sect.style.display = '';
+  }).catch(function () { /* leave the section hidden on error */ });
+}
+
+// The drift section: a before/after callout around the most recent edit (when both
+// sides have enough data), then the full version timeline. Framed as correlation —
+// "changed after the edit", never "the edit caused it".
+function driftHtml(d) {
+  var html = '';
+  var delta = d.delta;
+  if (delta) {
+    if (delta.enoughData) {
+      html += '<div class="sk-drift-delta">' +
+        '<div class="sk-drift-delta-h">Around the last edit · ' + esc(String(delta.editIso).slice(0, 10)) +
+          ' <span class="sk-drift-win">(± ' + num(delta.windowDays) + (delta.windowDays === 1 ? ' day' : ' days') + ')</span></div>' +
+        '<div class="sk-drift-cmp">' +
+          driftMetric('Friction-adjacent', delta.before, delta.after, 'frictionAdjacent', true) +
+          driftMetric('Own-call errors', delta.before, delta.after, 'errorCalls', true) +
+          driftMetric('Invocations', delta.before, delta.after, 'calls', false) +
+        '</div>' +
+        '<div class="sk-sect-note">Usage in the equal windows before and after the edit. This is <b>correlation, not causation</b> — behaviour that changed <i>after</i> the edit, not proof the edit caused it.</div>' +
+        '</div>';
+    } else {
+      html += '<div class="sk-drift-delta sk-drift-thin">' +
+        '<div class="sk-drift-delta-h">Around the last edit · ' + esc(String(delta.editIso).slice(0, 10)) + '</div>' +
+        '<div class="sk-sect-note">Not enough usage on both sides of this edit yet to compare (need ' + num(3) + '+ invocations each side). Keep using it and check back.</div>' +
+        '</div>';
+    }
+  }
+
+  // Version timeline: one row per captured version, newest first, with its lifetime usage.
+  var vs = d.versions.slice().reverse();
+  html += '<div class="sk-vers">';
+  for (var i = 0; i < vs.length; i++) {
+    var v = vs[i];
+    var span = String(v.startIso).slice(0, 10) + ' → ' + (v.endIso ? String(v.endIso).slice(0, 10) : 'now');
+    var label = v.current ? 'current' : 'v' + (vs.length - i);
+    var usage = v.enoughData
+      ? num(v.usage.calls) + ' calls · ' + Math.round((v.usage.frictionAdjacent / Math.max(1, v.usage.calls)) * 100) + '% friction-adj'
+      : num(v.usage.calls) + ' calls · too few to rate';
+    html += '<div class="sk-ver' + (v.current ? ' sk-ver-cur' : '') + '">' +
+      '<div class="sk-ver-tag">' + esc(label) + '</div>' +
+      '<div class="sk-ver-span">' + esc(span) + '</div>' +
+      '<div class="sk-ver-hash mono" title="body hash">' + esc(String(v.bodyHash).slice(0, 8) || '—') + '</div>' +
+      '<div class="sk-ver-use">' + esc(usage) + '</div>' +
+      '</div>';
+  }
+  html += '</div>';
+  html += '<div class="sk-sect-note">Versions come from config snapshots, so history is only as fine-grained as your analyze cadence — edits between two runs collapse into one.</div>';
+  return html;
+}
+
+// One before→after metric cell. `lowerBetter` colours a decrease green (good) and an
+// increase red (regressed); for neutral counts (invocations) we don't colour direction.
+function driftMetric(label, before, after, key, lowerBetter) {
+  var bv = before[key] || 0, av = after[key] || 0;
+  // Rates for friction/errors (per call) read better than raw counts across uneven windows.
+  var pct = function (u) { return Math.round(((u[key] || 0) / Math.max(1, u.calls || 0)) * 100); };
+  var showRate = key === 'frictionAdjacent' || key === 'errorCalls';
+  var bs = showRate ? pct(before) + '%' : num(bv);
+  var as = showRate ? pct(after) + '%' : num(av);
+  var dir = '';
+  if (lowerBetter) {
+    var bp = showRate ? pct(before) : bv, ap = showRate ? pct(after) : av;
+    if (ap > bp) dir = ' sk-drift-worse';
+    else if (ap < bp) dir = ' sk-drift-better';
+  }
+  return '<div class="sk-drift-metric">' +
+    '<div class="sk-drift-metric-l">' + esc(label) + '</div>' +
+    '<div class="sk-drift-metric-v">' + esc(bs) + ' <span class="sk-drift-arrow' + dir + '">→</span> <b class="' + dir.trim() + '">' + esc(as) + '</b></div>' +
+    '</div>';
 }
 
 // Fetch + render the invocations list for a skill, in the current window. Each row

@@ -3686,6 +3686,24 @@ export class Store {
   }
 
   /**
+   * Full snapshot history for a key+category, oldest→newest. Each row is an
+   * append-on-change state (a new row only when the whole-category payload changed),
+   * so diffing consecutive rows' per-item content recovers the edit timeline. Used by
+   * the skill drift feature to reconstruct per-skill version boundaries.
+   */
+  envSnapshotHistory(source: string, scope: string, scopeKey: string, category: string): EnvSnapshotRow[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT snapshot_json, captured_at, last_observed_at FROM environment_snapshots
+           WHERE source = ? AND scope = ? AND scope_key = ? AND category = ?
+           ORDER BY captured_at ASC`,
+        )
+        .all(source, scope, scopeKey, category) as Array<{ snapshot_json: string; captured_at: string; last_observed_at: string }>
+    ).map(toEnvSnapshotRow)
+  }
+
+  /**
    * Distinct categories with any stored snapshot for a key. Used by capture to
    * detect deletions: a category with history that a successful read no longer
    * returns has been removed from disk and gets a null tombstone snapshot.
