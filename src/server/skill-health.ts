@@ -105,6 +105,20 @@ export interface SkillHealthRow {
   errorCalls: number
   /** Repos it was actually invoked in (excludes the null-repo bucket). */
   usedRepos: string[]
+  /**
+   * Per-repo usage breakdown — the evidence behind the scope-down flag. One entry per
+   * repo the skill was invoked in (plus a `repo: null` bucket for unattributed usage),
+   * sorted most-used first. The sum of `calls` equals the row's `calls`. Paired with
+   * `report.totalActiveRepos`, the UI can say "used in aivue (3×), never in 6 other
+   * active repos".
+   */
+  perRepo: Array<{
+    repo: string | null
+    sessions: number
+    calls: number
+    errorCalls: number
+    frictionAdjacent: number
+  }>
   /** Proxy: invocations followed by an errored tool call within FRICTION_LOOKAHEAD calls, same session. */
   frictionAdjacent: number
   firstUsedAt: string | null
@@ -157,6 +171,9 @@ export interface SkillHealthWindow {
 export interface SkillHealthReport {
   /** The window length in days, or null when all-time (UI shows "all time"). */
   windowDays: number | null
+  /** Distinct repos with any session in the window — the denominator for "used in X of
+   *  N repos". Excludes the null-repo bucket. */
+  totalActiveRepos: number
   totalInstalled: number
   /** Primary status counts (used + unused = installed-or-seen). */
   totalUsed: number
@@ -415,6 +432,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         calls: 0,
         errorCalls: 0,
         usedRepos: [],
+        perRepo: [],
         frictionAdjacent: 0,
         firstUsedAt: null,
         lastUsedAt: null,
@@ -449,6 +467,18 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     row.calls += iv.calls
     row.errorCalls += iv.errorCalls
     row.frictionAdjacent += iv.frictionAdjacent
+    // Keep the per-repo grain instead of only summing it away — the scope-down evidence.
+    // A skill can reconcile from multiple raw names (plugin-namespaced) into one row, so
+    // merge same-repo entries rather than assuming one iv per repo.
+    const bucket = row.perRepo.find((p) => p.repo === iv.repo)
+    if (bucket) {
+      bucket.sessions += iv.sessions
+      bucket.calls += iv.calls
+      bucket.errorCalls += iv.errorCalls
+      bucket.frictionAdjacent += iv.frictionAdjacent
+    } else {
+      row.perRepo.push({ repo: iv.repo, sessions: iv.sessions, calls: iv.calls, errorCalls: iv.errorCalls, frictionAdjacent: iv.frictionAdjacent })
+    }
     if (iv.repo) row.usedRepos.push(iv.repo)
     row.firstUsedAt = minIso(row.firstUsedAt, iv.firstUsedAt)
     row.lastUsedAt = maxIso(row.lastUsedAt, iv.lastUsedAt)
@@ -461,6 +491,8 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   for (const row of rowsByName.values()) {
     row.installedRepos = [...new Set(row.installedRepos)].sort()
     row.usedRepos = [...new Set(row.usedRepos)].sort()
+    // Most-used repo first; the null (unattributed) bucket sinks to the end.
+    row.perRepo.sort((a, b) => b.calls - a.calls || (a.repo ?? '￿').localeCompare(b.repo ?? '￿'))
     const v = verdictByName.get(row.name)
 
     if (row.calls > 0) {
@@ -487,6 +519,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   const has = (r: SkillHealthRow, f: 'scope-down' | 'not-in-config') => r.flags.indexOf(f) >= 0
   return {
     windowDays,
+    totalActiveRepos: sessionCounts.size,
     totalInstalled: rows.filter((r) => r.installed).length,
     totalUsed: rows.filter((r) => r.status === 'used').length,
     totalUnused: rows.filter((r) => r.status === 'unused').length,

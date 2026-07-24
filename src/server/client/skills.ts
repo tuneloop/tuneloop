@@ -336,6 +336,16 @@ function paintSkillPage(box, r) {
       '</div>';
   }
 
+  // Per-repo usage breakdown — the evidence behind a scope-down flag. Shows where the
+  // skill actually fires, so "used in only these repos" is self-evident, not on faith.
+  if (r.calls > 0 && r.perRepo && r.perRepo.length) {
+    html += '<div class="sk-page-sect">' +
+      '<div class="sk-sect-h">Where it\'s used</div>' +
+      repoBreakdown(r) +
+      '<div class="sk-sect-note">' + repoBreakdownNote(r) + '</div>' +
+      '</div>';
+  }
+
   // Facts grid: install/usage locations + timeline.
   html += '<div class="sk-page-sect">' +
     '<div class="sk-sect-h">Details</div>' +
@@ -423,6 +433,43 @@ function invocationRow(o) {
     '<span class="sk-inv-date">' + esc(when) + '</span>' +
     '<span class="sk-inv-go">open ↗</span>' +
     '</button>';
+}
+
+// A horizontal bar per repo (invocation count), widest = most-used. The scope-down
+// colour is used when the skill carries that flag, so the evidence and the verdict
+// read as one. The null-repo (unattributed) bucket is labelled explicitly.
+function repoBreakdown(r) {
+  var rows = r.perRepo || [];
+  var max = 0;
+  for (var i = 0; i < rows.length; i++) if (rows[i].calls > max) max = rows[i].calls;
+  if (max <= 0) max = 1;
+  var scoped = hasFlag(r, 'scope-down');
+  var barColor = scoped ? (FLAGS['scope-down'] && FLAGS['scope-down'].color) || 'var(--amber)' : 'var(--emerald)';
+  return '<div class="sk-repos">' + rows.map(function (p) {
+    var label = p.repo == null ? 'unattributed' : p.repo;
+    var pct = Math.max(2, Math.round((p.calls / max) * 100));
+    var sub = num(p.calls) + (p.calls === 1 ? ' call' : ' calls') + ' · ' + num(p.sessions) + (p.sessions === 1 ? ' session' : ' sessions');
+    return '<div class="sk-repo' + (p.repo == null ? ' sk-repo-null' : '') + '">' +
+      '<div class="sk-repo-name" title="' + esc(label) + '">' + esc(label) + '</div>' +
+      '<div class="sk-repo-track"><div class="sk-repo-bar" style="width:' + pct + '%;background:' + barColor + '"></div></div>' +
+      '<div class="sk-repo-n">' + esc(sub) + '</div>' +
+      '</div>';
+  }).join('') + '</div>';
+}
+
+// The one-line takeaway under the bars: "used in N of M active repos", and — when
+// scope-down — that the other repos load it but never use it.
+function repoBreakdownNote(r) {
+  var usedRepos = 0;
+  var rows = r.perRepo || [];
+  for (var i = 0; i < rows.length; i++) if (rows[i].repo != null) usedRepos++;
+  var total = skReport && skReport.totalActiveRepos ? skReport.totalActiveRepos : usedRepos;
+  var base = 'Invoked in ' + num(usedRepos) + ' of ' + num(total) + ' repos active in this window.';
+  if (hasFlag(r, 'scope-down') && r.scopeToRepos && r.scopeToRepos.length) {
+    var others = Math.max(0, total - r.scopeToRepos.length);
+    if (others > 0) base += ' The other ' + num(others) + ' load it globally but never invoke it — a candidate to scope down to ' + r.scopeToRepos.join(', ') + '.';
+  }
+  return base;
 }
 
 function pageTile(value, label, sub) {

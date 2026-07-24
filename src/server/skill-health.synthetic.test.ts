@@ -1,5 +1,5 @@
 /**
- * Contract test for the synthetic skill-data generator (scripts/seed-skills.ts).
+ * Contract test for the synthetic skill-data generator (src/server/skill-seed.ts).
  * Locks the generator's EXPECTATIONS manifest against the current read model, so the
  * edge-case corpus every Skills feature builds on stays trustworthy. If the generator
  * drifts from what the read model reports, this fails before any feature test does.
@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { skillHealth } from './skill-health'
-import { seedSkillStore } from '../../scripts/seed-skills'
+import { seedSkillStore } from './skill-seed'
 
 const NOW = Date.parse('2026-07-22T00:00:00.000Z')
 
@@ -66,6 +66,28 @@ describe('synthetic skill seed', () => {
 
     // plugin-namespaced invocation reconciled to its installed name (single row)
     expect(r.rows.filter((x) => x.name.includes('frontend-design')).length).toBe(1)
+  })
+
+  it('exposes the per-repo breakdown behind the scope-down flag', () => {
+    const exp = seedSkillStore(store, { nowMs: NOW })
+    const r = skillHealth(store, { days: 30, nowMs: NOW })
+    const byName = new Map(r.rows.map((x) => [x.name, x]))
+
+    // totalActiveRepos = distinct repos with any session in the window (aivue + the
+    // background repos browse is absent from + lint-fix's repos).
+    expect(r.totalActiveRepos).toBeGreaterThanOrEqual(1 + exp.browseAbsentRepos.length)
+
+    // browse: scope-down, used in exactly one repo — the per-repo breakdown proves it.
+    const browse = byName.get('browse')!
+    expect(browse.perRepo.map((p) => p.repo)).toEqual(['aivue'])
+    expect(browse.perRepo[0]!.calls).toBe(browse.calls)
+
+    // lint-fix: broad — perRepo has an entry per repo, summing to the row's calls,
+    // sorted most-used first, and covering exactly the manifest's repos.
+    const lint = byName.get(exp.notScopeDown.name)!
+    expect(lint.perRepo.map((p) => p.repo).sort()).toEqual([...exp.notScopeDown.repos].sort())
+    expect(lint.perRepo.reduce((n, p) => n + p.calls, 0)).toBe(lint.calls)
+    for (let i = 1; i < lint.perRepo.length; i++) expect(lint.perRepo[i - 1]!.calls).toBeGreaterThanOrEqual(lint.perRepo[i]!.calls)
   })
 
   it('captures review version history with a lost intermediate for drifty', () => {
