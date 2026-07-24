@@ -14,12 +14,17 @@
  */
 
 import { basename } from 'node:path'
-import type { Detector, DetectorContext, EvidenceRef, InsightInput } from '../core/detector'
+import { insightId, type Detector, type DetectorContext, type EvidenceRef, type InsightInput } from '../core/detector'
 import { registerDetector } from '../core/registry'
 import type { Store } from '../store/store'
 
 /** The harness this detector reads: MCP-name grammar + config layout are CC-specific. */
 const SOURCE = 'claude-code'
+// Detector identity. The fix-prompt marker id is derived from (DETECTOR, repo, SIGNAL_KEY),
+// and persistInsights re-derives it from the SAME triple to verify the marker is embedded —
+// so these must stay in lockstep with the Detector.name and the insight's signalKey below.
+const DETECTOR = 'unused-capabilities'
+const SIGNAL_KEY = 'unused-caps'
 
 /** How far back invoked-capability usage is counted. */
 export const WINDOW_DAYS = 30
@@ -250,7 +255,9 @@ export function buildCards(classified: Classified[], scopeInvocations: Map<strin
     byRepo.set(c.cap.repo, list)
   }
 
-  // Fix: the global section (remove/scope) then one "remove from <repo>" section per repo.
+  // The concrete edits: the global section (remove/scope) then one "remove from <repo>"
+  // section per repo. These are agent instructions, not a paste-able config blob —
+  // moving a capability out of global config is a filesystem + config edit, not a snippet.
   const sections: string[] = []
   if (globals.length > 0) sections.push(globalFixContent(globals))
   for (const repo of [...byRepo.keys()].sort()) {
@@ -258,22 +265,42 @@ export function buildCards(classified: Classified[], scopeInvocations: Map<strin
   }
 
   const total = classified.length
+  const problem = [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ')
   return [{
-    signalKey: 'unused-caps',
+    signalKey: SIGNAL_KEY,
     repo: '*',
     severity: total >= SEVERITY_MEDIUM_COUNT ? 'medium' : 'low',
     title: `${total} unused ${plural(total, 'capability', 'capabilities')} inflating startup`,
-    description:
-      [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ') +
-      ` Each loads into a session's startup and adds to its overhead. Apply the fix below to trim your config.`,
+    description: `${problem} Each loads into a session's startup and adds to its overhead. Apply the fix below to trim your config.`,
     evidence: collectEvidence(globals, scopeInvocations),
     count: total,
     fix: {
-      type: 'config-snippet',
+      type: 'fix-prompt',
       label: 'Trim unused capabilities',
-      content: sections.join('\n\n'),
+      content: fixPromptContent(problem, sections),
     },
   }]
+}
+
+/**
+ * The fix as a self-contained prompt for a coding agent. It opens with the tuneloop-fix
+ * marker (so the fix session self-identifies in the transcript and the insight can flip
+ * to adopted), restates the diagnosis (the card's description isn't visible once the
+ * prompt is pasted), lists the concrete config edits, and gives an acceptance line the
+ * agent can check. This is a fix-prompt, not a config-snippet, because relocating a
+ * capability is agent work — editing/moving config across locations, not copying a blob.
+ */
+function fixPromptContent(problem: string, sections: string[]): string {
+  return [
+    `tuneloop-fix: ${insightId(DETECTOR, '*', SIGNAL_KEY)}`,
+    '',
+    `${problem} Each loads into every Claude Code session's startup and adds to its overhead. Make these config changes:`,
+    '',
+    sections.join('\n\n'),
+    '',
+    `Done when: every server/skill listed above is removed from the config file it's named under, and each capability marked "move to" appears only in the target repos' configs — no longer in global config.`,
+    '',
+  ].join('\n')
 }
 
 /**
@@ -547,7 +574,7 @@ function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> 
 }
 
 export const unusedCapabilities: Detector = {
-  name: 'unused-capabilities',
+  name: DETECTOR,
   version: 1,
   tier: 'S',
   run(ctx: DetectorContext): InsightInput[] {

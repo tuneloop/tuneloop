@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { buildCards, capIdentity, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
-import type { DetectorContext, EvidenceRef, InsightInput } from '../core/detector'
+import { insightId, type DetectorContext, type EvidenceRef, type InsightInput } from '../core/detector'
 
 const DAY_MS = 86_400_000
 
@@ -365,7 +365,7 @@ describe('buildCards', () => {
     expect(cards).toHaveLength(1)
     expect(cards[0]!.repo).toBe('*')
     expect(cards[0]!.signalKey).toBe('unused-caps')
-    expect(cards[0]!.fix.type).toBe('config-snippet')
+    expect(cards[0]!.fix.type).toBe('fix-prompt')
     expect(cards[0]!.count).toBe(4) // total flagged items across all scopes
     // Fix carries the global section plus a per-repo removal section for each project.
     expect(cards[0]!.fix.content).toContain('Remove from your global config:')
@@ -425,6 +425,15 @@ describe('buildCards', () => {
   it('a removal-only card has no evidence at all', () => {
     const cards = buildCards([remove(gcap('mcp', 'sentry')), remove(pcap('mcp', 'pg', 'web'))], noInv)
     expect(cards[0]!.evidence).toEqual([])
+  })
+
+  it('emits a fix-prompt carrying the adoption marker', () => {
+    const fix = buildCards([remove(gcap('mcp', 'sentry'))], noInv)[0]!.fix
+    expect(fix.type).toBe('fix-prompt')
+    // The marker lets the fix session self-identify so the insight can flip to adopted.
+    expect(fix.content).toContain(`tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps')}`)
+    // The concrete config edit still reads through — it IS the agent's task.
+    expect(fix.content).toContain('- MCP server: sentry')
   })
 
   it('carries no token or dollar figures in any copy', () => {
@@ -490,6 +499,18 @@ describe('unusedCapabilities.run (end to end)', () => {
     const { db, store } = setupDb()
     seedRepo(db, 'web', 20)
     expect(run(store)).toEqual([])
+  })
+
+  it('persists cleanly — the fix-prompt marker id matches the insight id (no throw)', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 12)
+    const cards = run(store)
+    expect(cards).toHaveLength(1)
+    // persistInsights throws if a fix-prompt does not embed its own (detector, repo,
+    // signalKey) id — this locks the DETECTOR/SIGNAL_KEY/repo triple against drift.
+    expect(() => store.persistInsights('unused-capabilities', 1, cards)).not.toThrow()
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')?.state).toBe('surfaced')
   })
 
   it('flags a global server never used, once past the session minimum', () => {
