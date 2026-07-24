@@ -33,10 +33,12 @@ program
     [],
   )
   .option('--db <path>', 'path to the tuneloop SQLite store')
+  .option('--config <path>', 'JSON config selecting which processors/detectors run (default: all — see config.json)')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
   .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, bedrock, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
   .option('--llm-model <id>', 'enrichment model id; overrides env')
+  .option('--llm-model-heavy <id>', 'stronger model for the detector pass (same provider); default: same as --llm-model')
   .option('--llm-base-url <url>', 'OpenAI-compatible endpoint URL (for openai-compatible / custom hosts); overrides env')
   .option('--no-serve', 'analyze only; do not serve the dashboard')
   .option('-v, --verbose', 'verbose logging')
@@ -46,12 +48,14 @@ program
       options: {
         source: string[]
         db?: string
+        config?: string
         limit?: number
         port?: number
         serve?: boolean
         verbose?: boolean
         llmProvider?: string
         llmModel?: string
+        llmModelHeavy?: string
         llmBaseUrl?: string
       },
     ) => {
@@ -62,9 +66,10 @@ program
         dirs: dirList,
         sources: options.source,
         db: options.db,
+        configPath: options.config,
         limit: options.limit,
         verbose: options.verbose,
-        llm: { provider: options.llmProvider, model: options.llmModel, baseURL: options.llmBaseUrl },
+        llm: { provider: options.llmProvider, model: options.llmModel, heavyModel: options.llmModelHeavy, baseURL: options.llmBaseUrl },
       })
       // Serve the dashboard by default and print its URL (press Enter to open a
       // browser tab); --no-serve opts out.

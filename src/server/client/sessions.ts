@@ -5,6 +5,17 @@
 import { state, $, esc, renderMd, usd, num, dayOf, badge, get, post, outcomeRank, outcomeLabel } from './core'
 import { syncHash } from './router'
 
+// The transcript drawer can be opened from an insight occurrence; its "← Insights"
+// back button calls this to reopen the insight detail. Registered by main.ts to
+// avoid a sessions↔insights import cycle. Null when insights aren't wired.
+var onBackToInsight: ((insightId: string) => void) | null = null;
+export function setBackToInsight(fn: (insightId: string) => void) { onBackToInsight = fn; }
+
+// Fires whenever the drawer closes (button / overlay / programmatic) — lets a view
+// clear its own selected-state. Same decoupling pattern as onBackToInsight.
+var onDrawerClose: (() => void) | null = null;
+export function setOnDrawerClose(fn: () => void) { onDrawerClose = fn; }
+
 // Close the transcript outline dropdown on an outside click — it's a custom
 // dropdown with no native blur. One module-level listener (added once) that
 // queries the live elements, so it works across drawer re-opens without leaking
@@ -693,7 +704,14 @@ export function openDetail(id, focus?: any) {
     // into one .drawer-head at the end, so they pin together as you scroll.
     // A title may be the session's full opening prompt (the fallback when nothing
     // else named it), so clip the unconstrained header and keep the full text on hover.
-    var headTop = '<div class="drawer-head-top"><h2 title="' + esc(s.title || '') + '">' + esc(clipLine(s.title, 120) || '(untitled)') + '</h2>' +
+    // A back link appears when the transcript was opened FROM an insight's
+    // occurrence, so the user can return to the insight detail (not just close).
+    var backToInsight = focus && focus.backToInsight;
+    var backBtn = backToInsight
+      ? '<button class="drawer-back" type="button" id="drawerBackBtn">&larr; Insights</button>'
+      : '';
+    var headTop = '<div class="drawer-head-top">' + backBtn +
+      '<h2 title="' + esc(s.title || '') + '">' + esc(clipLine(s.title, 120) || '(untitled)') + '</h2>' +
       '<button class="x" type="button" id="drawerCloseBtn">close</button></div>';
     var fileCount = (d.artifacts || []).filter(function (x) { return x.kind === 'file'; }).length;
     var tabs = '<div class="drawer-tabs">' +
@@ -1263,6 +1281,8 @@ export function openDetail(id, focus?: any) {
     }
     var closeBtn = $('#drawerCloseBtn');
     if (closeBtn) closeBtn.onclick = closeDrawer;
+    var backBtnEl = $('#drawerBackBtn');
+    if (backBtnEl) backBtnEl.onclick = function () { if (onBackToInsight) onBackToInsight(backToInsight); };
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .dtab'), function (b) {
       b.onclick = function () { showTab(b.getAttribute('data-dtab')); };
     });
@@ -1794,6 +1814,22 @@ export function openDetail(id, focus?: any) {
     }
     activeReveal = revealErrorTarget;
     if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
+
+    // Land on a specific user turn by its main-thread seq (insight evidence links
+    // pass the occurrence's turn_seq pointer). Degrades to a normal open when the
+    // seq isn't in the transcript (pruned blob, synthetic turn).
+    if (focus && focus.turnSeq != null) {
+      var fgi = -1;
+      allTurns.forEach(function (t, i) { if (fgi < 0 && t.role === 'user' && !t.sidechain && t.seq === focus.turnSeq) fgi = i; });
+      if (fgi >= 0 && hasTx) {
+        showTab('transcript');
+        if (activeScope !== 'main') switchScope('main');
+        // Every main-thread user turn is in the nav list, so the index resolves.
+        var fturn = -1;
+        userTurns.forEach(function (u, j) { if (fturn < 0 && u.i === fgi) fturn = j; });
+        if (fturn >= 0) requestAnimationFrame(function () { jumpToTurn(fturn); });
+      }
+    }
   });
 }
 
@@ -1825,6 +1861,7 @@ export function closeDrawer() {
   activeReveal = null;
   errWalk = null; renderErrWalkBar(); // closing the drawer ends any error walk
   if (state.open) { state.open = null; syncHash({ replace: true }); } // drop ?session= without adding history
+  if (onDrawerClose) onDrawerClose();
 }
 
 // The open drawer publishes its error-reveal fn here so the pager can reveal the
@@ -1949,7 +1986,7 @@ function linkAcSelect(inp: HTMLInputElement, menu: HTMLElement, sessionId: strin
 }
 
 export function setView(name) {
-  ['highlights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'insights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {

@@ -8,9 +8,12 @@ import { assignSeq, NORMALIZE_VERSION } from '../core/blocks'
 import { mergeSessions, trimInheritedPrefix } from '../core/merge'
 import type { Session } from '../core/model'
 import type { SourceAdapter } from '../adapters/types'
-import { getAdapters, getProcessors } from '../core/registry'
+import type { EnvCategory } from '../store/types'
+import { runDetectors } from '../core/detector-runner'
+import { getAdapters, getDetectors, getProcessors } from '../core/registry'
+import { loadPipelineConfig, resolvePipeline } from '../pipeline-config'
 import { orderProcessors, runProcessors } from '../core/runner'
-import { createLlmClient, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
+import { createLlmClient, startLlmTrace, endLlmTrace, PROVIDERS, PROVIDER_NAMES, type ProviderPreset } from '../llm'
 import { computeSessionCost, priceFor, PRICE_TABLE_VERSION } from '../pricing/pricing'
 import { loadOpenRouterPrices } from '../pricing/openrouter'
 import { openDb } from '../store/db'
@@ -29,6 +32,8 @@ export interface AnalyzeOptions {
   verbose?: boolean
   /** Cap the number of sessions processed — handy for a cheap enrichment test. */
   limit?: number
+  /** Path to a JSON pipeline config selecting which processors/detectors run; unset = the shipped default (everything). */
+  configPath?: string
   /** Non-secret LLM flag overrides (provider/model/base-url); the key stays env-only. */
   llm?: LlmOverrides
 }
@@ -41,6 +46,17 @@ export interface AnalyzeOptions {
 export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const log = createLogger(opts.verbose ? 'debug' : 'info')
   let config = loadConfig({ db: opts.db, llm: opts.llm })
+
+  // Which processors + detectors run this invocation. `--config` selects a JSON
+  // file; without it, the shipped default (everything) is read. Resolved up front
+  // so a bad --config path fails before any work, and unknown-name / missing-dep
+  // warnings surface early.
+  const { processors, detectors } = resolvePipeline(
+    loadPipelineConfig(opts.configPath),
+    { processors: getProcessors(), detectors: getDetectors() },
+    log,
+  )
+  log.debug(`pipeline: ${processors.length} processor(s), ${detectors.length} detector(s)`)
 
   // No enrichment provider configured: on an interactive terminal, offer a
   // run-only setup (paste a key; it lives only in this process, nothing is
@@ -66,9 +82,12 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
 
   // Fetch the OpenRouter price backfill only to price an enrichment model the
   // static table lacks; static-only runs stay offline.
-  if (config.llm && !priceFor(config.llm.provider, config.llm.model)) await loadOpenRouterPrices(config.dataDir, log)
+  // Both tiers need a price: the heavy model is what detector cost is billed at.
+  const unpricedLlmModel =
+    config.llm &&
+    [config.llm.model, config.llm.heavyModel].some((m) => m && !priceFor(config.llm!.provider, m))
+  if (unpricedLlmModel) await loadOpenRouterPrices(config.dataDir, log)
 
-  const processors = getProcessors()
   store.registerFacets('intrinsic', INTRINSIC_FACETS)
   store.registerMeasures('intrinsic', INTRINSIC_MEASURES)
   for (const p of processors) {
@@ -82,10 +101,27 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   } catch (err) {
     log.warn((err as Error).message)
   }
+  // Two-tier model routing: `llm` drives the per-session processors (one call per
+  // session — the volume, hence the cheap model), `heavyLlm` drives the detector
+  // pass (a handful of cross-session synthesis calls, where reasoning quality pays).
+  // Unset TUNELOOP_LLM_MODEL_HEAVY → the same client does both, as it always has.
+  // A build failure here degrades to the base client rather than losing detectors.
+  let heavyLlm = llm
+  if (llm && config.llm?.heavyModel && config.llm.heavyModel !== llm.model) {
+    try {
+      heavyLlm = createLlmClient({ ...config.llm, model: config.llm.heavyModel })
+    } catch (err) {
+      log.warn(`heavy model unusable (${(err as Error).message}); detectors fall back to ${llm.model}`)
+    }
+  }
   const llmEnabled = !!llm
   const llmModel = llm?.model ?? null
   if (llmEnabled) {
-    log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}). Session data goes to your configured provider.`)
+    // Open a run-level Langfuse trace (no-op without LANGFUSE_* env keys) so every
+    // LLM call this run nests under it — a personal prompt-debugging aid
+    await startLlmTrace('analyze', { provider: llm!.provider, model: llm!.model, heavyModel: heavyLlm!.model })
+    const heavyNote = heavyLlm!.model === llm!.model ? '' : `, detectors ${heavyLlm!.model}`
+    log.info(`LLM enrichment on (${llm!.provider}/${llm!.model}${heavyNote}). Session data goes to your configured provider.`)
   } else if (prompted) {
     // The interactive offer above was declined (or the client failed to build
     // and warned) — a full hint would repeat what the prompt just explained.
@@ -210,19 +246,21 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // cwd may be a subdir). Short name = basename of the git toplevel. Cached per
   // cwd since sessions cluster into a few working dirs; null when the dir is gone
   // or isn't a git checkout.
-  const repoCache = new Map<string, string | null>()
-  const resolveRepo = async (cwd: string | undefined): Promise<string | null> => {
+  // Cache both the short name (sessions.repo) and the git toplevel path (the
+  // environment reader's project scope_key + where it reads <root>/.claude/...).
+  const repoCache = new Map<string, { name: string; root: string } | null>()
+  const resolveRepo = async (cwd: string | undefined): Promise<{ name: string; root: string } | null> => {
     if (!cwd) return null
     const cached = repoCache.get(cwd)
     if (cached !== undefined) return cached
-    let repo: string | null = null
+    let entry: { name: string; root: string } | null = null
     const res = await sh('git', ['-C', cwd, 'rev-parse', '--show-toplevel'])
     if (res && res.code === 0) {
       const top = res.stdout.trim()
-      if (top) repo = basename(top)
+      if (top) entry = { name: basename(top), root: top }
     }
-    repoCache.set(cwd, repo)
-    return repo
+    repoCache.set(cwd, entry)
+    return entry
   }
 
   // Merge each group, then process oldest-first. Chronological order matters:
@@ -264,14 +302,24 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       `${totalNeedingWork} ${totalNeedingWork === 1 ? 'needs' : 'need'} processing.`,
   )
 
-  const progress = new Progress(sessionsToProcess.length, totalNeedingWork)
+  const progress = new Progress(sessionsToProcess.length, totalNeedingWork, process.stderr, 'Step 1/2 · Processing sessions')
+
+  // Repo roots touched this run, per source — the environment reader's project
+  // scope keys (one snapshot per unique repo, not per session).
+  const reposBySource = new Map<string, Set<string>>()
 
   let processed = 0
   for (const session of merged) {
     if (opts.limit != null && processed >= opts.limit) break
     assignSeq(session) // main-thread seq, post-merge — the block partition's coordinate
-    const repo = await resolveRepo(session.project.cwd)
+    const resolved = await resolveRepo(session.project.cwd)
+    const repo = resolved?.name ?? null
     if (repo) session.project.repo = repo
+    if (resolved) {
+      const set = reposBySource.get(session.source) ?? new Set<string>()
+      set.add(resolved.root)
+      reposBySource.set(session.source, set)
+    }
     const prior = store.storedMeta(session.id)
     const parseVersion = parseVersionBySource.get(session.source) ?? NORMALIZE_VERSION
     const needsIngest = prior?.hash !== session.raw.contentHash || prior.parseVersion < parseVersion
@@ -325,6 +373,32 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   const pruned = store.pruneOrphanArtifacts()
   if (pruned > 0) log.debug(`pruned ${pruned} orphan artifact(s)`)
 
+  // Capture harness config snapshots (environment reader). Runs before detectors so
+  // a config-diff detector sees fresh snapshots. Unconditional (never gated on the
+  // processor cache — config drifts even when transcripts don't). Adapters without a
+  // readEnvironment contribute nothing.
+  for (const adapter of activeAdapters) {
+    const captured = await captureEnvironment(adapter, store, reposBySource.get(adapter.id) ?? new Set(), log)
+    if (captured > 0) log.debug(`[${adapter.id}] captured ${captured} config snapshot(s)`)
+  }
+
+  // Run detectors (cross-session pattern detection) after all processors complete.
+  // Step 2/2: a shared bar whose total grows as each LLM detector declares its delta
+  // (starts at 0 — S-tier detectors add nothing and it completes instantly).
+  if (detectors.length > 0) {
+    log.debug(`Running ${detectors.length} detector(s)...`)
+    const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
+    await runDetectors({ detectors, store, log, llmEnabled, llm: heavyLlm, progress: detectorProgress, limit: opts.limit })
+    detectorProgress.clear()
+  }
+
+  // Interpret fix-marker sightings AFTER detectors, so sightings scanned before
+  // their insight existed (store rebuild) match in the same run. Unconditional
+  // and store-global: reconcile must run without detectors registered, and a
+  // --source scoped run still matches sightings across harnesses.
+  const adoptedCount = store.reconcileFixSightings()
+  if (adoptedCount > 0) log.info(`${adoptedCount} insight fix(es) marked adopted (fix session detected)`)
+
   log.info(
     `Scanned ${discovered} file(s), parsed ${parsed} session(s) into ${groups.size} unique session(s), ${reingested} new/changed.`,
   )
@@ -338,7 +412,54 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
   if (promptedProvider && llmEnabled) printPersistHint(promptedProvider)
+  await endLlmTrace() // flush buffered Langfuse events before exit (no-op if tracing off)
   store.close()
+}
+
+/**
+ * Capture one adapter's config snapshots: global once, then each repo root touched
+ * this run. The adapter's `readEnvironment` returns the redacted per-category
+ * payloads; the store append-on-change gate decides what actually persists. Adapters
+ * without `readEnvironment` do nothing. A read failure for one scope is logged and
+ * skipped, never fatal. Returns the number of categories written this call.
+ *
+ * Deletions are recorded as tombstones: a category with stored history that a
+ * SUCCESSFUL read no longer returns was removed from disk, so a `null` payload is
+ * written — current/asOf then reflect the deletion instead of reporting the last
+ * state forever (an adoption fix can be "remove X" as much as "add X"). A failed
+ * read never tombstones: no evidence the config is gone, only that we couldn't look.
+ */
+export async function captureEnvironment(
+  adapter: SourceAdapter,
+  store: Store,
+  repoRoots: Set<string>,
+  log: ReturnType<typeof createLogger>,
+): Promise<number> {
+  if (!adapter.readEnvironment) return 0
+  let count = 0
+  const capture = async (scope: 'global' | 'project', scopeKey: string, projectPath?: string): Promise<void> => {
+    let cats
+    try {
+      cats = await adapter.readEnvironment!(projectPath)
+    } catch (err) {
+      log.warn(`[${adapter.id}] environment read failed for ${scopeKey}: ${(err as Error).message}`)
+      return
+    }
+    const seen = new Set<string>(cats.map((c) => c.category))
+    for (const c of cats) {
+      store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: c.category, payload: c.payload })
+      count++
+    }
+    for (const category of store.envSnapshotCategories(adapter.id, scope, scopeKey)) {
+      if (seen.has(category)) continue
+      if (store.envSnapshotCurrent(adapter.id, scope, scopeKey, category)?.payload === null) continue // already tombstoned
+      store.recordEnvSnapshot({ source: adapter.id, scope, scopeKey, category: category as EnvCategory, payload: null })
+      count++
+    }
+  }
+  await capture('global', '_global')
+  for (const root of repoRoots) await capture('project', root, root)
+  return count
 }
 
 /** Offered when the user says yes but doesn't name a provider (README's primary example). */

@@ -2,16 +2,28 @@ import { randomUUID } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import type { CanonicalAction, Session, ToolCall } from '../core/model'
 import type { ProcessorResult, RefreshResult } from '../core/processor'
+import Database from 'better-sqlite3'
 import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
-import { deterministicBlocks } from '../core/blocks'
+import { blockSpine, deterministicBlocks } from '../core/blocks'
+import type { Block } from '../core/blocks'
 import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
+import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
+import { contentHash } from '../core/hash'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
-import type { ArtifactInput, FeatureRevisionInput, ProcessorRunRow, SessionArtifactRole, UsageFactInput } from './types'
+import { insightId } from '../core/detector'
+import type { EvidenceRef, InsightInput } from '../core/detector'
+import type { InsightRow } from './types'
+
+/**
+ * Max evidence occurrences retained per insight — a defensive bound on per-insight row
+ * growth, not a display limit
+ */
+const EVIDENCE_CAP = 500
 
 export interface Dist {
   value: string
@@ -65,7 +77,22 @@ export interface Highlight {
 }
 
 export class Store {
+  private readonlyDb: DB | null = null
+
   constructor(private db: DB) {}
+
+  /**
+   * Returns a readonly DB handle for detector queries. Opens lazily on first use.
+   * SQLite enforces the read-only constraint at the engine level — any write attempt
+   * (including DELETE...RETURNING, UPDATE...RETURNING, PRAGMA mutations) throws.
+   * This is the handle detectors use via queryAll()/queryOne().
+   */
+  private getReadonlyDb(): DB {
+    if (!this.readonlyDb) {
+      this.readonlyDb = new Database(this.db.name, { readonly: true })
+    }
+    return this.readonlyDb
+  }
 
   /** Read a value from the key-value `meta` table (undefined when absent). */
   getMeta(key: string): string | undefined {
@@ -485,6 +512,9 @@ export class Store {
         insertBlockArtifact.run(sessionId, x.blockIdx, x.artifactId, x.role, x.source ?? null, x.confidence ?? null, processor)
       }
 
+      // The table is single-writer (fix-marker), which always emits the field when it runs.
+      if (result.fixMarkerSightings) this.recordFixMarkerSightings(sessionId, result.fixMarkerSightings)
+
       this.db
         .prepare(
           `INSERT OR REPLACE INTO processor_runs
@@ -671,19 +701,32 @@ export class Store {
       )
       .all() as Array<{ name: string; calls: number; errors: number }>
 
-    const analysisCostUsd = (
-      this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }
-    ).s
+    // Enrichment spend = every LLM call analyze made: processor enrichment AND
+    // detector (tier P/X) passes. Sum both, or the detectors' spend
+    // (extraction/reconcile/fix — often the bulk) is invisible.
+    //
+    // The two halves mean subtly different things. detector_runs is an append-only
+    // log, so its sum is LIFETIME detector spend, including re-extractions forced by
+    // a version bump or a heavy-model swap. processor_runs holds one row per
+    // (session, processor) and is overwritten on re-run, so its sum is what the
+    // current store cost to produce. Detectors have to be a lifetime total: their
+    // runs are incremental, so the last run's cost is a top-up, not the bill.
+    const analysisCostUsd =
+      (this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM processor_runs').get() as { s: number }).s +
+      (this.db.prepare('SELECT COALESCE(SUM(cost_usd),0) AS s FROM detector_runs').get() as { s: number }).s
 
-    // Whether LLM enrichment has ever run. LLM-backed processors record their model
-    // in processor_runs (non-LLM ones store NULL), so a single non-null model is a
-    // durable "enrichment ran" signal — independent of which annotation dimensions
-    // the enricher currently emits (those can be renamed/removed; this won't). Note
-    // a row is only written on success, which is exactly what we want here: "did
-    // enrichment actually produce anything", not "was a key merely configured".
+    // Whether LLM enrichment has ever run. Both processor_runs and detector_runs
+    // record the model that ran them (NULL for non-LLM / S-tier), so a single
+    // non-null model in either is a durable "enrichment ran" signal — independent of
+    // which dimensions the enricher currently emits. Rows are written only on
+    // success: "did enrichment produce anything", not "was a key configured".
     const enrichmentRan =
-      (this.db.prepare('SELECT EXISTS(SELECT 1 FROM processor_runs WHERE model IS NOT NULL) AS r').get() as { r: number })
-        .r === 1
+      (this.db.prepare(
+        `SELECT EXISTS(
+           SELECT 1 FROM processor_runs WHERE model IS NOT NULL
+           UNION ALL SELECT 1 FROM detector_runs WHERE model IS NOT NULL
+         ) AS r`,
+      ).get() as { r: number }).r === 1
 
     const features = this.db
       .prepare(
@@ -2229,6 +2272,28 @@ export class Store {
   }
 
   /**
+   * A numbered one-line-per-block digest of a session's main thread (see
+   * blockSpine) plus the block partition it was rendered from: each block's
+   * opening user turn, a compact action summary, and its boundary tag.
+   * Reconstructs the partition from the blob at read time. Returns null when the
+   * session's blob is missing or unreadable.
+   *
+   * The `blocks` ride along so a caller reads the count and each block's startSeq
+   * from the same partition the digest was rendered from, rather than re-parsing
+   * the string or re-querying the stored blocks table (which can lag the blob).
+   *
+   * Recomputed on demand rather than stored: it's cheap for the few sessions a
+   * P-tier detector inspects, and hands a detector the block digest without
+   * exposing the full transcript (loadSession stays private).
+   */
+  blockDigest(id: string): { digest: string; blocks: Block[] } | null {
+    const session = this.loadSession(id)
+    if (!session) return null
+    const blocks = deterministicBlocks(session)
+    return { digest: blockSpine(session, blocks), blocks }
+  }
+
+  /**
    * The session's successful file edits as a flat, CHRONOLOGICAL list — the
    * Files-changed view. Each carries its raw before/after (Edit), full content
    * (Write), or hunks (MultiEdit), plus the transcript turn it happened in and
@@ -2841,8 +2906,941 @@ export class Store {
     }))
   }
 
+  // ---- Insight Ledger ---------------------------------------------------------
+
+  /**
+   * Read-only query helper for detectors. Uses a separate readonly DB handle so
+   * writes are rejected at the SQLite engine level — not just by convention.
+   * Detectors can ask any question across all sessions but cannot mutate data.
+   */
+  queryAll(sql: string, ...params: unknown[]): unknown[] {
+    return this.getReadonlyDb().prepare(sql).all(...params)
+  }
+
+  queryOne(sql: string, ...params: unknown[]): unknown {
+    return this.getReadonlyDb().prepare(sql).get(...params)
+  }
+
+  /**
+   * Hydrate a full `Session` from its stored blob for a P/X-tier detector — the
+   * content SQL-only detectors can't reach. Null when the blob is absent/corrupt.
+   */
+  hydrateSession(id: string): Session | null {
+    return this.loadSession(id)
+  }
+
+  detectorRun(detector: string): DetectorRunRow | undefined {
+    const row = this.db
+      .prepare('SELECT version, status, model, ran_at as ranAt FROM detector_runs WHERE detector = ? ORDER BY id DESC LIMIT 1')
+      .get(detector) as { version: number; status: string | null; model: string | null; ranAt: string } | undefined
+    return row ? { version: row.version, status: row.status, model: row.model, ranAt: row.ranAt } : undefined
+  }
+
+  /**
+   * The model of this detector's last SUCCESSFUL run — the one whose extractions are
+   * actually in the store. Distinct from `detectorRun().model`, which is the latest
+   * run's and is null after an error: a failed run may have burned tokens, but it
+   * persisted nothing, so it can't speak for what the stored insights were made with.
+   * Null when the detector has never succeeded, or ran without an LLM (S-tier).
+   */
+  detectorLastSuccessfulModel(detector: string): string | null {
+    const row = this.db
+      .prepare("SELECT model FROM detector_runs WHERE detector = ? AND status = 'ok' AND model IS NOT NULL ORDER BY id DESC LIMIT 1")
+      .get(detector) as { model: string } | undefined
+    return row?.model ?? null
+  }
+
+  /**
+   * Returns session IDs that a detector hasn't seen yet or whose content has changed
+   * since the detector last processed them. Used by P/X-tier detectors to compute
+   * the delta — only run expensive LLM analysis on new/changed sessions.
+   */
+  detectorUnseen(detector: string): Array<{ sessionId: string; contentHash: string }> {
+    return this.db.prepare(`
+      SELECT s.id as sessionId, s.content_hash as contentHash
+      FROM sessions s
+      LEFT JOIN detector_session_runs d ON d.detector = ? AND d.session_id = s.id
+      WHERE d.session_id IS NULL OR d.content_hash != s.content_hash
+    `).all(detector) as Array<{ sessionId: string; contentHash: string }>
+  }
+
+  /**
+   * Mark sessions as seen by a detector at their current content hash.
+   * Called after a P/X-tier detector has processed a session's data.
+   */
+  markDetectorSessionSeen(detector: string, sessions: Array<{ sessionId: string; contentHash: string }>): void {
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO detector_session_runs (detector, session_id, content_hash, ran_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const s of sessions) {
+        stmt.run(detector, s.sessionId, s.contentHash, now)
+      }
+    })()
+  }
+
+  /**
+   * Forget a detector's per-session tracking so its whole corpus counts as unseen
+   * again. The runner calls this when a P/X-tier detector's version changed since
+   * its last run: a new prompt/schema must re-extract every session, not just the
+   * content-hash delta. Themes themselves are untouched — re-extraction re-matches
+   * against them (stable ids), it doesn't wipe the taxonomy.
+   */
+  resetDetectorSessionRuns(detector: string): void {
+    this.db.prepare('DELETE FROM detector_session_runs WHERE detector = ?').run(detector)
+  }
+
+  // ---- Kitchen-sink verdicts --------------------------------------------------
+
+  /**
+   * Upsert this run's kitchen-sink verdicts (positive AND negative) into their
+   * permanent home, keyed on session id. INSERT OR REPLACE so a session re-judged
+   * after a content change (or a corrected verdict) overwrites its prior row — a
+   * positive→negative flip is a plain upsert that drops it from the windowed card.
+   */
+  recordKitchenSinkVerdicts(verdicts: KitchenSinkVerdictInput[]): void {
+    if (verdicts.length === 0) return
+    const now = new Date().toISOString()
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO kitchen_sink_verdict
+         (session_id, is_kitchen_sink, split_block_idx, split_seq, reason, model, detector_version, judged_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    this.db.transaction(() => {
+      for (const v of verdicts) {
+        stmt.run(v.sessionId, v.isKitchenSink ? 1 : 0, v.splitBlockIdx, v.splitSeq, v.reason, v.model, v.detectorVersion, now)
+      }
+    })()
+  }
+
+  /**
+   * The kitchen-sink card's data, as a windowed projection of the verdict table:
+   * every POSITIVE session whose `started_at` falls in the trailing window
+   * (`windowStartIso` = now − WINDOW_DAYS), most-recent first — the evidence + count.
+   * `lastSeenAt` is the max over that windowed set; `firstSeenAt` is the earliest
+   * over ALL positives (whole history), so a chronic pattern keeps its true origin
+   * date even though the count/evidence are windowed. Both null when
+   * there are no positives at all.
+   */
+  kitchenSinkPositives(windowStartIso: string): {
+    positives: Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+    firstSeenAt: string | null
+    lastSeenAt: string | null
+  } {
+    // Windowed positives (the card's evidence + count), most-recent first.
+    const positives = this.db
+      .prepare(
+        `SELECT v.session_id AS sessionId, v.split_block_idx AS splitBlockIdx,
+                v.split_seq AS splitSeq, v.reason AS reason
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?
+         ORDER BY s.started_at DESC, v.session_id`,
+      )
+      .all(windowStartIso) as Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+
+    // last-seen over the WINDOWED positives (the card's set); first-seen over ALL
+    // positives (whole history) so a chronic pattern keeps its true origin date even
+    // though count/evidence are windowed. strftime normalizes any offset before
+    // MIN/MAX so mixed timestamp formats can't skew the result.
+    const windowed = this.db
+      .prepare(
+        `SELECT MAX(strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.ended_at, s.started_at))) AS lastSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?`,
+      )
+      .get(windowStartIso) as { lastSeen: string | null }
+    const allTime = this.db
+      .prepare(
+        `SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', s.started_at)) AS firstSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1`,
+      )
+      .get() as { firstSeen: string | null }
+
+    return { positives, firstSeenAt: allTime.firstSeen, lastSeenAt: windowed.lastSeen }
+  }
+
+  // ---- Recurring-theme mining -------------------------------------------------
+
+  /**
+   * Themes visible to a session's extraction: its repo's themes + globals (repo
+   * NULL). Fed into the prompt as the existing-theme list so the model matches
+   * before minting (assign-at-extraction). Ordered oldest-first so the merge
+   * pass's "keep the older id" rule has a stable reference.
+   */
+  listThemes(repo: string | null): ThemeRef[] {
+    return this.db
+      .prepare(
+        `SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, repo
+         FROM theme WHERE repo IS NULL OR repo = ? ORDER BY first_seen`,
+      )
+      .all(repo ?? '') as ThemeRef[]
+  }
+
+  /** Every theme (all repos + globals) — the merge pass's input. */
+  allThemes(): ThemeRef[] {
+    return this.db
+      .prepare(`SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, repo, source FROM theme ORDER BY first_seen`)
+      .all() as ThemeRef[]
+  }
+
+  /**
+   * Persist one session's extraction: upsert referenced themes (OR IGNORE keeps
+   * identity stable — re-minting an existing id never renames/retypes it), replace
+   * that session's events, then prune derived themes left with no member events.
+   * All-in-one transaction so a session's events and their themes commit together.
+   */
+  persistThemeExtraction(sessionId: string, themes: ThemeInput[], events: ThemeEventInput[]): void {
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const t of themes) {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO theme (id, label, description, type, remedy, repo, source, first_seen)
+             VALUES (?,?,?,?,?,?,'derived',?)`,
+          )
+          .run(t.id, t.label, t.description ?? null, t.type, t.remedy ?? null, t.repo ?? null, t.firstSeen ?? now)
+      }
+      this.db.prepare('DELETE FROM theme_events WHERE session_id = ?').run(sessionId)
+      for (const e of events) {
+        this.db
+          .prepare(
+            `INSERT OR REPLACE INTO theme_events (session_id, idx, turn_seq, type, trigger, description, theme_id, added_at, occurred_at)
+             VALUES (?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(sessionId, e.idx, e.turnSeq ?? null, e.type, e.trigger, e.description, e.themeId ?? null, now, e.occurredAt ?? null)
+      }
+      // Prune derived themes with no surviving member events (a re-extraction may
+      // have moved the last event off a theme). Kept from pruning: resolved themes
+      // (so a recurrence can reopen them), and any theme still backing a live
+      // (non-dismissed) insight — else a version-bump full re-extract could delete
+      // a surfaced theme mid-run and orphan its insight. User themes never prune.
+      this.db
+        .prepare(
+          `DELETE FROM theme WHERE source = 'derived' AND resolved = 0
+             AND id NOT IN (SELECT DISTINCT theme_id FROM theme_events WHERE theme_id IS NOT NULL)
+             AND id NOT IN (SELECT signal_key FROM insights WHERE detector = 'recurring-themes' AND state != 'dismissed')`,
+        )
+        .run()
+    })()
+  }
+
+  /**
+   * Apply one theme merge: re-point every member event of `dropId` to `keepId`,
+   * then delete the absorbed theme. Only derived themes are absorbed. Returns
+   * false if either id is missing or they're equal. (Rewording the keeper is a
+   * separate step — see retitleTheme.)
+   */
+  applyThemeMerge(keepId: string, dropId: string): boolean {
+    return this.db.transaction(() => {
+      const keep = this.db.prepare('SELECT id FROM theme WHERE id = ?').get(keepId)
+      const drop = this.db.prepare("SELECT id FROM theme WHERE id = ? AND source <> 'user'").get(dropId)
+      if (!keep || !drop || keepId === dropId) return false
+      this.db.prepare('UPDATE theme_events SET theme_id = ? WHERE theme_id = ?').run(keepId, dropId)
+      this.db.prepare('DELETE FROM theme WHERE id = ?').run(dropId)
+      return true
+    })()
+  }
+
+  /**
+   * Fold dropId into keepId AND retire the dropped theme's insight as one atomic unit.
+   * Wrapping both in a single transaction (nested via savepoints) means a crash between
+   * them can't leave the deleted theme's insight orphaned as a frozen surfaced duplicate.
+   */
+  applyThemeMergeAndRetire(keepId: string, dropId: string, detector: string): boolean {
+    return this.db.transaction(() => {
+      if (!this.applyThemeMerge(keepId, dropId)) return false
+      this.retireInsightForTheme(detector, dropId)
+      return true
+    })()
+  }
+
+  /**
+   * Friction events the extractor recorded but couldn't confidently attach to a
+   * theme (varied wording, or a sibling session minted the theme concurrently so
+   * it wasn't yet visible). Grouped by session repo so the reconcile pass can scope
+   * a minted theme correctly. Most recent first.
+   */
+  orphanThemeEvents(): Array<{ sessionId: string; idx: number; repo: string | null; type: string; description: string }> {
+    return this.db
+      .prepare(
+        `SELECT e.session_id AS sessionId, e.idx, s.repo, e.type, e.description
+         FROM theme_events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.theme_id IS NULL ORDER BY e.added_at DESC, e.session_id, e.idx`,
+      )
+      .all() as Array<{ sessionId: string; idx: number; repo: string | null; type: string; description: string }>
+  }
+
+  /** Attach a previously-orphaned event to a theme (the reconcile pass's write). */
+  assignThemeEvent(sessionId: string, idx: number, themeId: string): void {
+    this.db.prepare('UPDATE theme_events SET theme_id = ? WHERE session_id = ? AND idx = ?').run(themeId, sessionId, idx)
+  }
+
+  /** Mint a derived theme if absent (INSERT OR IGNORE — never renames an existing id). */
+  ensureTheme(input: ThemeInput): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO theme (id, label, description, type, remedy, repo, source, first_seen)
+         VALUES (?,?,?,?,?,?,'derived',?)`,
+      )
+      .run(input.id, input.label, input.description ?? null, input.type, input.remedy ?? null, input.repo ?? null, input.firstSeen ?? now)
+  }
+
+  /** Rewrite a derived theme's wording (label/description). Never touches a user theme. */
+  retitleTheme(id: string, label?: string, description?: string): void {
+    if (!label && !description) return
+    const row = this.db.prepare("SELECT source FROM theme WHERE id = ?").get(id) as { source: string } | undefined
+    if (!row || row.source === 'user') return
+    if (label) this.db.prepare('UPDATE theme SET label = ? WHERE id = ?').run(label, id)
+    if (description) this.db.prepare('UPDATE theme SET description = ? WHERE id = ?').run(description, id)
+  }
+
+  /**
+   * Every theme with its member events aggregated — the surfacing step's input.
+   * `sessionCount` and `eventCount` drive the recurrence threshold; `descriptions`
+   * and `evidence` feed the insight's copy + drill-in pointers.
+   */
+  themesWithEvents(): Array<{
+    id: string
+    label: string
+    description: string | null
+    type: string
+    remedy: string | null
+    repo: string | null
+    resolved: number
+    fixType: string | null
+    fixContent: string | null
+    fixHash: string | null
+    eventCount: number
+    sessionCount: number
+    evidence: Array<{ sessionId: string; turnSeq: number | null; description: string }>
+    descriptions: string[]
+    // Real friction window from the member events' message timestamps (null until a
+    // post-schema-17 re-extraction populates occurred_at).
+    firstSeenAt: string | null
+    lastSeenAt: string | null
+  }> {
+    const themes = this.db
+      .prepare(
+        `SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, remedy, repo, resolved,
+                fix_type AS fixType, fix_content AS fixContent, fix_hash AS fixHash
+         FROM theme ORDER BY first_seen`,
+      )
+      .all() as Array<{
+        id: string; label: string; description: string | null; type: string; remedy: string | null; repo: string | null
+        resolved: number; fixType: string | null; fixContent: string | null; fixHash: string | null
+      }>
+    const evStmt = this.db.prepare(
+      // Chronological, most-recent friction first — by when the friction actually
+      // occurred (occurred_at), not when it was extracted. This is the order the fix
+      // pass slices (MAX_FIX_OCCURRENCES), so it must reflect real recency. Pre-schema-17
+      // rows have a null occurred_at; fall back to added_at for those.
+      `SELECT session_id AS sessionId, turn_seq AS turnSeq, description, occurred_at AS occurredAt
+       FROM theme_events WHERE theme_id = ?
+       ORDER BY COALESCE(occurred_at, added_at) DESC, added_at DESC, session_id, idx`,
+    )
+    return themes.map((t) => {
+      const evs = evStmt.all(t.id) as Array<{ sessionId: string; turnSeq: number | null; description: string; occurredAt: string | null }>
+      const sessions = new Set(evs.map((e) => e.sessionId))
+      // Friction window = min/max of the events' message timestamps. Ignore nulls
+      // (pre-schema-17 rows); all-null → null (caller falls back).
+      const times = evs.map((e) => e.occurredAt).filter((x): x is string => !!x).sort()
+      return {
+        ...t,
+        eventCount: evs.length,
+        sessionCount: sessions.size,
+        evidence: evs.map((e) => ({ sessionId: e.sessionId, turnSeq: e.turnSeq, description: e.description })),
+        descriptions: evs.map((e) => e.description),
+        firstSeenAt: times[0] ?? null,
+        lastSeenAt: times[times.length - 1] ?? null,
+      }
+    })
+  }
+
+  /** Cache a theme's LLM-generated fix + the hash of the occurrence set it was built from. */
+  setThemeFix(id: string, fixType: string, fixContent: string, fixHash: string): void {
+    this.db.prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_hash = ? WHERE id = ?').run(fixType, fixContent, fixHash, id)
+  }
+
+  /**
+   * The lifecycle state + last-persisted occurrence count of an existing insight,
+   * or null if none exists yet. A detector reads this before re-surfacing a theme
+   * so a dismissed insight stays gone and a resolved one only reopens on a GENUINE
+   * recurrence (new occurrences)
+   */
+  insightStatus(detector: string, repo: string, signalKey: string): { state: InsightState; count: number } | null {
+    const row = this.db
+      .prepare('SELECT state, count FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
+      .get(detector, repo, signalKey) as { state: string; count: number } | undefined
+    return row ? { state: row.state as InsightState, count: row.count } : null
+  }
+
+  /**
+   * Retire a theme's insight so it stops showing — used when the theme was absorbed
+   * by a merge (its id is gone) OR when the fix pass later vetoes it (no longer worth
+   * surfacing). Marked resolved with a state-log entry, not deleted, so its history
+   * and any adoption survive. No-op if there's no insight for that theme or it's
+   * already terminal.
+   */
+  retireInsightForTheme(detector: string, signalKey: string): void {
+    const row = this.db
+      .prepare("SELECT id, state FROM insights WHERE detector = ? AND signal_key = ?")
+      .get(detector, signalKey) as { id: string; state: string } | undefined
+    if (!row || row.state === 'resolved' || row.state === 'dismissed') return
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run('resolved', now, row.id)
+    this.logInsightState(row.id, row.state as InsightState, 'resolved', now)
+  }
+
+  /**
+   * Resolve an insight by its (detector, repo, signalKey) triple — for a detector that
+   * stops emitting a still-open insight, so no stale surfaced row lingers. No-op if absent or already terminal.
+   */
+  resolveInsight(detector: string, repo: string, signalKey: string): void {
+    const row = this.db
+      .prepare('SELECT id, state FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
+      .get(detector, repo, signalKey) as { id: string; state: string } | undefined
+    if (!row || row.state === 'resolved' || row.state === 'dismissed') return
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run('resolved', now, row.id)
+    this.logInsightState(row.id, row.state as InsightState, 'resolved', now)
+  }
+
+  /**
+   * Fetch the actual user-turn text for a set of (sessionId, seq) evidence
+   * pointers, live from the session blobs — so merge/fix prompts can show the
+   * user's real words without storing a snippet copy. Hydrates each session once.
+   * Missing/pruned turns are simply omitted. Text is returned verbatim (callers clip).
+   */
+  turnTexts(refs: Array<{ sessionId: string; seq: number | null }>): Map<string, string> {
+    const out = new Map<string, string>() // key: `${sessionId}:${seq}`
+    const bySession = new Map<string, number[]>()
+    for (const r of refs) {
+      if (r.seq == null) continue
+      const list = bySession.get(r.sessionId) ?? []
+      list.push(r.seq)
+      bySession.set(r.sessionId, list)
+    }
+    for (const [sessionId, seqs] of bySession) {
+      const session = this.loadSession(sessionId)
+      if (!session) continue
+      const want = new Set(seqs)
+      for (const ev of session.events) {
+        if (ev.kind !== 'user' || ev.isSidechain || ev.seq == null || !want.has(ev.seq)) continue
+        out.set(`${sessionId}:${ev.seq}`, ev.text.replace(/\s+/g, ' ').trim())
+      }
+    }
+    return out
+  }
+
+  persistInsights(detector: string, version: number, inputs: InsightInput[], cost?: { inTokens: number; outTokens: number; usd: number; model?: string }): void {
+    const now = new Date().toISOString()
+    this.db.transaction(() => {
+      for (const input of inputs) {
+        // Real occurrence times when the detector sources them (recurring-themes reads
+        // the events' message timestamps); else the analyze-run time as a coarse floor.
+        const lastSeen = input.lastSeenAt ?? now
+        const firstSeen = input.firstSeenAt ?? now
+        const existing = this.db
+          .prepare('SELECT id, state FROM insights WHERE detector = ? AND repo = ? AND signal_key = ?')
+          .get(detector, input.repo, input.signalKey) as { id: string; state: string } | undefined
+
+        if (existing && existing.state === 'dismissed') continue
+
+        // A fix-prompt that doesn't embed its own insight id can never adopt —
+        // a detector bug worth failing loudly on (the runner records the error).
+        if (input.fix.type === 'fix-prompt' && !input.fix.content.includes(insightId(detector, input.repo, input.signalKey))) {
+          throw new Error(`detector ${detector}: fix-prompt for "${input.signalKey}" does not embed its insight id`)
+        }
+
+        if (existing) {
+          // Re-detection of a resolved insight means the problem came back — reopen it.
+          const reopened = existing.state === 'resolved'
+          // first_seen_at only ever moves EARLIER. COALESCE alone kept the stored value
+          // when the detector supplied nothing, but let any supplied value win — and
+          // rolling-window detectors recompute their earliest occurrence over a trailing
+          // 30 days, so theirs marches forward every run. A chronic insight would keep
+          // reporting "first seen ≤30 days ago" and lose its origin date for good.
+          // MIN is safe here only because the column is NOT NULL: SQLite's multi-arg
+          // min() returns NULL if any argument is NULL, and the COALESCE covers the
+          // other argument (a detector that sources no occurrence time binds null).
+          this.db
+            .prepare(
+              `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
+               state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
+               state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
+               WHERE id = ?`,
+            )
+            .run(
+              input.severity,
+              input.title,
+              input.description,
+              input.count,
+              input.fix.type,
+              input.fix.label,
+              input.fix.content,
+              input.firstSeenAt ?? null,
+              lastSeen,
+              version,
+              now,
+              existing.id,
+            )
+          if (reopened) this.logInsightState(existing.id, 'resolved', 'surfaced', now)
+          this.db.prepare('DELETE FROM insight_evidence WHERE insight_id = ?').run(existing.id)
+          this.writeEvidence(existing.id, input.evidence, now)
+        } else {
+          const id = insightId(detector, input.repo, input.signalKey)
+          this.db
+            .prepare(
+              `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count,
+               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, detector_version)
+               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              id,
+              detector,
+              input.signalKey,
+              input.repo,
+              input.severity,
+              input.title,
+              input.description,
+              input.count,
+              input.fix.type,
+              input.fix.label,
+              input.fix.content,
+              firstSeen,
+              lastSeen,
+              version,
+            )
+          this.writeEvidence(id, input.evidence, now)
+          this.logInsightState(id, null, 'surfaced', now)
+        }
+      }
+      this.db
+        .prepare(
+          `INSERT INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+           VALUES (?, ?, 'ok', ?, ?, ?, ?, ?)`,
+        )
+        .run(detector, version, cost?.model ?? null, cost?.inTokens ?? null, cost?.outTokens ?? null, cost?.usd ?? null, now)
+    })()
+  }
+
+  /**
+   * Append a failed run to the log. Model and cost columns are explicitly NULL:
+   * the run produced nothing, so it carries no accounting of its own — and because
+   * this appends rather than upserts, it cannot blank the columns of the successful
+   * run before it (which `detectorLastSuccessfulModel` and the spend total read).
+   */
+  persistDetectorError(detector: string, version: number): void {
+    const now = new Date().toISOString()
+    this.db
+      .prepare(
+        `INSERT INTO detector_runs (detector, version, status, model, in_tokens, out_tokens, cost_usd, ran_at)
+         VALUES (?, ?, 'error', NULL, NULL, NULL, NULL, ?)`,
+      )
+      .run(detector, version, now)
+  }
+
+  /**
+   * Write an insight's evidence rows (assumes any prior rows were cleared).
+   * Capped generously: the insight card shows a few chips, but the detail view
+   * lists every occurrence, so we keep enough to be useful without unbounded rows.
+   */
+  private writeEvidence(insightId: string, evidence: EvidenceRef[], now: string): void {
+    const stmt = this.db.prepare(
+      'INSERT OR IGNORE INTO insight_evidence (insight_id, session_id, turn_idx, note, added_at) VALUES (?, ?, ?, ?, ?)',
+    )
+    for (const ev of evidence.slice(0, EVIDENCE_CAP)) {
+      stmt.run(insightId, ev.sessionId, ev.turnIdx ?? -1, ev.note ?? null, now)
+    }
+  }
+
+  /**
+   * Every stored occurrence for an insight — the detail view's drill-in list.
+   * Joins the session's display title so each row reads as "what happened, in
+   * which session" and links to the transcript turn (turn_idx = main-thread seq).
+   */
+  insightEvidence(insightId: string): Array<{ sessionId: string; turnIdx: number | null; note: string | null; sessionTitle: string | null }> {
+    return (
+      this.db
+        .prepare(
+          `SELECT e.session_id AS sessionId, e.turn_idx AS turnIdx, e.note AS note,
+                  ${titleExpr('s')} AS sessionTitle
+           FROM insight_evidence e LEFT JOIN sessions s ON s.id = e.session_id
+           -- rowid = insertion order = the detector's emit order (cache-miss emits its
+           -- evidence dollar-descending, so the priciest sessions show first). added_at
+           -- stays primary so accumulating detectors still surface the most recent run.
+           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.rowid`,
+        )
+        .all(insightId) as Array<{ sessionId: string; turnIdx: number; note: string | null; sessionTitle: string | null }>
+    ).map((r) => ({ ...r, turnIdx: r.turnIdx === -1 ? null : r.turnIdx }))
+  }
+
+  /**
+   * Distinct repos of the sessions in a cross-repo ('*') insight's evidence — the
+   * repos that CONTRIBUTED to the last-surfaced card. A resolve sweep uses this to ask
+   * whether each previously-contributing repo now has enough data to call clean, rather
+   * than trusting a corpus-wide total that many sub-threshold repos could reach together
+   * (or a different repo's data that says nothing about a still-quiet contributor). Uses
+   * the same repo derivation the detectors do (repo ▸ cwd ▸ '_unknown'). Empty when the
+   * insight has no evidence (e.g. never surfaced) or its evidence sessions were pruned.
+   */
+  insightEvidenceRepos(insightId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT COALESCE(NULLIF(s.repo,''), NULLIF(s.cwd,''), '_unknown') AS repo
+           FROM insight_evidence e JOIN sessions s ON s.id = e.session_id
+           WHERE e.insight_id = ?`,
+        )
+        .all(insightId) as Array<{ repo: string }>
+    ).map((r) => r.repo)
+  }
+
+  insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {
+    let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count,
+               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version
+               FROM insights WHERE state != 'dismissed'`
+    const params: unknown[] = []
+    if (opts?.state) {
+      sql += ' AND state = ?'
+      params.push(opts.state)
+    }
+    if (opts?.detector) {
+      sql += ' AND detector = ?'
+      params.push(opts.detector)
+    }
+    if (opts?.repo) {
+      sql += ' AND repo = ?'
+      params.push(opts.repo)
+    }
+    // Rank most-valuable-first: severity, then recency. `count` is intentionally NOT a
+    // sort key — it means different things per detector (cache misses in the thousands
+    // vs a handful of theme events), so sorting on it lets one high-cardinality detector
+    // monopolize the list. detector/signal_key are a stable final tiebreak.
+    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC, detector, signal_key`
+
+    const rows = this.db.prepare(sql).all(...params) as Array<{
+      id: string
+      detector: string
+      signal_key: string
+      repo: string
+      severity: string
+      state: string
+      title: string
+      description: string
+      count: number
+      fix_type: string | null
+      fix_label: string | null
+      fix_content: string | null
+      first_seen_at: string
+      last_seen_at: string
+      state_changed_at: string | null
+      detector_version: number
+    }>
+
+    return rows.map((r) => {
+      const evidence = this.db
+        .prepare('SELECT session_id, turn_idx FROM insight_evidence WHERE insight_id = ? ORDER BY added_at DESC LIMIT 10')
+        .all(r.id) as Array<{ session_id: string; turn_idx: number }>
+      // True session span, over ALL evidence — the capped `evidence` above can all fall
+      // in one session and under-count (the list must not infer this from the sample)
+      const sessionCount = (
+        this.db.prepare('SELECT COUNT(DISTINCT session_id) AS n FROM insight_evidence WHERE insight_id = ?').get(r.id) as { n: number }
+      ).n
+      // Fix sessions are scoped to the current lifecycle cycle: after a reopen,
+      // the previous cycle's fix must read as history, not as the current fix.
+      // Same boundary reconcile gates on, so state and refs can't disagree.
+      const boundary = this.insightCycleBoundary(r.id)
+      const fixSessions = this.db
+        .prepare(
+          `SELECT session_id, seq, turn_at FROM fix_marker_sightings
+           WHERE insight_id = ? AND matched_at IS NOT NULL AND (? IS NULL OR turn_at > ?)
+           ORDER BY turn_at ASC`,
+        )
+        .all(r.id, boundary, boundary) as Array<{ session_id: string; seq: number; turn_at: string }>
+      return {
+        id: r.id,
+        detector: r.detector,
+        signalKey: r.signal_key,
+        repo: r.repo,
+        severity: r.severity as InsightRow['severity'],
+        state: r.state as InsightState,
+        title: r.title,
+        description: r.description,
+        count: r.count,
+        fix: { type: r.fix_type ?? '', label: r.fix_label ?? '', content: r.fix_content ?? '' },
+        firstSeenAt: r.first_seen_at,
+        lastSeenAt: r.last_seen_at,
+        stateChangedAt: r.state_changed_at,
+        detectorVersion: r.detector_version,
+        sessionCount,
+        evidence: evidence.map((e) => ({ sessionId: e.session_id, turnIdx: e.turn_idx === -1 ? null : e.turn_idx })),
+        // Event time of the first fix application in the current cycle. When the
+        // fix session was pruned (transcript rotated → sightings cascade away),
+        // fall back to the state log's adoption entry — processing time, but it
+        // keeps "recurrences since adoption" answerable.
+        adoptedAt: fixSessions[0]?.turn_at ?? this.adoptedAtFromLog(r.id, r.state as InsightState, boundary),
+        fixSessions: fixSessions.map((f) => ({ sessionId: f.session_id, seq: f.seq, turnAt: f.turn_at })),
+      }
+    })
+  }
+
+  dismissInsight(id: string): boolean {
+    return this.transitionInsight(id, 'dismissed')
+  }
+
+  transitionInsight(id: string, newState: InsightState): boolean {
+    const VALID_TRANSITIONS: Record<string, string[]> = {
+      surfaced: ['fix_issued', 'resolved', 'dismissed'],
+      fix_issued: ['adopted', 'resolved', 'dismissed'],
+      adopted: ['resolved', 'dismissed'],
+      resolved: ['surfaced', 'dismissed'],
+    }
+    const row = this.db.prepare('SELECT state FROM insights WHERE id = ?').get(id) as { state: string } | undefined
+    if (!row) return false
+    const allowed = VALID_TRANSITIONS[row.state]
+    if (!allowed || !allowed.includes(newState)) return false
+    const now = new Date().toISOString()
+    this.db.prepare('UPDATE insights SET state = ?, state_changed_at = ? WHERE id = ?').run(newState, now, id)
+    this.logInsightState(id, row.state as InsightState, newState, now)
+    return true
+  }
+
+  /** Append one row to the lifecycle history. from = null means first surface. */
+  private logInsightState(id: string, from: InsightState | null, to: InsightState, at: string): void {
+    this.db
+      .prepare('INSERT INTO insight_state_log (insight_id, from_state, to_state, at) VALUES (?, ?, ?, ?)')
+      .run(id, from, to, at)
+  }
+
+  /** Current-cycle adoption time from the state log — the fallback when the fix session's sightings were pruned with it. */
+  private adoptedAtFromLog(id: string, state: InsightState, boundary: string | null): string | null {
+    if (state !== 'adopted' && state !== 'resolved') return null
+    const row = this.db
+      .prepare(
+        `SELECT MAX(at) as at FROM insight_state_log
+         WHERE insight_id = ? AND to_state = 'adopted' AND (? IS NULL OR at > ?)`,
+      )
+      .get(id, boundary, boundary) as { at: string | null }
+    return row.at
+  }
+
+  /**
+   * Event-time lower bound of the insight's current cycle: the resolve that
+   * preceded the latest reopen (null when never reopened). A fix applied after
+   * that resolve can only belong to the current cycle; one applied before it is
+   * a previous cycle's fix. Deliberately NOT the reopen timestamp — reopens are
+   * logged at processing time, which can postdate a genuine re-fix's event time
+   * (paste yesterday, analyze today). Shared by reconcile and the read path so
+   * they can't disagree on what "current cycle" means.
+   */
+  private insightCycleBoundary(id: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT MAX(at) as at FROM insight_state_log
+         WHERE insight_id = ? AND to_state = 'resolved'
+           AND at <= (SELECT MAX(at) FROM insight_state_log
+                      WHERE insight_id = ? AND from_state = 'resolved' AND to_state = 'surfaced')`,
+      )
+      .get(id, id) as { at: string | null }
+    return row.at
+  }
+
+  /**
+   * Persist the fix-marker sightings for one session. matched_at is intentionally NOT preserved 
+   * across replaces: reconcile re-stamps it, since "the claimed id exists" is re-checkable.
+   */
+  recordFixMarkerSightings(sessionId: string, sightings: FixMarkerSightingInput[]): void {
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM fix_marker_sightings WHERE session_id = ?').run(sessionId)
+      for (const s of sightings) {
+        this.db
+          .prepare('INSERT OR IGNORE INTO fix_marker_sightings (session_id, insight_id, seq, turn_at) VALUES (?, ?, ?, ?)')
+          .run(sessionId, s.insightId, s.seq, s.turnAt)
+      }
+    })()
+  }
+
+  /**
+   * Interpret unmatched sightings: a marker sighting whose claimed insight exists
+   * means the user ran that insight's fix-prompt — walk the insight to `adopted`
+   * (marker presence proves the fix was issued). Runs after the detector phase in
+   * analyze so insights created in the same run are visible. Idempotent: sightings
+   * on already-adopted/resolved/dismissed insights are matched without transitions;
+   * unknown ids stay unmatched and are retried next run (self-heals after rebuilds).
+   * Returns the number of insights newly flipped to adopted.
+   */
+  reconcileFixSightings(): number {
+    let adopted = 0
+    this.db.transaction(() => {
+      const pending = this.db
+        .prepare(
+          `SELECT f.session_id as sessionId, f.insight_id as insightId, f.turn_at as turnAt, i.state
+           FROM fix_marker_sightings f JOIN insights i ON i.id = f.insight_id
+           WHERE f.matched_at IS NULL`,
+        )
+        .all() as Array<{ sessionId: string; insightId: string; turnAt: string; state: InsightState }>
+      const now = new Date().toISOString()
+      for (const p of pending) {
+        // Only a current-cycle fix may transition: a previous cycle's fix session
+        // being re-scanned (wipe-and-replace on resume) must not re-adopt a
+        // reopened insight off stale evidence.
+        const boundary = this.insightCycleBoundary(p.insightId)
+        const currentCycle = boundary === null || p.turnAt > boundary
+        if (currentCycle) {
+          if (p.state === 'surfaced') this.transitionInsight(p.insightId, 'fix_issued')
+          if (p.state === 'surfaced' || p.state === 'fix_issued') {
+            if (this.transitionInsight(p.insightId, 'adopted')) adopted++
+          }
+        }
+        // Matched regardless of state or cycle — a re-scanned fix session keeps
+        // its link, dismissed means dead, and out-of-cycle sightings must not
+        // retry forever.
+        this.db
+          .prepare('UPDATE fix_marker_sightings SET matched_at = ? WHERE session_id = ? AND insight_id = ?')
+          .run(now, p.sessionId, p.insightId)
+      }
+    })()
+    return adopted
+  }
+
+  // ---- environment reader (harness config snapshots) -----------------------
+
+  /**
+   * Append-on-change write of one category's config snapshot. Hashes the payload
+   * and compares to the latest stored state for (source, scope, scope_key,
+   * category): an unchanged hash just bumps `last_observed_at` (no new row), so a
+   * config that holds steady across many analyze runs stays one row; a changed
+   * hash appends a new row, building the dated change timeline. `captured_at` marks
+   * when a state first appeared; `last_observed_at` the most recent run that saw it.
+   *
+   * `now` defaults to the current time; callers (tests) may pass an explicit
+   * timestamp to control the timeline and keep `captured_at` unique across writes.
+   */
+  recordEnvSnapshot(input: EnvSnapshotInput, now: string = new Date().toISOString()): void {
+    // Hash a canonical serialization (object keys sorted at every level; array order
+    // preserved) so a meaning-preserving key reorder in the source config doesn't read
+    // as a change. Arrays aren't sorted — element order can be meaningful (e.g. the
+    // order of permission rules) and is already consistent across reads.
+    const hash = contentHash(canonicalJson(input.payload))
+    this.db.transaction(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT content_hash, captured_at FROM environment_snapshots
+           WHERE source = ? AND scope = ? AND scope_key = ? AND category = ?
+           ORDER BY captured_at DESC LIMIT 1`,
+        )
+        .get(input.source, input.scope, input.scopeKey, input.category) as
+        | { content_hash: string; captured_at: string }
+        | undefined
+      if (existing?.content_hash === hash) {
+        // Same state — confirm we still see it, no new row. Target the latest row by
+        // captured_at (its PK): a prior round-trip can leave the same hash on an
+        // earlier row, which must not be touched.
+        this.db
+          .prepare(
+            `UPDATE environment_snapshots SET last_observed_at = ?
+             WHERE source = ? AND scope = ? AND scope_key = ? AND category = ? AND captured_at = ?`,
+          )
+          .run(now, input.source, input.scope, input.scopeKey, input.category, existing.captured_at)
+        return
+      }
+      this.db
+        .prepare(
+          `INSERT INTO environment_snapshots
+             (source, scope, scope_key, category, content_hash, snapshot_json, captured_at, last_observed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(input.source, input.scope, input.scopeKey, input.category, hash, JSON.stringify(input.payload), now, now)
+    })()
+  }
+
+  /** The current config state for a key — the newest snapshot by captured_at, or null if none. */
+  envSnapshotCurrent(source: string, scope: string, scopeKey: string, category: string): EnvSnapshotRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT snapshot_json, captured_at, last_observed_at FROM environment_snapshots
+         WHERE source = ? AND scope = ? AND scope_key = ? AND category = ?
+         ORDER BY captured_at DESC LIMIT 1`,
+      )
+      .get(source, scope, scopeKey, category) as
+      | { snapshot_json: string; captured_at: string; last_observed_at: string }
+      | undefined
+    return row ? toEnvSnapshotRow(row) : null
+  }
+
+  /**
+   * Point-in-time read: the config state as of `at` (the newest snapshot with
+   * captured_at <= at). Per-session detectors MUST use this rather than "current",
+   * so an old session isn't judged against today's config. `stale` is true when no
+   * snapshot precedes `at` — we never observed the config that early, so the caller
+   * should abstain or down-weight rather than treat the (absent) result as fact.
+   */
+  envSnapshotAsOf(source: string, scope: string, scopeKey: string, category: string, at: string): EnvSnapshotAsOf {
+    const row = this.db
+      .prepare(
+        `SELECT snapshot_json, captured_at, last_observed_at FROM environment_snapshots
+         WHERE source = ? AND scope = ? AND scope_key = ? AND category = ? AND captured_at <= ?
+         ORDER BY captured_at DESC LIMIT 1`,
+      )
+      .get(source, scope, scopeKey, category, at) as
+      | { snapshot_json: string; captured_at: string; last_observed_at: string }
+      | undefined
+    return { row: row ? toEnvSnapshotRow(row) : null, stale: !row }
+  }
+
+  /**
+   * Distinct categories with any stored snapshot for a key. Used by capture to
+   * detect deletions: a category with history that a successful read no longer
+   * returns has been removed from disk and gets a null tombstone snapshot.
+   */
+  envSnapshotCategories(source: string, scope: string, scopeKey: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT category FROM environment_snapshots
+           WHERE source = ? AND scope = ? AND scope_key = ?`,
+        )
+        .all(source, scope, scopeKey) as Array<{ category: string }>
+    ).map((r) => r.category)
+  }
+
   close() {
+    this.readonlyDb?.close()
     this.db.close()
+  }
+}
+
+/**
+ * Deterministic JSON for hashing: object keys sorted recursively, array order kept.
+ * So `{a:1,b:2}` and `{b:2,a:1}` hash identically, but `[1,2]` and `[2,1]` do not.
+ */
+function canonicalJson(value: unknown): string {
+  const canon = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(canon)
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.keys(v as Record<string, unknown>)
+          .sort()
+          .map((k) => [k, canon((v as Record<string, unknown>)[k])]),
+      )
+    }
+    return v
+  }
+  return JSON.stringify(canon(value))
+}
+
+/** Map a raw environment_snapshots row to the read-facing shape (parses snapshot_json). */
+function toEnvSnapshotRow(row: { snapshot_json: string; captured_at: string; last_observed_at: string }): EnvSnapshotRow {
+  return {
+    payload: JSON.parse(row.snapshot_json),
+    capturedAt: row.captured_at,
+    lastObservedAt: row.last_observed_at,
   }
 }
 

@@ -3,11 +3,13 @@ import { createAnthropicClient } from './anthropic'
 import { createBedrockClient } from './bedrock'
 import { createOpenAiClient } from './openai'
 import { PROVIDERS } from './providers'
+import { withTracing } from './tracing'
 import type { ClientOpts, LlmClient } from './types'
 
 export type { LlmClient, LlmResult, StructuredRequest, JsonSchema } from './types'
 export { PROVIDERS, PROVIDER_NAMES } from './providers'
 export type { ProviderPreset } from './providers'
+export { startLlmTrace, endLlmTrace } from './tracing'
 
 /** Build an LLM client from config, or null if enrichment isn't configured. */
 export function createLlmClient(llm: TuneloopConfig['llm']): LlmClient | null {
@@ -21,13 +23,14 @@ export function createLlmClient(llm: TuneloopConfig['llm']): LlmClient | null {
     throw new Error(`provider "${llm.provider}" needs a base URL — set TUNELOOP_LLM_BASE_URL or --llm-base-url`)
   }
   const opts: ClientOpts = { provider: llm.provider, baseURL: llm.baseURL }
+  // withTracing is a no-op unless LANGFUSE_* env keys are set (personal debug aid)
   switch (preset.shape) {
     case 'anthropic':
-      return createAnthropicClient(llm.apiKey, llm.model, opts)
+      return withTracing(createAnthropicClient(llm.apiKey, llm.model, opts))
     case 'bedrock':
-      return createBedrockClient(llm.apiKey, llm.model, opts)
+      return withTracing(createBedrockClient(llm.apiKey, llm.model, opts))
     case 'openai':
     case 'openai-compatible':
-      return createOpenAiClient(llm.apiKey, llm.model, opts)
+      return withTracing(createOpenAiClient(llm.apiKey, llm.model, opts))
   }
 }

@@ -11,6 +11,12 @@ export interface StructuredRequest {
   /** Name of the single forced tool. */
   toolName: string
   maxTokens?: number
+  /**
+   * Mark the (stable) system block as a prompt-cache breakpoint, for when the same
+   * system prompt repeats across many calls in a run. Anthropic: adds cache_control;
+   * OpenAI: no-op (auto-caches long prefixes).
+   */
+  cacheSystem?: boolean
 }
 
 export interface LlmResult {

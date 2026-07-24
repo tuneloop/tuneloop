@@ -13,7 +13,8 @@ import type {
   ToolCall,
   UserMessage,
 } from '../../core/model'
-import { mapAction } from './actions'
+import { synthSkillCall } from '../skill-invocation'
+import { explicitSkillName, mapAction } from './actions'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (see analyze.ts). 4: capture subagent identity (agentId on events +
@@ -23,7 +24,12 @@ import { mapAction } from './actions'
 // 7: count usage once per API message id, from the message's final line.
 // 8: capture the 1h-TTL share of cache creation (`cacheCreate1h`) so cache
 //    writes price at their real rate instead of all-5m.
-export const PARSE_VERSION = 8
+// 9: carry `isMeta` on user events so harness-injected turns (expanded skill and
+//    slash-command bodies) stop counting as human steering.
+// 10: capture EXPLICIT `/skill-name` invocations. CC injects the SKILL.md body as an
+//    isMeta user turn and acts directly (no `Skill` tool call), so synthesize a skill
+//    tool call from it — else the invocation is invisible to capability usage.
+export const PARSE_VERSION = 10
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -207,8 +213,14 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
         agentId,
         text,
         blocks,
+        // Only when set: keeps the flag out of the blob for the ordinary turn.
+        ...(r.isMeta ? { isMeta: true } : {}),
       }
       events.push(ev)
+      // Explicit `/skill-name` invocation: the isMeta body names the skill dir but no
+      // `Skill` tool call is emitted. Synthesize one so capability usage sees it.
+      const skill = r.isMeta ? explicitSkillName(text) : null
+      if (skill) toolCalls.push(synthSkillCall(skill, { id: `skill-${toolCalls.length}`, ts, isSidechain }))
     } else if (r.type === 'system') {
       const ev: SystemEvent = {
         kind: 'system',

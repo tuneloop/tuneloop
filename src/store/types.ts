@@ -154,3 +154,178 @@ export interface ProcessorRunRow {
   model: string | null
   invalidated: boolean
 }
+
+// ---- environment reader (harness config snapshots) -------------------------
+
+/**
+ * Harness-neutral category vocabulary for config snapshots. Deliberately abstract,
+ * not per-harness fields: the storage layer is shared, only the reader is
+ * per-harness. A harness populates ONLY the categories it has — an absent category
+ * simply produces no rows (Pi, e.g., ships no built-in MCP or sub-agents, so writes
+ * neither `mcp` nor `agents`).
+ *
+ *  settings     — permissions / plugins / equivalent. Concept is universal; the
+ *                 file format is not (CC=JSON, Codex=TOML, OpenCode=JSON).
+ *  mcp          — MCP servers. The most universal — every supported harness has it.
+ *  agents       — custom SUB-AGENT DEFINITIONS. NOTE: this is NOT `AGENTS.md`.
+ *                 `AGENTS.md` is Codex/OpenCode's instructions file (their CLAUDE.md)
+ *                 and belongs to `instructions`, despite the name. A harness reader
+ *                 must never file AGENTS.md here.
+ *  skills       — custom skills / commands. Ragged across harnesses: CC = SKILL.md
+ *                 dirs, Codex = shell SKILL.md bundles, OpenCode = a skill tool,
+ *                 Pi = SKILL.md dirs + root `.md` files. Same label, different
+ *                 mechanism — reader is per-harness.
+ *  instructions — the project-instructions file: CLAUDE.md (CC) / AGENTS.md (Codex,
+ *                 OpenCode). The generic name for "always-on instructions the user wrote".
+ */
+export type EnvCategory = 'settings' | 'mcp' | 'agents' | 'skills' | 'instructions'
+
+/**
+ * One category's redacted, allowlisted config payload, as read by an adapter's
+ * `readEnvironment`. `payload` is serialized to `snapshot_json`; only fields in
+ * the design's allowlist are ever included (never env values, MCP secrets, etc.).
+ */
+export interface EnvCategorySnapshot {
+  category: EnvCategory
+  payload: unknown
+}
+
+/** A snapshot write: one category, at one scope, for the store to append-on-change. */
+export interface EnvSnapshotInput {
+  source: string
+  scope: 'global' | 'project'
+  /** '_global' for global scope; repo root for project scope. */
+  scopeKey: string
+  category: EnvCategory
+  payload: unknown
+}
+
+/** One stored config state, as returned by the snapshot read methods. */
+export interface EnvSnapshotRow {
+  payload: unknown
+  capturedAt: string
+  lastObservedAt: string
+}
+
+/**
+ * Result of a point-in-time (`asOf`) read. `stale` is true when no snapshot was
+ * recorded at or before the requested time — i.e. we have no observation of the
+ * config as it was then, so a caller should down-weight or abstain rather than
+ * assert. `row` is null in that case only if nothing precedes the time at all.
+ */
+export interface EnvSnapshotAsOf {
+  row: EnvSnapshotRow | null
+  stale: boolean
+}
+
+// ---- insight ledger types ---------------------------------------------------
+
+export type InsightState = 'surfaced' | 'fix_issued' | 'adopted' | 'resolved' | 'dismissed'
+
+export interface InsightRow {
+  id: string
+  detector: string
+  signalKey: string
+  repo: string
+  severity: 'high' | 'medium' | 'low'
+  state: InsightState
+  title: string
+  description: string
+  count: number
+  fix: {
+    type: string
+    label: string
+    content: string
+  }
+  firstSeenAt: string
+  lastSeenAt: string
+  stateChangedAt: string | null
+  detectorVersion: number
+  /** Distinct sessions across ALL evidence (uncapped) — the true span, not the capped `evidence` sample. */
+  sessionCount: number
+  evidence: Array<{ sessionId: string; turnIdx: number | null }>
+  /** Event time the fix was first applied in the current cycle (transcript timestamp), null if not adopted. */
+  adoptedAt: string | null
+  /** Sessions that ran this insight's fix-prompt, current cycle only (older cycles are history). */
+  fixSessions: Array<{ sessionId: string; seq: number; turnAt: string }>
+}
+
+export interface DetectorRunRow {
+  version: number
+  status: string | null
+  ranAt: string
+  /** LLM model the last run billed against; null for S-tier (no LLM spend). */
+  model: string | null
+}
+
+/** One fix-marker sighting: a real user turn in this session carried `tuneloop-fix: <insightId>`. */
+export interface FixMarkerSightingInput {
+  insightId: string
+  /** Main-thread event seq of the sighted user turn. */
+  seq: number
+  /** Transcript timestamp of that turn — event time, the "fix applied" date. */
+  turnAt: string
+}
+
+// ---- Recurring-theme mining (recurring-themes detector) ---------------------
+
+/** Frozen theme-type enum — gives the dashboard a stable facet (prototype DR-5). */
+export type ThemeType = 're-steer' | 'context-supply' | 'tool-gap' | 'rework' | 'preference' | 'other'
+/** Remedy-class hint carried on a theme (not a fix itself — the fix is generated at surface time). */
+export type ThemeRemedy = 'add_doc' | 'add_skill' | 'add_tool' | 'model_or_prompt' | 'none'
+/** What preceded the friction, for interpreting the event (never itself proof of friction). */
+export type ThemeTrigger = 'unprompted' | 'after_tool_error' | 'after_review' | 'agent_stated'
+
+/** A theme referenced during extraction/merge — the existing-theme list fed into the prompt. */
+export interface ThemeRef {
+  id: string
+  label: string
+  description?: string | null
+  type: string
+  repo: string | null
+  source?: string | null
+}
+
+/** A theme to persist (INSERT OR IGNORE — minting an existing id never renames/retypes it). */
+export interface ThemeInput {
+  id: string
+  label: string
+  description?: string
+  type: ThemeType
+  remedy?: ThemeRemedy
+  repo?: string | null
+  firstSeen?: string
+}
+
+/** One extracted friction occurrence within a session. */
+export interface ThemeEventInput {
+  idx: number
+  turnSeq?: number
+  type: ThemeType
+  trigger: ThemeTrigger
+  description: string
+  themeId?: string
+  /** Timestamp of the user message this event was extracted from (the real friction moment). */
+  occurredAt?: string
+}
+
+/**
+ * One kitchen-sink verdict to persist — the LLM's judgement of a single session,
+ * positive OR negative (kitchen-sink detector, tier P). One row per judged session;
+ * the card is a windowed projection of the positives (see `kitchen_sink_verdict`).
+ */
+export interface KitchenSinkVerdictInput {
+  sessionId: string
+  /** True = the session mixed unrelated objectives; false = coherent work. */
+  isKitchenSink: boolean
+  /** Block where the second (first unrelated) objective begins; null when coherent. */
+  splitBlockIdx: number | null
+  /** That block's opening main-thread seq — the evidence pointer; null when coherent/unknown. */
+  splitSeq: number | null
+  /** The LLM's one-sentence explanation. */
+  reason: string | null
+  /** Model that produced the verdict (provenance). */
+  model: string | null
+  /** Detector version at judge time. */
+  detectorVersion: number
+}

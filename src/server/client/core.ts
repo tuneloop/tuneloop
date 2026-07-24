@@ -29,7 +29,7 @@ export interface SessTime {
 export interface ClientState {
   // The top-level tab the app is showing. Mirrored into the URL hash by the
   // router; setView() keeps it in step with the DOM.
-  view: 'highlights' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'dashboard' | 'artifacts' | 'sessions'
   // The session whose detail drawer is open (null = drawer closed). Mirrored into
   // the URL as `?session=<id>` so a session is shareable / reload-survivable.
   open: string | null

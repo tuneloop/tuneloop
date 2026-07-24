@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { registerAdapter } from '../../core/registry'
 import { walkFiles } from '../../util/walk'
 import type { SourceAdapter } from '../types'
+import { readCodexEnvironment } from './environment'
 import { parseCodex, PARSE_VERSION } from './parse'
 
 export const codexAdapter: SourceAdapter = {
@@ -16,6 +17,7 @@ export const codexAdapter: SourceAdapter = {
     return all
   },
   parse: parseCodex,
+  readEnvironment: readCodexEnvironment,
 }
 
 registerAdapter(codexAdapter)
