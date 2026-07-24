@@ -533,6 +533,46 @@ function invocationNote(cap: InstalledCap, repo: string): string {
   return `${repo} · uses ${cap.kind === 'mcp' ? 'MCP server' : 'skill'} ${cap.name}`
 }
 
+/** One row of the scope-evidence shape (a distinct invoking session, with its block seq). */
+interface ScopeEvidenceRow {
+  kind: 'mcp' | 'skill'
+  invokedName: string
+  repo: string
+  sessionId: string
+  seq: number | null
+}
+
+/**
+ * Evidence rows for OpenCode MCP scope caps. OpenCode records MCP as `action='other'`
+ * `<server>_<tool>` (invisible to `capability_invocation`), so scope evidence must reconcile
+ * the same way `queryInvokedOpencodeMcp` does — prefix-match the call name to an installed
+ * server. Returns the standard row shape with `invokedName` set to the SERVER (so the
+ * caller's `capNameMatches` does its normal exact match), joined to each call's block for a
+ * turn link. Newest session first, in the scope repos only.
+ */
+function opencodeMcpScopeRows(store: Store, sinceIso: string, servers: string[], repos: string[]): ScopeEvidenceRow[] {
+  const known = [...new Set(servers)].filter(Boolean).sort((a, b) => b.length - a.length)
+  if (known.length === 0 || repos.length === 0) return []
+  const rows = store.queryAll(
+    `SELECT t.name AS name, s.repo AS repo, t.session_id AS sessionId, MIN(b.start_seq) AS seq
+     FROM tool_calls t
+     JOIN sessions s ON s.id = t.session_id
+     LEFT JOIN block_tool bt ON bt.session_id = t.session_id AND bt.tool_idx = t.idx
+     LEFT JOIN blocks b ON b.session_id = bt.session_id AND b.idx = bt.block_idx
+     WHERE s.source = 'opencode' AND t.action = 'other' AND t.is_sidechain = 0 AND t.ts >= ? AND s.repo IN (${repos.map(() => '?').join(',')})
+     GROUP BY t.name, s.repo, t.session_id
+     ORDER BY MAX(t.ts) DESC`,
+    sinceIso,
+    ...repos,
+  ) as Array<{ name: string; repo: string; sessionId: string; seq: number | null }>
+  const out: ScopeEvidenceRow[] = []
+  for (const r of rows) {
+    const server = known.find((sv) => r.name === sv || r.name.startsWith(sv + '_'))
+    if (server) out.push({ kind: 'mcp', invokedName: server, repo: r.repo, sessionId: r.sessionId, seq: r.seq })
+  }
+  return out
+}
+
 /**
  * Real invocation evidence for each scope verdict: the sessions that ACTUALLY ran the
  * capability in each target repo — positive proof of the "you use it here" claim the
@@ -559,7 +599,15 @@ export function buildScopeEvidence(store: Store, source: string, scopes: Classif
     source,
     sinceIso,
     ...repos,
-  ) as Array<{ kind: 'mcp' | 'skill'; invokedName: string; repo: string; sessionId: string; seq: number | null }>
+  ) as ScopeEvidenceRow[]
+
+  // OpenCode MCP calls are `action='other'` (invisible to the view above), so reconcile
+  // their evidence by server prefix too — otherwise a scope card for an OpenCode MCP server
+  // is left evidence-less while classification claims it's used here.
+  if (source === 'opencode') {
+    const servers = scopes.filter((c) => c.cap.kind === 'mcp').map((c) => c.cap.name)
+    rows.push(...opencodeMcpScopeRows(store, sinceIso, servers, repos))
+  }
 
   for (const c of scopes) {
     const refs: EvidenceRef[] = []

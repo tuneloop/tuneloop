@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { buildCards, capIdentity, classify, loadInvoked, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, queryInvokedOpencodeMcp, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
+import { buildCards, buildScopeEvidence, capIdentity, classify, loadInvoked, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, queryInvokedOpencodeMcp, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
 import { insightId, type DetectorContext, type EvidenceRef, type InsightInput } from '../core/detector'
 
 const DAY_MS = 86_400_000
@@ -325,6 +325,26 @@ describe('queryInvokedOpencodeMcp (detector-layer reconcile)', () => {
     expect(oc.get('mcp:atlassian:o/r')).toMatchObject({ kind: 'mcp', name: 'atlassian' })
     // For a non-opencode source, loadInvoked is exactly queryInvoked — no reconcile applied.
     expect(loadInvoked(store, since, 'claude-code', ['atlassian'])).toEqual(queryInvoked(store, since, 'claude-code'))
+  })
+})
+
+describe('buildScopeEvidence — OpenCode MCP', () => {
+  const since = new Date(Date.now() - 30 * DAY_MS).toISOString()
+
+  it('produces scope evidence for an OpenCode MCP server (action=other, reconciled by prefix)', () => {
+    const { db, store } = setupDb()
+    // OpenCode records the MCP call as action='other' with name '<server>_<tool>' — the
+    // capability_invocation view can't see it, so the evidence path must reconcile too.
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+      .run('oc1', 'oc1', 'opencode', 'anthropic', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+    db.prepare('INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,0,?)')
+      .run('oc1', 0, 'atlassian_getJiraIssue', 'other', new Date(Date.now() - DAY_MS).toISOString())
+    const cap: InstalledCap = { kind: 'mcp', name: 'atlassian', scope: 'global' }
+    const scoped: Classified = { cap, verdict: 'scope', scopeToRepos: ['web'] }
+    const ev = buildScopeEvidence(store, 'opencode', [scoped], since)
+    const refs = ev.get(capIdentity(cap))
+    expect(refs?.length).toBe(1)
+    expect(refs![0]).toMatchObject({ sessionId: 'oc1', note: 'web · uses MCP server atlassian' })
   })
 })
 
