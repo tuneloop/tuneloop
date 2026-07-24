@@ -4,6 +4,22 @@ import { basename, join } from 'node:path'
 import { contentHash } from '../../core/hash'
 import { walkFiles } from '../../util/walk'
 import type { EnvCategorySnapshot } from '../../store/types'
+import {
+  isUnder,
+  listDirs,
+  parseFrontmatter,
+  pathExists,
+  readFrontmatterFile,
+  readJsonIfExists,
+  readSkillFile,
+  realpathOf,
+  redactUrl,
+  splitFrontmatter,
+  toStringList,
+} from '../env-shared'
+
+// Re-exported for existing importers (tests) that reach these through this module.
+export { parseFrontmatter, splitFrontmatter, toStringList }
 
 /**
  * Claude Code config reader (environment reader, Part 2). Produces the redacted,
@@ -53,21 +69,6 @@ export function claudeJsonPath(): string {
   return join(process.env.CLAUDE_CONFIG_DIR ?? homedir(), '.claude.json')
 }
 
-/** Read + parse a JSON file; null if it's missing or unparseable (never throws). */
-async function readJsonIfExists(path: string): Promise<unknown | null> {
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch {
-    return null
-  }
-  try {
-    return JSON.parse(text)
-  } catch {
-    return null
-  }
-}
-
 /**
  * Read + parse a JSON file, cached by path + mtime. Used for JSON files read more than
  * once within a run — `.claude.json` and `installed_plugins.json`. The mtime key means
@@ -87,83 +88,6 @@ async function readClaudeJson(path: string): Promise<Record<string, unknown> | n
   const parsed = await readJsonIfExists(path)
   claudeJsonCache.set(path, { mtimeMs, parsed })
   return parsed as Record<string, unknown> | null
-}
-
-/**
- * Split a markdown file into its YAML frontmatter block and body. A file that does
- * not open with a `---` fence has no frontmatter (all body). Returns the raw
- * frontmatter text (unparsed) and the body after the closing fence.
- */
-export function splitFrontmatter(text: string): { frontmatter: string; body: string } {
-  if (!text.startsWith('---')) return { frontmatter: '', body: text }
-  // Opening --- line, the (possibly empty) block, then a closing --- line. The
-  // newline before the closing --- is optional so an empty block (`---\n---`) matches.
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n?---\r?\n?([\s\S]*)$/)
-  if (!m) return { frontmatter: '', body: text }
-  return { frontmatter: m[1] ?? '', body: m[2] ?? '' }
-}
-
-/**
- * Minimal YAML-frontmatter parser for the handful of fields we allowlist. No YAML
- * dependency: handles top-level `key: value` scalars, inline lists (`key: [a, b]`),
- * and block lists (`key:` followed by `  - item` lines). Values are returned as
- * strings or string[]; anything more exotic is ignored. Not a general YAML parser —
- * intentionally strict and small, since we only read known scalar/list fields.
- */
-export function parseFrontmatter(text: string): Record<string, string | string[]> {
-  const out: Record<string, string | string[]> = {}
-  const lines = text.split(/\r?\n/)
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!
-    if (!line.trim() || line.startsWith('#')) continue
-    const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
-    if (!m) continue // not a top-level key line (e.g. a nested "  - item" handled below)
-    const key = m[1]!
-    const rest = (m[2] ?? '').trim()
-    if (rest === '') {
-      // Possibly a block list: collect following "  - item" lines.
-      const items: string[] = []
-      let j = i + 1
-      for (; j < lines.length; j++) {
-        const item = lines[j]!.match(/^\s+-\s*(.*)$/)
-        if (!item) break
-        items.push(stripQuotes(item[1]!.trim()))
-      }
-      if (items.length > 0) {
-        out[key] = items
-        i = j - 1
-      }
-      continue
-    }
-    out[key] = stripQuotes(rest)
-  }
-  return out
-}
-
-/** Strip a single layer of matching single/double quotes from a scalar. */
-function stripQuotes(s: string): string {
-  if (s.length >= 2 && ((s[0] === '"' && s.at(-1) === '"') || (s[0] === "'" && s.at(-1) === "'"))) {
-    return s.slice(1, -1)
-  }
-  return s
-}
-
-/**
- * Normalize a frontmatter value into a string list, accepting the forms CC allows
- * for `tools`/`disallowedTools`: a YAML block/inline list (already a string[]), an
- * inline `[a, b]`, or a comma/space-separated string (`Read, Grep Glob`). Null when
- * absent or empty.
- */
-export function toStringList(v: string | string[] | undefined): string[] | null {
-  if (Array.isArray(v)) return v.length > 0 ? v : null
-  if (typeof v !== 'string') return null
-  let s = v.trim()
-  if (s.startsWith('[') && s.endsWith(']')) s = s.slice(1, -1) // inline list
-  const parts = s
-    .split(/[,\s]+/)
-    .map((p) => stripQuotes(p.trim()))
-    .filter(Boolean)
-  return parts.length > 0 ? parts : null
 }
 
 // ---- per-category readers (stubbed in 2.1; filled in 2.2–2.6) --------------
@@ -261,11 +185,6 @@ async function readMcp(scope: 'global' | 'project', projectPath?: string, _scan?
   return Object.keys(payload).length > 0 ? { category: 'mcp', payload } : null
 }
 
-/** True when `path` is the repo root or a descendant of it. */
-function isUnder(path: string, root: string): boolean {
-  return path === root || path.startsWith(root.endsWith('/') ? root : root + '/')
-}
-
 /** Keep only name→{type,url} for each server; drop everything secret-bearing. Null if none. */
 function redactMcpServers(raw: unknown): Record<string, unknown> | null {
   if (!raw || typeof raw !== 'object') return null
@@ -285,21 +204,6 @@ function redactMcpServers(raw: unknown): Record<string, unknown> | null {
     out[name] = kept
   }
   return Object.keys(out).length > 0 ? out : null
-}
-
-/**
- * Strip everything credential-bearing from a URL, keeping endpoint identity:
- * protocol + host(:port) + path survive; userinfo (`user:token@`), query
- * (`?api_key=...`), and fragment are dropped. Null when the URL doesn't parse —
- * an unparseable value can't be safely redacted, so it isn't stored at all.
- */
-function redactUrl(raw: string): string | null {
-  try {
-    const u = new URL(raw)
-    return `${u.protocol}//${u.host}${u.pathname}`
-  } catch {
-    return null
-  }
 }
 
 /**
@@ -326,10 +230,19 @@ async function readAgents(scope: 'global' | 'project', projectPath?: string, sca
       : scan!.claudeDirs.map((rel) => ({ base: join(projectPath!, rel), dir: `${rel}/agents` }))
 
   const agents: Array<Record<string, unknown>> = []
+  const seen = new Set<string>() // source-file realpaths — collapse symlinked duplicates
+  const pushFile = async (sourceFile: string, entry: Record<string, unknown> | null): Promise<void> => {
+    if (!entry) return
+    const real = await realpathOf(sourceFile)
+    if (seen.has(real)) return
+    seen.add(real)
+    agents.push(entry)
+  }
+
   for (const { base, dir } of bases) {
     for (const path of (await walkFiles(join(base, 'agents'), '.md')).sort()) {
       const entry = await readAgentFile(path)
-      if (entry) agents.push(dir ? { ...entry, dir } : entry)
+      await pushFile(path, entry && (dir ? { ...entry, dir } : entry))
     }
   }
 
@@ -338,7 +251,7 @@ async function readAgents(scope: 'global' | 'project', projectPath?: string, sca
   for (const plugin of await enabledPluginDirs(scope, projectPath)) {
     for (const path of (await collectMdFiles(plugin.agentDirs)).sort()) {
       const entry = await readAgentFile(path)
-      if (entry) agents.push({ ...entry, source: `plugin:${plugin.id}` })
+      await pushFile(path, entry && { ...entry, source: `plugin:${plugin.id}` })
     }
   }
   return agents.length > 0 ? { category: 'agents', payload: { agents, count: agents.length } } : null
@@ -356,18 +269,13 @@ async function collectMdFiles(paths: string[]): Promise<string[]> {
 
 /** Parse one agent .md into its allowlisted { name, description?, model?, tools?, body, bodyHash } entry. */
 async function readAgentFile(path: string): Promise<Record<string, unknown> | null> {
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch {
-    return null
-  }
-  const { frontmatter, body } = splitFrontmatter(text)
-  const fm = parseFrontmatter(frontmatter)
+  const read = await readFrontmatterFile(path)
+  if (!read) return null
+  const { fm, body, bodyHash } = read
   const entry: Record<string, unknown> = {
     name: typeof fm.name === 'string' ? fm.name : basename(path, '.md'),
     body,
-    bodyHash: contentHash(body),
+    bodyHash,
   }
   if (typeof fm.description === 'string') entry.description = fm.description
   if (typeof fm.model === 'string') entry.model = fm.model
@@ -406,20 +314,29 @@ async function readSkills(scope: 'global' | 'project', projectPath?: string, sca
       : scan!.claudeDirs.map((rel) => ({ base: join(projectPath!, rel), rel }))
 
   const skills: Array<Record<string, unknown>> = []
+  const seen = new Set<string>() // source-file realpaths — collapse symlinked duplicates
   const withDir = (entry: Record<string, unknown>, dir: string | undefined) => (dir ? { ...entry, dir } : entry)
+  const pushFile = async (sourceFile: string, entry: Record<string, unknown> | null): Promise<void> => {
+    if (!entry) return
+    const real = await realpathOf(sourceFile)
+    if (seen.has(real)) return
+    seen.add(real)
+    skills.push(entry)
+  }
 
   for (const { base, rel } of bases) {
     // Directory skills: exactly `skills/<dir>/SKILL.md` — a skill's SKILL.md sits one
     // level deep. Immediate child dirs only (NOT recursive): a SKILL.md nested deeper
     // (e.g. a skill's own `examples/SKILL.md` supporting file) is not a skill.
     for (const dir of (await listDirs(join(base, 'skills'))).sort()) {
-      const entry = await readSkillFile(join(base, 'skills', dir, 'SKILL.md'), dir)
-      if (entry) skills.push(withDir(entry, rel && `${rel}/skills`))
+      const src = join(base, 'skills', dir, 'SKILL.md')
+      const entry = await readSkillFile(src, dir)
+      await pushFile(src, entry && withDir(entry, rel && `${rel}/skills`))
     }
     // Legacy commands: commands/<file>.md — name is the filename.
     for (const path of (await walkFiles(join(base, 'commands'), '.md')).sort()) {
       const entry = await readSkillFile(path, basename(path, '.md'))
-      if (entry) skills.push(withDir(entry, rel && `${rel}/commands`))
+      await pushFile(path, entry && withDir(entry, rel && `${rel}/commands`))
     }
   }
 
@@ -429,43 +346,26 @@ async function readSkills(scope: 'global' | 'project', projectPath?: string, sca
     // skillDirs: each holds `<name>/SKILL.md` (depth-1, same as project skills).
     for (const skillsDir of plugin.skillDirs) {
       for (const dir of (await listDirs(skillsDir)).sort()) {
-        const entry = await readSkillFile(join(skillsDir, dir, 'SKILL.md'), dir)
-        if (entry) skills.push(tag(entry))
+        const src = join(skillsDir, dir, 'SKILL.md')
+        const entry = await readSkillFile(src, dir)
+        await pushFile(src, entry && tag(entry))
       }
     }
     // skillRoots: the location's own SKILL.md is one skill (single-skill plugin or a
     // manifest path like "./"). Frontmatter `name` wins here, dir basename fallback.
     for (const skillRoot of plugin.skillRoots) {
-      const entry = await readSkillFile(join(skillRoot, 'SKILL.md'), basename(skillRoot), true)
-      if (entry) skills.push(tag(entry))
+      const src = join(skillRoot, 'SKILL.md')
+      const entry = await readSkillFile(src, basename(skillRoot), true)
+      await pushFile(src, entry && tag(entry))
     }
     // commandDirs: flat `.md` files (dir walked, or an explicit file from a manifest override).
     for (const path of (await collectMdFiles(plugin.commandDirs)).sort()) {
       const entry = await readSkillFile(path, basename(path, '.md'))
-      if (entry) skills.push(tag(entry))
+      await pushFile(path, entry && tag(entry))
     }
   }
 
   return skills.length > 0 ? { category: 'skills', payload: { skills, count: skills.length } } : null
-}
-
-/** True when a file or directory exists at `path`. */
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** Immediate child directory names of `dir` (non-recursive); [] if `dir` is missing. */
-async function listDirs(dir: string): Promise<string[]> {
-  try {
-    return (await readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name)
-  } catch {
-    return []
-  }
 }
 
 /** Directory names we never descend into when scanning a repo for config. */
@@ -647,38 +547,11 @@ async function enabledPluginDirs(scope: 'global' | 'project', projectPath?: stri
   // kept as two, since they're genuinely different installs.
   const seen = new Set<string>()
   return [...project, ...local].filter((p) => {
-    const key = `${p.id} ${p.skillDirs[0] ?? ''}`
+    const key = JSON.stringify([p.id, p.skillDirs[0] ?? ''])
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
-}
-
-/**
- * Read one skill/command file into a { name, description?, body, bodyHash } entry.
- * `name` is the INVOKABLE identity (directory name for a SKILL.md, filename for a
- * command) — NOT the frontmatter `name`, which is display-only and per docs defaults
- * to the directory name anyway. Using the invokable name keeps it aligned with the
- * `/name` an adoption fix would reference.
- *
- * EXCEPTION — `preferFrontmatterName`: for a single-skill location (a skillRoot,
- * where SKILL.md sits directly in the dir), docs invert the precedence: frontmatter
- * `name` determines the invocation name (stable regardless of the install dir), and
- * the passed `name` (dir basename) is only the fallback.
- */
-async function readSkillFile(path: string, name: string, preferFrontmatterName = false): Promise<Record<string, unknown> | null> {
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch {
-    return null
-  }
-  const { frontmatter, body } = splitFrontmatter(text)
-  const fm = parseFrontmatter(frontmatter)
-  const resolvedName = preferFrontmatterName && typeof fm.name === 'string' ? fm.name : name
-  const entry: Record<string, unknown> = { name: resolvedName, body, bodyHash: contentHash(body) }
-  if (typeof fm.description === 'string') entry.description = fm.description
-  return entry
 }
 
 /**
