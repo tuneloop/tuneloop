@@ -20,8 +20,6 @@ import type { Store } from '../store/store'
 
 /** The harness this detector reads: MCP-name grammar + config layout are CC-specific. */
 const SOURCE = 'claude-code'
-/** Evidence pointers to keep per repo — feeds the store-capped card evidence. */
-const SAMPLE_SESSIONS_PER_REPO = 10
 
 /** How far back invoked-capability usage is counted. */
 export const WINDOW_DAYS = 30
@@ -240,11 +238,7 @@ const MAX_EVIDENCE = 10
  * tracks the total flagged count, not any cost. Evidence draws sample sessions from the
  * repos the suggestions touch (scope targets + the project repos with dead caps).
  */
-export function buildCards(
-  classified: Classified[],
-  scopeInvocations: Map<string, EvidenceRef[]>,
-  sampleSessionsByRepo: Map<string, string[]>,
-): InsightInput[] {
+export function buildCards(classified: Classified[], scopeInvocations: Map<string, EvidenceRef[]>): InsightInput[] {
   if (classified.length === 0) return []
 
   const globals = classified.filter((c) => c.cap.scope === 'global')
@@ -272,7 +266,7 @@ export function buildCards(
     description:
       [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ') +
       ` Each loads into a session's startup and adds to its overhead. Apply the fix below to trim your config.`,
-    evidence: collectEvidence(globals, byRepo, scopeInvocations, sampleSessionsByRepo),
+    evidence: collectEvidence(globals, scopeInvocations),
     count: total,
     fix: {
       type: 'config-snippet',
@@ -283,30 +277,19 @@ export function buildCards(
 }
 
 /**
- * The card's evidence, capped at MAX_EVIDENCE. Scope verdicts lead with their REAL
- * invocation pointers (the sessions that ran the capability in each target repo, each
- * noting the capability + repo and landing on the call) — positive proof of the "used
- * here" claim, so it isn't crowded out. A project-scoped dead cap has no invocation to
- * point at, so those repos fall back to recent sessions (bare session-level pointers).
+ * The card's evidence, capped at MAX_EVIDENCE: ONLY the scope verdicts' real invocation
+ * pointers (the sessions that ran the capability in each target repo, each noting the
+ * capability + repo and landing on the call). A removal has no evidence — its claim is
+ * "never used here", so recent sessions that didn't use it aren't evidence of anything;
+ * empty is the honest answer, and the card is still dated by its lastSeenAt.
  */
-function collectEvidence(
-  globals: Classified[],
-  byRepo: Map<string, Classified[]>,
-  scopeInvocations: Map<string, EvidenceRef[]>,
-  sampleSessionsByRepo: Map<string, string[]>,
-): EvidenceRef[] {
+function collectEvidence(globals: Classified[], scopeInvocations: Map<string, EvidenceRef[]>): EvidenceRef[] {
   const out: EvidenceRef[] = []
   for (const c of globals) {
     if (c.verdict !== 'scope') continue
     for (const ref of scopeInvocations.get(capIdentity(c.cap)) ?? []) {
       if (out.length >= MAX_EVIDENCE) return out
       out.push(ref)
-    }
-  }
-  for (const repo of [...byRepo.keys()].sort()) {
-    for (const sessionId of sampleSessionsByRepo.get(repo) ?? []) {
-      if (out.length >= MAX_EVIDENCE) return out
-      out.push({ sessionId })
     }
   }
   return out
@@ -563,24 +546,6 @@ function loadSessionCounts(store: Store, sinceIso: string): Map<string, number> 
   return new Map(rows.map((r) => [r.repo, r.n]))
 }
 
-/** A few recent session ids per repo, for card evidence pointers. */
-function loadSampleSessions(store: Store, sinceIso: string): Map<string, string[]> {
-  const rows = store.queryAll(
-    `SELECT id, repo FROM sessions
-     WHERE source = ? AND started_at >= ? AND repo IS NOT NULL
-     ORDER BY started_at DESC`,
-    SOURCE,
-    sinceIso,
-  ) as Array<{ id: string; repo: string }>
-  const out = new Map<string, string[]>()
-  for (const { id, repo } of rows) {
-    const list = out.get(repo) ?? []
-    if (list.length < SAMPLE_SESSIONS_PER_REPO) list.push(id)
-    out.set(repo, list)
-  }
-  return out
-}
-
 export const unusedCapabilities: Detector = {
   name: 'unused-capabilities',
   version: 1,
@@ -607,7 +572,7 @@ export const unusedCapabilities: Detector = {
     // Scope verdicts get REAL invocation evidence (the sessions that ran the capability
     // in each target repo); project-remove repos fall back to recent sessions.
     const scopeInvocations = buildScopeEvidence(ctx.store, classified.filter((c) => c.verdict === 'scope'), sinceIso)
-    const cards = buildCards(classified, scopeInvocations, loadSampleSessions(ctx.store, sinceIso))
+    const cards = buildCards(classified, scopeInvocations)
     // Stamp last-seen as of the most recent examined session, so the card doesn't
     // default to the analyze-run time. A structural finding has no first-seen moment.
     const lastSeenAt = latestSessionStart(ctx.store, sinceIso) ?? undefined

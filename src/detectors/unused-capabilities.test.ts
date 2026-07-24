@@ -348,11 +348,10 @@ describe('buildCards', () => {
   const pcap = (kind: 'mcp' | 'skill', name: string, repo: string): InstalledCap => ({ kind, name, scope: 'project', repo })
   const remove = (cap: InstalledCap): Classified => ({ cap, verdict: 'remove' })
   const scope = (cap: InstalledCap, repos: string[]): Classified => ({ cap, verdict: 'scope', scopeToRepos: repos })
-  const samples = new Map([['web', ['s1', 's2']], ['api', ['s3']]])
   const noInv = new Map<string, EvidenceRef[]>() // no scope-invocation evidence supplied
 
   it('returns no cards for no verdicts', () => {
-    expect(buildCards([], noInv, samples)).toEqual([])
+    expect(buildCards([], noInv)).toEqual([])
   })
 
   it('folds globals and every project repo into one cross-repo card', () => {
@@ -362,7 +361,7 @@ describe('buildCards', () => {
       remove(pcap('mcp', 'pg', 'web')),
       remove(pcap('skill', 'lint', 'api')),
     ]
-    const cards = buildCards(classified, noInv, samples)
+    const cards = buildCards(classified, noInv)
     expect(cards).toHaveLength(1)
     expect(cards[0]!.repo).toBe('*')
     expect(cards[0]!.signalKey).toBe('unused-caps')
@@ -378,7 +377,6 @@ describe('buildCards', () => {
     const cards = buildCards(
       [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'frontend-design'), ['web', 'docs'])],
       noInv,
-      samples,
     )
     const global = cards.find((c) => c.repo === '*')!
     expect(global.fix.content).toContain('Remove from your global config:')
@@ -388,7 +386,7 @@ describe('buildCards', () => {
   })
 
   it('names the project repo and lists its capabilities in the fix', () => {
-    const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], noInv, samples)
+    const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], noInv)
     const card = cards[0]!
     expect(card.repo).toBe('*')
     expect(card.description).toContain('web')
@@ -397,40 +395,42 @@ describe('buildCards', () => {
   })
 
   it('severity is medium at 3+ items, low below', () => {
-    const three = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b')), remove(gcap('mcp', 'c'))], noInv, samples)
+    const three = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b')), remove(gcap('mcp', 'c'))], noInv)
     expect(three[0]!.severity).toBe('medium')
-    const two = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b'))], noInv, samples)
+    const two = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b'))], noInv)
     expect(two[0]!.severity).toBe('low')
   })
 
-  it('scope evidence comes from the capability’s invocations, leading the list', () => {
+  it('scope evidence is the capability’s invocations; a co-present removal adds none', () => {
     const cap = gcap('mcp', 'sentry')
     const scopeInv = new Map<string, EvidenceRef[]>([[capIdentity(cap), [
       { sessionId: 'inv1', turnIdx: 4, note: 'web · uses MCP server sentry' },
       { sessionId: 'inv2', note: 'web · uses MCP server sentry' },
     ]]])
-    // A project-remove repo is also present; its recent-session evidence fills AFTER the scope pointers.
-    const cards = buildCards([scope(cap, ['web']), remove(pcap('mcp', 'pg', 'api'))], scopeInv, samples)
-    const global = cards.find((c) => c.repo === '*')!
-    expect(global.evidence).toEqual([
+    // The project-remove (pg/api) contributes no evidence — only the scope invocations show.
+    const cards = buildCards([scope(cap, ['web']), remove(pcap('mcp', 'pg', 'api'))], scopeInv)
+    expect(cards.find((c) => c.repo === '*')!.evidence).toEqual([
       { sessionId: 'inv1', turnIdx: 4, note: 'web · uses MCP server sentry' },
       { sessionId: 'inv2', note: 'web · uses MCP server sentry' },
-      { sessionId: 's3' }, // api project-remove fallback (recent session, bare pointer)
     ])
   })
 
   it('caps evidence at 10 invocation sessions', () => {
     const cap = gcap('mcp', 'sentry')
     const refs = Array.from({ length: 25 }, (_, i) => ({ sessionId: `s${i}`, note: 'web · uses MCP server sentry' }))
-    const cards = buildCards([scope(cap, ['web'])], new Map([[capIdentity(cap), refs]]), samples)
+    const cards = buildCards([scope(cap, ['web'])], new Map([[capIdentity(cap), refs]]))
     expect(cards.find((c) => c.repo === '*')!.evidence).toHaveLength(10)
+  })
+
+  it('a removal-only card has no evidence at all', () => {
+    const cards = buildCards([remove(gcap('mcp', 'sentry')), remove(pcap('mcp', 'pg', 'web'))], noInv)
+    expect(cards[0]!.evidence).toEqual([])
   })
 
   it('carries no token or dollar figures in any copy', () => {
     const cards = buildCards(
       [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'fd'), ['web']), remove(pcap('mcp', 'pg', 'api'))],
       noInv,
-      samples,
     )
     for (const c of cards) {
       const text = `${c.title} ${c.description} ${c.fix.label} ${c.fix.content}`
@@ -620,6 +620,16 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(cards[0]).toMatchObject({ repo: '*', count: 1 })
     expect(cards[0]!.fix.content).toContain("Remove from web's config:")
     expect(cards[0]!.fix.content).toContain('- MCP server: pg')
+  })
+
+  it('shows no evidence for a removal — there is no invocation to point at', () => {
+    const { db, store } = setupDb()
+    installProjectMcp(store, '/Users/x/git/web', ['pg'])
+    seedRepo(db, 'web', 12) // pg never used in web → project remove
+    const card = run(store)[0]!
+    expect(card.fix.content).toContain("Remove from web's config:")
+    // The finding is "never used here"; recent sessions that didn't use it aren't evidence.
+    expect(card.evidence).toEqual([])
   })
 
   it('skips a project repo whose basename collides with another root', () => {
