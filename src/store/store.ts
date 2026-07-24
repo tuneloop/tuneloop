@@ -3388,7 +3388,10 @@ export class Store {
           `SELECT e.session_id AS sessionId, e.turn_idx AS turnIdx, e.note AS note,
                   ${titleExpr('s')} AS sessionTitle
            FROM insight_evidence e LEFT JOIN sessions s ON s.id = e.session_id
-           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.session_id, e.turn_idx`,
+           -- rowid = insertion order = the detector's emit order (cache-miss emits its
+           -- evidence dollar-descending, so the priciest sessions show first). added_at
+           -- stays primary so accumulating detectors still surface the most recent run.
+           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.rowid`,
         )
         .all(insightId) as Array<{ sessionId: string; turnIdx: number; note: string | null; sessionTitle: string | null }>
     ).map((r) => ({ ...r, turnIdx: r.turnIdx === -1 ? null : r.turnIdx }))
