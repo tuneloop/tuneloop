@@ -375,6 +375,25 @@ describe('Codex unified exec envelopes', () => {
   })
 })
 
+describe('Codex explicit skill invocation ($skill-name)', () => {
+  it('captures a $skill-name invocation (injected <skill> envelope) as a skill tool call', async () => {
+    const session = await parseRecords([
+      meta('s'),
+      { type: 'turn_context', payload: { model: 'gpt-5.2-codex' } },
+      // Genuine human prompt (echoed to event_msg.user_message → a real user turn).
+      { type: 'event_msg', payload: { type: 'user_message', message: 'use $hello-world' } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'use $hello-world' }] } },
+      // Injected skill envelope — NOT echoed, so it is machinery (a SystemEvent). We
+      // synthesize the skill invocation from its <name> so capture is not lost.
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<skill>\n<name>hello-world</name>\n<path>/repo/.codex/skills/hello-world/SKILL.md</path>\n---\nname: hello-world\n' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello, world!' }] } },
+      tokenCount({ input_tokens: 100, output_tokens: 10 }, { input_tokens: 100, output_tokens: 10 }),
+    ])
+    const skills = session.toolCalls.filter((t) => t.action === 'skill')
+    expect(skills.map((s) => s.name)).toEqual(['hello-world'])
+  })
+})
+
 async function parseRecords(records: unknown[]): Promise<Session> {
   const dir = await mkdtemp(join(tmpdir(), 'tuneloop-codex-tools-'))
   const path = join(dir, 'rollout.jsonl')
