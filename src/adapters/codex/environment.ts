@@ -105,7 +105,7 @@ async function walkProjectDirs(root: string): Promise<string[]> {
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       // Do not follow arbitrary repo-directory symlinks while searching for
       // layers. Skill symlinks are followed separately with a confinement check.
-      if (!entry.isDirectory() || PRUNE_DIRS.has(entry.name)) continue
+      if (!entry.isDirectory() || PRUNE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
       await walk(join(dir, entry.name))
     }
   }

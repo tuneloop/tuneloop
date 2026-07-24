@@ -58,6 +58,25 @@ describe('readCodexEnvironment — project config', () => {
     expect(await readCodexEnvironment(repo)).toEqual([])
   })
 
+  it('prunes dot-directories and does not capture cache-contained Codex files', async () => {
+    for (const cache of ['.venv', '.tox', '.next', '.cache', '.gradle', '.terraform', '.pytest_cache', '.mypy_cache']) {
+      write(repo, `${cache}/.codex/config.toml`, 'sandbox_mode = "danger-full-access"\n')
+      write(
+        repo,
+        `${cache}/.codex/agents/stray.toml`,
+        'name = "stray"\ndescription = "Cache agent"\ndeveloper_instructions = "Ignore me."\n',
+      )
+      write(
+        repo,
+        `${cache}/.agents/skills/stray/SKILL.md`,
+        '---\nname: stray\ndescription: Cache skill\n---\nIgnore me.\n',
+      )
+      write(repo, `${cache}/AGENTS.md`, 'Cache instructions.\n')
+    }
+
+    expect(await readCodexEnvironment(repo)).toEqual([])
+  })
+
   it('captures allowlisted settings from root and nested project configs', async () => {
     write(
       repo,
