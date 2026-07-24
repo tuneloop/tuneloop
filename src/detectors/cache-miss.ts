@@ -3,7 +3,7 @@ import type { Detector, InsightInput } from '../core/detector'
 import { priceFor } from '../pricing/pricing'
 
 /**
- * Flags repos where prompt-cache misses are burning money.
+ * Flags repos where prompt cache misses are burning money.
  *
  * Misses are OBSERVED, never inferred from timing: a warm turn reads its prior
  * context back as cache_read; a cold turn reads ~nothing and re-pays it — as
@@ -27,8 +27,10 @@ import { priceFor } from '../pricing/pricing'
 const WINDOW_DAYS = 30
 const MIN_SESSIONS = 10 // per repo in the window — fewer and the rates are noise
 const LONG_BREAK_MS = 5 * 60_000 // descriptive split only — no cache-lifetime claim
-const MIN_WASTE_USD = 1 // level-card floor: absolute avoidable premium per repo over the window
-const SEVERITY_USD = { high: 10, medium: 3 }
+const MIN_WASTE_USD = 20 // level-card floor: absolute avoidable premium per repo over the window
+// Severity above the floor. medium = the floor, so every surfaced card (>= $20 avoidable
+// premium — real money) is at least medium; high flags serious steady leakage.
+const SEVERITY_USD = { high: 50, medium: MIN_WASTE_USD }
 
 // One row per repo from cache_classified_turn — the session count the qualifying gate
 // needs, plus the denominator for the "share of sessions that saw a miss" figure.
@@ -231,7 +233,7 @@ function buildLevelInsight(qualifying: Array<[string, RepoAgg]>): InsightInput {
       signalKey: 'cache-misses',
       repo: '*',
       severity: wasteUsd >= SEVERITY_USD.high ? 'high' : wasteUsd >= SEVERITY_USD.medium ? 'medium' : 'low',
-      title: 'Frequent prompt-cache misses',
+      title: 'Frequent prompt cache misses',
       description:
         `Across ${sessions} sessions in ${repoLabel} in the last ${WINDOW_DAYS} days, ${pct(sessionMissRate)} of ` +
         `sessions saw a cache-miss event — an estimated $${waste} premium over warm-cache rates. ${breakMisses} ` +

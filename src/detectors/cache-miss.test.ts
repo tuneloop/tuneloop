@@ -121,7 +121,7 @@ describe('cache-miss detector', () => {
     expect(ins).toMatchObject({
       signalKey: 'cache-misses',
       repo: '*', // one cross-repo aggregate insight
-      severity: 'high', // 10 × $2.30 = $23.00 ≥ $10
+      severity: 'medium', // 10 × $2.30 = $23.00: clears the $20 floor, below the $50 high bar
       count: 10, // one miss per session
       fix: { type: 'behavioral-nudge' },
     })
@@ -285,21 +285,22 @@ describe('cache-miss detector', () => {
   it('prices read-discount caching (OpenAI-style): misses re-pay as input, not creates', () => {
     const { db, ctx } = setup()
     // gpt-5.2: input $2.5/Mtok, cache_read $0.25/Mtok → premium $2.25/Mtok un-read.
+    // Sized so 10 sessions clear the $20 floor (each re-buys 1M tokens at $2.25/Mtok = $2.25).
     for (let i = 0; i < 10; i++)
       seedSession(
         db, `s${i}`,
         [
-          { atMs: 0, input: 100_000 },
-          { atMs: 1 * MIN, reads: 100_000, input: 5_000 },
-          { atMs: 40 * MIN, input: 120_000 },
+          { atMs: 0, input: 1_000_000 },
+          { atMs: 1 * MIN, reads: 995_000, input: 5_000 },
+          { atMs: 40 * MIN, input: 1_200_000 },
         ],
         { provider: 'openai', model: 'gpt-5.2' },
       )
     const insights = cacheMiss.run(ctx) as InsightInput[]
     expect(insights).toHaveLength(1)
-    // premium = min(prevCtx 105k, input 120k) = 105k × $2.25/Mtok ≈ $0.236 × 10 sessions ≈ $2.36
-    expect(insights[0]!).toMatchObject({ severity: 'low', count: 10 })
-    expect(insights[0]!.description).toContain('$2.36')
+    // premium = min(prevCtx 1.0M, input 1.2M) = 1.0M × $2.25/Mtok = $2.25 × 10 sessions = $22.50
+    expect(insights[0]!).toMatchObject({ severity: 'medium', count: 10 })
+    expect(insights[0]!.description).toContain('$22.50')
   })
 
   it('prices the re-buy at the write TTL mix: a 1h-heavy miss costs more than a 5m one', () => {
