@@ -1,6 +1,5 @@
 import { registerDetector } from '../core/registry'
 import type { Detector, InsightInput } from '../core/detector'
-import { DROP_SHARE, PEAK_FLOOR } from '../core/thresholds'
 
 /**
  * Flags repos where sessions run into the context window and get compacted.
@@ -12,6 +11,12 @@ import { DROP_SHARE, PEAK_FLOOR } from '../core/thresholds'
  * one reason — the harness discarded context (auto-compaction, or a manual reset).
  * A large drop from a high prior turn is that event, made visible.
  *
+ * The classification itself lives in SQL: the `compaction_event` view
+ * (src/store/db.ts) is scanned GLOBALLY and this detector presents a recent WINDOW
+ * over it (decision 1). The window keys off each compaction turn's OWN timestamp,
+ * not its session's start (decision 7), so a card ages out when the compactions
+ * stop — even for a long session that began before the window but is still active.
+ *
  * The detector makes no causal claim about outcomes. Whether a compacted session
  * "went worse" needs a bigger corpus than a single developer has; here we surface
  * the pattern with receipts (peak occupancy, how many times it compacted) and a
@@ -21,23 +26,24 @@ import { DROP_SHARE, PEAK_FLOOR } from '../core/thresholds'
 
 const WINDOW_DAYS = 30
 const MIN_SESSIONS = 10 // per repo in the window — fewer and the pattern is anecdote, not signal
-// DROP_SHARE / PEAK_FLOOR moved to ../core/thresholds: the compaction_event view
-// classifies off the same values, so a single definition keeps the detector and
-// the view from drifting (decision 4). The rationale for the compaction rule —
-// a >60% occupancy drop (occ <= DROP_SHARE × prev) from a prior turn of at least
-// PEAK_FLOOR tokens, an absolute gate applied uniformly across models — lives there.
 const MIN_COMPACTED_SESSIONS = 1 // surface a repo once any session compacted (gated by MIN_SESSIONS corpus)
 // Severity by how entrenched the pattern is (share of the repo's sessions that compacted).
 const SEVERITY_SHARE = { high: 0.3, medium: 0.1 }
 
-interface FactRow {
+// One row per repo from usage_turns — the active-session denominator behind `share`.
+interface ActiveAgg {
+  repo: string
+  sessions: number
+}
+
+// One row per compaction event from compaction_event, carrying its session's peak
+// occupancy (an aggregate over usage_turns — decision: peak is a session property,
+// not part of the event view).
+interface CompactionRow {
   sessionId: string
   repo: string
   ts: string | null
-  input: number
-  output: number
-  creates: number
-  reads: number
+  peak: number
 }
 
 interface SessionResult {
@@ -48,8 +54,8 @@ interface SessionResult {
 }
 
 interface RepoAgg {
-  sessions: number // sessions in the window that ran (contributed turns)
-  compactedSessions: SessionResult[]
+  sessions: number // main-thread sessions active in the window (the share denominator)
+  compactedSessions: Map<string, SessionResult>
   totalCompactions: number
   firstCompactionTs: string | null // earliest/latest compaction time — the real occurrence window
   lastCompactionTs: string | null
@@ -61,82 +67,63 @@ export const contextExhaustion: Detector = {
   tier: 'S',
   run(ctx) {
     const since = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString()
-    // Main thread only — a subagent (sidechain) has its own context window and its
-    // own compaction story; folding it into the parent's occupancy is meaningless.
-    const rows = ctx.store.queryAll(
-      `SELECT u.session_id AS sessionId,
-              COALESCE(NULLIF(s.repo, ''), NULLIF(s.cwd, ''), '_unknown') AS repo,
-              u.ts,
-              COALESCE(u.tok_input, 0) AS input,
-              COALESCE(u.tok_output, 0) AS output,
-              -- Cache-write total = both TTL buckets (disjoint; see the 5m/1h split).
-              -- We only care about occupancy, so the TTL distinction is irrelevant —
-              -- summing reconstructs the whole write.
-              COALESCE(u.tok_cache_create_5m, 0) + COALESCE(u.tok_cache_create_1h, 0) AS creates,
-              COALESCE(u.tok_cache_read, 0) AS reads
-       FROM usage_facts u JOIN sessions s ON s.id = u.session_id
-       WHERE u.is_sidechain = 0 AND s.started_at >= ?
-       ORDER BY u.session_id, u.idx`,
-      since,
-    ) as FactRow[]
 
-    const bySession = new Map<string, FactRow[]>()
-    for (const r of rows) {
-      const list = bySession.get(r.sessionId) ?? []
-      list.push(r)
-      bySession.set(r.sessionId, list)
-    }
+    // Denominator: distinct main-thread sessions active in the window, per repo. The
+    // views scan globally; `ts >= since` is the read-time window on each turn's own
+    // timestamp (decisions 1 + 7). A subagent (sidechain) has its own context window
+    // and its own compaction story, so it's excluded here and in the event view.
+    const activeRows = ctx.store.queryAll(
+      `SELECT repo, COUNT(DISTINCT session_id) AS sessions
+       FROM usage_turns
+       WHERE is_sidechain = 0 AND ts >= ?
+       GROUP BY repo`,
+      since,
+    ) as ActiveAgg[]
+
+    // Numerator: the compaction events in the window, each carrying its session's peak
+    // occupancy — MAX(occupancy) over the session's main-thread turns, a session
+    // property the event view doesn't hold (used only in the evidence note).
+    const compactionRows = ctx.store.queryAll(
+      `SELECT ce.session_id AS sessionId, ce.repo, ce.ts, pk.peak
+       FROM compaction_event ce
+       JOIN (SELECT session_id, MAX(occupancy) AS peak
+             FROM usage_turns WHERE is_sidechain = 0 GROUP BY session_id) pk
+         ON pk.session_id = ce.session_id
+       WHERE ce.ts >= ?`,
+      since,
+    ) as CompactionRow[]
 
     const repos = new Map<string, RepoAgg>()
-    for (const facts of bySession.values()) {
-      const repo = facts[0]!.repo
-      let agg = repos.get(repo)
-      if (!agg) {
-        agg = { sessions: 0, compactedSessions: [], totalCompactions: 0, firstCompactionTs: null, lastCompactionTs: null }
-        repos.set(repo, agg)
-      }
+    for (const a of activeRows) {
+      repos.set(a.repo, { sessions: a.sessions, compactedSessions: new Map(), totalCompactions: 0, firstCompactionTs: null, lastCompactionTs: null })
+    }
 
-      let compactions = 0
-      let peak = 0
-      let prevOcc = 0
-      let contributed = false
-      let firstTs: string | null = null
-      let lastTs: string | null = null
-      for (const f of facts) {
-        // Skip all-zero rows (content flushes, ingest-deduped repeat lines) — they'd
-        // read as occupancy 0 and fake a massive drop.
-        if (f.input + f.output + f.creates + f.reads === 0) continue
-        contributed = true
-        const occ = f.input + f.reads + f.creates
-        if (prevOcc >= PEAK_FLOOR && occ <= prevOcc * DROP_SHARE) {
-          compactions++
-          // The compaction turn's real time (rows arrive in idx order). Skip null ts.
-          if (f.ts) {
-            if (firstTs === null) firstTs = f.ts
-            lastTs = f.ts
-          }
-        }
-        if (occ > peak) peak = occ
-        prevOcc = occ
-      }
-
-      if (!contributed) continue
-      agg.sessions++
-      if (compactions > 0) {
-        agg.compactedSessions.push({ sessionId: facts[0]!.sessionId, repo, compactions, peak })
-        agg.totalCompactions += compactions
-        // Widen the repo's compaction window (sessions arrive in id order, not time order).
-        if (firstTs && (agg.firstCompactionTs === null || firstTs < agg.firstCompactionTs)) agg.firstCompactionTs = firstTs
-        if (lastTs && (agg.lastCompactionTs === null || lastTs > agg.lastCompactionTs)) agg.lastCompactionTs = lastTs
+    for (const c of compactionRows) {
+      // Every compaction turn is also an active turn, so its repo is always present.
+      const agg = repos.get(c.repo)
+      if (!agg) continue
+      agg.totalCompactions++
+      const s = agg.compactedSessions.get(c.sessionId) ?? { sessionId: c.sessionId, repo: c.repo, compactions: 0, peak: c.peak }
+      s.compactions++
+      agg.compactedSessions.set(c.sessionId, s)
+      // Widen the repo's compaction window with this event's real time (skip null ts).
+      if (c.ts) {
+        if (agg.firstCompactionTs === null || c.ts < agg.firstCompactionTs) agg.firstCompactionTs = c.ts
+        if (agg.lastCompactionTs === null || c.ts > agg.lastCompactionTs) agg.lastCompactionTs = c.ts
       }
     }
 
     // Qualifying repos (each gated on its own corpus + a compacted session), then fold
     // into ONE cross-repo insight. Per-repo detail survives as each evidence session's note.
     const qualifying = [...repos.entries()].filter(
-      ([, a]) => a.sessions >= MIN_SESSIONS && a.compactedSessions.length >= MIN_COMPACTED_SESSIONS,
+      ([, a]) => a.sessions >= MIN_SESSIONS && a.compactedSessions.size >= MIN_COMPACTED_SESSIONS,
     )
-    if (qualifying.length === 0) return []
+    if (qualifying.length === 0) {
+      // No qualifying compaction this window — resolve any prior card so a stale claim
+      // doesn't freeze on the dashboard (the N4 fix, applied at the empty path).
+      ctx.store.resolveInsight('context-exhaustion', '*', 'context-exhaustion')
+      return []
+    }
 
     let sessions = 0
     let compactedCount = 0
@@ -146,11 +133,11 @@ export const contextExhaustion: Detector = {
     const compacted: SessionResult[] = []
     for (const [, a] of qualifying) {
       sessions += a.sessions
-      compactedCount += a.compactedSessions.length
+      compactedCount += a.compactedSessions.size
       totalCompactions += a.totalCompactions
       if (a.firstCompactionTs && (firstCompactionTs === null || a.firstCompactionTs < firstCompactionTs)) firstCompactionTs = a.firstCompactionTs
       if (a.lastCompactionTs && (lastCompactionTs === null || a.lastCompactionTs > lastCompactionTs)) lastCompactionTs = a.lastCompactionTs
-      compacted.push(...a.compactedSessions)
+      compacted.push(...a.compactedSessions.values())
     }
 
     const share = compactedCount / sessions
