@@ -586,7 +586,16 @@ export const unusedCapabilities: Detector = {
     if (ambiguous.size > 0) {
       ctx.log.debug(`unused-capabilities: skipped ${ambiguous.size} repo(s) with a colliding basename: ${[...ambiguous].join(', ')}`)
     }
-    if (installed.length === 0) return [] // no config snapshots captured yet — nothing to judge
+    if (installed.length === 0) {
+      // Nothing installed. Either the config was never captured (fresh store) or every
+      // capability was removed — e.g. the fix was applied and the config emptied. A
+      // surfaced card then has no basis (zero installed → nothing can be unused), so
+      // resolve it. resolveInsight is a no-op when nothing is surfaced, so the fresh
+      // -store case (no prior card) is unaffected; and a card can only exist if config
+      // once existed, so this can't fire on genuinely absent snapshots.
+      ctx.store.resolveInsight(DETECTOR, '*', SIGNAL_KEY)
+      return []
+    }
 
     const invoked = queryInvoked(ctx.store, sinceIso, SOURCE)
     const sessionCounts = loadSessionCounts(ctx.store, sinceIso)

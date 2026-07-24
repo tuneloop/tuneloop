@@ -659,6 +659,19 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('surfaced')
   })
 
+  it('resolves a prior card when nothing is installed (config emptied — the fix applied)', () => {
+    const { store } = setupDb()
+    store.persistInsights('unused-capabilities', 1, [{
+      signalKey: 'unused-caps', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    // No installed capabilities (config emptied): with nothing installed there is nothing
+    // that can be unused, so the surfaced card must resolve rather than linger — even
+    // though this path returns before the usual session-count gate.
+    expect(run(store)).toEqual([])
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps')!.state).toBe('resolved')
+  })
+
   it('matches a plugin-namespaced skill invocation, so a used skill is not flagged', () => {
     const { db, store } = setupDb()
     installGlobalSkills(store, ['frontend-design'])
