@@ -510,9 +510,9 @@ describe('verdictRow', () => {
 })
 
 describe('positiveEvidence', () => {
-  it('points the occurrence at the stored split seq, with the derived note', () => {
+  it('points the occurrence at the stored split seq, with the derived note (no block jargon)', () => {
     const ev = positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: 'auth then export.' })
-    expect(ev).toEqual({ sessionId: 's1', turnIdx: 4, note: 'Block 1 began a separate objective — auth then export.' })
+    expect(ev).toEqual({ sessionId: 's1', turnIdx: 4, note: 'A separate, unrelated objective begins here — auth then export.' })
   })
 
   it('omits turnIdx when the stored split seq is null', () => {
@@ -522,7 +522,7 @@ describe('positiveEvidence', () => {
   })
 
   it('leaves the note clause off when the reason is null', () => {
-    expect(positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: null }).note).toBe('Block 1 began a separate objective')
+    expect(positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: null }).note).toBe('A separate, unrelated objective begins here')
   })
 })
 

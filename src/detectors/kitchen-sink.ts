@@ -296,10 +296,14 @@ export async function judge(llm: LlmClient, digest: string, blocks: Block[]): Pr
   }
 }
 
-/** The per-occurrence note shown for a flagged session: which block broke off, and why. */
-function noteFor(splitBlockIdx: number, reason: string): string {
+/**
+ * The per-occurrence note shown for a flagged session, and why. It says "here"
+ * rather than naming a block: the evidence row links to the exact turn (splitSeq),
+ * and "block" is an internal segmentation concept the user never sees.
+ */
+function noteFor(reason: string): string {
   const r = reason.trim()
-  return `Block ${splitBlockIdx} began a separate objective${r ? ` — ${r}` : ''}`
+  return `A separate, unrelated objective begins here${r ? ` — ${r}` : ''}`
 }
 
 /**
@@ -330,8 +334,7 @@ export function verdictRow(c: Candidate, verdict: Verdict, blocks: Block[]): Omi
  * it was judged.
  */
 export function positiveEvidence(row: { sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }): EvidenceRef {
-  const note = noteFor(row.splitBlockIdx ?? 0, row.reason ?? '')
-  return { sessionId: row.sessionId, ...(row.splitSeq != null ? { turnIdx: row.splitSeq } : {}), note }
+  return { sessionId: row.sessionId, ...(row.splitSeq != null ? { turnIdx: row.splitSeq } : {}), note: noteFor(row.reason ?? '') }
 }
 
 /**
@@ -363,7 +366,7 @@ export function buildAggregate(evidence: EvidenceRef[], firstSeenAt?: string, la
       content:
         `When you switch to an unrelated task, start a new session instead of continuing the current ` +
         `one, so the agent works from a clean context instead of dragging in the previous task. ` +
-        `Each occurrence below points at the block where that session began a separate objective — ` +
+        `Each occurrence below points at where that session began a separate objective — ` +
         `a natural place to have opened a fresh session.`,
     },
   }
