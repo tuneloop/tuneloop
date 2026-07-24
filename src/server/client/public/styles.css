@@ -866,6 +866,19 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .sk-ver-hash { font-size: 11px; color: var(--gray); }
 .sk-ver-use { font-size: 12px; color: var(--muted); text-align: right; }
 
+/* Activation outcomes — stacked proportion bar + legend + evidence. */
+.sk-oc-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--track); margin-top: 10px; max-width: 720px; }
+.sk-oc-seg { display: block; height: 100%; }
+.sk-oc-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
+.sk-oc-leg { font-size: 12px; color: var(--ink); display: inline-flex; align-items: center; gap: 6px; }
+.sk-oc-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
+.sk-oc-legn { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.sk-oc-corr { margin-top: 12px; font-size: 12.5px; color: var(--red); }
+.sk-oc-examples { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; max-width: 720px; }
+.sk-oc-ex { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+.sk-oc-ex-tag { flex: none; width: 74px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.sk-oc-ex-txt { color: var(--muted); font-style: italic; }
+
 /* Co-occurrence list — other skills sharing sessions. */
 #sk-cooc { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-width: 720px; }
 .sk-cooc { display: grid; grid-template-columns: 180px 1fr auto auto auto; align-items: center; gap: 12px; width: 100%;

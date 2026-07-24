@@ -688,6 +688,83 @@ export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWi
   return { name, totalSessions, items }
 }
 
+// ---- Skill activation outcomes (LLM-classified; the honest "did it help") --
+// Reads the `skill_outcomes` annotation (written by the skill-outcomes processor):
+// per skill firing, whether the agent used / reworked / ignored the output, plus an
+// adjacent user-correction flag. Rolled up per skill, windowed like usage. Purely a
+// read of already-persisted verdicts (analyze WRITES them; serve READS).
+
+/** Per-skill rollup of the LLM-classified activation outcomes. */
+export interface SkillOutcomeStats {
+  name: string
+  /** Firings that carry a verdict in the window (the distribution denominator). */
+  classified: number
+  used: number
+  reworked: number
+  ignored: number
+  unclear: number
+  /** Firings whose verdict flagged an adjacent user correction. */
+  userCorrectionAdjacent: number
+  /** A few example evidence snippets (observational), newest-ish first. */
+  examples: Array<{ outcome: string; evidence: string }>
+}
+
+const MAX_OUTCOME_EXAMPLES = 5
+
+/**
+ * Roll up activation-outcome verdicts for one skill in the window. Each session's
+ * `skill_outcomes` annotation is a JSON array of per-firing verdicts (each carrying
+ * the raw skill name); we unpack with json_each, window by the session start, and
+ * reconcile plugin-namespaced names to the roster name via skillMatches. Returns null
+ * when no verdicts exist for the skill (the classifier hasn't run / didn't cover it).
+ */
+export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWindow = {}): SkillOutcomeStats | null {
+  const { sinceIso, untilIso } = resolveWindow(store, win)
+  const rows = store.queryAll(
+    `SELECT json_extract(j.value, '$.name') AS vname,
+            json_extract(j.value, '$.outcome') AS outcome,
+            json_extract(j.value, '$.userCorrectionAdjacent') AS correction,
+            json_extract(j.value, '$.evidence') AS evidence
+     FROM annotations a
+     JOIN sessions s ON s.id = a.session_id
+     JOIN json_each(a.value) j
+     WHERE a.key = 'skill_outcomes'
+       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
+     ORDER BY s.started_at DESC`,
+    SOURCE,
+    sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
+  ) as Array<{ vname: string | null; outcome: string | null; correction: number | null; evidence: string | null }>
+
+  const stats: SkillOutcomeStats = {
+    name,
+    classified: 0,
+    used: 0,
+    reworked: 0,
+    ignored: 0,
+    unclear: 0,
+    userCorrectionAdjacent: 0,
+    examples: [],
+  }
+  for (const r of rows) {
+    // Match the verdict's skill name to the requested skill (incl. plugin-namespaced).
+    if (!r.vname || !(r.vname === name || skillMatches(name, r.vname))) continue
+    stats.classified++
+    switch (r.outcome) {
+      case 'used': stats.used++; break
+      case 'reworked': stats.reworked++; break
+      case 'ignored': stats.ignored++; break
+      default: stats.unclear++; break
+    }
+    if (r.correction) stats.userCorrectionAdjacent++
+    if (r.evidence && stats.examples.length < MAX_OUTCOME_EXAMPLES) {
+      stats.examples.push({ outcome: r.outcome ?? 'unclear', evidence: r.evidence })
+    }
+  }
+  return stats.classified > 0 ? stats : null
+}
+
 // ---- Skill drift & version comparison (the hero feature) ------------------
 // Reconstructs a skill's edit timeline from the append-on-change snapshot history
 // and reports usage/error/friction on each side of each edit. Deliberately EDIT-

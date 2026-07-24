@@ -54,6 +54,11 @@ interface Invocation {
   error?: boolean
   /** Emit an errored non-skill tool call right after (drives the friction proxy). */
   frictionAfter?: boolean
+  /** A pre-classified activation outcome, stand-in for the LLM classifier's verdict
+   *  (so the read model + UI can be exercised without a real LLM). */
+  outcome?: 'used' | 'reworked' | 'ignored' | 'unclear'
+  /** Whether the seeded verdict flags an adjacent user correction. */
+  correction?: boolean
 }
 
 /** What the generator guarantees about the seeded data, for test assertions. */
@@ -80,6 +85,8 @@ export interface SeedExpectations {
   coOccur: Array<{ a: string; b: string; sessions: number }>
   /** Repos that have sessions but where `browse` was never used. */
   browseAbsentRepos: string[]
+  /** review's seeded activation-outcome distribution (30d window) + correction count. */
+  reviewOutcomes: { classified: number; used: number; reworked: number; ignored: number; userCorrectionAdjacent: number }
 }
 
 interface SeedOptions {
@@ -102,8 +109,20 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     // Interleave skill calls with the occasional plain tool call so idx gaps + the
     // friction lookahead behave like real transcripts.
     const calls: Array<{ name: string; action: string; error: boolean }> = []
+    // Verdicts stand in for the skill-outcomes processor's output, keyed by tool_call idx.
+    const verdicts: Array<{ idx: number; name: string; outcome: string; userCorrectionAdjacent: boolean; evidence: string }> = []
     for (const inv of invocations) {
+      const idx = calls.length
       calls.push({ name: inv.raw ?? inv.skill, action: 'skill', error: !!inv.error })
+      if (inv.outcome) {
+        verdicts.push({
+          idx,
+          name: inv.raw ?? inv.skill,
+          outcome: inv.outcome,
+          userCorrectionAdjacent: !!inv.correction,
+          evidence: 'synthetic: agent ' + inv.outcome + ' the ' + inv.skill + ' output',
+        })
+      }
       if (inv.frictionAfter) calls.push({ name: 'Bash', action: 'shell', error: true })
     }
     db.prepare(
@@ -116,6 +135,11 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
          VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
       ).run(id, idx, c.name, c.action, c.error ? 0 : 1, c.error ? 1 : 0, iso(dayAgo))
     })
+    if (verdicts.length) {
+      db.prepare(
+        `INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'skill-outcomes', 'skill_outcomes', ?)`,
+      ).run(id, JSON.stringify(verdicts))
+    }
     return id
   }
 
@@ -209,10 +233,12 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
   // ---- usage ----
   // review: the drift hero. Dense usage on both sides of each edit so before/after
   // clears the min-sample guard. Low friction early, higher after the last edit
-  // (the "changed after the edit" story). All in 'aivue'.
-  for (let i = 0; i < 6; i++) insertSession('aivue', 50 - i, [{ skill: 'review', frictionAfter: i === 0 }]) // v1 era, ~8% friction
-  for (let i = 0; i < 6; i++) insertSession('aivue', 33 - i, [{ skill: 'review', frictionAfter: i < 1 }]) // v2 era
-  for (let i = 0; i < 6; i++) insertSession('aivue', 15 - (i % 15), [{ skill: 'review', frictionAfter: i >= 2 }]) // v3 era, higher friction
+  // (the "changed after the edit" story). All in 'aivue'. Also carries pre-classified
+  // activation outcomes (stand-in for the LLM classifier) skewing worse post-edit.
+  for (let i = 0; i < 6; i++) insertSession('aivue', 50 - i, [{ skill: 'review', frictionAfter: i === 0, outcome: 'used' }]) // v1 era, ~8% friction
+  for (let i = 0; i < 6; i++) insertSession('aivue', 33 - i, [{ skill: 'review', frictionAfter: i < 1, outcome: i < 1 ? 'reworked' : 'used' }]) // v2 era
+  for (let i = 0; i < 6; i++)
+    insertSession('aivue', 15 - (i % 15), [{ skill: 'review', frictionAfter: i >= 2, outcome: i >= 4 ? 'ignored' : i >= 2 ? 'reworked' : 'used', correction: i >= 4 }]) // v3 era, worse outcomes
 
   // review also co-occurs with grill-with-docs (not-in-config) and lint-fix.
   for (let i = 0; i < 4; i++)
@@ -259,5 +285,8 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
       { a: 'review', b: 'lint-fix', sessions: 4 },
     ],
     browseAbsentRepos,
+    // 30d window: v2 era contributes 3 'used' (days 28-30), v3 era contributes
+    // 2 used + 2 reworked + 2 ignored (days 10-15), with 2 adjacent corrections.
+    reviewOutcomes: { classified: 9, used: 5, reworked: 2, ignored: 2, userCorrectionAdjacent: 2 },
   }
 }

@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { skillHealth } from './skill-health'
+import { skillHealth, skillOutcomeStats } from './skill-health'
 import { seedSkillStore } from './skill-seed'
 
 const NOW = Date.parse('2026-07-22T00:00:00.000Z')
@@ -88,6 +88,24 @@ describe('synthetic skill seed', () => {
     expect(lint.perRepo.map((p) => p.repo).sort()).toEqual([...exp.notScopeDown.repos].sort())
     expect(lint.perRepo.reduce((n, p) => n + p.calls, 0)).toBe(lint.calls)
     for (let i = 1; i < lint.perRepo.length; i++) expect(lint.perRepo[i - 1]!.calls).toBeGreaterThanOrEqual(lint.perRepo[i]!.calls)
+  })
+
+  it('rolls up the seeded activation-outcome verdicts for review (30d window)', () => {
+    const exp = seedSkillStore(store, { nowMs: NOW })
+    const stats = skillOutcomeStats(store, 'review', { days: 30, nowMs: NOW })!
+    expect(stats).not.toBeNull()
+    expect(stats.classified).toBe(exp.reviewOutcomes.classified)
+    expect(stats.used).toBe(exp.reviewOutcomes.used)
+    expect(stats.reworked).toBe(exp.reviewOutcomes.reworked)
+    expect(stats.ignored).toBe(exp.reviewOutcomes.ignored)
+    expect(stats.userCorrectionAdjacent).toBe(exp.reviewOutcomes.userCorrectionAdjacent)
+    expect(stats.examples.length).toBeGreaterThan(0)
+  })
+
+  it('returns null outcome stats for a skill with no classifier verdicts', () => {
+    seedSkillStore(store, { nowMs: NOW })
+    // browse was seeded without outcomes → the classifier surface should abstain.
+    expect(skillOutcomeStats(store, 'browse', { days: 30, nowMs: NOW })).toBeNull()
   })
 
   it('captures review version history with a lost intermediate for drifty', () => {

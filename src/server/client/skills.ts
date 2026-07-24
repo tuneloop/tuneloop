@@ -379,6 +379,15 @@ function paintSkillPage(box, r) {
   // Verdict-specific guidance.
   html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
 
+  // Activation outcomes — the LLM-classified "did the agent use it" signal. Windowed;
+  // hidden unless the classifier has produced verdicts for this skill in the window.
+  if (r.calls > 0) {
+    html += '<div class="sk-page-sect" id="sk-oc-sect" style="display:none">' +
+      '<div class="sk-sect-h">Activation outcomes</div>' +
+      '<div id="sk-oc"></div>' +
+      '</div>';
+  }
+
   // Co-occurrence — other skills that fire in the same sessions (add/compose signal).
   // Windowed like usage; hidden until we find at least one co-occurring skill.
   if (r.calls > 0) {
@@ -409,9 +418,10 @@ function paintSkillPage(box, r) {
 
   if (r.calls > 0) {
     wireTrendTooltip();
-    // Load the invocations list + co-occurrence async (keeps the page paint instant).
+    // Load the invocations list + co-occurrence + outcomes async (page paints instantly).
     loadInvocations(r.name);
     loadCoOccurrence(r.name);
+    loadOutcomes(r.name);
   }
   // Drift loads regardless of window (edit-anchored) — even an unused-in-window skill
   // may have a meaningful version history worth showing.
@@ -437,6 +447,68 @@ function loadCoOccurrence(name) {
       el.onclick = function () { openSkill(this.getAttribute('data-name')); };
     });
   }).catch(function () { /* leave hidden on error */ });
+}
+
+// Fetch + render the LLM-classified activation outcomes (windowed). Hidden unless the
+// classifier produced verdicts. Framed observationally, never as a causal verdict.
+function loadOutcomes(name) {
+  get('/api/skill-outcomes?name=' + encodeURIComponent(name) + '&' + skWinQuery()).then(function (d) {
+    if (state.skill !== name) return;
+    var sect = $('#sk-oc-sect');
+    var host = $('#sk-oc');
+    if (!sect || !host) return;
+    if (!d || !d.classified) return; // classifier hasn't covered this skill → stay hidden
+    host.innerHTML = outcomesHtml(d);
+    sect.style.display = '';
+  }).catch(function () { /* leave hidden on error */ });
+}
+
+var OUTCOME_META = {
+  used: { label: 'Used', color: 'var(--emerald)' },
+  reworked: { label: 'Reworked', color: 'var(--amber)' },
+  ignored: { label: 'Ignored', color: 'var(--red)' },
+  unclear: { label: 'Unclear', color: 'var(--gray)' }
+};
+
+function outcomesHtml(d) {
+  var total = d.classified || 1;
+  var order = ['used', 'reworked', 'ignored', 'unclear'];
+  // A single stacked proportion bar + a legend line per outcome with counts.
+  var seg = order.map(function (k) {
+    var n = d[k] || 0;
+    if (!n) return '';
+    var pct = (n / total) * 100;
+    var m = OUTCOME_META[k];
+    return '<span class="sk-oc-seg" style="width:' + pct + '%;background:' + m.color + '" title="' + esc(m.label) + ': ' + num(n) + '"></span>';
+  }).join('');
+  var legend = order.filter(function (k) { return (d[k] || 0) > 0; }).map(function (k) {
+    var n = d[k] || 0;
+    var m = OUTCOME_META[k];
+    return '<span class="sk-oc-leg"><span class="sk-oc-dot" style="background:' + m.color + '"></span>' +
+      esc(m.label) + ' ' + Math.round((n / total) * 100) + '% <span class="sk-oc-legn">(' + num(n) + ')</span></span>';
+  }).join('');
+
+  var html = '<div class="sk-oc-bar">' + seg + '</div>' +
+    '<div class="sk-oc-legend">' + legend + '</div>';
+
+  if (d.userCorrectionAdjacent > 0) {
+    html += '<div class="sk-oc-corr">⚠ A user correction landed adjacent to ' +
+      num(d.userCorrectionAdjacent) + ' of ' + num(d.classified) + ' firings.</div>';
+  }
+
+  // A couple of observational evidence snippets, clearly labelled as examples.
+  if (d.examples && d.examples.length) {
+    html += '<div class="sk-oc-examples">' + d.examples.slice(0, 3).map(function (e) {
+      var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
+      return '<div class="sk-oc-ex"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
+        '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span></div>';
+    }).join('') + '</div>';
+  }
+
+  html += '<div class="sk-sect-note">A cheap LLM read of the turns around each firing: did the agent <b>use</b>, <b>rework</b>, or <b>ignore</b> the skill’s output. ' +
+    'This is <b>observational</b> — what happened after the skill ran — not a verdict that the skill succeeded or failed, and never a cost. ' +
+    'Classified ' + num(d.classified) + ' firing' + (d.classified === 1 ? '' : 's') + ' in this window.</div>';
+  return html;
 }
 
 function cooccRow(it, ownName) {

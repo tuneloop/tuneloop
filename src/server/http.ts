@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
-import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence } from './skill-health'
+import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence, skillOutcomeStats } from './skill-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -228,6 +228,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       return
     }
     sendJson(res, 200, skillCoOccurrence(store, name, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/skill-outcomes') {
+    // LLM-classified activation outcomes (used/reworked/ignored) for one skill —
+    // null when the classifier hasn't produced verdicts for it. `name` required.
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillOutcomeStats(store, name, skillWindowFrom(url.searchParams)))
     return
   }
   if (path === '/api/error-categories') {
