@@ -55,10 +55,11 @@ interface MissRow {
   blockSeq: number | null
 }
 
-// Per evidence session: total premium, plus the block seq of its worst single miss —
-// so the evidence link opens the exchange that cost the most, not the session top.
+// Per evidence session: total premium, miss count (shown in the note), and the block
+// seq of its worst single miss — so the evidence link opens the exchange that cost the most.
 interface SessionWaste {
   waste: number
+  misses: number
   topWaste: number
   seq: number | null
 }
@@ -94,8 +95,9 @@ function priceMiss(m: Pick<MissRow, 'provider' | 'model' | 'avoidableTokens' | '
 // Only a miss that HAS a block can seed it; otherwise seq stays null and the link
 // degrades to session-level (the transcript top), no worse than before.
 function pickWorst(cur: SessionWaste | undefined, w: number, blockSeq: number | null): SessionWaste {
-  const s = cur ?? { waste: 0, topWaste: 0, seq: null }
+  const s = cur ?? { waste: 0, misses: 0, topWaste: 0, seq: null }
   s.waste += w
+  s.misses++
   if (blockSeq != null && w >= s.topWaste) {
     s.topWaste = w
     s.seq = blockSeq
@@ -105,7 +107,7 @@ function pickWorst(cur: SessionWaste | undefined, w: number, blockSeq: number | 
 
 export const cacheMiss: Detector = {
   name: 'cache-miss',
-  version: 4,
+  version: 5,
   tier: 'S',
   run(ctx) {
     const nowMs = Date.now()
@@ -196,7 +198,7 @@ function buildLevelInsight(qualifying: Array<[string, RepoAgg]>): InsightInput {
     let wasteUsd = 0
     let firstMissTs: string | null = null
     let lastMissTs: string | null = null
-    const sessionWaste: Array<{ sessionId: string; repo: string; waste: number; seq: number | null }> = []
+    const sessionWaste: Array<{ sessionId: string; repo: string; waste: number; misses: number; seq: number | null }> = []
     for (const [repo, a] of qualifying) {
       sessions += a.sessions
       sessionsWithMiss += a.missSessions.size
@@ -205,14 +207,18 @@ function buildLevelInsight(qualifying: Array<[string, RepoAgg]>): InsightInput {
       wasteUsd += a.wasteUsd
       if (a.firstMissTs && (firstMissTs === null || a.firstMissTs < firstMissTs)) firstMissTs = a.firstMissTs
       if (a.lastMissTs && (lastMissTs === null || a.lastMissTs > lastMissTs)) lastMissTs = a.lastMissTs
-      for (const [sessionId, v] of a.sessionWaste) sessionWaste.push({ sessionId, repo, waste: v.waste, seq: v.seq })
+      for (const [sessionId, v] of a.sessionWaste) sessionWaste.push({ sessionId, repo, waste: v.waste, misses: v.misses, seq: v.seq })
     }
     // Worst-wasting sessions first. Each evidence row links to the session's priciest
-    // miss exchange (turnIdx) and notes its repo + premium — the per-repo detail the
-    // single aggregate row would otherwise lose.
+    // miss exchange (turnIdx) and notes its repo, premium, and miss count — the per-repo
+    // detail the single aggregate row would otherwise lose.
     const evidence = sessionWaste
       .sort((x, y) => y.waste - x.waste)
-      .map((s) => ({ sessionId: s.sessionId, turnIdx: s.seq ?? undefined, note: `${s.repo} · $${s.waste.toFixed(2)} premium` }))
+      .map((s) => ({
+        sessionId: s.sessionId,
+        turnIdx: s.seq ?? undefined,
+        note: `${s.repo} · $${s.waste.toFixed(2)} premium · ${s.misses} cache miss${s.misses === 1 ? '' : 'es'}`,
+      }))
 
     const waste = wasteUsd.toFixed(2)
     const sessionMissRate = sessionsWithMiss / sessions

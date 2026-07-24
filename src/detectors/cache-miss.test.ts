@@ -120,8 +120,9 @@ describe('cache-miss detector', () => {
       fix: { type: 'behavioral-nudge' },
     })
     expect(ins.evidence).toHaveLength(10)
-    // Single qualifying repo → named directly; each evidence row notes its repo + premium.
+    // Single qualifying repo → named directly; each evidence row notes its repo, premium, misses.
     expect(ins.evidence[0]!.note).toContain('o/r · $')
+    expect(ins.evidence[0]!.note).toContain('1 cache miss') // one miss this session
     expect(ins.description).toContain('$23.00')
     expect(ins.description).toContain('10 sessions in o/r')
     expect(ins.description).toContain('100% of sessions saw a cache-miss event') // 10 of 10 sessions
@@ -149,6 +150,7 @@ describe('cache-miss detector', () => {
     expect(last - first).toBeGreaterThanOrEqual(20 * MIN)
     expect(last - first).toBeLessThan(20 * MIN + 1000)
     expect(Date.now() - last).toBeGreaterThan(DAY_MS / 2) // clearly a past occurrence, not now
+    expect(ins.evidence[0]!.note).toContain('2 cache misses') // two misses this session, pluralized
   })
 
   it('reports mid-flow misses honestly in the timing split (no cause claimed)', () => {
