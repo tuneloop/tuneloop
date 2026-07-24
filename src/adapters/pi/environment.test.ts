@@ -153,6 +153,82 @@ describe('readPiEnvironment — project scope', () => {
     const res = await readPiEnvironment(repo)
     expect(cat(res, 'settings')).toBeUndefined()
   })
+
+  it('strips credentials from package git URLs (string and object forms), keeping bare names', async () => {
+    write(
+      repo,
+      '.pi/settings.json',
+      JSON.stringify({
+        packages: [
+          'pi-skills',
+          '@org/my-extension',
+          'https://user:ghp_secret@github.com/org/repo.git#main',
+          { source: 'git+https://tok:pat@example.com/pkg.git', skills: ['a'] },
+          { source: 'internal-pkg' },
+        ],
+      }),
+    )
+    const packages = cat(await readPiEnvironment(repo), 'settings')['.pi/settings.json'].packages
+    expect(packages[0]).toBe('pi-skills')
+    expect(packages[1]).toBe('@org/my-extension')
+    // userinfo removed, path + ref preserved
+    expect(packages[2]).toBe('https://github.com/org/repo.git#main')
+    expect(packages[2]).not.toContain('ghp_secret')
+    expect(packages[3]).toEqual({ source: 'git+https://example.com/pkg.git', skills: ['a'] })
+    expect(packages[4]).toEqual({ source: 'internal-pkg' })
+  })
+
+  it('treats a directory with SKILL.md as one skill, ignoring nested SKILL.md assets', async () => {
+    write(repo, '.pi/skills/deploy/SKILL.md', '---\nname: deploy\ndescription: Ship\n---\nBody.\n')
+    // A supporting example bundled inside the skill must NOT become a second skill.
+    write(repo, '.pi/skills/deploy/examples/SKILL.md', '---\nname: example\ndescription: nope\n---\nB.\n')
+    const skills = cat(await readPiEnvironment(repo), 'skills').skills
+    expect(skills.map((s: any) => s.name)).toEqual(['deploy'])
+    expect(skills[0].dir).toBe('.pi/skills/deploy')
+  })
+
+  it('drops skills without a description (Pi refuses to load them)', async () => {
+    write(repo, '.pi/skills/good/SKILL.md', '---\nname: good\ndescription: valid\n---\nB.\n')
+    write(repo, '.pi/skills/nodesc/SKILL.md', '---\nname: nodesc\n---\nMissing description.\n')
+    write(repo, '.pi/skills/blank/SKILL.md', '---\nname: blank\ndescription: "   "\n---\nBlank description.\n')
+    const skills = cat(await readPiEnvironment(repo), 'skills').skills
+    expect(skills.map((s: any) => s.name)).toEqual(['good'])
+  })
+
+  it('finds SKILL.md dirs nested below the skills root', async () => {
+    write(repo, '.pi/skills/group/nested/SKILL.md', '---\nname: nested\ndescription: d\n---\nB.\n')
+    const skills = cat(await readPiEnvironment(repo), 'skills').skills
+    expect(skills.map((s: any) => s.name)).toEqual(['nested'])
+    expect(skills[0].dir).toBe('.pi/skills/group/nested')
+  })
+
+  it('selects one context file per directory by precedence (AGENTS.md > CLAUDE.md)', async () => {
+    write(repo, 'AGENTS.md', 'Agents wins.\n')
+    write(repo, 'CLAUDE.md', 'Claude loses.\n')
+    const instr = cat(await readPiEnvironment(repo), 'instructions')
+    expect(Object.keys(instr)).toEqual(['AGENTS.md'])
+    expect(instr['AGENTS.md'].body).toContain('Agents wins.')
+  })
+
+  it('captures the uppercase .MD filename variant', async () => {
+    write(repo, 'packages/svc/CLAUDE.MD', 'Uppercase ext.\n')
+    const instr = cat(await readPiEnvironment(repo), 'instructions')
+    expect(instr['packages/svc/CLAUDE.MD'].body).toContain('Uppercase ext.')
+  })
+
+  it('detects .pi and .agents mounted via symlink', async () => {
+    const shared = mkdtempSync(join(tmpdir(), 'pi-shared-'))
+    write(shared, 'settings.json', JSON.stringify({ defaultProvider: 'anthropic' }))
+    write(shared, 'skills/linked/SKILL.md', '---\nname: linked\ndescription: d\n---\nB.\n')
+    symlinkSync(shared, join(repo, '.pi'))
+    try {
+      const res = await readPiEnvironment(repo)
+      expect(Object.keys(cat(res, 'settings'))).toEqual(['.pi/settings.json'])
+      expect(cat(res, 'skills').skills.map((s: any) => s.name)).toEqual(['linked'])
+    } finally {
+      rmSync(shared, { recursive: true, force: true })
+    }
+  })
 })
 
 // ---- global scope (HOME + PI_CODING_AGENT_DIR redirected to a temp home) ----

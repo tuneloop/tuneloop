@@ -960,7 +960,9 @@ non-secret posture: model + thinking config (`defaultProvider`, `defaultModel`,
 `branchSummary`, `retry`), delivery (`steeringMode`, `followUpMode`, `transport`), `warnings`,
 and resource pointers (`packages`, `extensions`, `skills`, `prompts`, `themes`,
 `enableSkillCommands`). `httpProxy` is kept only as a redacted endpoint identity (userinfo, query,
-and fragment stripped). Everything else — themes and other pure-UI display options,
+and fragment stripped). `packages` accepts HTTP(S) git sources that Pi stores verbatim, so each
+source (string or `{ source }` object) has its `user:token@` userinfo stripped while the path and
+ref are preserved; bare npm names and scp-style refs pass through unchanged. Everything else — themes and other pure-UI display options,
 `externalEditor`, `shellPath`/`shellCommandPrefix`/`npmCommand` execution plumbing, `sessionDir`,
 `trackingId`, telemetry flags — is dropped by omission. A file whose fields are all dropped
 contributes no entry.
@@ -970,8 +972,11 @@ contributes no entry.
 Global scope scans `<piHome>/skills` and `~/.agents/skills`. Project scope scans `<repo>/.pi/skills`
 and `<repo>/.agents/skills` in every such directory found. Per Pi's discovery rules, `.pi` skill
 dirs discover direct root `.md` files as individual skills, all locations discover `SKILL.md`
-directories recursively, and `.agents` skill dirs ignore root `.md` files. The payload is
-`{ "skills": [...], "count": n }`; each entry retains `name`, optional `description`, full `body`,
+directories recursively, and `.agents` skill dirs ignore root `.md` files. The first directory that
+contains a `SKILL.md` IS a skill and its subtree is not searched further, so a skill's own bundled
+`examples/SKILL.md` assets never become separate skills. Skills with a missing or blank
+`description` are dropped, matching Pi, which refuses to load them. The payload is
+`{ "skills": [...], "count": n }`; each entry retains `name`, `description`, full `body`,
 `bodyHash`, `kind: "skill"`, and the source `dir`. Pi lets the frontmatter `name` differ from the
 directory, so it is authoritative with the directory/file base name as fallback. Skills reached
 through symlinks are deduplicated by real path.
@@ -981,13 +986,20 @@ for v1 — the two on-disk conventions above cover the common case.
 
 ### `instructions`
 
-Global scope reads `<piHome>/AGENTS.md` and `<piHome>/CLAUDE.md`. Project scope stores every
-`AGENTS.md`/`CLAUDE.md` found under the repo (Pi walks up from cwd loading these, so nested files
-represent sessions launched from those directories). Each entry is keyed by relative path and
-holds the full `body` plus `hash`. Empty files are omitted.
+Pi selects at most one context file per directory, trying `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`,
+then `CLAUDE.MD` in order. Global scope applies that precedence in `<piHome>`. Project scope stores
+the winning file for each directory under the repo (Pi walks up from cwd loading these, so nested
+files represent sessions launched from those directories). Each entry is keyed by relative path and
+holds the full `body` plus `hash`. Empty files are omitted. Context files in directories *above*
+the repository root, which Pi also loads, are out of scope for v1 (capture is keyed by repo root).
+
+Directory discovery detects `.pi`/`.agents` even when mounted via symlink (shared config is
+commonly linked in), while arbitrary directory symlinks are not chased so the walk cannot escape
+the repository or cycle.
 
 ## Deferred Pi surfaces (v1)
 
 `models.json` (custom providers), `keybindings.json`, `auth.json`, package/extension *contents*
-(only their settings pointers are captured), settings-referenced and CLI-supplied skill paths, and
-prompt/theme resource contents are intentionally deferred.
+(only their settings pointers are captured), settings-referenced and CLI-supplied skill paths,
+context files in directories above the repository root, and prompt/theme resource contents are
+intentionally deferred.
