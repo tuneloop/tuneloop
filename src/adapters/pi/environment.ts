@@ -174,12 +174,17 @@ function redactPackages(raw: unknown): unknown {
 
 /** Drop `user:token@` userinfo from a URL source, preserving the path/ref; non-URLs pass through. */
 function redactPackageSource(raw: string): string {
+  // Pi accepts a `git:` prefix in front of an http(s) URL (`git:https://user:token@host/repo`).
+  // new URL() would treat that as an opaque `git:` URL and miss the userinfo, so peel the prefix,
+  // redact the inner URL, then restore it.
+  const gitPrefix = /^git:https?:\/\//.test(raw) ? 'git:' : ''
+  const url = raw.slice(gitPrefix.length)
   try {
-    const u = new URL(raw)
+    const u = new URL(url)
     if (!u.username && !u.password) return raw
     u.username = ''
     u.password = ''
-    return u.toString()
+    return gitPrefix + u.toString()
   } catch {
     return raw // bare npm name / scoped name / scp-style git ref — no URL credentials
   }
@@ -247,9 +252,11 @@ async function readSkills(
 
 /**
  * Enumerate the skill source files under one `skills/` root, applying Pi's discovery
- * rules. Direct-child `.md` files are individual skills only when `allowRootMd`. Each
- * subdirectory is searched for a `SKILL.md`: the first directory that has one IS a skill
- * and its subtree is not descended further. Deterministic (entries sorted per level).
+ * rules. The root itself is checked first: if it directly contains `SKILL.md` it IS a
+ * single skill and nothing else in the tree is discovered. Otherwise, direct-child
+ * `.md` files are individual skills (only when `allowRootMd`), and each subdirectory is
+ * searched for a `SKILL.md` (the first directory that has one IS a skill; its subtree is
+ * not descended further). Deterministic (entries sorted per level).
  */
 async function collectSkillFiles(
   root: SkillRoot,
@@ -258,9 +265,15 @@ async function collectSkillFiles(
   const seenDirs = new Set<string>() // realpaths — terminate symlink cycles
 
   const entries = await dirEntries(root.dir)
+  // The skills root directory can itself be a single skill (a `SKILL.md` sitting directly
+  // in it). Pi stops all further discovery in that case, for both `.pi` and `.agents`.
+  if (await hasSkillMd(root.dir, entries)) {
+    out.push({ path: join(root.dir, 'SKILL.md'), fallbackName: basename(root.dir), dirLabel: root.label })
+    return out
+  }
   for (const e of entries) {
     const childPath = join(root.dir, e.name)
-    if (root.allowRootMd && isFileLike(e) && e.name.endsWith('.md')) {
+    if (root.allowRootMd && (await isFileLike(childPath, e)) && e.name.endsWith('.md')) {
       // Individual `.pi` skill: name defaults to the file's base name.
       out.push({ path: childPath, fallbackName: basename(e.name, '.md'), dirLabel: root.label })
     } else if (await isDirLike(childPath, e)) {
@@ -268,6 +281,14 @@ async function collectSkillFiles(
     }
   }
   return out
+}
+
+/** True when `dir` directly contains a `SKILL.md` file (following a file symlink). */
+async function hasSkillMd(dir: string, entries: Dirent[]): Promise<boolean> {
+  for (const e of entries) {
+    if (e.name === 'SKILL.md' && (await isFileLike(join(dir, e.name), e))) return true
+  }
+  return false
 }
 
 /**
@@ -285,7 +306,7 @@ async function findSkillDirs(
   if (seenDirs.has(real)) return
   seenDirs.add(real)
   const entries = await dirEntries(dir)
-  if (entries.some((e) => e.name === 'SKILL.md' && isFileLike(e))) {
+  if (await hasSkillMd(dir, entries)) {
     // Directory skill: name defaults to the containing directory name.
     out.push({ path: join(dir, 'SKILL.md'), fallbackName: basename(dir), dirLabel: `${root.label}/${relLabel(root.dir, dir)}` })
     return // stop descending — nested SKILL.md files are this skill's own assets
@@ -351,9 +372,15 @@ async function dirEntries(dir: string): Promise<Dirent[]> {
   }
 }
 
-/** True when a Dirent is a plain file (not a symlink or directory). */
-function isFileLike(e: Dirent): boolean {
-  return e.isFile()
+/** True when `path` is a file, resolving a symlink to its target if needed (Pi follows them). */
+async function isFileLike(path: string, e: Dirent): Promise<boolean> {
+  if (e.isFile()) return true
+  if (!e.isSymbolicLink()) return false
+  try {
+    return (await stat(path)).isFile() // follows the link
+  } catch {
+    return false // dangling symlink
+  }
 }
 
 /** True when `path` is a directory, resolving a symlink to its target if needed. */
@@ -401,7 +428,7 @@ export async function scanProject(repoRoot: string): Promise<ProjectScan> {
       if (e.isDirectory()) {
         if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue
         subdirs.push({ path: childPath, rel: childRel })
-      } else if (isFileLike(e)) {
+      } else if (await isFileLike(childPath, e)) {
         fileNames.add(e.name)
       }
     }

@@ -163,7 +163,7 @@ describe('readPiEnvironment — project scope', () => {
           'pi-skills',
           '@org/my-extension',
           'https://user:ghp_secret@github.com/org/repo.git#main',
-          { source: 'git+https://tok:pat@example.com/pkg.git', skills: ['a'] },
+          { source: 'git:https://tok:pat@example.com/pkg.git', skills: ['a'] },
           { source: 'internal-pkg' },
         ],
       }),
@@ -174,7 +174,9 @@ describe('readPiEnvironment — project scope', () => {
     // userinfo removed, path + ref preserved
     expect(packages[2]).toBe('https://github.com/org/repo.git#main')
     expect(packages[2]).not.toContain('ghp_secret')
-    expect(packages[3]).toEqual({ source: 'git+https://example.com/pkg.git', skills: ['a'] })
+    // Pi's `git:` prefix is peeled before redaction, then restored.
+    expect(packages[3]).toEqual({ source: 'git:https://example.com/pkg.git', skills: ['a'] })
+    expect(packages[3].source).not.toContain('pat')
     expect(packages[4]).toEqual({ source: 'internal-pkg' })
   })
 
@@ -200,6 +202,35 @@ describe('readPiEnvironment — project scope', () => {
     const skills = cat(await readPiEnvironment(repo), 'skills').skills
     expect(skills.map((s: any) => s.name)).toEqual(['nested'])
     expect(skills[0].dir).toBe('.pi/skills/group/nested')
+  })
+
+  it('treats a skills root that directly contains SKILL.md as one skill (both .pi and .agents)', async () => {
+    // Root-level SKILL.md must stop further discovery — the sibling dir is not a 2nd skill.
+    write(repo, '.pi/skills/SKILL.md', '---\nname: pi-root\ndescription: d\n---\nB.\n')
+    write(repo, '.pi/skills/other/SKILL.md', '---\nname: other\ndescription: d\n---\nB.\n')
+    write(repo, '.agents/skills/SKILL.md', '---\nname: agents-root\ndescription: d\n---\nB.\n')
+    const skills = cat(await readPiEnvironment(repo), 'skills').skills
+    expect(skills.map((s: any) => s.name).sort()).toEqual(['agents-root', 'pi-root'])
+    expect(skills.find((s: any) => s.name === 'pi-root').dir).toBe('.pi/skills')
+    expect(skills.find((s: any) => s.name === 'agents-root').dir).toBe('.agents/skills')
+  })
+
+  it('follows symlinked SKILL.md, root skill markdown, and context files', async () => {
+    const store = mkdtempSync(join(tmpdir(), 'pi-links-'))
+    writeFileSync(join(store, 'linked-SKILL.md'), '---\nname: linked-skill\ndescription: d\n---\nB.\n')
+    writeFileSync(join(store, 'root.md'), '---\nname: linked-root\ndescription: d\n---\nB.\n')
+    writeFileSync(join(store, 'AGENTS.md'), 'Linked instructions.\n')
+    mkdirSync(join(repo, '.pi/skills/dir'), { recursive: true })
+    symlinkSync(join(store, 'linked-SKILL.md'), join(repo, '.pi/skills/dir/SKILL.md'))
+    symlinkSync(join(store, 'root.md'), join(repo, '.pi/skills/rootlink.md'))
+    symlinkSync(join(store, 'AGENTS.md'), join(repo, 'AGENTS.md'))
+    try {
+      const res = await readPiEnvironment(repo)
+      expect(cat(res, 'skills').skills.map((s: any) => s.name).sort()).toEqual(['linked-root', 'linked-skill'])
+      expect(cat(res, 'instructions')['AGENTS.md'].body).toContain('Linked instructions.')
+    } finally {
+      rmSync(store, { recursive: true, force: true })
+    }
   })
 
   it('selects one context file per directory by precedence (AGENTS.md > CLAUDE.md)', async () => {

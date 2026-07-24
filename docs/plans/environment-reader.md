@@ -962,7 +962,9 @@ and resource pointers (`packages`, `extensions`, `skills`, `prompts`, `themes`,
 `enableSkillCommands`). `httpProxy` is kept only as a redacted endpoint identity (userinfo, query,
 and fragment stripped). `packages` accepts HTTP(S) git sources that Pi stores verbatim, so each
 source (string or `{ source }` object) has its `user:token@` userinfo stripped while the path and
-ref are preserved; bare npm names and scp-style refs pass through unchanged. Everything else — themes and other pure-UI display options,
+ref are preserved; Pi's `git:https://…` prefix is peeled before redaction and restored afterward
+(otherwise `URL` treats it as an opaque `git:` value and misses the credentials); bare npm names
+and scp-style refs pass through unchanged. Everything else — themes and other pure-UI display options,
 `externalEditor`, `shellPath`/`shellCommandPrefix`/`npmCommand` execution plumbing, `sessionDir`,
 `trackingId`, telemetry flags — is dropped by omission. A file whose fields are all dropped
 contributes no entry.
@@ -972,9 +974,11 @@ contributes no entry.
 Global scope scans `<piHome>/skills` and `~/.agents/skills`. Project scope scans `<repo>/.pi/skills`
 and `<repo>/.agents/skills` in every such directory found. Per Pi's discovery rules, `.pi` skill
 dirs discover direct root `.md` files as individual skills, all locations discover `SKILL.md`
-directories recursively, and `.agents` skill dirs ignore root `.md` files. The first directory that
-contains a `SKILL.md` IS a skill and its subtree is not searched further, so a skill's own bundled
-`examples/SKILL.md` assets never become separate skills. Skills with a missing or blank
+directories recursively, and `.agents` skill dirs ignore root `.md` files. The skills root itself is
+checked first: a `SKILL.md` sitting directly in it makes the root one skill and stops all further
+discovery (for both `.pi` and `.agents`). Otherwise the first directory that contains a `SKILL.md`
+IS a skill and its subtree is not searched further, so a skill's own bundled `examples/SKILL.md`
+assets never become separate skills. Skills with a missing or blank
 `description` are dropped, matching Pi, which refuses to load them. The payload is
 `{ "skills": [...], "count": n }`; each entry retains `name`, `description`, full `body`,
 `bodyHash`, `kind: "skill"`, and the source `dir`. Pi lets the frontmatter `name` differ from the
@@ -995,7 +999,8 @@ the repository root, which Pi also loads, are out of scope for v1 (capture is ke
 
 Directory discovery detects `.pi`/`.agents` even when mounted via symlink (shared config is
 commonly linked in), while arbitrary directory symlinks are not chased so the walk cannot escape
-the repository or cycle.
+the repository or cycle. Symlinked *files* (a linked `SKILL.md`, root skill markdown, or
+`AGENTS.md`/`CLAUDE.md`) are resolved with `stat` and followed, as Pi does.
 
 ## Deferred Pi surfaces (v1)
 
