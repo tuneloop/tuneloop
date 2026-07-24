@@ -379,6 +379,15 @@ function paintSkillPage(box, r) {
   // Verdict-specific guidance.
   html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
 
+  // Co-occurrence — other skills that fire in the same sessions (add/compose signal).
+  // Windowed like usage; hidden until we find at least one co-occurring skill.
+  if (r.calls > 0) {
+    html += '<div class="sk-page-sect" id="sk-cooc-sect" style="display:none">' +
+      '<div class="sk-sect-h">Frequently used with</div>' +
+      '<div id="sk-cooc"></div>' +
+      '</div>';
+  }
+
   // Invocations list — every call, each opening the session scrolled to that call.
   if (r.calls > 0) {
     html += '<div class="sk-page-sect">' +
@@ -400,12 +409,48 @@ function paintSkillPage(box, r) {
 
   if (r.calls > 0) {
     wireTrendTooltip();
-    // Load the invocations list async (keeps the page paint instant).
+    // Load the invocations list + co-occurrence async (keeps the page paint instant).
     loadInvocations(r.name);
+    loadCoOccurrence(r.name);
   }
   // Drift loads regardless of window (edit-anchored) — even an unused-in-window skill
   // may have a meaningful version history worth showing.
   loadDrift(r.name);
+}
+
+// Fetch + render the co-occurrence list (windowed). Hidden unless another skill shares
+// a session. Each row is a compose candidate, framed as a pattern not a dependency.
+function loadCoOccurrence(name) {
+  get('/api/skill-cooccurrence?name=' + encodeURIComponent(name) + '&' + skWinQuery()).then(function (d) {
+    if (state.skill !== name) return;
+    var sect = $('#sk-cooc-sect');
+    var host = $('#sk-cooc');
+    if (!sect || !host) return;
+    if (!d || !d.items || !d.items.length) return;
+    host.innerHTML = d.items.map(function (it) { return cooccRow(it, name); }).join('') +
+      '<div class="sk-sect-note">Share = the fraction of <b>' + esc(name) + '</b>’s sessions that also ran the other skill. ' +
+      '“often first” marks skills that tended to fire before it — a pattern to eyeball, not a dependency. ' +
+      'A high share is a candidate to compose into one workflow.</div>';
+    sect.style.display = '';
+    // Clicking a co-occurring skill navigates to its own detail page (keeps the window).
+    Array.prototype.forEach.call(host.querySelectorAll('.sk-cooc'), function (el) {
+      el.onclick = function () { openSkill(this.getAttribute('data-name')); };
+    });
+  }).catch(function () { /* leave hidden on error */ });
+}
+
+function cooccRow(it, ownName) {
+  var pct = Math.round((it.share || 0) * 100);
+  var first = it.precededSessions > 0 && it.precededSessions >= it.sessions / 2
+    ? '<span class="sk-cooc-first" title="Fired before ' + esc(ownName) + ' in ' + num(it.precededSessions) + ' of ' + num(it.sessions) + ' shared sessions">often first</span>'
+    : '';
+  return '<button class="sk-cooc" data-name="' + esc(it.name) + '">' +
+    '<span class="sk-cooc-name mono">' + esc(it.name) + '</span>' +
+    '<span class="sk-cooc-track"><span class="sk-cooc-bar" style="width:' + Math.max(2, pct) + '%"></span></span>' +
+    '<span class="sk-cooc-meta">' + num(it.sessions) + (it.sessions === 1 ? ' session' : ' sessions') + ' · ' + pct + '%</span>' +
+    first +
+    '<span class="sk-cooc-go">view ↗</span>' +
+    '</button>';
 }
 
 // Fetch + render the version-drift section for a skill. Edit-anchored (no window

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import type { Bucket, Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
-import { skillHealth, skillInvocations, skillDrift } from './skill-health'
+import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence } from './skill-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -217,6 +217,17 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       return
     }
     sendJson(res, 200, skillDrift(store, name))
+    return
+  }
+  if (path === '/api/skill-cooccurrence') {
+    // Other skills that fire in the same sessions as this one — the add/compose signal.
+    // `name` required; windowed like skill-health (it's a current-usage fact).
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillCoOccurrence(store, name, skillWindowFrom(url.searchParams)))
     return
   }
   if (path === '/api/error-categories') {

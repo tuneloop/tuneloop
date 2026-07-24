@@ -601,6 +601,93 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
   }))
 }
 
+// ---- Skill co-occurrence (the add/compose signal) -------------------------
+// Which other skills fire in the same sessions as this one, and how often. A high
+// co-occurrence is a candidate to compose into one workflow. Windowed by the time
+// filter (a "current usage" fact, unlike drift). Pure SQL. Ordering (A-before-B) is
+// reported as a light "leads to" PATTERN, never a dependency claim.
+
+const MAX_COOCCUR = 20
+
+/** One co-occurring skill: how many of THIS skill's sessions it also appears in. */
+export interface SkillCoOccurrence {
+  name: string
+  /** Sessions where both this skill and `name` were invoked (main-thread, in window). */
+  sessions: number
+  /** Fraction of this skill's sessions that also had `name` (0..1). */
+  share: number
+  /** Sessions where `name`'s first call preceded this skill's first call — a soft
+   *  "tends to precede" pattern, not a dependency. */
+  precededSessions: number
+}
+
+export interface SkillCoOccurrenceReport {
+  name: string
+  /** Distinct sessions this skill was invoked in (window) — the share denominator. */
+  totalSessions: number
+  items: SkillCoOccurrence[]
+}
+
+/**
+ * Co-occurrence for one skill in the window. We resolve the skill's own invocations
+ * (matching plugin-namespaced forms), collect the sessions it ran in, then count the
+ * other distinct skills in those same sessions. `precededSessions` compares first-call
+ * idx to give a light ordering signal. Main-thread only, matching the roster's counts.
+ */
+export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWindow = {}): SkillCoOccurrenceReport {
+  const { sinceIso, untilIso } = resolveWindow(store, win)
+  // Sessions this skill ran in, plus the earliest idx it fired at (for ordering).
+  const own = store.queryAll(
+    `SELECT t.session_id AS sid, MIN(t.idx) AS firstIdx
+     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     WHERE t.action = 'skill' AND t.is_sidechain = 0
+       AND (t.name = ? OR t.name LIKE ?)
+       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
+     GROUP BY t.session_id`,
+    name,
+    '%:' + name,
+    SOURCE,
+    sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
+  ) as Array<{ sid: string; firstIdx: number }>
+
+  const totalSessions = own.length
+  if (totalSessions === 0) return { name, totalSessions: 0, items: [] }
+  const ownFirst = new Map(own.map((o) => [o.sid, o.firstIdx]))
+  const sids = own.map((o) => o.sid)
+
+  // Every skill call in those sessions (so we can bucket the OTHER skills per session).
+  const placeholders = sids.map(() => '?').join(',')
+  const others = store.queryAll(
+    `SELECT t.session_id AS sid, t.name AS name, MIN(t.idx) AS firstIdx
+     FROM tool_calls t
+     WHERE t.action = 'skill' AND t.is_sidechain = 0 AND t.session_id IN (${placeholders})
+     GROUP BY t.session_id, t.name`,
+    ...sids,
+  ) as Array<{ sid: string; name: string; firstIdx: number }>
+
+  // Fold per other-skill: count co-sessions + how often it preceded this skill.
+  const agg = new Map<string, { sessions: number; preceded: number }>()
+  for (const o of others) {
+    if (skillMatches(name, o.name) || o.name === name) continue // skip self (incl. namespaced)
+    // Normalise a plugin-namespaced other-skill to its bare name so it aggregates once.
+    const bare = o.name.indexOf(':') >= 0 ? o.name.slice(o.name.indexOf(':') + 1) : o.name
+    const cur = agg.get(bare) ?? { sessions: 0, preceded: 0 }
+    cur.sessions++
+    const mineIdx = ownFirst.get(o.sid)
+    if (mineIdx != null && o.firstIdx < mineIdx) cur.preceded++
+    agg.set(bare, cur)
+  }
+
+  const items: SkillCoOccurrence[] = [...agg.entries()]
+    .map(([n, v]) => ({ name: n, sessions: v.sessions, share: v.sessions / totalSessions, precededSessions: v.preceded }))
+    .sort((a, b) => b.sessions - a.sessions || b.share - a.share || a.name.localeCompare(b.name))
+    .slice(0, MAX_COOCCUR)
+
+  return { name, totalSessions, items }
+}
+
 // ---- Skill drift & version comparison (the hero feature) ------------------
 // Reconstructs a skill's edit timeline from the append-on-change snapshot history
 // and reports usage/error/friction on each side of each edit. Deliberately EDIT-
