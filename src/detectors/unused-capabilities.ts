@@ -77,55 +77,35 @@ export interface InvokedCap {
 }
 
 /**
- * Read invoked capabilities from tool-call usage in the last WINDOW_DAYS.
- * Main-thread only (`is_sidechain = 0`): a subagent's tool calls run against its own
- * context, and we're reasoning about what the user wired into their own sessions.
+ * Read invoked capabilities from the `capability_usage` view — the shared definition
+ * of "this server/skill ran" (the MCP-server-from-tool-name grammar and the
+ * main-thread / malformed-name filters all live in the view now; see src/store/db.ts).
  *
- *  - MCP:   `action = 'mcp_call'`, name = `mcp__<server>__<tool>` → the SERVER is the
- *           2nd `__`-segment (the installed unit is the server, not each tool).
- *  - skill: `action = 'skill'`, name = the specific skill (the adapter already refines
- *           the generic `Skill` tool into the invoked skill's name).
+ * The view aggregates globally; recency is applied HERE as a read-time predicate:
+ * `last_invoked_at >= since` keeps a capability only if its MOST RECENT invocation is
+ * inside the window (decision 6 — a server used once long ago is not current use). That
+ * timestamp is `MAX(tool_call.ts)`, so usage is dated by when the tool actually ran, not
+ * by when its session began (decision 7): a long session that started before the window
+ * but invoked the server yesterday still counts, where the old `s.started_at` scan
+ * dropped it and then misread the live server as unused.
  *
- * Grouped by (kind, name, repo) with a DISTINCT-session count, since "used in N
- * sessions" (not "called N times") is the signal — one chatty session shouldn't
- * look like broad adoption. `source` restricts to one harness's sessions (the MCP
- * name grammar and skill action are harness-specific); omitted counts every source.
+ * Grouped by (kind, name, repo) with a DISTINCT-session count — "used in N sessions",
+ * not "called N times", so one chatty session isn't mistaken for broad adoption. A
+ * session belongs to exactly one source, so `SUM(sessions)` across sources equals the
+ * total distinct-session count. `source` restricts to one harness (the name grammar is
+ * harness-specific); omitted counts every source, re-merged by the outer GROUP BY.
  */
 export function queryInvoked(store: Store, sinceIso: string, source?: string): InvokedCap[] {
-  // The (kind, name) derivation happens in an inner SELECT so the outer GROUP BY
-  // keys on the DERIVED name, not tool_calls.name — an alias named `name` would
-  // otherwise bind to the real column and split servers back into their per-tool rows.
-  const rows = store.queryAll(
-    `SELECT kind, name, repo, COUNT(DISTINCT session_id) AS sessions
-     FROM (
-       SELECT
-          CASE t.action WHEN 'mcp_call' THEN 'mcp' ELSE 'skill' END AS kind,
-          CASE t.action
-            WHEN 'mcp_call' THEN
-              -- server = text between the 1st and 2nd '__' in mcp__<server>__<tool>;
-              -- empty when there's no 2nd '__' (guards substr against a negative length,
-              -- which SQLite would otherwise read backwards).
-              CASE WHEN instr(substr(t.name, 6), '__') > 0
-                   THEN substr(t.name, 6, instr(substr(t.name, 6), '__') - 1)
-                   ELSE '' END
-            ELSE t.name
-          END AS name,
-          t.session_id AS session_id,
-          s.repo AS repo
-       FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-       WHERE t.is_sidechain = 0
-         AND t.action IN ('mcp_call', 'skill')
-         AND s.started_at >= ?
-         AND (? IS NULL OR s.source = ?)
-     )
-     GROUP BY kind, name, repo`,
+  return store.queryAll(
+    `SELECT kind, name, repo, SUM(sessions) AS sessions
+     FROM capability_usage
+     WHERE (? IS NULL OR source = ?)
+     GROUP BY kind, name, repo
+     HAVING MAX(last_invoked_at) >= ?`,
+    source ?? null,
+    source ?? null,
     sinceIso,
-    source ?? null,
-    source ?? null,
-  ) as Array<{ kind: 'mcp' | 'skill'; name: string; repo: string | null; sessions: number }>
-  // A malformed mcp name (no 2nd '__') yields an empty server segment — drop it
-  // rather than emit a phantom "" capability.
-  return rows.filter((r) => r.name !== '')
+  ) as InvokedCap[]
 }
 
 /**

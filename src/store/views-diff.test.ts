@@ -118,6 +118,40 @@ export function sqlCacheEvents(db: DB): Map<string, { isMiss: number; avoidable:
   )
 }
 
+// Port of the OLD unused-capabilities queryInvoked derivation → { "kind#name#repo":
+// distinctSessions }. Scanned GLOBALLY (no window, no source filter) — the window/source
+// are consumer predicates, not part of the (kind, name) derivation the view replaces.
+export function refInvoked(db: DB): Map<string, number> {
+  const rows = db
+    .prepare(
+      `SELECT kind, name, repo, COUNT(DISTINCT session_id) AS sessions
+       FROM (
+         SELECT
+            CASE t.action WHEN 'mcp_call' THEN 'mcp' ELSE 'skill' END AS kind,
+            CASE t.action WHEN 'mcp_call' THEN
+                 CASE WHEN instr(substr(t.name, 6), '__') > 0
+                      THEN substr(t.name, 6, instr(substr(t.name, 6), '__') - 1)
+                      ELSE '' END
+              ELSE t.name END AS name,
+            t.session_id AS session_id, s.repo AS repo
+         FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+         WHERE t.is_sidechain = 0 AND t.action IN ('mcp_call', 'skill')
+       )
+       GROUP BY kind, name, repo`,
+    )
+    .all() as Array<{ kind: string; name: string; repo: string | null; sessions: number }>
+  return new Map(rows.filter((r) => r.name !== '').map((r) => [`${r.kind}#${r.name}#${r.repo}`, r.sessions]))
+}
+
+// The same set from the capability_usage view — re-merged across sources (a session has
+// one source, so SUM of per-source distinct counts is the total distinct count).
+export function sqlInvoked(db: DB): Map<string, number> {
+  const rows = db
+    .prepare('SELECT kind, name, repo, SUM(sessions) AS sessions FROM capability_usage GROUP BY kind, name, repo')
+    .all() as Array<{ kind: string; name: string; repo: string | null; sessions: number }>
+  return new Map(rows.map((r) => [`${r.kind}#${r.name}#${r.repo}`, r.sessions]))
+}
+
 /** Sorted [key, value] pairs — Maps don't deep-equal by insertion order otherwise. */
 function sorted<V>(m: Map<string, V>): Array<[string, V]> {
   return [...m.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
@@ -200,6 +234,36 @@ function buildSyntheticCorpus(db: DB): void {
   seedTurn(db, 'rewrite', 1, { reads: 5_000 }) // new_ctx 5k < 20k → excluded from classification
 }
 
+interface Call {
+  name: string
+  action: 'mcp_call' | 'skill' | 'other'
+  sidechain?: boolean
+}
+function seedCapSession(db: DB, id: string, source: string, repo: string | null, calls: Call[]): void {
+  db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, started_at) VALUES (?,?,?,?,?,?)').run(
+    id, id, source, 'anthropic', repo, '2026-07-01T00:00:00Z',
+  )
+  const ins = db.prepare(
+    'INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,?,?)',
+  )
+  calls.forEach((c, idx) => ins.run(id, idx, c.name, c.action, c.sidechain ? 1 : 0, `2026-07-01T00:0${idx}:00Z`))
+}
+
+function buildCapabilityCorpus(db: DB): void {
+  // sentry used in two claude-code sessions of o/web (distinct-session count, not calls)…
+  seedCapSession(db, 'capweb', 'claude-code', 'o/web', [
+    { name: 'mcp__sentry__a', action: 'mcp_call' },
+    { name: 'mcp__sentry__b', action: 'mcp_call' }, // same server, one session
+    { name: 'deploy', action: 'skill' },
+  ])
+  seedCapSession(db, 'capweb2', 'claude-code', 'o/web', [{ name: 'mcp__sentry__a', action: 'mcp_call' }])
+  seedCapSession(db, 'capapi', 'claude-code', 'o/api', [{ name: 'mcp__sentry__a', action: 'mcp_call' }]) // repo split
+  seedCapSession(db, 'capnull', 'claude-code', null, [{ name: 'deploy', action: 'skill' }]) // null-repo usage kept
+  seedCapSession(db, 'capside', 'claude-code', 'o/web', [{ name: 'mcp__sub__t', action: 'mcp_call', sidechain: true }]) // dropped
+  seedCapSession(db, 'capbad', 'claude-code', 'o/web', [{ name: 'mcp__nobreak', action: 'mcp_call' }]) // malformed → dropped
+  seedCapSession(db, 'capcodex', 'codex', 'o/web', [{ name: 'mcp__sentry__a', action: 'mcp_call' }]) // other source → re-merged by SUM
+}
+
 describe('view↔detector diff (W1 acceptance) — synthetic corpus', () => {
   it('compaction_event matches the context-exhaustion loop event-for-event', () => {
     const db = openDb(join(dir, 'synthetic.db'))
@@ -220,6 +284,19 @@ describe('view↔detector diff (W1 acceptance) — synthetic corpus', () => {
     expect(miss).toEqual(['cache#1', 'runmax#1'])
     db.close()
   })
+
+  it('capability_usage matches the queryInvoked derivation, re-merged across sources', () => {
+    const db = openDb(join(dir, 'synthetic3.db'))
+    buildCapabilityCorpus(db)
+    expect(sorted(sqlInvoked(db))).toEqual(sorted(refInvoked(db)))
+    // Guard against a trivially-empty diff and pin the tricky rows:
+    const m = sqlInvoked(db)
+    expect(m.get('mcp#sentry#o/web')).toBe(3) // capweb + capweb2 (claude-code) + capcodex (codex), re-merged
+    expect(m.get('skill#deploy#null')).toBe(1) // null-repo usage kept
+    expect(m.has('mcp#sub#o/web')).toBe(false) // sidechain dropped
+    expect([...m.keys()].some((k) => k.includes('nobreak'))).toBe(false) // malformed dropped
+    db.close()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -233,13 +310,16 @@ describe('view↔detector diff (W1 acceptance) — real store', () => {
     const db = openDb(realStore as string)
     const comp = { sql: sqlCompactionEvents(db), ref: refCompactionEvents(db) }
     const cache = { sql: sqlCacheEvents(db), ref: refCacheEvents(db) }
+    const invoked = { sql: sqlInvoked(db), ref: refInvoked(db) }
     console.log(
       `[real-store diff] compactions: sql=${comp.sql.size} ref=${comp.ref.size}; ` +
         `classified: sql=${cache.sql.size} ref=${cache.ref.size}; ` +
-        `misses: sql=${[...cache.sql.values()].filter((v) => v.isMiss).length}`,
+        `misses: sql=${[...cache.sql.values()].filter((v) => v.isMiss).length}; ` +
+        `capabilities: sql=${invoked.sql.size} ref=${invoked.ref.size}`,
     )
     expect(sorted(comp.sql)).toEqual(sorted(comp.ref))
     expect(sorted(cache.sql)).toEqual(sorted(cache.ref))
+    expect(sorted(invoked.sql)).toEqual(sorted(invoked.ref))
     db.close()
   })
 })

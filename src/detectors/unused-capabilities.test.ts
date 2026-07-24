@@ -29,6 +29,7 @@ interface ToolSpec {
   name: string
   action: 'mcp_call' | 'skill' | 'other'
   sidechain?: boolean
+  tsMs?: number // call timestamp; defaults to the session start (decouple to exercise the event-ts window)
 }
 
 /** Seed one session and its tool calls; repo defaults to 'o/r', null = no git repo. */
@@ -46,7 +47,7 @@ function seedSession(
   const ins = db.prepare(
     'INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,?,?)',
   )
-  tools.forEach((t, idx) => ins.run(id, idx, t.name, t.action, t.sidechain ? 1 : 0, new Date(startMs).toISOString()))
+  tools.forEach((t, idx) => ins.run(id, idx, t.name, t.action, t.sidechain ? 1 : 0, new Date(t.tsMs ?? startMs).toISOString()))
 }
 
 const byKey = (caps: InvokedCap[]) => new Map(caps.map((c) => [`${c.kind}:${c.name}:${c.repo}`, c]))
@@ -168,6 +169,19 @@ describe('queryInvoked', () => {
     const { db, store } = setupDb()
     seedSession(db, 's1', [{ name: 'mcp__nobreak', action: 'mcp_call' }])
     expect(queryInvoked(store, since)).toEqual([])
+  })
+
+  it('windows by the tool call\'s own timestamp, not the session start (decision 7)', () => {
+    const { db, store } = setupDb()
+    // A long-running session that began 40 days ago (outside the window) but invoked the
+    // server yesterday. The old started_at scan dropped it — and would then read the
+    // still-live server as "never used"; the last_invoked_at window keeps it.
+    seedSession(db, 's1', [{ name: 'mcp__live__t', action: 'mcp_call', tsMs: Date.now() - DAY_MS }], {
+      startedMs: Date.now() - 40 * DAY_MS,
+    })
+    const m = byKey(queryInvoked(store, since))
+    expect(m.get('mcp:live:o/r')).toMatchObject({ kind: 'mcp', name: 'live' })
+    expect([...m.keys()]).toEqual(['mcp:live:o/r'])
   })
 })
 

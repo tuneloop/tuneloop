@@ -5,7 +5,7 @@ import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 19
+const SCHEMA_VERSION = 20
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -581,6 +581,53 @@ CREATE VIEW cache_miss_event AS SELECT * FROM cache_classified_turn WHERE is_mis
 `
 }
 
+/**
+ * Read-time views for capability usage — the shared definition of "this MCP server /
+ * skill was invoked", read by `unused-capabilities` (and available to anything else).
+ * The (kind, name) derivation — the MCP-server-from-tool-name grammar — lived only
+ * inside that detector's query; hoisting it here makes it the one definition.
+ *
+ * Same lifecycle contract as `buildUsageViews`: `DROP VIEW IF EXISTS` then an
+ * unconditional `CREATE VIEW` on every `openDb` (landmine 5). No thresholds here — the
+ * recency window is a read-time predicate the consumer applies (`last_invoked_at >=
+ * since`), since a capability used once long ago is not current use (decision 6).
+ */
+function buildCapabilityViews(): string {
+  return `
+DROP VIEW IF EXISTS capability_invocation;
+CREATE VIEW capability_invocation AS
+WITH derived AS (
+  SELECT t.session_id, t.idx, t.ts, t.is_sidechain, s.source, s.repo,
+         CASE t.action WHEN 'mcp_call' THEN 'mcp' ELSE 'skill' END AS kind,
+         -- Installed unit is the SERVER: text between the 1st and 2nd '__' in
+         -- mcp__<server>__<tool>. Empty when there's no 2nd '__' — the substr length
+         -- would go negative, which SQLite reads backwards.
+         CASE t.action WHEN 'mcp_call' THEN
+                CASE WHEN instr(substr(t.name, 6), '__') > 0
+                     THEN substr(t.name, 6, instr(substr(t.name, 6), '__') - 1)
+                     ELSE '' END
+              ELSE t.name END AS name
+  FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+  WHERE t.action IN ('mcp_call', 'skill')
+)
+SELECT session_id, idx, ts, is_sidechain, source, repo, kind, name
+FROM derived WHERE name <> '';   -- drop malformed mcp names; don't emit a phantom "" capability
+
+DROP VIEW IF EXISTS capability_usage;
+CREATE VIEW capability_usage AS
+SELECT source, kind, name, repo,
+       COUNT(DISTINCT session_id) AS sessions,   -- adoption breadth, not chattiness
+       COUNT(*)                   AS calls,
+       -- strftime normalizes any offset to UTC before MIN/MAX, so mixed timestamp
+       -- formats can't produce a wrong "latest" (landmine 6 / N10, fixed at source).
+       MIN(strftime('%Y-%m-%dT%H:%M:%SZ', ts)) AS first_invoked_at,
+       MAX(strftime('%Y-%m-%dT%H:%M:%SZ', ts)) AS last_invoked_at
+FROM capability_invocation
+WHERE is_sidechain = 0   -- a subagent runs against its own context; we ask what the
+GROUP BY source, kind, name, repo;   -- user wired into their OWN sessions
+`
+}
+
 export function openDb(path: string): DB {
   mkdirSync(dirname(path), { recursive: true })
   const db = new Database(path)
@@ -589,6 +636,7 @@ export function openDb(path: string): DB {
   migrate(db) // add columns to pre-existing tables before SCHEMA (its indexes reference them)
   db.exec(SCHEMA)
   db.exec(buildUsageViews()) // after SCHEMA: the views read the tables it defines
+  db.exec(buildCapabilityViews())
   db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(
     'schema_version',
     String(SCHEMA_VERSION),
