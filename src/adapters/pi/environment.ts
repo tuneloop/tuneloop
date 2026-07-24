@@ -172,18 +172,23 @@ function redactPackages(raw: unknown): unknown {
   })
 }
 
-/** Drop `user:token@` userinfo from a URL source, preserving the path/ref; non-URLs pass through. */
+/**
+ * Strip secrets from a package URL source, preserving endpoint identity. Removes
+ * `user:token@` userinfo AND the query string (`?access_token=…`), keeping the path
+ * and `#ref`. Pi also accepts a `git:` prefix in front of a nested URL of ANY scheme
+ * (`git:https://…`, `git:ssh://user:secret@host/repo`); `new URL()` would treat that as
+ * an opaque `git:` value and miss its credentials, so the prefix is peeled before
+ * redaction and restored afterward. Non-URL sources (bare npm names, scoped names,
+ * scp-style `git@host:path` refs) don't parse and pass through untouched.
+ */
 function redactPackageSource(raw: string): string {
-  // Pi accepts a `git:` prefix in front of an http(s) URL (`git:https://user:token@host/repo`).
-  // new URL() would treat that as an opaque `git:` URL and miss the userinfo, so peel the prefix,
-  // redact the inner URL, then restore it.
-  const gitPrefix = /^git:https?:\/\//.test(raw) ? 'git:' : ''
+  const gitPrefix = /^git:[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? 'git:' : ''
   const url = raw.slice(gitPrefix.length)
   try {
     const u = new URL(url)
-    if (!u.username && !u.password) return raw
     u.username = ''
     u.password = ''
+    u.search = '' // query params can carry tokens
     return gitPrefix + u.toString()
   } catch {
     return raw // bare npm name / scoped name / scp-style git ref — no URL credentials
@@ -257,6 +262,11 @@ async function readSkills(
  * `.md` files are individual skills (only when `allowRootMd`), and each subdirectory is
  * searched for a `SKILL.md` (the first directory that has one IS a skill; its subtree is
  * not descended further). Deterministic (entries sorted per level).
+ *
+ * Traversal skips the same set as the repo scan — hidden directories plus the build/vendor
+ * skip-list — so a dependency's `node_modules/**\/SKILL.md` never registers as a skill.
+ * (Full `.gitignore`/`.ignore`/`.fdignore` parity that Pi's `fd`-based traversal applies
+ * is deferred, matching the other harness readers, which prune by the same fixed list.)
  */
 async function collectSkillFiles(
   root: SkillRoot,
@@ -276,7 +286,7 @@ async function collectSkillFiles(
     if (root.allowRootMd && (await isFileLike(childPath, e)) && e.name.endsWith('.md')) {
       // Individual `.pi` skill: name defaults to the file's base name.
       out.push({ path: childPath, fallbackName: basename(e.name, '.md'), dirLabel: root.label })
-    } else if (await isDirLike(childPath, e)) {
+    } else if (!isPrunedDir(e.name) && (await isDirLike(childPath, e))) {
       await findSkillDirs(childPath, root, out, seenDirs)
     }
   }
@@ -312,6 +322,7 @@ async function findSkillDirs(
     return // stop descending — nested SKILL.md files are this skill's own assets
   }
   for (const e of entries) {
+    if (isPrunedDir(e.name)) continue // skip hidden dirs + node_modules/build/vendor trees
     const childPath = join(dir, e.name)
     if (await isDirLike(childPath, e)) await findSkillDirs(childPath, root, out, seenDirs)
   }
@@ -362,6 +373,11 @@ async function readInstructions(
 
 /** Directory names we never descend into when scanning a repo for config. */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'vendor', 'venv', 'target'])
+
+/** A directory to prune from any traversal: a hidden dir or a known build/vendor tree. */
+function isPrunedDir(name: string): boolean {
+  return SKIP_DIRS.has(name) || name.startsWith('.')
+}
 
 /** Sorted directory entries; [] when the dir is missing/unreadable. */
 async function dirEntries(dir: string): Promise<Dirent[]> {
@@ -426,7 +442,7 @@ export async function scanProject(repoRoot: string): Promise<ProjectScan> {
         continue
       }
       if (e.isDirectory()) {
-        if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) continue
+        if (isPrunedDir(e.name)) continue
         subdirs.push({ path: childPath, rel: childRel })
       } else if (await isFileLike(childPath, e)) {
         fileNames.add(e.name)

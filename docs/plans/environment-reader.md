@@ -961,10 +961,11 @@ non-secret posture: model + thinking config (`defaultProvider`, `defaultModel`,
 and resource pointers (`packages`, `extensions`, `skills`, `prompts`, `themes`,
 `enableSkillCommands`). `httpProxy` is kept only as a redacted endpoint identity (userinfo, query,
 and fragment stripped). `packages` accepts HTTP(S) git sources that Pi stores verbatim, so each
-source (string or `{ source }` object) has its `user:token@` userinfo stripped while the path and
-ref are preserved; Pi's `git:https://…` prefix is peeled before redaction and restored afterward
-(otherwise `URL` treats it as an opaque `git:` value and misses the credentials); bare npm names
-and scp-style refs pass through unchanged. Everything else — themes and other pure-UI display options,
+source (string or `{ source }` object) has its `user:token@` userinfo **and** query string stripped
+(a `?access_token=…` param can carry a secret) while the path and `#ref` are preserved; Pi's `git:`
+prefix in front of a nested URL of any scheme (`git:https://…`, `git:ssh://…`) is peeled before
+redaction and restored afterward (otherwise `URL` treats it as an opaque `git:` value and misses the
+credentials); bare npm names and scp-style refs pass through unchanged. Everything else — themes and other pure-UI display options,
 `externalEditor`, `shellPath`/`shellCommandPrefix`/`npmCommand` execution plumbing, `sessionDir`,
 `trackingId`, telemetry flags — is dropped by omission. A file whose fields are all dropped
 contributes no entry.
@@ -978,7 +979,10 @@ directories recursively, and `.agents` skill dirs ignore root `.md` files. The s
 checked first: a `SKILL.md` sitting directly in it makes the root one skill and stops all further
 discovery (for both `.pi` and `.agents`). Otherwise the first directory that contains a `SKILL.md`
 IS a skill and its subtree is not searched further, so a skill's own bundled `examples/SKILL.md`
-assets never become separate skills. Skills with a missing or blank
+assets never become separate skills. The skill traversal prunes the same set as the repo scan —
+hidden directories plus the build/vendor skip-list — so a dependency's `node_modules/**/SKILL.md`
+never registers as a skill. Full `.gitignore`/`.ignore`/`.fdignore` parity that Pi's `fd`-based
+traversal applies is deferred, matching the other harness readers, which prune by the same fixed list. Skills with a missing or blank
 `description` are dropped, matching Pi, which refuses to load them. The payload is
 `{ "skills": [...], "count": n }`; each entry retains `name`, `description`, full `body`,
 `bodyHash`, `kind: "skill"`, and the source `dir`. Pi lets the frontmatter `name` differ from the

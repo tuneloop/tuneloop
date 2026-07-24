@@ -180,6 +180,32 @@ describe('readPiEnvironment — project scope', () => {
     expect(packages[4]).toEqual({ source: 'internal-pkg' })
   })
 
+  it('strips query-string tokens and redacts git:ssh credentials', async () => {
+    write(
+      repo,
+      '.pi/settings.json',
+      JSON.stringify({
+        packages: [
+          'https://example.com/repo.git?access_token=sekret',
+          'git:ssh://git:sshsecret@host.example.com/org/repo.git',
+        ],
+      }),
+    )
+    const packages = cat(await readPiEnvironment(repo), 'settings')['.pi/settings.json'].packages
+    expect(packages[0]).toBe('https://example.com/repo.git')
+    expect(packages[0]).not.toContain('access_token')
+    expect(packages[1]).toBe('git:ssh://host.example.com/org/repo.git')
+    expect(packages[1]).not.toContain('sshsecret')
+  })
+
+  it('does not discover skills inside node_modules or hidden dirs', async () => {
+    write(repo, '.pi/skills/real/SKILL.md', '---\nname: real\ndescription: d\n---\nB.\n')
+    write(repo, '.pi/skills/group/node_modules/dep/SKILL.md', '---\nname: dep\ndescription: d\n---\nB.\n')
+    write(repo, '.pi/skills/.hidden/secret/SKILL.md', '---\nname: secret\ndescription: d\n---\nB.\n')
+    const skills = cat(await readPiEnvironment(repo), 'skills').skills
+    expect(skills.map((s: any) => s.name)).toEqual(['real'])
+  })
+
   it('treats a directory with SKILL.md as one skill, ignoring nested SKILL.md assets', async () => {
     write(repo, '.pi/skills/deploy/SKILL.md', '---\nname: deploy\ndescription: Ship\n---\nBody.\n')
     // A supporting example bundled inside the skill must NOT become a second skill.
