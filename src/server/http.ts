@@ -9,11 +9,6 @@ import { ERROR_CATEGORIES } from '../core/error-category'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
-// The Insights tab surfaces only the most valuable insights to act on — not an
-// exhaustive ledger. We cap the read model to the top-ranked few (store.insights()
-// already orders them severity → recurrence → recency)
-const TOP_INSIGHTS = 7
-
 /**
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
  * time; POST endpoints write user judgment only — curation (features +
@@ -167,9 +162,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/insights') {
-    // The insight read model, capped to the top TOP_INSIGHTS (dismissed excluded,
-    // ranked severity → recurrence → recency) — only the most valuable to act on.
-    sendJson(res, 200, store.insights().slice(0, TOP_INSIGHTS))
+    // The full insight read model (dismissed excluded, ranked severity → recency). The
+    // client fetches once and filters/searches/sorts entirely client-side, so it must
+    // receive every row — a server-side cap here silently breaks those filters (e.g.
+    // "Severity: low" would find nothing whenever enough higher rows exist).
+    sendJson(res, 200, store.insights())
     return
   }
   if (path === '/api/insight/evidence') {

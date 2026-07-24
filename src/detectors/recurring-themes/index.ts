@@ -342,7 +342,7 @@ async function surfaceInsights(
     const severity = t.eventCount >= SEVERITY_EVENTS.high ? 'high' : t.eventCount >= SEVERITY_EVENTS.medium ? 'medium' : 'low'
 
     // Evidence: the theme's member turns, ranked most-recent-first (store orders
-    // by added_at desc). The occurrence description rides as the note.
+    // by occurred_at desc — real friction recency). The occurrence description rides as the note.
     const evidence = t.evidence.map((e) => ({ sessionId: e.sessionId, turnIdx: e.turnSeq ?? undefined, note: e.description }))
 
     // Fix input is built LAZILY: ensureThemeFix hashes the descriptions first and

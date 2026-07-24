@@ -3145,6 +3145,19 @@ export class Store {
   }
 
   /**
+   * Fold dropId into keepId AND retire the dropped theme's insight as one atomic unit.
+   * Wrapping both in a single transaction (nested via savepoints) means a crash between
+   * them can't leave the deleted theme's insight orphaned as a frozen surfaced duplicate.
+   */
+  applyThemeMergeAndRetire(keepId: string, dropId: string, detector: string): boolean {
+    return this.db.transaction(() => {
+      if (!this.applyThemeMerge(keepId, dropId)) return false
+      this.retireInsightForTheme(detector, dropId)
+      return true
+    })()
+  }
+
+  /**
    * Friction events the extractor recorded but couldn't confidently attach to a
    * theme (varied wording, or a sibling session minted the theme concurrently so
    * it wasn't yet visible). Grouped by session repo so the reconcile pass can scope
@@ -3221,8 +3234,13 @@ export class Store {
         resolved: number; fixType: string | null; fixContent: string | null; fixHash: string | null
       }>
     const evStmt = this.db.prepare(
+      // Chronological, most-recent friction first — by when the friction actually
+      // occurred (occurred_at), not when it was extracted. This is the order the fix
+      // pass slices (MAX_FIX_OCCURRENCES), so it must reflect real recency. Pre-schema-17
+      // rows have a null occurred_at; fall back to added_at for those.
       `SELECT session_id AS sessionId, turn_seq AS turnSeq, description, occurred_at AS occurredAt
-       FROM theme_events WHERE theme_id = ? ORDER BY added_at DESC, session_id, idx`,
+       FROM theme_events WHERE theme_id = ?
+       ORDER BY COALESCE(occurred_at, added_at) DESC, added_at DESC, session_id, idx`,
     )
     return themes.map((t) => {
       const evs = evStmt.all(t.id) as Array<{ sessionId: string; turnSeq: number | null; description: string; occurredAt: string | null }>
@@ -3240,11 +3258,6 @@ export class Store {
         lastSeenAt: times[times.length - 1] ?? null,
       }
     })
-  }
-
-  /** Flag/unflag a theme resolved — keeps it in the extraction feed after its insight resolves. */
-  setThemeResolved(id: string, resolved: boolean): void {
-    this.db.prepare('UPDATE theme SET resolved = ? WHERE id = ?').run(resolved ? 1 : 0, id)
   }
 
   /** Cache a theme's LLM-generated fix + the hash of the occurrence set it was built from. */
@@ -3505,9 +3518,11 @@ export class Store {
       sql += ' AND repo = ?'
       params.push(opts.repo)
     }
-    // Rank most-valuable-first: severity, then recurrence (how often it bit), then
-    // recency
-    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, count DESC, last_seen_at DESC`
+    // Rank most-valuable-first: severity, then recency. `count` is intentionally NOT a
+    // sort key — it means different things per detector (cache misses in the thousands
+    // vs a handful of theme events), so sorting on it lets one high-cardinality detector
+    // monopolize the list. detector/signal_key are a stable final tiebreak.
+    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC, detector, signal_key`
 
     const rows = this.db.prepare(sql).all(...params) as Array<{
       id: string
