@@ -343,10 +343,11 @@ function globalProblem(globals: Classified[]): string {
     parts.push(`${never} global ${plural(never, 'capability is', 'capabilities are')} never invoked in the last ${WINDOW_DAYS} days`)
   }
   if (few > 0) {
-    // "a few of your repos" only reads right when the scope actually spans >1 repo;
-    // a capability used in a single repo is "just one of your repos".
+    // No second person ("your"): this sentence is reused verbatim in the fix-prompt,
+    // which is copied to a coding agent. "a few repos" only reads right when the scope
+    // spans >1 repo; a capability used in a single repo is "just one repo".
     const oneRepo = scoped.every((c) => (c.scopeToRepos ?? []).length <= 1)
-    const where = oneRepo ? 'just one of your repos' : 'only a few of your repos'
+    const where = oneRepo ? 'just one repo' : 'only a few repos'
     parts.push(`${few} global ${plural(few, 'capability is', 'capabilities are')} used in ${where}`)
   }
   if (parts.length === 0) return ''
@@ -368,7 +369,7 @@ function projectProblem(byRepo: Map<string, Classified[]>): string {
 function globalFixContent(globals: Classified[]): string {
   const sections: string[] = []
   const removes = globals.filter((c) => c.verdict === 'remove').map((c) => c.cap)
-  if (removes.length > 0) sections.push(`Remove from your global config:\n${capList(removes)}`)
+  if (removes.length > 0) sections.push(`Remove from the global config:\n${capList(removes)}`)
   const scopes = globals
     .filter((c) => c.verdict === 'scope')
     .sort((a, b) => a.cap.kind.localeCompare(b.cap.kind) || a.cap.name.localeCompare(b.cap.name))

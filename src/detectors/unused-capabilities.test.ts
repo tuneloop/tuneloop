@@ -368,7 +368,7 @@ describe('buildCards', () => {
     expect(cards[0]!.fix.type).toBe('fix-prompt')
     expect(cards[0]!.count).toBe(4) // total flagged items across all scopes
     // Fix carries the global section plus a per-repo removal section for each project.
-    expect(cards[0]!.fix.content).toContain('Remove from your global config:')
+    expect(cards[0]!.fix.content).toContain('Remove from the global config:')
     expect(cards[0]!.fix.content).toContain("Remove from api's config:")
     expect(cards[0]!.fix.content).toContain("Remove from web's config:")
   })
@@ -379,7 +379,7 @@ describe('buildCards', () => {
       noInv,
     )
     const global = cards.find((c) => c.repo === '*')!
-    expect(global.fix.content).toContain('Remove from your global config:')
+    expect(global.fix.content).toContain('Remove from the global config:')
     expect(global.fix.content).toContain('- MCP server: sentry')
     expect(global.fix.content).toContain('Move out of global config')
     expect(global.fix.content).toContain('- skill: frontend-design → move to web, docs')
@@ -434,6 +434,14 @@ describe('buildCards', () => {
     expect(fix.content).toContain(`tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps')}`)
     // The concrete config edit still reads through — it IS the agent's task.
     expect(fix.content).toContain('- MCP server: sentry')
+  })
+
+  it('the fix-prompt addresses the agent, not the user (no second-person "your")', () => {
+    // A scope verdict exercises the "used in … repos" diagnosis; a global + a project
+    // removal exercise both config sections — every phrase that reaches the prompt.
+    const classified = [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'fd'), ['web']), remove(pcap('mcp', 'pg', 'api'))]
+    const content = buildCards(classified, noInv)[0]!.fix.content
+    expect(content).not.toMatch(/\byour\b/i)
   })
 
   it('carries no token or dollar figures in any copy', () => {
