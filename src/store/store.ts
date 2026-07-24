@@ -12,7 +12,7 @@ import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
@@ -2990,6 +2990,76 @@ export class Store {
    */
   resetDetectorSessionRuns(detector: string): void {
     this.db.prepare('DELETE FROM detector_session_runs WHERE detector = ?').run(detector)
+  }
+
+  // ---- Kitchen-sink verdicts --------------------------------------------------
+
+  /**
+   * Upsert this run's kitchen-sink verdicts (positive AND negative) into their
+   * permanent home, keyed on session id. INSERT OR REPLACE so a session re-judged
+   * after a content change (or a corrected verdict) overwrites its prior row — a
+   * positive→negative flip is a plain upsert that drops it from the windowed card.
+   */
+  recordKitchenSinkVerdicts(verdicts: KitchenSinkVerdictInput[]): void {
+    if (verdicts.length === 0) return
+    const now = new Date().toISOString()
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO kitchen_sink_verdict
+         (session_id, is_kitchen_sink, split_block_idx, split_seq, reason, model, detector_version, judged_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    this.db.transaction(() => {
+      for (const v of verdicts) {
+        stmt.run(v.sessionId, v.isKitchenSink ? 1 : 0, v.splitBlockIdx, v.splitSeq, v.reason, v.model, v.detectorVersion, now)
+      }
+    })()
+  }
+
+  /**
+   * The kitchen-sink card's data, as a windowed projection of the verdict table:
+   * every POSITIVE session whose `started_at` falls in the trailing window
+   * (`windowStartIso` = now − WINDOW_DAYS), most-recent first — the evidence + count.
+   * `lastSeenAt` is the max over that windowed set; `firstSeenAt` is the earliest
+   * over ALL positives (whole history), so a chronic pattern keeps its true origin
+   * date even though the count/evidence are windowed (decision 5). Both null when
+   * there are no positives at all.
+   */
+  kitchenSinkPositives(windowStartIso: string): {
+    positives: Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+    firstSeenAt: string | null
+    lastSeenAt: string | null
+  } {
+    // Windowed positives (the card's evidence + count), most-recent first.
+    const positives = this.db
+      .prepare(
+        `SELECT v.session_id AS sessionId, v.split_block_idx AS splitBlockIdx,
+                v.split_seq AS splitSeq, v.reason AS reason
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?
+         ORDER BY s.started_at DESC, v.session_id`,
+      )
+      .all(windowStartIso) as Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+
+    // last-seen over the WINDOWED positives (the card's set); first-seen over ALL
+    // positives (whole history) so a chronic pattern keeps its true origin date even
+    // though count/evidence are windowed (decision 5). strftime normalizes any offset
+    // before MIN/MAX so mixed timestamp formats can't skew the result (landmine 6).
+    const windowed = this.db
+      .prepare(
+        `SELECT MAX(strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.ended_at, s.started_at))) AS lastSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?`,
+      )
+      .get(windowStartIso) as { lastSeen: string | null }
+    const allTime = this.db
+      .prepare(
+        `SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', s.started_at)) AS firstSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1`,
+      )
+      .get() as { firstSeen: string | null }
+
+    return { positives, firstSeenAt: allTime.firstSeen, lastSeenAt: windowed.lastSeen }
   }
 
   // ---- Recurring-theme mining -------------------------------------------------

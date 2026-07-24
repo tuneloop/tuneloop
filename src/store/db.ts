@@ -5,7 +5,7 @@ import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 20
+const SCHEMA_VERSION = 21
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -457,6 +457,28 @@ CREATE TABLE IF NOT EXISTS theme_events (
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_theme_events_theme ON theme_events(theme_id);
+
+-- Kitchen-sink verdicts (kitchen-sink detector, tier P). The LLM's judgement of
+-- whether a session mixed unrelated objectives — expensive, non-reproducible, and a
+-- property of immutable session content — gets a permanent home here rather than
+-- living in insight_evidence (a DISPLAY table capped at EVIDENCE_CAP and coupled to
+-- the insight lifecycle: that coupling was the N6 root cause). One row per JUDGED
+-- session, positive AND negative, so the card is a pure projection — windowed
+-- positives, rebuilt every run, ageing out on their own. A positive re-judged
+-- negative just flips is_kitchen_sink (a plain upsert), dropping it from the card.
+-- split_seq is the main-thread seq the evidence points at; NULL for a negative verdict.
+CREATE TABLE IF NOT EXISTS kitchen_sink_verdict (
+  session_id       TEXT PRIMARY KEY,
+  is_kitchen_sink  INTEGER NOT NULL,   -- 1 = mixed unrelated work, 0 = coherent
+  split_block_idx  INTEGER,            -- block where the 2nd objective begins (NULL if coherent)
+  split_seq        INTEGER,            -- that block's opening main-thread seq (the evidence pointer)
+  reason           TEXT,               -- the LLM's one-sentence explanation
+  model            TEXT,               -- model that produced the verdict
+  detector_version INTEGER NOT NULL,   -- detector version at judge time
+  judged_at        TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_kitchen_sink_verdict_positive ON kitchen_sink_verdict(is_kitchen_sink);
 
 -- Append-only lifecycle history for insights. state_changed_at on the insights row
 -- only remembers the LAST transition; measurement ("fix applied Jul 25, recurrences

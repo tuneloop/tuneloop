@@ -108,7 +108,7 @@ aggregate over `usage_turns`, not part of the event view.
   should build on that timeline rather than the marker mechanism (`config-snippet` fixes carry no
   `tuneloop-fix:` id, so adoption can't be detected the marker way).
 
-### W5 — `kitchen-sink`: verdict table + windowed presentation (needs W0, W6)
+### W5 — `kitchen-sink`: verdict table + windowed presentation (needs W0, W6) — LANDED 2026-07-24
 `src/store/db.ts`, `src/detectors/kitchen-sink.ts`.
 - New table for the verdict — session id, verdict, split block idx, reason, judged-at, model, detector
   version. Root cause of N6 is that the verdict has no home, so `insight_evidence` (a *display* table, capped
@@ -121,9 +121,27 @@ aggregate over `usage_turns`, not part of the event view.
 - Verdicts are cached per session (`detector_session_runs`), so going global is a **one-time backfill**, not
   recurring spend. The judgement is a property of immutable content and never goes stale.
 
-### W6 — `--limit` bounds detectors (BLOCKS W5)
+**As landed:** `kitchen_sink_verdict` (session_id PK) stores every JUDGED session — positive AND negative —
+with `split_block_idx` + the resolved `split_seq` (the evidence pointer, computed at judge time so the read
+path never re-hydrates), `reason`, `model`, `detector_version`, `judged_at`. `recordKitchenSinkVerdicts` is a
+plain `INSERT OR REPLACE`, so a positive re-judged negative just flips `is_kitchen_sink` and drops out of the
+card — `mergeEvidence`/`seenWindow`/the `insight_evidence` read-back are all deleted. `candidates()` scans all
+history (`ALL_TIME = ''`); `run()` rebuilds the card EVERY analyze from `kitchenSinkPositives(windowStart)`, so
+a positive ages off on its own even when nothing was judged. Per decision 5, `firstSeenAt` is the MIN over ALL
+positives (whole history) while count/evidence/`lastSeenAt` are windowed. Detector bumped **v2 → v3** so the
+runner's version-reset re-judges the corpus into the new table (the one-time backfill). SCHEMA_VERSION 20 → 21.
+
+### W6 — `--limit` bounds detectors (BLOCKS W5) — LANDED 2026-07-24
 Round-1 finding #4. W5's first run judges every historical candidate with an LLM and there is currently no
 way to cap or dry-run it. Land the bound (and ideally a pre-run cost estimate) first.
+
+**As landed:** the existing `--limit` now bounds detectors too (threaded `analyze` → `runDetectors` →
+`DetectorContext.limit`). **P-tier** detectors (kitchen-sink) judge at most `limit` unseen candidates per run —
+safe because each verdict is cached and the card rebuilds from the table, so the backfill is throttled across
+runs. **X-tier** (cross-session) detectors are **skipped entirely** under a limit and say so at `info`: their
+extract-per-session → reconcile → surface-over-the-whole-corpus flow can't be partially bounded without leaving
+written rows inconsistent (design decision, 2026-07-24). The optional pre-run cost estimate is **deferred** —
+`--limit` gives the throttle; a token-count dry-run can follow if wanted.
 
 ### W7 — Resolve sweep (after W2–W5)
 Verify each detector's empty path ends in `resolveInsight`. For W2/W3/W5 this should fall out of the design;

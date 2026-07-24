@@ -388,7 +388,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   if (detectors.length > 0) {
     log.debug(`Running ${detectors.length} detector(s)...`)
     const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
-    await runDetectors({ detectors, store, log, llmEnabled, llm: heavyLlm, progress: detectorProgress })
+    await runDetectors({ detectors, store, log, llmEnabled, llm: heavyLlm, progress: detectorProgress, limit: opts.limit })
     detectorProgress.clear()
   }
 

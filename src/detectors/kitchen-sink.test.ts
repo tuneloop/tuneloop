@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { artifactCounts, buildAggregate, buildRequest, candidates, judge, kitchenSink, mergeEvidence, realUserTurns, sizeCutoff, toEvidence, unseenCandidates } from './kitchen-sink'
+import { artifactCounts, buildAggregate, buildRequest, candidates, judge, kitchenSink, positiveEvidence, realUserTurns, sizeCutoff, unseenCandidates, verdictRow } from './kitchen-sink'
 import { normalizeDetectorResult } from '../core/detector'
 import type { DetectorContext } from '../core/detector'
 import { emptyUsage } from '../core/model'
@@ -35,6 +35,12 @@ type DB = ReturnType<typeof openDb>
 const RECENT = new Date(Date.now() - 86_400_000).toISOString()
 // A `since` bound older than RECENT, so seeded sessions are in scope.
 const SINCE = new Date(Date.now() - 30 * 86_400_000).toISOString()
+
+// A no-millisecond UTC timestamp N days before now. SQLite's
+// strftime('%Y-%m-%dT%H:%M:%SZ', …) — which the store uses to normalize first/last
+// -seen (landmine 6) — drops milliseconds, so seeding with this form lets those
+// assertions round-trip exactly. Compute each once and reuse (Date.now() drifts).
+const daysAgoZ = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
 
 function addSession(db: DB, id: string, repo = 'o/r', startedAt = RECENT) {
   db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, started_at, content_hash) VALUES (?,?,?,?,?,?,?)')
@@ -101,15 +107,15 @@ function flakyLlmClient(data: Record<string, unknown>, failOnCall: number): LlmC
   }
 }
 
-function ctxWith(store: Store, llm: LlmClient | null): DetectorContext {
-  return { store, log: { debug() {}, info() {}, warn() {} }, llmEnabled: llm != null, llm } as unknown as DetectorContext
+function ctxWith(store: Store, llm: LlmClient | null, limit?: number): DetectorContext {
+  return { store, log: { debug() {}, info() {}, warn() {} }, llmEnabled: llm != null, llm, limit } as unknown as DetectorContext
 }
 
 // Ingest a real multi-block session (blob + matching blocks + 2 features) large
 // enough to clear MIN_TURNS. Each user turn opens a block (seqs 2k / 2k+1), so
 // `turns` user turns produce `turns` blocks; the seeded blocks table matches what
 // blockDigest recomputes from the blob. Block 1 opens at seq 2.
-function ingestCandidate(store: Store, id: string, repo = 'o/r', turns = 12) {
+function ingestCandidate(store: Store, id: string, repo = 'o/r', turns = 12, startedAt = RECENT) {
   const prompts = ['fix the auth token refresh', 'now add a CSV export button to the report page']
   const events: Event[] = []
   const toolCalls: ToolCall[] = []
@@ -122,7 +128,7 @@ function ingestCandidate(store: Store, id: string, repo = 'o/r', turns = 12) {
     id, sessionId: id, source: 'claude-code', provider: 'anthropic',
     project: { cwd: '/repo', repo }, models: ['claude-haiku-4-5'], tokens: emptyUsage(),
     events, toolCalls, raw: { path: '', contentHash: `${id}-hash` },
-    startedAt: RECENT,
+    startedAt,
   }
   store.ingestSession(session, 0, [], 'test', 1)
   // ingestSession writes the blob but not the blocks table (segment-blocks does);
@@ -148,6 +154,8 @@ describe('kitchen-sink detector', () => {
     expect(kitchenSink.name).toBe('kitchen-sink')
     expect(kitchenSink.tier).toBe('P')
     expect(kitchenSink.needsLlm).toBe(true)
+    // v3: verdicts live in their own table and the card is windowed at read time.
+    expect(kitchenSink.version).toBe(3)
   })
 
   it('returns no insights on an empty store', async () => {
@@ -323,14 +331,26 @@ describe('candidates', () => {
     expect(candidates(store).map((c) => c.sessionId)).toEqual(['huge'])
   })
 
-  it('ignores sessions outside the 30-day window', () => {
+  it('scans globally — a session older than the card window is still a candidate', () => {
     const { db, store } = setup()
+    // 60 days old, so it would fall outside the 30-day card window — but candidate
+    // SELECTION is global now; the window is applied only when the card is built.
     const old = new Date(Date.now() - 60 * 86_400_000).toISOString()
-    addSession(db, 'old', 'o/r', old)
-    db.prepare('INSERT INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,?,?,?,?,?)')
-      .run('old', 0, 0, 0, 'session_end', 'segment-blocks')
+    addSessionWithTurns(db, 'old', 50, 'o/r')
+    db.prepare('UPDATE sessions SET started_at = ? WHERE id = ?').run(old, 'old')
     giveTwoFeatures(db, 'old')
-    expect(candidates(store)).toEqual([])
+    expect(candidates(store).map((c) => c.sessionId)).toContain('old')
+  })
+
+  it('excludes a session with a NULL started_at (it can never be windowed on the card)', () => {
+    const { db, store } = setup()
+    for (let i = 0; i < 12; i++) addSessionWithTurns(db, `filler-${i}`, 5)
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, started_at, content_hash) VALUES (?,?,?,?,?,NULL,?)')
+      .run('nostart', 'nostart', 'claude-code', 'anthropic', 'o/r', 'nostart-hash')
+    const ins = db.prepare('INSERT INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,?,?,?,?,?)')
+    Array.from({ length: 49 }, () => 'user_turn').concat('session_end').forEach((bk, idx) => ins.run('nostart', idx, idx, idx, bk, 'segment-blocks'))
+    giveTwoFeatures(db, 'nostart')
+    expect(candidates(store).map((c) => c.sessionId)).not.toContain('nostart')
   })
 
   it('skips a session with a NULL content_hash', () => {
@@ -453,7 +473,7 @@ describe('judge', () => {
   })
 })
 
-describe('toEvidence', () => {
+describe('verdictRow', () => {
   const candidate = { sessionId: 's1', repo: 'o/r', turns: 10, features: 2, prs: 0, contentHash: 'h', startedAt: '2026-06-25T00:00:00Z', endedAt: '2026-07-06T00:00:00Z' }
   const blocks3: Block[] = [
     { idx: 0, startSeq: 0, endSeq: 3, boundaryKind: 'user_turn' },
@@ -461,21 +481,42 @@ describe('toEvidence', () => {
     { idx: 2, startSeq: 8, endSeq: 9, boundaryKind: 'session_end' },
   ]
 
-  it('points the occurrence at the split block’s start_seq, with the reason as the note', () => {
-    const ev = toEvidence(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: 'auth then export.' }, blocks3)
-    // block 1 opens at seq 4 in blocks3.
+  it('resolves a positive verdict to its split block idx and opening seq', () => {
+    const row = verdictRow(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: ' auth then export. ' }, blocks3)
+    // block 1 opens at seq 4 in blocks3; the reason is trimmed.
+    expect(row).toEqual({ sessionId: 's1', isKitchenSink: true, splitBlockIdx: 1, splitSeq: 4, reason: 'auth then export.' })
+  })
+
+  it('records a negative verdict with no split point or seq', () => {
+    const row = verdictRow(candidate, { isKitchenSink: false, splitBlockIdx: -1, reason: 'coherent' }, blocks3)
+    expect(row).toEqual({ sessionId: 's1', isKitchenSink: false, splitBlockIdx: null, splitSeq: null, reason: 'coherent' })
+  })
+
+  it('leaves splitSeq null when the split index is out of the partition', () => {
+    const row = verdictRow(candidate, { isKitchenSink: true, splitBlockIdx: 9, reason: 'x' }, blocks3)
+    expect(row.splitSeq).toBeNull()
+    expect(row.splitBlockIdx).toBe(9)
+  })
+
+  it('normalizes an empty reason to null', () => {
+    expect(verdictRow(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: '  ' }, blocks3).reason).toBeNull()
+  })
+})
+
+describe('positiveEvidence', () => {
+  it('points the occurrence at the stored split seq, with the derived note', () => {
+    const ev = positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: 'auth then export.' })
     expect(ev).toEqual({ sessionId: 's1', turnIdx: 4, note: 'Block 1 began a separate objective — auth then export.' })
   })
 
-  it('omits turnIdx when the split index is out of the partition', () => {
-    const ev = toEvidence(candidate, { isKitchenSink: true, splitBlockIdx: 9, reason: 'x' }, blocks3)
+  it('omits turnIdx when the stored split seq is null', () => {
+    const ev = positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: null, reason: 'x' })
     expect(ev.turnIdx).toBeUndefined()
     expect(ev.sessionId).toBe('s1')
   })
 
-  it('leaves the note clause off when the reason is empty', () => {
-    const ev = toEvidence(candidate, { isKitchenSink: true, splitBlockIdx: 1, reason: '' }, blocks3)
-    expect(ev.note).toBe('Block 1 began a separate objective')
+  it('leaves the note clause off when the reason is null', () => {
+    expect(positiveEvidence({ sessionId: 's1', splitBlockIdx: 1, splitSeq: 4, reason: null }).note).toBe('Block 1 began a separate objective')
   })
 })
 
@@ -508,31 +549,47 @@ describe('buildAggregate', () => {
   })
 })
 
-describe('mergeEvidence', () => {
-  const prior = [
-    { sessionId: 'a', turnIdx: 2, note: 'was-a' },
-    { sessionId: 'b', turnIdx: 3, note: 'was-b' },
-  ]
+describe('store: kitchen_sink_verdict round-trip', () => {
+  // Windowed (in-window) and out-of-window timestamps, computed once so insert and
+  // assert reference the same string.
+  const WIN_START = daysAgoZ(30)
+  const t5 = daysAgoZ(5)
+  const t2 = daysAgoZ(2)
+  const t60 = daysAgoZ(60)
 
-  it('carries prior sessions forward and adds new positives', () => {
-    const merged = mergeEvidence(prior, [{ sessionId: 'c', turnIdx: 5, note: 'new-c' }], new Set())
-    expect(merged.map((e) => e.sessionId).sort()).toEqual(['a', 'b', 'c'])
+  const positive = (sessionId: string) => ({ sessionId, isKitchenSink: true, splitBlockIdx: 1, splitSeq: 4, reason: 'mixed', model: 'm', detectorVersion: 3 })
+  const negative = (sessionId: string) => ({ sessionId, isKitchenSink: false, splitBlockIdx: null, splitSeq: null, reason: 'coherent', model: 'm', detectorVersion: 3 })
+
+  it('returns only in-window positives, most-recent first, with first-seen over ALL positives', () => {
+    const { db, store } = setup()
+    addSession(db, 'recent-a', 'o/r', t5)
+    addSession(db, 'recent-b', 'o/r', t2)
+    addSession(db, 'old', 'o/r', t60)
+    addSession(db, 'coherent', 'o/r', t5)
+    store.recordKitchenSinkVerdicts([positive('recent-a'), positive('recent-b'), positive('old'), negative('coherent')])
+
+    const card = store.kitchenSinkPositives(WIN_START)
+    // 'old' is out of window; 'coherent' is negative → neither appears.
+    expect(card.positives.map((p) => p.sessionId)).toEqual(['recent-b', 'recent-a'])
+    // count/evidence are windowed, but first-seen reaches back to the oldest positive.
+    expect(card.firstSeenAt).toBe(t60)
+    expect(card.lastSeenAt).toBe(t2)
   })
 
-  it('a re-judged positive overwrites its prior occurrence in place', () => {
-    const merged = mergeEvidence(prior, [{ sessionId: 'a', turnIdx: 9, note: 'now-a' }], new Set())
-    expect(merged).toHaveLength(2)
-    expect(merged.find((e) => e.sessionId === 'a')).toEqual({ sessionId: 'a', turnIdx: 9, note: 'now-a' })
+  it('a positive re-judged negative drops out of the window (plain upsert)', () => {
+    const { db, store } = setup()
+    addSession(db, 's1', 'o/r', t5)
+    store.recordKitchenSinkVerdicts([positive('s1')])
+    expect(store.kitchenSinkPositives(WIN_START).positives).toHaveLength(1)
+    store.recordKitchenSinkVerdicts([negative('s1')])
+    expect(store.kitchenSinkPositives(WIN_START).positives).toEqual([])
   })
 
-  it('a negative verdict removes its session from the set', () => {
-    const merged = mergeEvidence(prior, [], new Set(['b']))
-    expect(merged.map((e) => e.sessionId)).toEqual(['a'])
-  })
-
-  it('normalizes prior null turn/note back to absent fields', () => {
-    const merged = mergeEvidence([{ sessionId: 'a', turnIdx: null, note: null }], [], new Set())
-    expect(merged).toEqual([{ sessionId: 'a' }])
+  it('returns nulls when there are no positives at all', () => {
+    const { db, store } = setup()
+    addSession(db, 's1', 'o/r', t5)
+    store.recordKitchenSinkVerdicts([negative('s1')])
+    expect(store.kitchenSinkPositives(WIN_START)).toEqual({ positives: [], firstSeenAt: null, lastSeenAt: null })
   })
 })
 
@@ -667,5 +724,55 @@ describe('kitchenSink.run (end to end)', () => {
     await kitchenSink.run(ctx)
     expect(prog.units).toBe(2) // declared both candidates up front
     expect(prog.ticks).toBe(2) // one tick per candidate, whatever the verdict (bar total stays honest)
+  })
+
+  it('ages a flagged session off the card once it falls outside the 30-day window', async () => {
+    const { store } = setup()
+    // Judged positive, but the session ran 60 days ago — outside the card window.
+    const old = new Date(Date.now() - 60 * 86_400_000).toISOString()
+    ingestCandidate(store, 'kc:old', 'o/r', 12, old)
+    const llm = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'auth then export.' })
+
+    const result = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
+    // It WAS judged (global scan) and its verdict cached, but the card is empty…
+    expect(result.seen).toEqual([{ sessionId: 'kc:old', contentHash: 'kc:old-hash' }])
+    expect(result.insights).toEqual([])
+    // …and no stale claim is frozen — the aggregate is never surfaced (the N4 fix).
+    store.persistInsights('kitchen-sink', kitchenSink.version, result.insights)
+    expect(store.insightStatus('kitchen-sink', '*', 'kitchen-sink')).toBeNull()
+  })
+
+  it('windows the count but keeps first-seen at the earliest flagged session (decision 5)', async () => {
+    const { store } = setup()
+    const old = daysAgoZ(50) // out of window
+    const recent = daysAgoZ(3) // in window
+    ingestCandidate(store, 'kc:old', 'o/r', 12, old)
+    ingestCandidate(store, 'kc:recent', 'o/r', 12, recent)
+    const llm = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'x' })
+
+    const r = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm)))
+    // Only the recent session is inside the window → count 1…
+    expect(r.insights[0]!.count).toBe(1)
+    expect(r.insights[0]!.evidence.map((e) => e.sessionId)).toEqual(['kc:recent'])
+    // …but first-seen reaches back to the older (out-of-window) positive.
+    expect(r.insights[0]!.firstSeenAt).toBe(old)
+  })
+
+  it('judges at most --limit candidates per run, leaving the rest unseen', async () => {
+    const { store } = setup()
+    ingestCandidate(store, 'kc:1')
+    ingestCandidate(store, 'kc:2')
+    ingestCandidate(store, 'kc:3')
+    const llm = fakeLlmClient({ isKitchenSink: true, splitBlockIdx: 1, reason: 'x' })
+
+    // limit=2 → only two candidates judged this run (the backfill throttle).
+    const r1 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm, 2)))
+    expect(r1.seen).toHaveLength(2)
+    expect(r1.cost?.inTokens).toBe(200) // two judge calls
+    store.markDetectorSessionSeen('kitchen-sink', r1.seen ?? [])
+
+    // The third is still unseen; a follow-up run picks it up.
+    const r2 = normalizeDetectorResult(await kitchenSink.run(ctxWith(store, llm, 2)))
+    expect(r2.seen).toHaveLength(1)
   })
 })

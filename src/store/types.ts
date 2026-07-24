@@ -306,3 +306,24 @@ export interface ThemeEventInput {
   /** Timestamp of the user message this event was extracted from (the real friction moment). */
   occurredAt?: string
 }
+
+/**
+ * One kitchen-sink verdict to persist — the LLM's judgement of a single session,
+ * positive OR negative (kitchen-sink detector, tier P). One row per judged session;
+ * the card is a windowed projection of the positives (see `kitchen_sink_verdict`).
+ */
+export interface KitchenSinkVerdictInput {
+  sessionId: string
+  /** True = the session mixed unrelated objectives; false = coherent work. */
+  isKitchenSink: boolean
+  /** Block where the second (first unrelated) objective begins; null when coherent. */
+  splitBlockIdx: number | null
+  /** That block's opening main-thread seq — the evidence pointer; null when coherent/unknown. */
+  splitSeq: number | null
+  /** The LLM's one-sentence explanation. */
+  reason: string | null
+  /** Model that produced the verdict (provenance). */
+  model: string | null
+  /** Detector version at judge time. */
+  detectorVersion: number
+}
