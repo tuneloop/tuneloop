@@ -4,8 +4,8 @@ import { meetsMinTier, modelTier } from './capability'
 describe('modelTier', () => {
   it.each([
     // Anthropic — direct ids and Bedrock inference-profile ARNs
-    ['claude-opus-4-8', 'frontier'],
-    ['claude-fable-5', 'frontier'],
+    ['claude-opus-4-8', 'strong'],
+    ['claude-fable-5', 'strong'],
     ['claude-sonnet-5', 'strong'],
     ['us.anthropic.claude-sonnet-5-20250930-v1:0', 'strong'],
     ['claude-haiku-4-5', 'weak'],
@@ -39,7 +39,7 @@ describe('modelTier', () => {
 })
 
 describe('meetsMinTier(strong) — the Sonnet-class floor', () => {
-  it('passes frontier and strong models', () => {
+  it('passes strong models', () => {
     expect(meetsMinTier('claude-opus-4-8', 'strong')).toBe(true)
     expect(meetsMinTier('claude-sonnet-5', 'strong')).toBe(true)
     expect(meetsMinTier('gemini-2.5-pro', 'strong')).toBe(true)

@@ -10,12 +10,12 @@
  * anything we don't recognise is `unknown`, which ranks BELOW the `strong` floor
  * (fail-closed). Update the markers as new model families ship.
  */
-export type ModelTier = 'frontier' | 'strong' | 'weak' | 'unknown'
+export type ModelTier = 'strong' | 'weak' | 'unknown'
 
-// Ordinal so tiers compare. `strong` == Sonnet-class — the floor the heavy
-// detector pass needs. `unknown` sits below `weak` so an unrecognised model is
-// gated out unless explicitly forced.
-const RANK: Record<ModelTier, number> = { frontier: 3, strong: 2, weak: 1, unknown: 0 }
+// Ordinal so tiers compare. `strong` == Sonnet-class-or-above — the floor the
+// heavy detector pass needs. `unknown` sits below `weak` so an unrecognised model
+// is gated out unless explicitly forced.
+const RANK: Record<ModelTier, number> = { strong: 2, weak: 1, unknown: 0 }
 
 /** Classify a model id into a coarse capability tier by its family markers. */
 export function modelTier(model: string): ModelTier {
@@ -25,8 +25,7 @@ export function modelTier(model: string): ModelTier {
   const cheap = /\b(mini|nano|flash|flash-lite|lite|small|tiny)\b/.test(m) || has('-mini', '-nano', '-flash', '-lite')
 
   // Anthropic (direct ids + Bedrock ARNs + OpenRouter `anthropic/…`)
-  if (has('opus', 'fable')) return 'frontier'
-  if (has('sonnet')) return 'strong'
+  if (has('opus', 'fable', 'sonnet')) return 'strong'
   if (has('haiku')) return 'weak'
 
   // OpenAI GPT-5 family (full = strong; mini/nano = weak). Older GPT-4/3 = weak.
