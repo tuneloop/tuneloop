@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
-import { loadConfig } from '../config'
+import { defaultHeavyModel, loadConfig } from '../config'
 import type { LlmOverrides } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
@@ -71,8 +71,14 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     if (answer) {
       promptedProvider = answer.provider
       // Re-resolve through the normal config path so the preset's default
-      // model / base URL apply exactly as they would from env.
-      config = loadConfig({ db: opts.db, llm: { ...opts.llm, provider: answer.provider, apiKey: answer.apiKey } })
+      // model / base URL apply exactly as they would from env. Also seed the
+      // detector-pass model with the provider's strong sibling — a fresh opt-in
+      // otherwise reuses the cheap session model for detectors, which the
+      // Sonnet-class-or-stronger pass gates out (a flag / env still win).
+      config = loadConfig({
+        db: opts.db,
+        llm: { ...opts.llm, provider: answer.provider, apiKey: answer.apiKey, heavyModel: defaultHeavyModel(answer.provider, opts.llm) },
+      })
     }
   }
 
@@ -411,7 +417,11 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Per-directory provenance, stamped with the same completion time.
   store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
-  if (promptedProvider && llmEnabled) printPersistHint(promptedProvider)
+  // Echo the heavy model only when a distinct second tier actually ran, so the
+  // persist hint tells the user how to keep it.
+  if (promptedProvider && llmEnabled) {
+    printPersistHint(promptedProvider, heavyLlm!.model !== llm!.model ? heavyLlm!.model : undefined)
+  }
   await endLlmTrace() // flush buffered Langfuse events before exit (no-op if tracing off)
   store.close()
 }
@@ -535,7 +545,7 @@ function matchProvider(name: string): string | null {
  * stick. Deliberately does NOT echo the key back — it was entered hidden, and
  * scrollback / screen shares shouldn't reveal it.
  */
-function printPersistHint(provider: string): void {
+function printPersistHint(provider: string, heavyModel?: string): void {
   const preset = PROVIDERS[provider]
   const lines = [
     '',
@@ -548,6 +558,9 @@ function printPersistHint(provider: string): void {
     else if (!preset.keyless) lines.push(`    export ${preset.keyEnv}=<the key you just entered>`)
     else if ('fallback' in preset.keyless) lines.push(`    export ${preset.keyEnv}=<your key — omit if ${preset.keyless.fallback} handle auth>`)
   }
+  // The detector pass ran on a stronger model than the per-session default; name
+  // it so persisting the setup keeps the two-tier routing.
+  if (heavyModel) lines.push(`    export TUNELOOP_LLM_MODEL_HEAVY=${heavyModel}`)
   process.stdout.write(lines.join('\n') + '\n')
 }
 

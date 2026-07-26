@@ -17,6 +17,19 @@ export interface ProviderPreset {
   keyEnv: string
   defaultModel: string
   /**
+   * Strong sibling to seed the detector pass (`heavyModel`) with when a provider
+   * is configured INTERACTIVELY — analyze's run-only enrichment setup, where the
+   * user gives a provider + key but no model. `defaultModel` is a cheap model
+   * (high-volume per-session work), which the Sonnet-class-or-stronger detectors
+   * gate out; without a strong sibling a freshly-onboarded user would silently
+   * get no reasoning-heavy detectors. Deliberately NOT applied from env/flags —
+   * only the interactive nudge opts in — so existing configured users keep
+   * one-model-for-everything (see config.ts `heavyModel`). Omitted when the
+   * default model is already strong (xai) or has no clear strong sibling on the
+   * same endpoint (local / open-weights hosts).
+   */
+  defaultHeavyModel?: string
+  /**
    * Set when a missing key does NOT block enrichment (absent = key required):
    * `fallback` names the auth the SDK applies on its own (Bedrock → the AWS
    * credential chain) and `isConfigured` resolves whether that auth actually
@@ -42,16 +55,17 @@ async function hasAwsCredentials(): Promise<boolean> {
 }
 
 export const PROVIDERS: Record<string, ProviderPreset> = {
-  anthropic: { shape: 'anthropic', keyEnv: 'ANTHROPIC_API_KEY', defaultModel: 'claude-haiku-4-5' },
-  openai: { shape: 'openai', keyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-5.4-mini' },
+  anthropic: { shape: 'anthropic', keyEnv: 'ANTHROPIC_API_KEY', defaultModel: 'claude-haiku-4-5', defaultHeavyModel: 'claude-sonnet-5' },
+  openai: { shape: 'openai', keyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-5.4-mini', defaultHeavyModel: 'gpt-5.4' },
   // Keyless = the AWS SDK credential chain (SigV4); the key env is Bedrock's bearer API key.
   // Default model is a US inference profile — other regions set TUNELOOP_LLM_MODEL (eu., apac., …).
-  bedrock: { shape: 'bedrock', keyEnv: 'AWS_BEARER_TOKEN_BEDROCK', defaultModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', keyless: { fallback: 'AWS credentials', isConfigured: hasAwsCredentials } },
+  // Heavy sibling is the US Sonnet-5 profile (same region prefix as the default).
+  bedrock: { shape: 'bedrock', keyEnv: 'AWS_BEARER_TOKEN_BEDROCK', defaultModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', defaultHeavyModel: 'us.anthropic.claude-sonnet-5-20260203-v1:0', keyless: { fallback: 'AWS credentials', isConfigured: hasAwsCredentials } },
 
-  openrouter: { shape: 'openai-compatible', baseURL: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', defaultModel: 'openai/gpt-5-mini' },
+  openrouter: { shape: 'openai-compatible', baseURL: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', defaultModel: 'openai/gpt-5-mini', defaultHeavyModel: 'openai/gpt-5' },
   groq: { shape: 'openai-compatible', baseURL: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', defaultModel: 'llama-3.3-70b-versatile' },
   deepseek: { shape: 'openai-compatible', baseURL: 'https://api.deepseek.com', keyEnv: 'DEEPSEEK_API_KEY', defaultModel: 'deepseek-chat' },
-  gemini: { shape: 'openai-compatible', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', keyEnv: 'GEMINI_API_KEY', defaultModel: 'gemini-2.5-flash' },
+  gemini: { shape: 'openai-compatible', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', keyEnv: 'GEMINI_API_KEY', defaultModel: 'gemini-3.6-flash', defaultHeavyModel: 'gemini-3.1-pro-preview' },
   together: { shape: 'openai-compatible', baseURL: 'https://api.together.xyz/v1', keyEnv: 'TOGETHER_API_KEY', defaultModel: 'deepseek-ai/DeepSeek-V3' },
   fireworks: { shape: 'openai-compatible', baseURL: 'https://api.fireworks.ai/inference/v1', keyEnv: 'FIREWORKS_API_KEY', defaultModel: 'accounts/fireworks/models/deepseek-v3' },
   xai: { shape: 'openai-compatible', baseURL: 'https://api.x.ai/v1', keyEnv: 'XAI_API_KEY', defaultModel: 'grok-4' },
