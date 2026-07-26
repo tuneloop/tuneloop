@@ -47,9 +47,9 @@ function filePaths(obj: Record<string, unknown>): string[] | undefined {
 }
 
 /**
- * The skill name from an explicit `/skill-name` invocation, or null. Claude Code does
- * NOT emit a `Skill` tool call for the explicit path — it injects the SKILL.md body as
- * an `isMeta` user message whose first line is `Base directory for this skill: <dir>`.
+ * The skill name from an injected SKILL.md body, or null. Claude Code injects the body
+ * as an `isMeta` user message whose first line is `Base directory for this skill: <dir>`,
+ * whether the skill was triggered by a `Skill` tool call or an explicit `/skill-name`.
  * The skill's invokable identity is that dir's basename (matching how the environment
  * reader names an installed skill). Caller gates on `isMeta`; this only parses the body.
  */
