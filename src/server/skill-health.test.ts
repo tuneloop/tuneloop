@@ -159,4 +159,27 @@ describe('skillHealth', () => {
     expect(all.windowDays).toBeNull()
     expect(all.rows.find((x) => x.name === 'usedskill')!.calls).toBe(1)
   })
+
+  it('windows usage by tool-run time, not session start (a straddling session counts)', () => {
+    seedInstalledGlobal(store, [{ name: 'usedskill' }])
+    // A long session that STARTED 40 days ago (outside the 30d window) but invoked the
+    // skill 2 days ago (inside it). Dated by tool-run time, that call is in-window; the
+    // old started_at scan wrongly dropped it and misread the live skill as unused.
+    db.prepare(
+      `INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls)
+       VALUES ('straddle', 'straddle', ?, 'repoA', ?, 1, 1)`,
+    ).run(SOURCE, iso(40))
+    db.prepare(
+      `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts)
+       VALUES ('straddle', 0, 'usedskill', 'skill', 1, 0, 0, ?)`,
+    ).run(iso(2))
+
+    const row = skillHealth(store, { days: 30, nowMs: NOW }).rows.find((x) => x.name === 'usedskill')!
+    expect(row.status).toBe('used')
+    expect(row.calls).toBe(1) // the straddling call is counted in the 30d window
+    // And a 1-day window (after the call ran) excludes it — proving it's the CALL's ts
+    // that windows, not the session's start.
+    const tight = skillHealth(store, { days: 1, nowMs: NOW }).rows.find((x) => x.name === 'usedskill')
+    expect(tight?.calls ?? 0).toBe(0)
+  })
 })

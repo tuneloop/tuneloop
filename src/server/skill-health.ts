@@ -240,6 +240,11 @@ interface InvokedDetail {
  * Per (name, repo) invocation facts. The friction-adjacency proxy is computed with a
  * correlated subquery: for each skill call, is there an errored tool call in the same
  * session within the next FRICTION_LOOKAHEAD idx positions? Main-thread only.
+ *
+ * Windowed by the tool-call timestamp `t.ts` (when the skill actually ran), NOT the
+ * session's start — matching the shared `capability_usage` view (see queryInvoked): a
+ * long session that began before the window but invoked the skill inside it still
+ * counts, and its calls land in the window they happened in.
  */
 function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): InvokedDetail[] {
   return store.queryAll(
@@ -258,7 +263,7 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
             MAX(t.ts) AS lastUsedAt
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
+       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
      GROUP BY t.name, s.repo`,
     FRICTION_LOOKAHEAD,
     SOURCE,
@@ -279,7 +284,7 @@ function querySpark(store: Store, sinceIso: string, buckets: SparkBucket[], unti
     `SELECT t.name AS name, t.ts AS ts
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?) AND t.ts IS NOT NULL`,
+       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?) AND t.ts IS NOT NULL`,
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -303,7 +308,14 @@ function querySpark(store: Store, sinceIso: string, buckets: SparkBucket[], unti
   return out
 }
 
-/** Distinct-session count per repo in the window — the trust denominator for verdicts. */
+/**
+ * Distinct-session count per repo in the window — the trust denominator for verdicts.
+ * Windowed on `started_at` (a session's own clock), NOT tool-run time: this must match
+ * the denominator the shared `classify` policy uses (unused-capabilities' loadSessionCounts
+ * counts sessions by started_at too), so the scope/remove verdict divides invocation
+ * facts by the same session population the detector does. Invocation FACTS date by t.ts;
+ * the session POPULATION dates by started_at — the two clocks are intentional.
+ */
 function loadSessionCounts(store: Store, sinceIso: string, untilIso?: string): Map<string, number> {
   const rows = store.queryAll(
     `SELECT repo, COUNT(*) AS n FROM sessions
@@ -577,8 +589,8 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
-     ORDER BY s.started_at DESC, t.idx ASC
+       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
+     ORDER BY t.ts DESC, t.idx ASC
      LIMIT ?`,
     FRICTION_LOOKAHEAD,
     name,
@@ -642,7 +654,7 @@ export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWi
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
+       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
      GROUP BY t.session_id`,
     name,
     '%:' + name,
@@ -713,10 +725,13 @@ const MAX_OUTCOME_EXAMPLES = 5
 
 /**
  * Roll up activation-outcome verdicts for one skill in the window. Each session's
- * `skill_outcomes` annotation is a JSON array of per-firing verdicts (each carrying
- * the raw skill name); we unpack with json_each, window by the session start, and
- * reconcile plugin-namespaced names to the roster name via skillMatches. Returns null
- * when no verdicts exist for the skill (the classifier hasn't run / didn't cover it).
+ * `skill_outcomes` annotation is a JSON array of per-firing verdicts (each carrying the
+ * raw skill name + the tool-call `idx` it verdicts). We unpack with json_each and join
+ * each verdict back to its firing's tool_call so it windows by tool-run time `t.ts` — the
+ * same clock as every other invocation-fact read (queryInvokedDetail et al.), not the
+ * session start. Reconciles plugin-namespaced names to the roster name via skillMatches.
+ * Returns null when no verdicts exist for the skill (the classifier hasn't run / didn't
+ * cover it).
  */
 export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWindow = {}): SkillOutcomeStats | null {
   const { sinceIso, untilIso } = resolveWindow(store, win)
@@ -728,9 +743,10 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
      FROM annotations a
      JOIN sessions s ON s.id = a.session_id
      JOIN json_each(a.value) j
+     JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
      WHERE a.key = 'skill_outcomes'
-       AND s.source = ? AND s.started_at >= ? AND (? IS NULL OR s.started_at < ?)
-     ORDER BY s.started_at DESC`,
+       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
+     ORDER BY t.ts DESC`,
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -886,7 +902,7 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND s.started_at >= ? AND s.started_at < ?`,
+       AND s.source = ? AND t.ts >= ? AND t.ts < ?`,
     FRICTION_LOOKAHEAD,
     name,
     '%:' + name,
