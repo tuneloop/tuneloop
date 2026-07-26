@@ -16,14 +16,23 @@ import { openDetail, closeDrawer } from './sessions';
 function isGlobal(repo) { return !repo || repo === '*'; }
 function repoLabel(repo) { return isGlobal(repo) ? 'global' : repo; }
 
-function sevDot(s) { return '<span class="ins-dot sev-' + esc(s) + '" title="' + esc(s) + ' severity"></span>'; }
-function stateBadge(s) { return '<span class="ins-state st-' + esc(s) + '">' + esc(String(s).replace(/_/g, ' ')) + '</span>'; }
 
 // fix.type → rendering, per the detector contract: prose for a behavioral nudge,
 // a code block for the paste/run payload types (config-snippet | install | fix-prompt).
 function fixBody(fix) {
   if (fix.type === 'behavioral-nudge') return '<div class="ins-fix-prose">' + renderMd(fix.content) + '</div>';
   return '<pre class="md-code"><code>' + esc(fix.content) + '</code></pre>';
+}
+
+// Per fix.type: what to DO with the payload, so the user knows where it goes. `hint` is a
+// one-line instruction shown above the body (a fix-prompt is pasted into a coding agent, a
+// snippet applied to config, a command run in a shell); `copy` labels what Copy grabs. A
+// behavioral nudge is prose guidance — no payload to run, so no hint.
+function fixAffordance(type) {
+  if (type === 'fix-prompt') return { hint: 'Paste this into your coding agent.', copy: 'Copy prompt' };
+  if (type === 'config-snippet') return { hint: 'Apply this to your config.', copy: 'Copy' };
+  if (type === 'install-command') return { hint: 'Run this in your terminal.', copy: 'Copy command' };
+  return { hint: '', copy: 'Copy fix' };
 }
 
 // Session ids are `<source>:<uuid>` — a short uuid prefix labels an occurrence
@@ -47,19 +56,24 @@ function sessionSpan(r) {
 
 function detailHtml(r, occ) {
   var head = '<div class="drawer-head ins-detail-head"><div class="drawer-head-top">' +
-    '<h2>' + sevDot(r.severity) + esc(r.title) + '</h2>' +
+    '<h2>' + esc(r.title) + '</h2>' +
     '<button class="x" type="button" id="drawerCloseBtn">close</button></div>' +
-    '<div class="ins-detail-meta">' + stateBadge(r.state) +
+    '<div class="ins-detail-meta">' +
       '<span class="tag">' + esc(repoLabel(r.repo)) + '</span> · ' +
       num(r.count) + ' occurrences · last seen ' + esc(dayOf(r.lastSeenAt)) + '</div>' +
     '</div>';
 
   var desc = '<div class="ins-desc">' + renderMd(r.description) + '</div>';
 
+  var aff = fixAffordance(r.fix && r.fix.type);
+  // "Fix" section label mirrors "Evidence"; the box keeps its own action label
+  // (e.g. "Apply fix-prompt") beside the Copy button.
   var fix = r.fix && r.fix.content
-    ? '<div class="ins-fix"><div class="ins-fix-head">' +
+    ? '<div class="ins-section-label">Fix</div>' +
+      '<div class="ins-fix"><div class="ins-fix-head">' +
         '<span class="ins-fix-label">' + esc(r.fix.label || 'Suggested fix') + '</span>' +
-        '<button type="button" class="ins-btn ins-copy">Copy fix</button></div>' +
+        '<button type="button" class="ins-btn ins-copy">' + esc(aff.copy) + '</button></div>' +
+        (aff.hint ? '<div class="ins-fix-hint">' + esc(aff.hint) + '</div>' : '') +
         fixBody(r.fix) + '</div>'
     : '';
 
@@ -76,14 +90,19 @@ function detailHtml(r, occ) {
         (e.turnIdx != null ? '<span class="ins-occ-turn">open ↗</span>' : '') +
       '</div></button>';
   }).join('');
+  // Label with the true distinct-session span (matches the list row's "N sessions"),
+  // not occ.length — the evidence is per-moment, and one session may appear more than once.
+  var evSessions = sessionSpan(r);
   var occSection = '<div class="ins-occ-list"><div class="ins-section-label">Evidence (' +
-    ((occ && occ.length) || 0) + ')</div>' +
-    (occRows || '<div class="empty">No stored occurrences.</div>') + '</div>';
+    num(evSessions) + ' session' + (evSessions === 1 ? '' : 's') + ')</div>' +
+    '<div class="ins-occ-scroll">' + (occRows || '<div class="empty">No stored occurrences.</div>') + '</div></div>';
 
   var dismiss = '<div class="ins-detail-actions">' +
-    '<button type="button" class="ins-btn ins-dismiss">Dismiss insight</button></div>';
+    '<button type="button" class="ins-btn ins-dismiss">Dismiss recommendation</button></div>';
 
-  return head + '<div class="ins-detail-body">' + desc + fix + occSection + dismiss + '</div>';
+  // Order: description (why) → evidence (receipts, capped/scrollable) → fix (what to do) →
+  // dismiss. Evidence precedes the fix, but is height-capped so the fix stays on screen.
+  return head + '<div class="ins-detail-body">' + desc + occSection + fix + dismiss + '</div>';
 }
 
 // ---- state ------------------------------------------------------------------
@@ -102,7 +121,10 @@ var TIME_PRESETS = [{ d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' },
 export function renderInsights() {
   get('/api/insights').then(function (d) {
     rows = d || [];
-    buildFilters();
+    // Top controls (time/search/status/severity) disabled for the simplified view —
+    // hide the filter host and skip buildFilters(). `flt` stays at its defaults
+    // (time:'all', no facets), so visibleRows() returns everything in API order.
+    var f = $('#insights-filters'); if (f) f.style.display = 'none';
     paint();
   });
 }
@@ -158,7 +180,7 @@ function buildFilters() {
           '<input type="date" id="ins-f-to" value="' + esc(flt.to) + '" />' +
         '</span>' +
       '</span>' +
-      '<input id="ins-f-q" class="flt-search" placeholder="search insight / description" value="' + esc(flt.q) + '" />' +
+      '<input id="ins-f-q" class="flt-search" placeholder="search recommendation / description" value="' + esc(flt.q) + '" />' +
     '</div>' +
     '<div class="flt-row flt-row-facets">' + statusSel + sevSel + repoSel + '</div>';
 
@@ -220,64 +242,57 @@ function visibleRows() {
   return out;
 }
 
-// ---- table render -----------------------------------------------------------
-
-function arrow(key) {
-  if (sort.key !== key) return '<span class="ins-sort">↕</span>';
-  return '<span class="ins-sort on">' + (sort.dir === 'asc' ? '▴' : '▾') + '</span>';
-}
+// ---- list render ------------------------------------------------------------
 
 function row(r, i) {
   var span = sessionSpan(r);
   var rec = num(r.count) + ' occ' + (span >= 1 ? ' · ' + num(span) + (span === 1 ? ' session' : ' sessions') : '');
   var repoTag = isGlobal(r.repo) ? '' : '<span class="tag ins-row-repo" title="' + esc(r.repo) + '">' + esc(r.repo) + '</span>';
-  // NOTE: our OWN row class only — NOT the sessions tab's `srow`. sessions.ts binds
-  // `document.querySelectorAll('.srow')` GLOBALLY to its openDetail(), which would
-  // hijack every insight row's click (→ fetch a session by an insight id → dead drawer).
-  // The fix is read + copied from the row's detail drawer, not inline.
-  return '<tr class="ins-row" data-i="' + i + '" data-id="' + esc(r.id) + '">' +
-    '<td><span class="ins-row-title-wrap">' + sevDot(r.severity) +
-      '<span class="s-title ins-row-title" title="' + esc(r.title) + '">' + esc(r.title) + '</span>' + repoTag + '</span></td>' +
-    '<td class="num nowrap ins-row-rec">' + esc(rec) + '</td>' +
-    '<td class="num nowrap">' + esc(dayOf(r.lastSeenAt)) + '</td>' +
-    '<td>' + stateBadge(r.state) + '</td></tr>';
+  // The recommended action, beneath the signal — the "so do this" that makes the item read
+  // as a recommendation. Absent when the detector produced none (fallback fixes).
+  var recLine = r.recommendation
+    ? '<div class="ins-row-rec-line"><span class="ins-rec-arrow">↳</span>' + esc(r.recommendation) + '</div>'
+    : '';
+  // Compact stats footer: occurrences · sessions · last seen.
+  var meta = '<div class="ins-row-meta">' + esc(rec) + ' · last seen ' + esc(dayOf(r.lastSeenAt)) + '</div>';
+  // Whole block is clickable (a drag-select is guarded in paint() so text stays selectable);
+  // "View →" is the explicit affordance. NOT the sessions tab's `srow` (globally wired).
+  return '<div class="ins-row" data-i="' + i + '" data-id="' + esc(r.id) + '">' +
+    '<div class="ins-row-main">' +
+      '<div class="ins-row-title-wrap"><span class="ins-row-title" title="' + esc(r.title) + '">' + esc(r.title) + '</span>' + repoTag + '</div>' +
+      recLine + meta +
+    '</div>' +
+    '<button type="button" class="hrow-to ins-row-view" data-i="' + i + '">View <i>→</i></button>' +
+    '</div>';
 }
 
 function paint() {
   var el = $('#insights');
   if (!el) return;
   if (!rows.length) {
-    el.innerHTML = '<div class="empty">No insights yet. Detectors run during <code>tuneloop analyze</code> and surface improvement opportunities here.</div>';
+    el.innerHTML = '<div class="empty">No recommendations yet. Detectors run during <code>tuneloop analyze</code> and surface improvement opportunities here.</div>';
     return;
   }
   var vis = visibleRows();
-  if (!vis.length) { el.innerHTML = '<div class="empty">No insights match.</div>'; return; }
+  if (!vis.length) { el.innerHTML = '<div class="empty">No recommendations match.</div>'; return; }
 
-  var head = '<tr>' +
-    '<th>Insight</th>' +
-    '<th class="ins-th-sort" data-sort="occ">Recurrence ' + arrow('occ') + '</th>' +
-    '<th class="ins-th-sort" data-sort="lastSeen">Last seen ' + arrow('lastSeen') + '</th>' +
-    '<th>Status</th></tr>';
-  el.innerHTML = '<table>' + head + vis.map(function (r) { return row(r, rows.indexOf(r)); }).join('') + '</table>';
+  el.innerHTML =
+    '<div class="hl-head ins-intro">Recommendations from analyzing your session transcripts</div>' +
+    '<div class="ins-list">' + vis.map(function (r) { return row(r, rows.indexOf(r)); }).join('') + '</div>';
 
-  // Sortable headers: click toggles asc/desc; a third click on the same key returns
-  // to the default (severity → recency) order.
-  Array.prototype.forEach.call(el.querySelectorAll('.ins-th-sort'), function (th) {
-    th.onclick = function () {
-      var key = th.getAttribute('data-sort');
-      if (sort.key !== key) { sort.key = key; sort.dir = 'desc'; }
-      else if (sort.dir === 'desc') sort.dir = 'asc';
-      else { sort.key = 'default'; sort.dir = 'desc'; }
-      paint();
+  // Whole block opens the detail drawer, but a drag to SELECT text must not navigate — so
+  // guard on an active selection. "View" (a real button) keeps a keyboard-focusable target.
+  Array.prototype.forEach.call(el.querySelectorAll('.ins-row'), function (block) {
+    var open = function () {
+      var r = rows[parseInt(block.getAttribute('data-i'), 10)];
+      if (r) { selectRow(block); openInsight(r); }
     };
-  });
-
-  // Row click opens the insight detail drawer (where the fix is read + copied).
-  Array.prototype.forEach.call(el.querySelectorAll('.ins-row'), function (tr) {
-    tr.onclick = function () {
-      var r = rows[parseInt(tr.getAttribute('data-i'), 10)];
-      if (r) { selectRow(tr); openInsight(r); }
+    block.onclick = function () {
+      if (window.getSelection && String(window.getSelection()).length > 0) return; // user was selecting text
+      open();
     };
+    var view = block.querySelector('.ins-row-view');
+    if (view) view.onclick = function (e) { e.stopPropagation(); open(); }; // avoid double-firing via bubble
   });
 }
 
@@ -303,10 +318,7 @@ function copyFix(r, btn) {
     setTimeout(function () { btn.textContent = orig; }, 1500);
     post('/api/insights/fix-issued', { id: r.id }).then(function (res) {
       if (!res || !res.ok) return;
-      r.state = 'fix_issued';
-      // Reflect the new state wherever it shows: the drawer meta badge + the table.
-      var st = document.querySelector('#drawerBody .ins-detail-meta .ins-state');
-      if (st) st.outerHTML = stateBadge('fix_issued');
+      r.state = 'fix_issued'; // record issuance in the local model; the list re-renders below
       paint();
     });
   }, function () {
@@ -323,6 +335,7 @@ function openInsight(r) {
     var body = $('#drawerBody');
     if (!body) return;
     body.innerHTML = detailHtml(r, occ);
+    body.setAttribute('data-insight-id', r.id); // tag which insight the drawer is showing
     $('#drawer').classList.add('on');
     $('#overlay').classList.add('on');
     wireDetail(r, occ);
@@ -331,10 +344,13 @@ function openInsight(r) {
   // Render immediately (fix is the priority payload); fill occurrences when they arrive.
   render(null);
   get('/api/insight/evidence?id=' + encodeURIComponent(r.id)).then(function (occ) {
-    occCache[r.id] = occ || [];
-    // Only re-render if this insight's detail is still the one on screen.
-    var open = document.querySelector('#drawerBody .ins-detail-body');
-    if (open) render(occCache[r.id]);
+    occCache[r.id] = Array.isArray(occ) ? occ : []; // never cache a non-array (e.g. an error body)
+    // Re-render only if the drawer still shows THIS insight — guards the open-A-then-B
+    // race (a slow response for A must not clobber B) and a close before the response lands.
+    var body = $('#drawerBody');
+    if (body && $('#drawer').classList.contains('on') && body.getAttribute('data-insight-id') === r.id) {
+      render(occCache[r.id]);
+    }
   });
 }
 

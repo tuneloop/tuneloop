@@ -12,7 +12,7 @@ import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
 import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
-import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
+import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
@@ -2992,6 +2992,76 @@ export class Store {
     this.db.prepare('DELETE FROM detector_session_runs WHERE detector = ?').run(detector)
   }
 
+  // ---- Kitchen-sink verdicts --------------------------------------------------
+
+  /**
+   * Upsert this run's kitchen-sink verdicts (positive AND negative) into their
+   * permanent home, keyed on session id. INSERT OR REPLACE so a session re-judged
+   * after a content change (or a corrected verdict) overwrites its prior row — a
+   * positive→negative flip is a plain upsert that drops it from the windowed card.
+   */
+  recordKitchenSinkVerdicts(verdicts: KitchenSinkVerdictInput[]): void {
+    if (verdicts.length === 0) return
+    const now = new Date().toISOString()
+    const stmt = this.db.prepare(
+      `INSERT OR REPLACE INTO kitchen_sink_verdict
+         (session_id, is_kitchen_sink, split_block_idx, split_seq, reason, model, detector_version, judged_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    this.db.transaction(() => {
+      for (const v of verdicts) {
+        stmt.run(v.sessionId, v.isKitchenSink ? 1 : 0, v.splitBlockIdx, v.splitSeq, v.reason, v.model, v.detectorVersion, now)
+      }
+    })()
+  }
+
+  /**
+   * The kitchen-sink card's data, as a windowed projection of the verdict table:
+   * every POSITIVE session whose `started_at` falls in the trailing window
+   * (`windowStartIso` = now − WINDOW_DAYS), most-recent first — the evidence + count.
+   * `lastSeenAt` is the max over that windowed set; `firstSeenAt` is the earliest
+   * over ALL positives (whole history), so a chronic pattern keeps its true origin
+   * date even though the count/evidence are windowed. Both null when
+   * there are no positives at all.
+   */
+  kitchenSinkPositives(windowStartIso: string): {
+    positives: Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+    firstSeenAt: string | null
+    lastSeenAt: string | null
+  } {
+    // Windowed positives (the card's evidence + count), most-recent first.
+    const positives = this.db
+      .prepare(
+        `SELECT v.session_id AS sessionId, v.split_block_idx AS splitBlockIdx,
+                v.split_seq AS splitSeq, v.reason AS reason
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?
+         ORDER BY s.started_at DESC, v.session_id`,
+      )
+      .all(windowStartIso) as Array<{ sessionId: string; splitBlockIdx: number | null; splitSeq: number | null; reason: string | null }>
+
+    // last-seen over the WINDOWED positives (the card's set); first-seen over ALL
+    // positives (whole history) so a chronic pattern keeps its true origin date even
+    // though count/evidence are windowed. strftime normalizes any offset before
+    // MIN/MAX so mixed timestamp formats can't skew the result.
+    const windowed = this.db
+      .prepare(
+        `SELECT MAX(strftime('%Y-%m-%dT%H:%M:%SZ', COALESCE(s.ended_at, s.started_at))) AS lastSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1 AND s.started_at >= ?`,
+      )
+      .get(windowStartIso) as { lastSeen: string | null }
+    const allTime = this.db
+      .prepare(
+        `SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', s.started_at)) AS firstSeen
+         FROM kitchen_sink_verdict v JOIN sessions s ON s.id = v.session_id
+         WHERE v.is_kitchen_sink = 1`,
+      )
+      .get() as { firstSeen: string | null }
+
+    return { positives, firstSeenAt: allTime.firstSeen, lastSeenAt: windowed.lastSeen }
+  }
+
   // ---- Recurring-theme mining -------------------------------------------------
 
   /**
@@ -3075,6 +3145,19 @@ export class Store {
   }
 
   /**
+   * Fold dropId into keepId AND retire the dropped theme's insight as one atomic unit.
+   * Wrapping both in a single transaction (nested via savepoints) means a crash between
+   * them can't leave the deleted theme's insight orphaned as a frozen surfaced duplicate.
+   */
+  applyThemeMergeAndRetire(keepId: string, dropId: string, detector: string): boolean {
+    return this.db.transaction(() => {
+      if (!this.applyThemeMerge(keepId, dropId)) return false
+      this.retireInsightForTheme(detector, dropId)
+      return true
+    })()
+  }
+
+  /**
    * Friction events the extractor recorded but couldn't confidently attach to a
    * theme (varied wording, or a sibling session minted the theme concurrently so
    * it wasn't yet visible). Grouped by session repo so the reconcile pass can scope
@@ -3130,6 +3213,7 @@ export class Store {
     resolved: number
     fixType: string | null
     fixContent: string | null
+    fixRecommendation: string | null
     fixHash: string | null
     eventCount: number
     sessionCount: number
@@ -3143,16 +3227,21 @@ export class Store {
     const themes = this.db
       .prepare(
         `SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, remedy, repo, resolved,
-                fix_type AS fixType, fix_content AS fixContent, fix_hash AS fixHash
+                fix_type AS fixType, fix_content AS fixContent, fix_recommendation AS fixRecommendation, fix_hash AS fixHash
          FROM theme ORDER BY first_seen`,
       )
       .all() as Array<{
         id: string; label: string; description: string | null; type: string; remedy: string | null; repo: string | null
-        resolved: number; fixType: string | null; fixContent: string | null; fixHash: string | null
+        resolved: number; fixType: string | null; fixContent: string | null; fixRecommendation: string | null; fixHash: string | null
       }>
     const evStmt = this.db.prepare(
+      // Chronological, most-recent friction first — by when the friction actually
+      // occurred (occurred_at), not when it was extracted. This is the order the fix
+      // pass slices (MAX_FIX_OCCURRENCES), so it must reflect real recency. Pre-schema-17
+      // rows have a null occurred_at; fall back to added_at for those.
       `SELECT session_id AS sessionId, turn_seq AS turnSeq, description, occurred_at AS occurredAt
-       FROM theme_events WHERE theme_id = ? ORDER BY added_at DESC, session_id, idx`,
+       FROM theme_events WHERE theme_id = ?
+       ORDER BY COALESCE(occurred_at, added_at) DESC, added_at DESC, session_id, idx`,
     )
     return themes.map((t) => {
       const evs = evStmt.all(t.id) as Array<{ sessionId: string; turnSeq: number | null; description: string; occurredAt: string | null }>
@@ -3172,14 +3261,11 @@ export class Store {
     })
   }
 
-  /** Flag/unflag a theme resolved — keeps it in the extraction feed after its insight resolves. */
-  setThemeResolved(id: string, resolved: boolean): void {
-    this.db.prepare('UPDATE theme SET resolved = ? WHERE id = ?').run(resolved ? 1 : 0, id)
-  }
-
-  /** Cache a theme's LLM-generated fix + the hash of the occurrence set it was built from. */
-  setThemeFix(id: string, fixType: string, fixContent: string, fixHash: string): void {
-    this.db.prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_hash = ? WHERE id = ?').run(fixType, fixContent, fixHash, id)
+  /** Cache a theme's LLM-generated fix (+ its one-line recommendation) and the hash of the occurrence set it was built from. */
+  setThemeFix(id: string, fixType: string, fixContent: string, fixRecommendation: string | null, fixHash: string): void {
+    this.db
+      .prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_recommendation = ?, fix_hash = ? WHERE id = ?')
+      .run(fixType, fixContent, fixRecommendation, fixHash, id)
   }
 
   /**
@@ -3287,7 +3373,7 @@ export class Store {
           this.db
             .prepare(
               `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
-               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, recommendation = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
                state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
                state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
                WHERE id = ?`,
@@ -3300,6 +3386,7 @@ export class Store {
               input.fix.type,
               input.fix.label,
               input.fix.content,
+              input.recommendation ?? null,
               input.firstSeenAt ?? null,
               lastSeen,
               version,
@@ -3314,8 +3401,8 @@ export class Store {
           this.db
             .prepare(
               `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count,
-               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, detector_version)
-               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               fix_type, fix_label, fix_content, recommendation, first_seen_at, last_seen_at, detector_version)
+               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -3329,6 +3416,7 @@ export class Store {
               input.fix.type,
               input.fix.label,
               input.fix.content,
+              input.recommendation ?? null,
               firstSeen,
               lastSeen,
               version,
@@ -3388,15 +3476,39 @@ export class Store {
           `SELECT e.session_id AS sessionId, e.turn_idx AS turnIdx, e.note AS note,
                   ${titleExpr('s')} AS sessionTitle
            FROM insight_evidence e LEFT JOIN sessions s ON s.id = e.session_id
-           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.session_id, e.turn_idx`,
+           -- rowid = insertion order = the detector's emit order (cache-miss emits its
+           -- evidence dollar-descending, so the priciest sessions show first). added_at
+           -- stays primary so accumulating detectors still surface the most recent run.
+           WHERE e.insight_id = ? ORDER BY e.added_at DESC, e.rowid`,
         )
         .all(insightId) as Array<{ sessionId: string; turnIdx: number; note: string | null; sessionTitle: string | null }>
     ).map((r) => ({ ...r, turnIdx: r.turnIdx === -1 ? null : r.turnIdx }))
   }
 
-  insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {
+  /**
+   * Distinct repos of the sessions in a cross-repo ('*') insight's evidence — the
+   * repos that CONTRIBUTED to the last-surfaced card. A resolve sweep uses this to ask
+   * whether each previously-contributing repo now has enough data to call clean, rather
+   * than trusting a corpus-wide total that many sub-threshold repos could reach together
+   * (or a different repo's data that says nothing about a still-quiet contributor). Uses
+   * the same repo derivation the detectors do (repo ▸ cwd ▸ '_unknown'). Empty when the
+   * insight has no evidence (e.g. never surfaced) or its evidence sessions were pruned.
+   */
+  insightEvidenceRepos(insightId: string): string[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT DISTINCT COALESCE(NULLIF(s.repo,''), NULLIF(s.cwd,''), '_unknown') AS repo
+           FROM insight_evidence e JOIN sessions s ON s.id = e.session_id
+           WHERE e.insight_id = ?`,
+        )
+        .all(insightId) as Array<{ repo: string }>
+    ).map((r) => r.repo)
+  }
+
+  insights(opts?: { state?: InsightState; detector?: string; repo?: string; limit?: number }): InsightRow[] {
     let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count,
-               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version
+               fix_type, fix_label, fix_content, recommendation, first_seen_at, last_seen_at, state_changed_at, detector_version
                FROM insights WHERE state != 'dismissed'`
     const params: unknown[] = []
     if (opts?.state) {
@@ -3411,9 +3523,18 @@ export class Store {
       sql += ' AND repo = ?'
       params.push(opts.repo)
     }
-    // Rank most-valuable-first: severity, then recurrence (how often it bit), then
-    // recency
-    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, count DESC, last_seen_at DESC`
+    // Rank most-valuable-first: severity, then recency. `count` is intentionally NOT a
+    // sort key — it means different things per detector (cache misses in the thousands
+    // vs a handful of theme events), so sorting on it lets one high-cardinality detector
+    // monopolize the list. detector/signal_key are a stable final tiebreak.
+    sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC, detector, signal_key`
+    // Optional cap: with the ranking above, LIMIT N yields the N most valuable (highest
+    // severity, most recent). Applied in SQL so the per-row evidence/session subqueries
+    // below never run for rows we'd drop.
+    if (opts?.limit != null) {
+      sql += ' LIMIT ?'
+      params.push(opts.limit)
+    }
 
     const rows = this.db.prepare(sql).all(...params) as Array<{
       id: string
@@ -3428,6 +3549,7 @@ export class Store {
       fix_type: string | null
       fix_label: string | null
       fix_content: string | null
+      recommendation: string | null
       first_seen_at: string
       last_seen_at: string
       state_changed_at: string | null
@@ -3465,6 +3587,7 @@ export class Store {
         description: r.description,
         count: r.count,
         fix: { type: r.fix_type ?? '', label: r.fix_label ?? '', content: r.fix_content ?? '' },
+        recommendation: r.recommendation,
         firstSeenAt: r.first_seen_at,
         lastSeenAt: r.last_seen_at,
         stateChangedAt: r.state_changed_at,

@@ -45,3 +45,18 @@ function filePaths(obj: Record<string, unknown>): string[] | undefined {
   const p = obj.file_path ?? obj.notebook_path ?? obj.path
   return typeof p === 'string' ? [p] : undefined
 }
+
+/**
+ * The skill name from an explicit `/skill-name` invocation, or null. Claude Code does
+ * NOT emit a `Skill` tool call for the explicit path — it injects the SKILL.md body as
+ * an `isMeta` user message whose first line is `Base directory for this skill: <dir>`.
+ * The skill's invokable identity is that dir's basename (matching how the environment
+ * reader names an installed skill). Caller gates on `isMeta`; this only parses the body.
+ */
+export function explicitSkillName(text: string): string | null {
+  const m = /^Base directory for this skill:\s*(.+?)\s*$/m.exec(text)
+  if (!m) return null
+  const dir = m[1]!.replace(/[/\\]+$/, '')
+  const name = dir.split(/[/\\]/).pop() ?? ''
+  return name || null
+}

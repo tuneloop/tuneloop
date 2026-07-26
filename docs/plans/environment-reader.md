@@ -50,10 +50,10 @@ absent category simply produces no rows.
 | Category       | Universal?             | Notes                                                                                                                          |
 | -------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `settings`     | Concept yes, format no | CC=JSON, Codex=TOML, OpenCode=JSON. Keys differ entirely per harness.                                                          |
-| `mcp`          | **Yes**                | All supported harnesses (CC, Codex, OpenCode, Pi) have MCP.                                                                    |
+| `mcp`          | **Yes**                | CC, Codex, OpenCode have MCP. Pi ships no built-in MCP → no rows.                                                              |
 | `agents`       | Mostly                 | Sub-agent *definitions*. Pi has no sub-agents → no rows.                                                                       |
-| `skills`       | Ragged                 | CC = `SKILL.md` dirs, Codex = shell `SKILL.md` bundles, OpenCode = a `skill` tool, Pi = none. Same label, different mechanism. |
-| `instructions` | **Yes**                | The project-instructions file: `CLAUDE.md` (CC) / `AGENTS.md` (Codex, OpenCode).                                               |
+| `skills`       | Ragged                 | CC = `SKILL.md` dirs, Codex = shell `SKILL.md` bundles, OpenCode = a `skill` tool, Pi = `SKILL.md` dirs + root `.md` files. Same label, different mechanism. |
+| `instructions` | **Yes**                | The project-instructions file: `CLAUDE.md` (CC) / `AGENTS.md` (Codex, OpenCode, Pi).                                          |
 
 
 The **reader is fully per-harness** — there is no shared parsing (JSON vs TOML, `mcp__<server>`
@@ -574,5 +574,441 @@ config-diff adoption check).
    specifically need them.
 6. **Allowlist, not blocklist** — a field is captured only if it appears in the tables above.
 
+---
+
+# Part 3 — OpenCode reader
+
+The storage layer, the harness-neutral category vocabulary, the two-phase capture (global once +
+per unique repo root), append-on-change, and deletion tombstones are all **inherited unchanged**
+from Parts 1–2. Adding OpenCode is therefore a single new reader:
+
+- `src/adapters/opencode/environment.ts` exporting `readOpencodeEnvironment(projectPath?)` →
+  `EnvCategorySnapshot[]`, plus
+- one line in `src/adapters/opencode/index.ts` (`readEnvironment: readOpencodeEnvironment`).
+
+No store, schema, or `analyze.ts` change is needed — `reposBySource` already resolves OpenCode
+repo roots from `session.project.cwd`, so project-scope capture runs the moment the hook exists.
+
+## Snapshots are independent per-harness views
+
+Every `environment_snapshots` row is keyed by `source` (the adapter id) as the leading PK column.
+The `claude-code` and `opencode` snapshots are **fully isolated** and are consumed independently —
+each is read only to advise *that* harness. Nothing is summed across sources, so there is **no
+double-counting** and therefore **no "skip" rule**: the OpenCode reader captures *every* location
+OpenCode honors, including its Claude-compatible and agent-compatible fallback dirs
+(`.claude/skills/`, `~/.claude/CLAUDE.md`, `.agents/skills/`, …). The same physical file
+appearing in both the `claude-code` and `opencode` snapshots is correct — they are two different
+harnesses' effective config, and advice about OpenCode must read off OpenCode's effective config.
+
+## Structural differences from Claude Code (why it isn't copy-paste)
+
+1. **Config home ≠ data home.** The adapter's `defaultRoots` is the *data* dir
+   (`~/.local/share/opencode`, which holds `opencode.db`). Config lives elsewhere, under
+   `opencodeConfigHome()`:
+   `$OPENCODE_CONFIG_DIR` → else `$XDG_CONFIG_HOME/opencode` → else `~/.config/opencode`.
+   An explicit config *file* override is `$OPENCODE_CONFIG`. Global-scope reads must use the
+   config home, never the data root.
+2. **One JSONC file feeds four categories.** `opencode.json` **or** `opencode.jsonc` packs
+   `permission` + `plugin` (settings), `mcp`, inline `agent` (agents), inline `command` (skills),
+   and `instructions` refs. A single parse fans out; the `.md`/`SKILL.md` scans layer on top.
+3. **JSONC parsing is new.** The repo has no JSONC support today. A small comment-/trailing-
+   comma-tolerant parse helper is required (JSON alone will not parse the user's `.jsonc`).
+   Variable substitution (`{env:…}`, `{file:…}`) is left literal — since secrets are dropped, a
+   substituted MCP url simply fails `redactUrl` and is dropped (safe).
+4. **Directory names vary; config keys are singular.** In the config file the keys are singular
+   (`agent`, `command`, `plugin`). On disk the docs read as plural (`agents/`, `commands/`,
+   `skills/`, `plugins/`), but OpenCode has used the singular dir names across versions — so the
+   reader scans **both** `agents/`+`agent/` and `commands/`+`command/` (missing dirs yield `[]`,
+   so scanning both is free and version-robust). `skills/` is confirmed plural.
+5. **`permission` is an object, not allow/deny/ask arrays** (`{ edit, bash, webfetch }` → enum
+   `ask|allow|deny`, or nested glob→enum). Different allowlist shape from CC.
+6. **`AGENTS.md` is `instructions`, not `agents`.** OpenCode's `agents/*.md` are sub-agent
+   definitions; `AGENTS.md` is the CLAUDE.md-equivalent.
+
+## Shared-helper extraction
+
+OpenCode's `SKILL.md` and frontmatter handling are identical to CC's. Rather than reimplement or
+import cross-adapter, extract the reusable primitives into **`src/adapters/env-shared.ts`** and
+have both readers import them: `splitFrontmatter`, `parseFrontmatter`, `toStringList`,
+`readSkillFile`, the agent-frontmatter parse, `redactUrl`, `readJsonIfExists`, `isUnder`,
+`listDirs`, `contentHash`-of-body. `claude-code/environment.ts` and `opencode/environment.ts`
+then share one implementation.
+
+## What we capture — by category (OpenCode)
+
+Where `$OC_HOME` = `opencodeConfigHome()` and `<repo>` is a project root. Each category's payload
+is **keyed by on-disk source** (file path / dir+name), so every location is distinguishable and
+the `content_hash` moves when any one changes.
+
+### 1. `settings`
+
+**Sources:** `$OC_HOME/opencode.json[c]` (global); `<repo>/opencode.json[c]` (project). Keyed by
+source file path.
+
+| Field                 | Capture                | Signal                                             |
+| --------------------- | ---------------------- | -------------------------------------------------- |
+| `permission`          | Yes (object as-is)     | Tool-approval posture — core adoption signal       |
+| `plugin`              | Yes (npm names / specs)| Ecosystem adoption (parallel to CC `enabledPlugins`)|
+| `model` / `small_model` / `default_agent` | Candidate (non-secret model posture) | Model-choice adoption — include if a detector needs it |
+
+**Dropped:** **`provider`** (holds API keys — never read), `keybinds`/`theme`/`tui`, `formatter`/
+`lsp`/`watcher`/`compaction`/`experimental`, and `mcp`/`agent`/`command` (their own categories).
+
+### 2. `mcp`
+
+**Sources:** the `mcp` object in the global and project `opencode.json[c]`. Keyed by source file →
+server name.
+
+| Field     | Capture                          | Notes                                             |
+| --------- | -------------------------------- | ------------------------------------------------- |
+| `type`    | Yes (`local` \| `remote`)        |                                                   |
+| `url`     | remote only, credential-stripped | via `redactUrl`; `{env:…}` → unparseable → dropped |
+| `enabled` | If present (bool)                |                                                   |
+
+**Dropped (secret-bearing / signal-free):** `command`, `cwd`, **`environment`**, **`headers`**,
+**`oauth`**, `timeout`.
+
+### 3. `agents`
+
+**Sources:** `agents/*.md` (`$OC_HOME/agents/`, `<repo>/.opencode/agents/`) **and** inline `agent`
+objects in `opencode.json[c]` (global + project). File entries key `name` off the filename; inline
+entries key off the config path + object key and tag `source: "config"`.
+
+| Field                         | Capture                | Signal                        |
+| ----------------------------- | ---------------------- | ----------------------------- |
+| `name`                        | Yes (filename / key)   | Agent catalog                 |
+| `description`                 | If present             | Purpose                       |
+| `mode` (`primary`/`subagent`/`all`) | If present       | Agent role                    |
+| `model`                       | If present             | Per-agent model preference    |
+| Body (markdown body / inline `prompt`) | Yes — full + hash | System prompt — adoption + diff |
+
+**Dropped:** `color`, `temperature`, `permission`, `steps`, `top_p`, `hidden`, `disable`, `tools`
+(deprecated), provider passthrough. (Docs list no `.claude/agents` fallback for agents — native
+locations only.)
+
+### 4. `skills`
+
+The harness-neutral `skills` category holds both OpenCode **skills** (`SKILL.md`) and **commands**
+(the user-invoked `/slash` prompts) — mirroring how CC folds commands into skills — with each entry
+tagged `kind: "skill" | "command"` so the two remain distinguishable.
+
+**Skill sources — all six searched `<name>/SKILL.md` locations (merged), keyed by (location, name):**
+
+| Scope   | Locations                                                              |
+| ------- | --------------------------------------------------------------------- |
+| Project | `.opencode/skills/`, `.claude/skills/`, `.agents/skills/`             |
+| Global  | `$OC_HOME/skills/`, `~/.claude/skills/`, `~/.agents/skills/`          |
+
+`name` = directory name (must equal frontmatter `name`); capture `description` + body + hash;
+`kind: "skill"`. `SKILL.md` shape is identical to CC → reuse `readSkillFile`.
+
+**Command sources:** `commands/*.md` (`$OC_HOME/commands/`, `<repo>/.opencode/commands/`) **and**
+inline `command` objects in the config. `name` = filename / key; capture `description`, `agent`,
+`model` + body (`template`) + hash; `kind: "command"`.
+
+**Dropped:** `subtask`; skill `license` / `compatibility` / `metadata` (low signal).
+
+### 5. `instructions`
+
+**Effective/active only** — apply OpenCode's fallback precedence and store *only* what OpenCode
+actually loads (a shadowed file OpenCode ignores is not stored). Keyed by file path; empty files
+omitted; bodies stored full + hash.
+
+| Scope   | Active source (in precedence order)                                                  |
+| ------- | ------------------------------------------------------------------------------------ |
+| Global  | `$OC_HOME/AGENTS.md`; **else** fallback `~/.claude/CLAUDE.md`                         |
+| Project | `<repo>/AGENTS.md` (+ nested `AGENTS.md` under the repo); **else** fallback `<repo>/CLAUDE.md` |
+| Both    | every file matched by the config `instructions[]` globs (always combined; local paths only — remote URLs deferred) |
+
+## Scope summary (OpenCode)
+
+| Category       | Global scope                                            | Project scope                                                        |
+| -------------- | ------------------------------------------------------- | -------------------------------------------------------------------- |
+| `settings`     | `$OC_HOME/opencode.json[c]`                             | `<repo>/opencode.json[c]`                                            |
+| `mcp`          | `mcp{}` in `$OC_HOME/opencode.json[c]`                  | `mcp{}` in `<repo>/opencode.json[c]`                                 |
+| `agents`       | `$OC_HOME/agents/*.md` + inline `agent{}`              | `<repo>/.opencode/agents/*.md` + inline `agent{}`                    |
+| `skills`       | 3 global `skills/<n>/SKILL.md` + `commands/*.md` + inline `command{}` | 3 project `skills/<n>/SKILL.md` + `.opencode/commands/*.md` + inline |
+| `instructions` | `$OC_HOME/AGENTS.md` (→ `~/.claude/CLAUDE.md`) + `instructions[]` | `<repo>/AGENTS.md` (+ nested; → `<repo>/CLAUDE.md`) + `instructions[]` |
+
+## Symlinks & deduplication (both readers)
+
+Skills, agents, and commands are commonly **symlinked** to share them across harness dirs (e.g.
+`~/.claude/skills/foo` → `~/.agents/skills/foo`). Two shared fixes make the readers handle this —
+they apply to the Claude Code reader as well, not just OpenCode:
+
+- **Follow symlinks.** `listDirs` and `walkFiles` (in `env-shared.ts` / `util/walk.ts`) previously
+  filtered on `Dirent.isDirectory()`, which is **false for a symlink-to-a-directory** — so a
+  symlinked skill dir was silently dropped even though the harness loads it. Both now resolve
+  symlinks (with a visited-realpath guard in `walkFiles` so a symlink cycle terminates).
+- **Dedupe by real path.** Because the same physical skill can be reached through several
+  locations (a real dir plus symlinks into it), each reader keeps a `Set` of source-file
+  realpaths and collapses entries that resolve to the same file — so a skill symlinked into
+  `.claude` **and** `.agents` appears once, not twice. Scan order lists likely-real locations
+  first, so the real location wins the surviving `dir` label. This mirrors the "effective, not
+  raw on-disk" choice made for instructions.
+
+## Out of scope (v1)
+
+Remote config (`.well-known/opencode`), `OPENCODE_CONFIG_CONTENT` inline overrides, managed
+system configs (`/Library/Application Support/opencode`, `/etc/opencode`), local plugin JS bodies
+in `plugins/` dirs (names captured via `settings.plugin`, not the code), remote-URL entries in
+`instructions[]`, and `tui.json`.
+
+## Security (delta from Part 2)
+
+Same allowlist-not-blocklist principle. OpenCode-specific **never-store**: the `provider` block
+(API keys), MCP `environment` / `headers` / `oauth`, any `{env:…}`-substituted value, and the data
+dir's `auth.json` (never touched). Instruction/agent/skill/command bodies are stored (user-authored
+content, not secrets — the adoption signal needs them), consistent with CC.
+
+---
+
+# Part 4 — Codex reader
+
+Codex is the next adapter to implement the same five-category snapshot contract. The storage
+lifecycle is unchanged: capture global scope once, capture each observed repository root once,
+append only on content change, and write tombstones only after a successful read. The adapter adds
+`readCodexEnvironment(projectPath?)`; there is no schema migration or session parse-version bump.
+
+The discovery rules follow the current Codex documentation for the
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference),
+[AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
+[skills](https://learn.chatgpt.com/docs/build-skills),
+[custom agents](https://learn.chatgpt.com/docs/agent-configuration/subagents), and
+[MCP](https://learn.chatgpt.com/docs/extend/mcp).
+
+## Scope and source precedence
+
+`$CODEX_HOME` is read from the environment and defaults to `~/.codex`. Global scope reads the base
+`$CODEX_HOME/config.toml`. Project scope discovers every `.codex/config.toml` below the repository
+root, including nested package/service layers, and keeps each file separate in the payload. This
+represents sessions launched below the root even though environment capture is keyed by repository.
+
+Codex normally resolves project config from repository root toward the launch directory, with the
+closest layer winning. The snapshot deliberately does not flatten those layers: file-keyed entries
+preserve their origin and make additions/removals attributable. Nested instruction fallback settings
+are applied only to their directory and descendants.
+
+TOML is parsed with `smol-toml`, not a partial in-tree parser. If a present global or project
+`config.toml` is invalid, that scope's read throws. The capture layer then keeps the last successful
+snapshot rather than mistaking a parse failure for deletion and writing tombstones. Invalid
+standalone agent TOMLs are local failures and are omitted individually.
+
+## Payloads by category
+
+### `settings`
+
+Sources are `$CODEX_HOME/config.toml` for global scope and every discovered project
+`.codex/config.toml` for project scope. The payload is keyed by source file:
+
+```json
+{
+  ".codex/config.toml": {
+    "approval_policy": "on-request",
+    "approvals_reviewer": "auto_review",
+    "sandbox_mode": "workspace-write",
+    "sandbox_workspace_write": { "network_access": true },
+    "web_search": "cached",
+    "features": {
+      "apps": true,
+      "hooks": false,
+      "memories": true,
+      "code_mode": {
+        "enabled": true,
+        "excluded_tool_namespaces": ["mcp__codex_apps"],
+        "direct_only_tool_namespaces": ["mcp__history"]
+      }
+    }
+  }
+}
+```
+
+Only explicit values are captured. Granular approval policy retains only its documented boolean
+prompt categories. The `apps`, `hooks`, and `memories` entries above are enablement flags from
+`[features]`; per-app configuration, hook definitions/commands, and memory contents are excluded.
+An otherwise valid config that retains no allowlisted setting contributes no `settings` category.
+
+### `mcp`
+
+`mcp_servers` is read independently from each config file. Server type is derived as `http` when a
+`url` exists and `stdio` when a `command` exists. The payload retains only type, a redacted URL, and
+an explicitly configured enabled state:
+
+```json
+{
+  ".codex/config.toml": {
+    "servers": {
+      "docs": { "type": "http", "url": "https://example.com/mcp", "enabled": true },
+      "local": { "type": "stdio", "enabled": false }
+    }
+  }
+}
+```
+
+URL userinfo, query strings, and fragments are removed. Unparseable URLs are omitted rather than
+stored verbatim. Commands, arguments, working directories, environment/environment-variable names,
+headers, authentication, bearer-token configuration, OAuth scopes, tool policy, and timeouts are
+never stored.
+
+### `agents`
+
+Global scope scans TOML files under `$CODEX_HOME/agents`. Project scope scans every nested
+`.codex/agents` directory. The reader also honors `[agents.<name>].config_file` references; relative
+paths resolve beside the defining `config.toml`. Each valid file must contain Codex's required
+`name`, `description`, and `developer_instructions` fields.
+
+The harness-neutral payload remains `{ "agents": [...], "count": n }`. Each entry retains:
+
+- `name` and `description`
+- `developer_instructions` as `body`, plus `bodyHash`
+- optional `model`, `model_reasoning_effort`, and `sandbox_mode`
+- `dir`, the source directory relative to the scope when possible
+
+Nested MCP servers, skills, and all other session config in an agent file are dropped. Referenced
+project paths and symlink targets must remain inside the repository; global config may reference
+user-owned paths outside `$CODEX_HOME`.
+
+### `skills`
+
+Global scope scans `~/.agents/skills/<name>/SKILL.md`. Project scope scans
+`.agents/skills/<name>/SKILL.md` in every directory below the repository root. Safe
+`[[skills.config]]` paths add skills or disable a discovered skill by canonical file path. Relative
+paths resolve beside the defining config.
+
+The payload remains `{ "skills": [...], "count": n }`. Entries retain `name`, optional
+`description`, full `body`, `bodyHash`, `kind: "skill"`, and the source `dir`. Skill-directory
+symlinks are followed, then files are deduplicated by real path. Configured project paths and
+project symlink targets that escape the repository are ignored.
+
+Plugin caches, plugin-contributed skills, admin/system skills, and bundled system skills are not
+part of v1.
+
+### `instructions`
+
+Global scope uses the first non-empty `$CODEX_HOME/AGENTS.override.md`, otherwise
+`$CODEX_HOME/AGENTS.md`. For every project directory, precedence is:
+
+1. `AGENTS.override.md`
+2. `AGENTS.md`
+3. the active `project_doc_fallback_filenames`, in configured order
+
+At most one non-empty file per directory is stored. Each entry is keyed by scope-relative path and
+contains the full `body` plus `hash`. Nested project configs replace fallback filename lists only
+for their directory and descendants. The snapshot keeps complete files rather than applying the
+runtime context-size cap because diff/adoption analysis needs the durable source content.
+
+## Determinism and security
+
+Config files, server names, project directories, agents, skills, and safe namespace lists are
+sorted before emission. Realpath deduplication prevents a skill or agent reached through multiple
+symlinks from causing false snapshot churn.
+
+The reader uses fixed allowlists. It never opens `auth.json` or another credential store and never
+returns provider configuration, API keys, environment values or names, shell commands/arguments,
+headers, tokens, OAuth/auth configuration, hooks bodies, or MCP timeouts. Full bodies are retained
+only for the three user-authored content surfaces where they are the adoption signal: agents,
+skills, and instruction files.
+
+## Deferred Codex surfaces (v1)
+
+Profile TOMLs, CLI `--config` overrides, runtime-only session overrides, system/managed config and
+requirements, memories, plugin caches and plugin-provided skills, app definitions, hook bodies,
+auth files, and installed/bundled skill catalogs are intentionally deferred. Base and project
+config files remain independent source records rather than a flattened effective object.
 
 
+# Part 5 — Pi reader
+
+Pi is the next adapter to implement the snapshot contract. The storage lifecycle is unchanged:
+capture global scope once, capture each observed repository root once, append only on content
+change, and write tombstones only after a successful read. The adapter adds
+`readPiEnvironment(projectPath?)`; there is no schema migration or session parse-version bump.
+
+Discovery follows the current Pi documentation for [settings](../../settings.md),
+[skills](../../skills.md), and context files (`quickstart.md`, `usage.md`).
+
+## Narrow category coverage
+
+Pi is deliberately minimal: it ships **no built-in MCP and no sub-agents** (`usage.md`: "does not
+include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash"). The
+reader therefore emits only three of the five categories — `settings`, `skills`, and
+`instructions` — and never `mcp` or `agents`. Users who want those workflows install them as
+extensions or packages, which are captured indirectly through the `settings` resource pointers.
+
+## Scope and home resolution
+
+Pi's agent home is `$PI_CODING_AGENT_DIR` (which points AT the agent dir, e.g. `~/.pi/agent`, not
+its parent), defaulting to `~/.pi/agent`. Global scope reads that home. The home-level
+`~/.agents/skills` directory is a *sibling* of `~/.pi` and does **not** follow
+`$PI_CODING_AGENT_DIR`; it is always resolved from the OS home.
+
+Project scope walks the repository once (`scanProject`) collecting every `.pi/` dir, every
+`.agents/` dir, and every `AGENTS.md`/`CLAUDE.md`. Nested `.pi`/`.agents` in monorepo sub-packages
+are captured and kept separate; the walk prunes `node_modules`, `.git`, build/vendor trees, and
+other dot-directories so vendored config never leaks in. `.pi`/`.agents` themselves are registered
+but not descended into — their subtrees are skill directories, not more config dirs.
+
+## Payloads by category
+
+### `settings`
+
+Sources are `<piHome>/settings.json` for global scope and every discovered project
+`.pi/settings.json` for project scope, keyed by relative path. A fixed allowlist keeps only
+non-secret posture: model + thinking config (`defaultProvider`, `defaultModel`,
+`defaultThinkingLevel`, `thinkingBudgets`, `hideThinkingBlock`, `showCacheMissNotices`,
+`enabledModels`), trust posture (`defaultProjectTrust`), context management (`compaction`,
+`branchSummary`, `retry`), delivery (`steeringMode`, `followUpMode`, `transport`), `warnings`,
+and resource pointers (`packages`, `extensions`, `skills`, `prompts`, `themes`,
+`enableSkillCommands`). `httpProxy` is kept only as a redacted endpoint identity (userinfo, query,
+and fragment stripped). `packages` accepts HTTP(S) git sources that Pi stores verbatim, so each
+source (string or `{ source }` object) has its `user:token@` userinfo **and** query string stripped
+(a `?access_token=…` param can carry a secret) while the path and `#ref` are preserved; Pi's `git:`
+prefix in front of a nested URL of any scheme (`git:https://…`, `git:ssh://…`) is peeled before
+redaction and restored afterward (otherwise `URL` treats it as an opaque `git:` value and misses the
+credentials); bare npm names and scp-style refs pass through unchanged. Everything else — themes and other pure-UI display options,
+`externalEditor`, `shellPath`/`shellCommandPrefix`/`npmCommand` execution plumbing, `sessionDir`,
+`trackingId`, telemetry flags — is dropped by omission. A file whose fields are all dropped
+contributes no entry.
+
+### `skills`
+
+Global scope scans `<piHome>/skills` and `~/.agents/skills`. Project scope scans `<repo>/.pi/skills`
+and `<repo>/.agents/skills` in every such directory found. Per Pi's discovery rules, `.pi` skill
+dirs discover direct root `.md` files as individual skills, all locations discover `SKILL.md`
+directories recursively, and `.agents` skill dirs ignore root `.md` files. The skills root itself is
+checked first: a `SKILL.md` sitting directly in it makes the root one skill and stops all further
+discovery (for both `.pi` and `.agents`). Otherwise the first directory that contains a `SKILL.md`
+IS a skill and its subtree is not searched further, so a skill's own bundled `examples/SKILL.md`
+assets never become separate skills. The skill traversal prunes the same set as the repo scan —
+hidden directories plus the build/vendor skip-list — so a dependency's `node_modules/**/SKILL.md`
+never registers as a skill. Full `.gitignore`/`.ignore`/`.fdignore` parity that Pi's `fd`-based
+traversal applies is deferred, matching the other harness readers, which prune by the same fixed list. Skills with a missing or blank
+`description` are dropped, matching Pi, which refuses to load them. The payload is
+`{ "skills": [...], "count": n }`; each entry retains `name`, `description`, full `body`,
+`bodyHash`, `kind: "skill"`, and the source `dir`. Pi lets the frontmatter `name` differ from the
+directory, so it is authoritative with the directory/file base name as fallback. Skills reached
+through symlinks are deduplicated by real path.
+
+Settings-listed skill directories, package-contributed skills, and CLI `--skill` paths are deferred
+for v1 — the two on-disk conventions above cover the common case.
+
+### `instructions`
+
+Pi selects at most one context file per directory, trying `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`,
+then `CLAUDE.MD` in order. Global scope applies that precedence in `<piHome>`. Project scope stores
+the winning file for each directory under the repo (Pi walks up from cwd loading these, so nested
+files represent sessions launched from those directories). Each entry is keyed by relative path and
+holds the full `body` plus `hash`. Empty files are omitted. Context files in directories *above*
+the repository root, which Pi also loads, are out of scope for v1 (capture is keyed by repo root).
+
+Directory discovery detects `.pi`/`.agents` even when mounted via symlink (shared config is
+commonly linked in), while arbitrary directory symlinks are not chased so the walk cannot escape
+the repository or cycle. Symlinked *files* (a linked `SKILL.md`, root skill markdown, or
+`AGENTS.md`/`CLAUDE.md`) are resolved with `stat` and followed, as Pi does.
+
+## Deferred Pi surfaces (v1)
+
+`models.json` (custom providers), `keybindings.json`, `auth.json`, package/extension *contents*
+(only their settings pointers are captured), settings-referenced and CLI-supplied skill paths,
+context files in directories above the repository root, and prompt/theme resource contents are
+intentionally deferred.

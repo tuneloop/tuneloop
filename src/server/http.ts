@@ -10,10 +10,8 @@ import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence, skillOutc
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
-// The Insights tab surfaces only the most valuable insights to act on — not an
-// exhaustive ledger. We cap the read model to the top-ranked few (store.insights()
-// already orders them severity → recurrence → recency)
-const TOP_INSIGHTS = 7
+/** How many recommendations the tab surfaces — the top few by severity → recency. */
+const TOP_RECOMMENDATIONS = 5
 
 /**
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
@@ -168,9 +166,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/insights') {
-    // The insight read model, capped to the top TOP_INSIGHTS (dismissed excluded,
-    // ranked severity → recurrence → recency) — only the most valuable to act on.
-    sendJson(res, 200, store.insights().slice(0, TOP_INSIGHTS))
+    // The Recommendations tab shows a fixed top-N with no client filtering/search/sort,
+    // so the cap lives here: the store ranks severity → recency, and LIMIT takes the most
+    // valuable few. (When the tab had client-side filters this had to return every row;
+    // it no longer does, so a server cap is safe.)
+    sendJson(res, 200, store.insights({ limit: TOP_RECOMMENDATIONS }))
     return
   }
   if (path === '/api/insight/evidence') {

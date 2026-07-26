@@ -4,8 +4,8 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { buildCards, classify, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
-import type { DetectorContext, InsightInput } from '../core/detector'
+import { buildCards, buildScopeEvidence, capIdentity, classify, loadInvoked, mapScopeKeysToRepos, parseInstalledMcp, parseInstalledSkills, queryInvoked, queryInvokedOpencodeMcp, skillMatches, unusedCapabilities, type Classified, type InstalledCap, type InvokedCap } from './unused-capabilities'
+import { insightId, type DetectorContext, type EvidenceRef, type InsightInput } from '../core/detector'
 
 const DAY_MS = 86_400_000
 
@@ -29,6 +29,7 @@ interface ToolSpec {
   name: string
   action: 'mcp_call' | 'skill' | 'other'
   sidechain?: boolean
+  tsMs?: number // call timestamp; defaults to the session start (decouple to exercise the event-ts window)
 }
 
 /** Seed one session and its tool calls; repo defaults to 'o/r', null = no git repo. */
@@ -46,7 +47,7 @@ function seedSession(
   const ins = db.prepare(
     'INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,?,?)',
   )
-  tools.forEach((t, idx) => ins.run(id, idx, t.name, t.action, t.sidechain ? 1 : 0, new Date(startMs).toISOString()))
+  tools.forEach((t, idx) => ins.run(id, idx, t.name, t.action, t.sidechain ? 1 : 0, new Date(t.tsMs ?? startMs).toISOString()))
 }
 
 const byKey = (caps: InvokedCap[]) => new Map(caps.map((c) => [`${c.kind}:${c.name}:${c.repo}`, c]))
@@ -75,6 +76,19 @@ describe('parseInstalledMcp', () => {
     expect(parseInstalledMcp('nope')).toEqual([])
     expect(parseInstalledMcp({ '.mcp.json': {} })).toEqual([]) // no servers key
     expect(parseInstalledMcp({ '.mcp.json': { servers: null } })).toEqual([])
+  })
+
+  it('excludes servers explicitly disabled (enabled: false) — dormant, no startup overhead', () => {
+    // Codex/OpenCode snapshots retain `enabled: false`. A disabled server isn't loaded, so
+    // it can't be "unused" in a way worth removing. Absent flag (CC, or unset) = enabled.
+    const payload = {
+      'config.toml': { servers: {
+        live: { type: 'stdio', enabled: true },
+        dormant: { type: 'http', url: 'https://x', enabled: false },
+        implicit: { type: 'stdio' }, // no enabled field → on by default
+      } },
+    }
+    expect(parseInstalledMcp(payload).sort()).toEqual(['implicit', 'live'])
   })
 })
 
@@ -169,6 +183,19 @@ describe('queryInvoked', () => {
     seedSession(db, 's1', [{ name: 'mcp__nobreak', action: 'mcp_call' }])
     expect(queryInvoked(store, since)).toEqual([])
   })
+
+  it('windows by the tool call\'s own timestamp, not the session start', () => {
+    const { db, store } = setupDb()
+    // A long-running session that began 40 days ago (outside the window) but invoked the
+    // server yesterday. The old started_at scan dropped it — and would then read the
+    // still-live server as "never used"; the last_invoked_at window keeps it.
+    seedSession(db, 's1', [{ name: 'mcp__live__t', action: 'mcp_call', tsMs: Date.now() - DAY_MS }], {
+      startedMs: Date.now() - 40 * DAY_MS,
+    })
+    const m = byKey(queryInvoked(store, since))
+    expect(m.get('mcp:live:o/r')).toMatchObject({ kind: 'mcp', name: 'live' })
+    expect([...m.keys()]).toEqual(['mcp:live:o/r'])
+  })
 })
 
 describe('mapScopeKeysToRepos', () => {
@@ -228,6 +255,96 @@ describe('skillMatches', () => {
   it('does not match on a plugin id alone', () => {
     // installed 'my-plugin' must not match an invocation 'my-plugin:deploy'
     expect(skillMatches('my-plugin', 'my-plugin:deploy')).toBe(false)
+  })
+})
+
+describe('queryInvokedOpencodeMcp (detector-layer reconcile)', () => {
+  const since = new Date(Date.now() - 30 * DAY_MS).toISOString()
+
+  // Seed an OpenCode session with raw tool calls (OpenCode MCP calls land as action='other').
+  function seedOpencode(
+    db: ReturnType<typeof openDb>,
+    id: string,
+    tools: Array<{ name: string; action: string; tsMs?: number; sidechain?: boolean }>,
+    repo: string | null = 'o/r',
+  ) {
+    const startMs = Date.now() - DAY_MS
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)').run(
+      id, id, 'opencode', 'anthropic', repo, '/repo', new Date(startMs).toISOString(),
+    )
+    const ins = db.prepare('INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,?,?)')
+    tools.forEach((t, idx) => ins.run(id, idx, t.name, t.action, t.sidechain ? 1 : 0, new Date(t.tsMs ?? startMs).toISOString()))
+  }
+
+  it('counts a <server>_<tool> other-call as a use of the installed server', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [{ name: 'atlassian_getJiraIssue', action: 'other' }])
+    const m = byKey(queryInvokedOpencodeMcp(store, since, ['atlassian']))
+    expect(m.get('mcp:atlassian:o/r')).toMatchObject({ kind: 'mcp', name: 'atlassian', repo: 'o/r', sessions: 1 })
+    expect([...m.values()]).toHaveLength(1)
+  })
+
+  it('does not match a built-in with an underscore, or a prefix without a "_" boundary', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [
+      { name: 'apply_patch', action: 'other' }, // built-in; no server named 'apply'
+      { name: 'atlassianfoo', action: 'other' }, // 'atlassian' prefix but no '_' boundary
+    ])
+    expect(queryInvokedOpencodeMcp(store, since, ['atlassian'])).toEqual([])
+  })
+
+  it('ignores calls outside the recency window', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 'old', [{ name: 'atlassian_x', action: 'other', tsMs: Date.now() - 40 * DAY_MS }])
+    expect(queryInvokedOpencodeMcp(store, since, ['atlassian'])).toEqual([])
+  })
+
+  it('only considers opencode sessions, and only action=other', () => {
+    const { db, store } = setupDb()
+    seedSession(db, 'cc1', [{ name: 'atlassian_getJiraIssue', action: 'other' }]) // claude-code source
+    seedOpencode(db, 'oc1', [{ name: 'atlassian_getJiraIssue', action: 'mcp_call' }]) // already-tagged: not ours
+    expect(queryInvokedOpencodeMcp(store, since, ['atlassian'])).toEqual([])
+  })
+
+  it('counts distinct sessions, ignores sidechains, and returns [] for an empty server list', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [{ name: 'atlassian_a', action: 'other' }])
+    seedOpencode(db, 's2', [
+      { name: 'atlassian_b', action: 'other' },
+      { name: 'atlassian_c', action: 'other', sidechain: true },
+    ])
+    const m = byKey(queryInvokedOpencodeMcp(store, since, ['atlassian']))
+    expect(m.get('mcp:atlassian:o/r')).toMatchObject({ sessions: 2 })
+    expect(queryInvokedOpencodeMcp(store, since, [])).toEqual([])
+  })
+
+  it('loadInvoked folds the reconcile into opencode invocations but leaves other sources untouched', () => {
+    const { db, store } = setupDb()
+    seedOpencode(db, 's1', [{ name: 'atlassian_getJiraIssue', action: 'other' }])
+    const oc = byKey(loadInvoked(store, since, 'opencode', ['atlassian']))
+    expect(oc.get('mcp:atlassian:o/r')).toMatchObject({ kind: 'mcp', name: 'atlassian' })
+    // For a non-opencode source, loadInvoked is exactly queryInvoked — no reconcile applied.
+    expect(loadInvoked(store, since, 'claude-code', ['atlassian'])).toEqual(queryInvoked(store, since, 'claude-code'))
+  })
+})
+
+describe('buildScopeEvidence — OpenCode MCP', () => {
+  const since = new Date(Date.now() - 30 * DAY_MS).toISOString()
+
+  it('produces scope evidence for an OpenCode MCP server (action=other, reconciled by prefix)', () => {
+    const { db, store } = setupDb()
+    // OpenCode records the MCP call as action='other' with name '<server>_<tool>' — the
+    // capability_invocation view can't see it, so the evidence path must reconcile too.
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+      .run('oc1', 'oc1', 'opencode', 'anthropic', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+    db.prepare('INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?,?,?,?,1,0,0,?)')
+      .run('oc1', 0, 'atlassian_getJiraIssue', 'other', new Date(Date.now() - DAY_MS).toISOString())
+    const cap: InstalledCap = { kind: 'mcp', name: 'atlassian', scope: 'global' }
+    const scoped: Classified = { cap, verdict: 'scope', scopeToRepos: ['web'] }
+    const ev = buildScopeEvidence(store, 'opencode', [scoped], since)
+    const refs = ev.get(capIdentity(cap))
+    expect(refs?.length).toBe(1)
+    expect(refs![0]).toMatchObject({ sessionId: 'oc1', note: 'web · uses MCP server atlassian' })
   })
 })
 
@@ -334,10 +451,10 @@ describe('buildCards', () => {
   const pcap = (kind: 'mcp' | 'skill', name: string, repo: string): InstalledCap => ({ kind, name, scope: 'project', repo })
   const remove = (cap: InstalledCap): Classified => ({ cap, verdict: 'remove' })
   const scope = (cap: InstalledCap, repos: string[]): Classified => ({ cap, verdict: 'scope', scopeToRepos: repos })
-  const samples = new Map([['web', ['s1', 's2']], ['api', ['s3']]])
+  const noInv = new Map<string, EvidenceRef[]>() // no scope-invocation evidence supplied
 
   it('returns no cards for no verdicts', () => {
-    expect(buildCards([], samples)).toEqual([])
+    expect(buildCards([], noInv)).toEqual([])
   })
 
   it('folds globals and every project repo into one cross-repo card', () => {
@@ -347,14 +464,14 @@ describe('buildCards', () => {
       remove(pcap('mcp', 'pg', 'web')),
       remove(pcap('skill', 'lint', 'api')),
     ]
-    const cards = buildCards(classified, samples)
+    const cards = buildCards(classified, noInv)
     expect(cards).toHaveLength(1)
     expect(cards[0]!.repo).toBe('*')
-    expect(cards[0]!.signalKey).toBe('unused-caps')
-    expect(cards[0]!.fix.type).toBe('config-snippet')
+    expect(cards[0]!.signalKey).toBe('unused-caps:claude-code')
+    expect(cards[0]!.fix.type).toBe('fix-prompt')
     expect(cards[0]!.count).toBe(4) // total flagged items across all scopes
     // Fix carries the global section plus a per-repo removal section for each project.
-    expect(cards[0]!.fix.content).toContain('Remove from your global config:')
+    expect(cards[0]!.fix.content).toContain('Remove from the global config:')
     expect(cards[0]!.fix.content).toContain("Remove from api's config:")
     expect(cards[0]!.fix.content).toContain("Remove from web's config:")
   })
@@ -362,17 +479,17 @@ describe('buildCards', () => {
   it('global snippet lists removals and scoping moves with target repos', () => {
     const cards = buildCards(
       [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'frontend-design'), ['web', 'docs'])],
-      samples,
+      noInv,
     )
     const global = cards.find((c) => c.repo === '*')!
-    expect(global.fix.content).toContain('Remove from your global config:')
+    expect(global.fix.content).toContain('Remove from the global config:')
     expect(global.fix.content).toContain('- MCP server: sentry')
     expect(global.fix.content).toContain('Move out of global config')
     expect(global.fix.content).toContain('- skill: frontend-design → move to web, docs')
   })
 
   it('names the project repo and lists its capabilities in the fix', () => {
-    const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], samples)
+    const cards = buildCards([remove(pcap('mcp', 'pg', 'web'))], noInv)
     const card = cards[0]!
     expect(card.repo).toBe('*')
     expect(card.description).toContain('web')
@@ -381,28 +498,71 @@ describe('buildCards', () => {
   })
 
   it('severity is medium at 3+ items, low below', () => {
-    const three = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b')), remove(gcap('mcp', 'c'))], samples)
+    const three = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b')), remove(gcap('mcp', 'c'))], noInv)
     expect(three[0]!.severity).toBe('medium')
-    const two = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b'))], samples)
+    const two = buildCards([remove(gcap('mcp', 'a')), remove(gcap('mcp', 'b'))], noInv)
     expect(two[0]!.severity).toBe('low')
   })
 
-  it('draws global evidence from the repos the scope suggestions point at', () => {
-    const cards = buildCards([scope(gcap('mcp', 'sentry'), ['web'])], samples)
-    const global = cards.find((c) => c.repo === '*')!
-    expect(global.evidence).toEqual([{ sessionId: 's1' }, { sessionId: 's2' }])
+  it('recommendation adapts to the verdict mix (scope-only, remove-only, both)', () => {
+    const scopeOnly = buildCards([scope(gcap('skill', 'frontend-design'), ['web'])], noInv)[0]!
+    expect(scopeOnly.recommendation).toBe("Move repo-only skills/servers out of global config so they don't load every session.")
+
+    // A per-repo removal counts as a remove, too.
+    const removeOnly = buildCards([remove(pcap('mcp', 'pg', 'web'))], noInv)[0]!
+    expect(removeOnly.recommendation).toBe('Remove capabilities that are never used from your config.')
+
+    const both = buildCards([remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'frontend-design'), ['web'])], noInv)[0]!
+    expect(both.recommendation).toBe('Remove never-used capabilities and move repo-only ones out of global config.')
   })
 
-  it('caps evidence at 10 sessions', () => {
-    const many = new Map([['web', Array.from({ length: 25 }, (_, i) => `s${i}`)]])
-    const cards = buildCards([scope(gcap('mcp', 'sentry'), ['web'])], many)
+  it('scope evidence is the capability’s invocations; a co-present removal adds none', () => {
+    const cap = gcap('mcp', 'sentry')
+    const scopeInv = new Map<string, EvidenceRef[]>([[capIdentity(cap), [
+      { sessionId: 'inv1', turnIdx: 4, note: 'web · uses MCP server sentry' },
+      { sessionId: 'inv2', note: 'web · uses MCP server sentry' },
+    ]]])
+    // The project-remove (pg/api) contributes no evidence — only the scope invocations show.
+    const cards = buildCards([scope(cap, ['web']), remove(pcap('mcp', 'pg', 'api'))], scopeInv)
+    expect(cards.find((c) => c.repo === '*')!.evidence).toEqual([
+      { sessionId: 'inv1', turnIdx: 4, note: 'web · uses MCP server sentry' },
+      { sessionId: 'inv2', note: 'web · uses MCP server sentry' },
+    ])
+  })
+
+  it('caps evidence at 10 invocation sessions', () => {
+    const cap = gcap('mcp', 'sentry')
+    const refs = Array.from({ length: 25 }, (_, i) => ({ sessionId: `s${i}`, note: 'web · uses MCP server sentry' }))
+    const cards = buildCards([scope(cap, ['web'])], new Map([[capIdentity(cap), refs]]))
     expect(cards.find((c) => c.repo === '*')!.evidence).toHaveLength(10)
+  })
+
+  it('a removal-only card has no evidence at all', () => {
+    const cards = buildCards([remove(gcap('mcp', 'sentry')), remove(pcap('mcp', 'pg', 'web'))], noInv)
+    expect(cards[0]!.evidence).toEqual([])
+  })
+
+  it('emits a fix-prompt carrying the adoption marker', () => {
+    const fix = buildCards([remove(gcap('mcp', 'sentry'))], noInv)[0]!.fix
+    expect(fix.type).toBe('fix-prompt')
+    // The marker lets the fix session self-identify so the insight can flip to adopted.
+    expect(fix.content).toContain(`tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps:claude-code')}`)
+    // The concrete config edit still reads through — it IS the agent's task.
+    expect(fix.content).toContain('- MCP server: sentry')
+  })
+
+  it('the fix-prompt addresses the agent, not the user (no second-person "your")', () => {
+    // A scope verdict exercises the "used in … repos" diagnosis; a global + a project
+    // removal exercise both config sections — every phrase that reaches the prompt.
+    const classified = [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'fd'), ['web']), remove(pcap('mcp', 'pg', 'api'))]
+    const content = buildCards(classified, noInv)[0]!.fix.content
+    expect(content).not.toMatch(/\byour\b/i)
   })
 
   it('carries no token or dollar figures in any copy', () => {
     const cards = buildCards(
       [remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'fd'), ['web']), remove(pcap('mcp', 'pg', 'api'))],
-      samples,
+      noInv,
     )
     for (const c of cards) {
       const text = `${c.title} ${c.description} ${c.fix.label} ${c.fix.content}`
@@ -435,21 +595,28 @@ describe('unusedCapabilities.run (end to end)', () => {
     }
   }
 
-  const installGlobalMcp = (store: Store, ...servers: string[]) =>
+  // Config first observed well past the removal-tenure cutoff (10 days): a never-used
+  // capability seen this long ago is eligible for a remove verdict.
+  const OLD = new Date(Date.now() - 40 * DAY_MS).toISOString()
+  // Config first observed today: inside the tenure cutoff, so the removal gate holds
+  // fire (used by the fresh-install test).
+  const NEW = new Date().toISOString()
+
+  const installGlobalMcp = (store: Store, servers: string[], capturedAt = OLD) =>
     store.recordEnvSnapshot({
       source: 'claude-code', scope: 'global', scopeKey: '_global', category: 'mcp',
       payload: { '.claude.json': { servers: Object.fromEntries(servers.map((s) => [s, { type: 'stdio' }])) } },
-    })
-  const installGlobalSkills = (store: Store, ...names: string[]) =>
+    }, capturedAt)
+  const installGlobalSkills = (store: Store, names: string[], capturedAt = OLD) =>
     store.recordEnvSnapshot({
       source: 'claude-code', scope: 'global', scopeKey: '_global', category: 'skills',
       payload: { skills: names.map((n) => ({ name: n, body: 'x', bodyHash: 'h' })), count: names.length },
-    })
-  const installProjectMcp = (store: Store, rootPath: string, ...servers: string[]) =>
+    }, capturedAt)
+  const installProjectMcp = (store: Store, rootPath: string, servers: string[], capturedAt = OLD) =>
     store.recordEnvSnapshot({
       source: 'claude-code', scope: 'project', scopeKey: rootPath, category: 'mcp',
       payload: { '.mcp.json': { servers: Object.fromEntries(servers.map((s) => [s, { type: 'stdio' }])) } },
-    })
+    }, capturedAt)
 
   it('returns nothing when no config snapshots have been captured', () => {
     const { db, store } = setupDb()
@@ -457,19 +624,31 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(run(store)).toEqual([])
   })
 
+  it('persists cleanly — the fix-prompt marker id matches the insight id (no throw)', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 12)
+    const cards = run(store)
+    expect(cards).toHaveLength(1)
+    // persistInsights throws if a fix-prompt does not embed its own (detector, repo,
+    // signalKey) id — this locks the DETECTOR/SIGNAL_KEY/repo triple against drift.
+    expect(() => store.persistInsights('unused-capabilities', 1, cards)).not.toThrow()
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')?.state).toBe('surfaced')
+  })
+
   it('flags a global server never used, once past the session minimum', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 12) // ≥ MIN_SESSIONS
     const cards = run(store)
     expect(cards).toHaveLength(1)
-    expect(cards[0]).toMatchObject({ repo: '*', signalKey: 'unused-caps', count: 1 })
+    expect(cards[0]).toMatchObject({ repo: '*', signalKey: 'unused-caps:claude-code', count: 1 })
     expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
   })
 
   it('stamps last-seen from the most recent examined session, not the analyze run', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 12)
     // Push one session's start later than the others (seedRepo uses now − 1 day) but
     // still in window; it becomes MAX(started_at) → the card's last-seen. (No
@@ -483,14 +662,41 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('stays silent when the global server is unused but sessions are too few', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 5) // < MIN_SESSIONS
     expect(run(store)).toEqual([])
   })
 
+  it('does not flag a freshly-installed server for removal', () => {
+    const { db, store } = setupDb()
+    // First observed today — inside the tenure cutoff. Its absence from the older
+    // sessions is not disuse (it didn't exist then), so the removal gate holds fire.
+    installGlobalMcp(store, ['sentry'], NEW)
+    seedRepo(db, 'web', 20) // plenty of sessions, but all predate the install
+    expect(run(store)).toEqual([])
+  })
+
+  it('flags a server observed installed past the tenure cutoff', () => {
+    const { db, store } = setupDb()
+    // First observed 40 days ago plus a fresh no-change re-capture: the as-of read at
+    // the 10-day cutoff still finds the old row, so the capability is removal-eligible.
+    installGlobalMcp(store, ['sentry'], OLD)
+    installGlobalMcp(store, ['sentry'], NEW)
+    seedRepo(db, 'web', 12)
+    expect(run(store)).toHaveLength(1)
+  })
+
+  it('flags a server observed 15 days ago — tenure (10d) is shorter than the session window (30d)', () => {
+    const { db, store } = setupDb()
+    // Past the 10-day tenure cutoff but well inside the 30-day session window: eligible.
+    installGlobalMcp(store, ['sentry'], new Date(Date.now() - 15 * DAY_MS).toISOString())
+    seedRepo(db, 'web', 12)
+    expect(run(store)).toHaveLength(1)
+  })
+
   it('scopes a global server used in a minority of repos to those repos', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__issues' }])
     seedRepo(db, 'api', 8)
     seedRepo(db, 'cli', 8)
@@ -499,17 +705,91 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(global.fix.content).toContain('- MCP server: sentry → move to web')
   })
 
+  it('scope evidence points at the sessions that invoked the capability, noting it and the repo', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__issues' }])
+    seedRepo(db, 'api', 8)
+    seedRepo(db, 'cli', 8)
+    seedRepo(db, 'docs', 8) // used in 1 of 4 repos → scope to web
+    const global = run(store).find((c) => c.repo === '*')!
+    expect(global.fix.content).toContain('- MCP server: sentry → move to web')
+    // Evidence is the web sessions that actually ran sentry, not arbitrary recent ones.
+    expect(global.evidence.length).toBeGreaterThan(0)
+    expect(global.evidence.every((e) => e.sessionId.startsWith('web-'))).toBe(true)
+    expect(global.evidence.every((e) => e.note === 'web · uses MCP server sentry')).toBe(true)
+    expect(global.evidence.every((e) => e.turnIdx === undefined)).toBe(true) // no block mapping seeded
+  })
+
+  it('lands scope evidence on the invocation’s block turn when the call is mapped', () => {
+    const { db, store } = setupDb()
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    seedRepo(db, 'api', 8)
+    seedRepo(db, 'cli', 8)
+    seedRepo(db, 'docs', 8)
+    // web-0's sentry call (tool_calls.idx 0) sits in a block opening at user-turn seq 7.
+    db.prepare('INSERT INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,?,?,?,?,?)')
+      .run('web-0', 0, 7, 12, 'user_turn', 'test')
+    db.prepare('INSERT INTO block_tool (session_id, tool_idx, block_idx, producer) VALUES (?,?,?,?)')
+      .run('web-0', 0, 0, 'test')
+    const global = run(store).find((c) => c.repo === '*')!
+    const web0 = global.evidence.find((e) => e.sessionId === 'web-0')!
+    expect(web0.turnIdx).toBe(7)
+  })
+
   it('keeps a global server used across most repos', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
     seedRepo(db, 'api', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }]) // 2 of 2 → shared
     expect(run(store)).toEqual([])
   })
 
+  it('resolves a prior card once nothing is flagged and the window has enough sessions', () => {
+    const { db, store } = setupDb()
+    store.persistInsights('unused-capabilities', 1, [{
+      signalKey: 'unused-caps:claude-code', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    installGlobalMcp(store, ['sentry'])
+    // sentry now used across both repos → shared → nothing flagged. 16 sessions ≥ MIN_SESSIONS.
+    seedRepo(db, 'web', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    seedRepo(db, 'api', 8, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    expect(run(store)).toEqual([])
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')!.state).toBe('resolved')
+  })
+
+  it('does NOT resolve when the window has too few sessions — not enough data', () => {
+    const { db, store } = setupDb()
+    store.persistInsights('unused-capabilities', 1, [{
+      signalKey: 'unused-caps:claude-code', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    installGlobalMcp(store, ['sentry'])
+    // Nothing flagged (sentry used), but only 5 sessions — too thin to conclude the config
+    // was cleaned up, so the stale card must stay surfaced.
+    seedRepo(db, 'web', 5, [{ action: 'mcp_call', name: 'mcp__sentry__x' }])
+    expect(run(store)).toEqual([])
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')!.state).toBe('surfaced')
+  })
+
+  it('resolves a prior card when nothing is installed (config emptied — the fix applied)', () => {
+    const { store } = setupDb()
+    store.persistInsights('unused-capabilities', 1, [{
+      signalKey: 'unused-caps:claude-code', repo: '*', severity: 'medium', title: 'stale', description: 'stale',
+      evidence: [], count: 3, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+    // No installed capabilities (config emptied): with nothing installed there is nothing
+    // that can be unused, so the surfaced card must resolve rather than linger — even
+    // though this path returns before the usual session-count gate.
+    expect(run(store)).toEqual([])
+    expect(store.insightStatus('unused-capabilities', '*', 'unused-caps:claude-code')!.state).toBe('resolved')
+  })
+
   it('matches a plugin-namespaced skill invocation, so a used skill is not flagged', () => {
     const { db, store } = setupDb()
-    installGlobalSkills(store, 'frontend-design')
+    installGlobalSkills(store, ['frontend-design'])
     // Used everywhere (both repos) via the plugin-namespaced name → shared, no card.
     seedRepo(db, 'web', 8, [{ action: 'skill', name: 'frontend-design:frontend-design' }])
     seedRepo(db, 'api', 8, [{ action: 'skill', name: 'frontend-design:frontend-design' }])
@@ -518,7 +798,7 @@ describe('unusedCapabilities.run (end to end)', () => {
 
   it('surfaces a project-scoped unused server in the aggregate, noting its repo', () => {
     const { db, store } = setupDb()
-    installProjectMcp(store, '/Users/x/git/web', 'pg')
+    installProjectMcp(store, '/Users/x/git/web', ['pg'])
     seedRepo(db, 'web', 12) // pg never used in web
     const cards = run(store)
     expect(cards).toHaveLength(1)
@@ -527,18 +807,28 @@ describe('unusedCapabilities.run (end to end)', () => {
     expect(cards[0]!.fix.content).toContain('- MCP server: pg')
   })
 
+  it('shows no evidence for a removal — there is no invocation to point at', () => {
+    const { db, store } = setupDb()
+    installProjectMcp(store, '/Users/x/git/web', ['pg'])
+    seedRepo(db, 'web', 12) // pg never used in web → project remove
+    const card = run(store)[0]!
+    expect(card.fix.content).toContain("Remove from web's config:")
+    // The finding is "never used here"; recent sessions that didn't use it aren't evidence.
+    expect(card.evidence).toEqual([])
+  })
+
   it('skips a project repo whose basename collides with another root', () => {
     const { db, store } = setupDb()
     // Two distinct roots, same basename 'api' → ambiguous, both skipped.
-    installProjectMcp(store, '/Users/x/work/api', 'pg')
-    installProjectMcp(store, '/Users/x/personal/api', 'redis')
+    installProjectMcp(store, '/Users/x/work/api', ['pg'])
+    installProjectMcp(store, '/Users/x/personal/api', ['redis'])
     seedRepo(db, 'api', 12)
     expect(run(store)).toEqual([])
   })
 
   it('does not read another harness’s sessions (source scoping)', () => {
     const { db, store } = setupDb()
-    installGlobalMcp(store, 'sentry')
+    installGlobalMcp(store, ['sentry'])
     // A codex session that uses sentry must not count as claude-code usage.
     db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
       .run('cx-1', 'cx-1', 'codex', 'openai', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
@@ -549,5 +839,52 @@ describe('unusedCapabilities.run (end to end)', () => {
     const cards = run(store)
     expect(cards).toHaveLength(1)
     expect(cards[0]!.fix.content).toContain('- MCP server: sentry')
+  })
+
+  it('emits one insight per harness, keyed by source, with harness-specific wording', () => {
+    const { db, store } = setupDb()
+    // Claude Code: unused server 'sentry' across 12 sessions.
+    installGlobalMcp(store, ['sentry'])
+    seedRepo(db, 'web', 12)
+    // Codex: its own snapshot + 12 codex sessions, none using its 'pg' server.
+    store.recordEnvSnapshot({
+      source: 'codex', scope: 'global', scopeKey: '_global', category: 'mcp',
+      payload: { 'config.toml': { servers: { pg: { type: 'stdio' } } } },
+    }, OLD)
+    const sIns = db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+    for (let i = 0; i < 12; i++) sIns.run(`cx-${i}`, `cx-${i}`, 'codex', 'openai', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+
+    const cards = run(store)
+    const bySig = new Map(cards.map((c) => [c.signalKey, c]))
+    expect(new Set(cards.map((c) => c.signalKey))).toEqual(new Set(['unused-caps:claude-code', 'unused-caps:codex']))
+    // Each card names its own harness and edits its own config.
+    expect(bySig.get('unused-caps:claude-code')!.title).toContain('Claude Code')
+    expect(bySig.get('unused-caps:claude-code')!.fix.content).toContain('- MCP server: sentry')
+    expect(bySig.get('unused-caps:codex')!.title).toContain('Codex')
+    expect(bySig.get('unused-caps:codex')!.fix.content).toContain('- MCP server: pg')
+    // Codex's fix-prompt carries ITS OWN per-source adoption marker.
+    expect(bySig.get('unused-caps:codex')!.fix.content).toContain(
+      `tuneloop-fix: ${insightId('unused-capabilities', '*', 'unused-caps:codex')}`,
+    )
+    // Persisting two distinct-identity insights doesn't collide or throw.
+    expect(() => store.persistInsights('unused-capabilities', 1, cards)).not.toThrow()
+  })
+
+  it('does not flag OpenCode commands folded into the skills category as unused', () => {
+    const { db, store } = setupDb()
+    // OpenCode's `skills` snapshot mixes real skills with commands (kind:'command').
+    store.recordEnvSnapshot({
+      source: 'opencode', scope: 'global', scopeKey: '_global', category: 'skills',
+      payload: { skills: [
+        { name: 'deploy', kind: 'skill', body: 'x', bodyHash: 'h' },
+        { name: 'approve', kind: 'command', body: 'y', bodyHash: 'h2' },
+      ], count: 2 },
+    }, OLD)
+    const sIns = db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)')
+    for (let i = 0; i < 12; i++) sIns.run(`oc-${i}`, `oc-${i}`, 'opencode', 'anthropic', 'web', '/repo', new Date(Date.now() - DAY_MS).toISOString())
+    // Neither is invoked; only the real skill 'deploy' may be flagged — never the command.
+    const card = run(store).find((c) => c.signalKey === 'unused-caps:opencode')!
+    expect(card.fix.content).toContain('- skill: deploy')
+    expect(card.fix.content).not.toContain('approve')
   })
 })

@@ -105,6 +105,23 @@ describe('readClaudeCodeEnvironment — empty', () => {
   })
 })
 
+describe('readClaudeCodeEnvironment — symlinked skills', () => {
+  it('follows a symlinked skill dir and collapses duplicates by real path', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'cc-symlink-'))
+    try {
+      // A real skill, plus a sibling that is a symlink to it — both are discovered
+      // (listDirs follows symlinks) but collapse to one entry (realpath dedup).
+      mkdirSync(join(repo, '.claude', 'skills', 'real'), { recursive: true })
+      writeFileSync(join(repo, '.claude', 'skills', 'real', 'SKILL.md'), '---\ndescription: Real\n---\nReal body.\n')
+      symlinkSync(join(repo, '.claude', 'skills', 'real'), join(repo, '.claude', 'skills', 'dup'))
+      const skills = cat(await readClaudeCodeEnvironment(repo), 'skills') as { skills: Array<{ body: string }> }
+      expect(skills.skills.filter((s) => s.body.includes('Real body')).length).toBe(1)
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('scanProject', () => {
   let repo: string
   beforeEach(() => {

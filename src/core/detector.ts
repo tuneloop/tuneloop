@@ -82,6 +82,14 @@ export interface DetectorContext {
    * it). Shared across all detectors this run, so reports aggregate into one bar.
    */
   progress?: DetectorProgress
+  /**
+   * The run's `--limit`, when set — a cap for a bounded/cheap analyze. A P-tier
+   * detector judges at most this many candidates per run (its first global backfill
+   * can be large; the rest are picked up on later analyzes). Undefined = no cap.
+   * X-tier detectors don't see it: the runner skips them entirely under a limit,
+   * since their cross-session accumulation can't be partially bounded.
+   */
+  limit?: number
 }
 
 export interface EvidenceRef {
@@ -143,6 +151,14 @@ export interface InsightInput {
     /** The deliverable: JSON config to paste, prose suggestion, or shell command. */
     content: string
   }
+  /**
+   * One-line recommended action shown beneath the signal in the list — the "so do
+   * this" that makes the tab read as recommendations, not just problems. Imperative,
+   * verb-first, states what to change (not the problem). Optional: when a detector
+   * can't produce one (e.g. recurring-themes' fix-generation fallback), the row shows
+   * the signal alone.
+   */
+  recommendation?: string
 }
 
 /**

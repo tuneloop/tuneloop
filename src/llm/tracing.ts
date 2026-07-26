@@ -1,12 +1,17 @@
 import type { LlmClient, LlmResult, StructuredRequest } from './types'
 import { costOfUsage } from '../pricing/pricing'
 
-// When Langfuse env keys are present, every LLM call is mirrored to a self-hosted Langfuse 
-// as a "generation" nested under one trace per analyze run — so prompt (system+user), 
-// output, model, tokens, and cost are all inspectable. Entirely opt-in: no keys → this module 
+// When the Langfuse env vars are present, every LLM call is mirrored to Langfuse as a
+// "generation" nested under one trace per analyze run — so prompt (system+user), output,
+// model, tokens, and cost are all inspectable. Entirely opt-in: absent them, this module
 // is a no-op and the SDK (a devDependency) is never even imported, so it can't affect a user's build or run.
-
-const ENABLED = !!process.env.LANGFUSE_PUBLIC_KEY && !!process.env.LANGFUSE_SECRET_KEY
+//
+// LANGFUSE_BASE_URL is REQUIRED, not just the keys: without it the SDK silently defaults
+// to https://cloud.langfuse.com, which would ship private transcript content off-box. We
+// keep egress an explicit choice — point it at your self-hosted instance, or deliberately
+// at cloud.langfuse.com if that's really what you want.
+const ENABLED =
+  !!process.env.LANGFUSE_PUBLIC_KEY && !!process.env.LANGFUSE_SECRET_KEY && !!process.env.LANGFUSE_BASE_URL
 
 // A minimal shape of the bits of the Langfuse SDK we touch, so this file type-checks
 // without the (dev-only) package as a hard dependency.

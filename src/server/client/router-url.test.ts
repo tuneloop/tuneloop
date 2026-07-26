@@ -3,14 +3,15 @@ import { parseHash, serializeRoute, parseQuery, serializeQuery } from './router-
 import type { NavState } from './router-url'
 
 describe('parseHash', () => {
-  it('defaults an empty hash to the dashboard success-rate view', () => {
-    expect(parseHash('')).toMatchObject({ view: 'dashboard', metric: 'success_rate', artKind: 'feature', session: null })
-    expect(parseHash('#/')).toMatchObject({ view: 'dashboard', metric: 'success_rate' })
+  it('defaults an empty hash to the dashboard cost-per-artifact view', () => {
+    expect(parseHash('')).toMatchObject({ view: 'dashboard', metric: 'cost_artifact', artKind: 'feature', session: null })
+    expect(parseHash('#/')).toMatchObject({ view: 'dashboard', metric: 'cost_artifact' })
   })
 
   it('parses each view + sub-selection', () => {
     expect(parseHash('#/highlights')).toMatchObject({ view: 'highlights' })
-    expect(parseHash('#/insights')).toMatchObject({ view: 'insights' })
+    expect(parseHash('#/recommendations')).toMatchObject({ view: 'insights' })
+    expect(parseHash('#/insights')).toMatchObject({ view: 'insights' }) // legacy slug still resolves
     expect(parseHash('#/dashboard/cost_artifact')).toMatchObject({ view: 'dashboard', metric: 'cost_artifact' })
     expect(parseHash('#/artifacts/pr')).toMatchObject({ view: 'artifacts', artKind: 'pr' })
     expect(parseHash('#/sessions')).toMatchObject({ view: 'sessions' })
@@ -50,13 +51,13 @@ describe('parseHash', () => {
   })
 
   it('falls back to defaults for unknown view / metric / kind', () => {
-    expect(parseHash('#/bogus')).toMatchObject({ view: 'dashboard', metric: 'success_rate' })
-    expect(parseHash('#/dashboard/not_a_metric')).toMatchObject({ metric: 'success_rate' })
+    expect(parseHash('#/bogus')).toMatchObject({ view: 'dashboard', metric: 'cost_artifact' })
+    expect(parseHash('#/dashboard/not_a_metric')).toMatchObject({ metric: 'cost_artifact' })
     expect(parseHash('#/artifacts/nope')).toMatchObject({ artKind: 'feature' })
   })
 
   it('ignores a metric segment on a non-dashboard view', () => {
-    expect(parseHash('#/sessions/cost_artifact')).toMatchObject({ view: 'sessions', metric: 'success_rate' })
+    expect(parseHash('#/sessions/success_rate')).toMatchObject({ view: 'sessions', metric: 'cost_artifact' })
   })
 
   it('tolerates a malformed query', () => {
@@ -70,7 +71,7 @@ describe('serializeRoute', () => {
 
   it('serializes each view path', () => {
     expect(serializeRoute(nav({ view: 'highlights' }), {})).toBe('#/highlights')
-    expect(serializeRoute(nav({ view: 'insights' }), {})).toBe('#/insights')
+    expect(serializeRoute(nav({ view: 'insights' }), {})).toBe('#/recommendations')
     expect(serializeRoute(nav({ view: 'dashboard', metric: 'total_spend' }), {})).toBe('#/dashboard/total_spend')
     expect(serializeRoute(nav({ view: 'artifacts', artKind: 'pr' }), {})).toBe('#/artifacts/pr')
     expect(serializeRoute(nav({ view: 'sessions' }), {})).toBe('#/sessions')

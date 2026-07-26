@@ -161,7 +161,8 @@ export interface ProcessorRunRow {
  * Harness-neutral category vocabulary for config snapshots. Deliberately abstract,
  * not per-harness fields: the storage layer is shared, only the reader is
  * per-harness. A harness populates ONLY the categories it has — an absent category
- * simply produces no rows (Pi, e.g., has no sub-agents or skills, so writes neither).
+ * simply produces no rows (Pi, e.g., ships no built-in MCP or sub-agents, so writes
+ * neither `mcp` nor `agents`).
  *
  *  settings     — permissions / plugins / equivalent. Concept is universal; the
  *                 file format is not (CC=JSON, Codex=TOML, OpenCode=JSON).
@@ -172,7 +173,8 @@ export interface ProcessorRunRow {
  *                 must never file AGENTS.md here.
  *  skills       — custom skills / commands. Ragged across harnesses: CC = SKILL.md
  *                 dirs, Codex = shell SKILL.md bundles, OpenCode = a skill tool,
- *                 Pi = none. Same label, different mechanism — reader is per-harness.
+ *                 Pi = SKILL.md dirs + root `.md` files. Same label, different
+ *                 mechanism — reader is per-harness.
  *  instructions — the project-instructions file: CLAUDE.md (CC) / AGENTS.md (Codex,
  *                 OpenCode). The generic name for "always-on instructions the user wrote".
  */
@@ -235,6 +237,8 @@ export interface InsightRow {
     label: string
     content: string
   }
+  /** One-line recommended action shown beneath the signal; null when the detector produced none. */
+  recommendation: string | null
   firstSeenAt: string
   lastSeenAt: string
   stateChangedAt: string | null
@@ -305,4 +309,25 @@ export interface ThemeEventInput {
   themeId?: string
   /** Timestamp of the user message this event was extracted from (the real friction moment). */
   occurredAt?: string
+}
+
+/**
+ * One kitchen-sink verdict to persist — the LLM's judgement of a single session,
+ * positive OR negative (kitchen-sink detector, tier P). One row per judged session;
+ * the card is a windowed projection of the positives (see `kitchen_sink_verdict`).
+ */
+export interface KitchenSinkVerdictInput {
+  sessionId: string
+  /** True = the session mixed unrelated objectives; false = coherent work. */
+  isKitchenSink: boolean
+  /** Block where the second (first unrelated) objective begins; null when coherent. */
+  splitBlockIdx: number | null
+  /** That block's opening main-thread seq — the evidence pointer; null when coherent/unknown. */
+  splitSeq: number | null
+  /** The LLM's one-sentence explanation. */
+  reason: string | null
+  /** Model that produced the verdict (provenance). */
+  model: string | null
+  /** Detector version at judge time. */
+  detectorVersion: number
 }

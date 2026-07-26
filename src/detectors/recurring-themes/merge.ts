@@ -163,11 +163,11 @@ function applyCluster(
     if (!drop) continue
     const legal = keeper.repo === drop.repo || keeper.repo == null // same repo, or global keeper absorbs repo-scoped
     if (!legal) continue
-    if (store.applyThemeMerge(keeper.id, dropId)) {
+    // Merge + retire atomically: the dropped id is gone, so its insight must retire in
+    // the same transaction or a crash between the two would orphan it as a frozen duplicate.
+    if (store.applyThemeMergeAndRetire(keeper.id, dropId, DETECTOR)) {
       byId.delete(dropId)
       applied++
-      // The dropped id is gone; retire its insight so it doesn't linger as a frozen duplicate.
-      store.retireInsightForTheme(DETECTOR, dropId)
     }
   }
 

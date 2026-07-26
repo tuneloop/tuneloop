@@ -3,12 +3,15 @@
 
 export const DETECTOR = 'recurring-themes'
 
-export function slug(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'untitled'
-}
-
 /** Max characters for a theme label — enforced everywhere a label is written (mint, retitle). */
 export const MAX_LABEL_CHARS = 80
+
+// The slug bound must be >= MAX_LABEL_CHARS: a theme id embeds slug(label), so a
+// shorter bound would drop label-distinguishing characters and collapse two
+// distinct (clamped) labels onto the same id.
+export function slug(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, MAX_LABEL_CHARS) || 'untitled'
+}
 
 /** Trim a label to MAX_LABEL_CHARS; the single place the length bound lives. */
 export function clampLabel(label: string): string {

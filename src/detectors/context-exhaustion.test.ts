@@ -59,6 +59,29 @@ function seedSession(
   }
 }
 
+// Like seedSession, but decouples the session's started_at from its turn
+// timestamps — to exercise the event-ts window, where a card is
+// dated by when a compaction happened, not by when its session began. Turns are
+// stamped a minute apart from tsBaseMs, in idx order.
+function seedDecoupled(
+  db: ReturnType<typeof openDb>,
+  id: string,
+  usage: UsageSpec[],
+  startedAtIso: string,
+  tsBaseMs: number,
+  over: { repo?: string; model?: string } = {},
+) {
+  db.prepare('INSERT INTO sessions (id, session_id, source, provider, repo, cwd, started_at) VALUES (?,?,?,?,?,?,?)').run(
+    id, id, 'claude-code', 'anthropic', over.repo ?? 'o/r', '/repo', startedAtIso,
+  )
+  const ins = db.prepare(
+    'INSERT INTO usage_facts (session_id, idx, model, is_sidechain, ts, tok_input, tok_output, tok_cache_create_5m, tok_cache_create_1h, tok_cache_read, cost_usd) VALUES (?,?,?,?,?,?,?,?,0,?,0)',
+  )
+  usage.forEach((u, idx) => {
+    ins.run(id, idx, over.model ?? MODEL, u.sidechain ? 1 : 0, new Date(tsBaseMs + idx * 60_000).toISOString(), u.input ?? 0, u.output ?? 0, u.creates ?? 0, u.reads ?? 0)
+  })
+}
+
 // A session that climbs to the limit and compacts once: occupancy ~166K, then
 // collapses to ~40K (a >40K drop from >100K), then climbs again. One compaction.
 const compactedOnce: UsageSpec[] = [
@@ -100,18 +123,21 @@ describe('context-exhaustion detector', () => {
   it('sources first/last-seen from the compaction turns, not the analyze run', () => {
     const { db, ctx } = setup()
     // Stamp the compaction turn (idx 3) at a fixed past time; earlier/later turns
-    // carry other times so we prove last-seen tracks the compaction, not the max row.
+    // carry other times so we prove first/last-seen tracks the compaction, not the
+    // higher-occupancy peak turn (idx 2) or the later climbing turn (idx 4). All
+    // timestamps are relative to now and inside the 30-day event-ts window.
+    const compactionTs = new Date(Date.now() - 5 * DAY_MS).toISOString()
     const stamped: UsageSpec[] = [
-      { reads: 20_000, creates: 20_000, ts: '2026-06-01T00:00:00Z' },
-      { reads: 100_000, creates: 5_000, ts: '2026-06-01T01:00:00Z' },
-      { reads: 160_000, creates: 6_000, ts: '2026-06-01T02:00:00Z' },
-      { reads: 0, creates: 40_000, ts: '2026-06-10T00:00:00Z' }, // the compaction
-      { reads: 60_000, creates: 3_000, ts: '2026-06-11T00:00:00Z' }, // later, but not a compaction
+      { reads: 20_000, creates: 20_000, ts: new Date(Date.now() - 6 * DAY_MS).toISOString() },
+      { reads: 100_000, creates: 5_000, ts: new Date(Date.now() - 6 * DAY_MS + 3_600_000).toISOString() },
+      { reads: 160_000, creates: 6_000, ts: new Date(Date.now() - 6 * DAY_MS + 7_200_000).toISOString() },
+      { reads: 0, creates: 40_000, ts: compactionTs }, // the compaction
+      { reads: 60_000, creates: 3_000, ts: new Date(Date.now() - 4 * DAY_MS).toISOString() }, // later, but not a compaction
     ]
     for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, stamped)
     const ins = (contextExhaustion.run(ctx) as InsightInput[])[0]!
-    expect(ins.firstSeenAt).toBe('2026-06-10T00:00:00Z')
-    expect(ins.lastSeenAt).toBe('2026-06-10T00:00:00Z')
+    expect(ins.firstSeenAt).toBe(compactionTs)
+    expect(ins.lastSeenAt).toBe(compactionTs)
   })
 
   it('counts multiple compactions within one session', () => {
@@ -128,7 +154,7 @@ describe('context-exhaustion detector', () => {
     const insights = contextExhaustion.run(ctx) as InsightInput[]
     expect(insights).toHaveLength(1)
     // 3 compactions × 10 sessions = 30 total; copy reflects the total and the worst session.
-    expect(insights[0]!.description).toContain('30 compactions total')
+    expect(insights[0]!.description).toContain('30 events total')
     expect(insights[0]!.description).toContain('3 times')
   })
 
@@ -258,5 +284,64 @@ describe('context-exhaustion detector', () => {
     const insights = contextExhaustion.run(ctx) as InsightInput[]
     expect(insights).toHaveLength(1)
     expect(insights[0]!).toMatchObject({ severity: 'medium', count: 2 })
+  })
+
+  it('windows by the compaction turn\'s own timestamp, so a session begun long ago but active now still counts', () => {
+    const { db, ctx } = setup()
+    const beganOutsideWindow = new Date(Date.now() - 40 * DAY_MS).toISOString()
+    const compactedYesterday = Date.now() - DAY_MS
+    // The old started_at scan dropped every one of these sessions; the event-ts
+    // window keeps them because the compactions themselves are recent.
+    for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, compactedOnce, beganOutsideWindow, compactedYesterday)
+    const insights = contextExhaustion.run(ctx) as InsightInput[]
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.count).toBe(10)
+  })
+
+  it('excludes compactions older than the window even when the session started recently', () => {
+    const { db, ctx } = setup()
+    const startedYesterday = new Date(Date.now() - DAY_MS).toISOString()
+    const compactedLongAgo = Date.now() - 40 * DAY_MS
+    // The old started_at scan would have counted these (recent session start); the
+    // event-ts window drops them because the compactions are ancient.
+    for (let i = 0; i < 10; i++) seedDecoupled(db, `s${i}`, compactedOnce, startedYesterday, compactedLongAgo)
+    expect(contextExhaustion.run(ctx)).toEqual([])
+  })
+
+  // A previously-surfaced cross-repo card whose evidence points at one session in `repo`,
+  // so the resolve sweep can recover that repo as the previous contributor.
+  const seedPriorCard = (store: Store, evidenceSessionId: string) =>
+    store.persistInsights('context-exhaustion', 1, [{
+      signalKey: 'context-exhaustion', repo: '*', severity: 'high', title: 'stale', description: 'stale',
+      evidence: [{ sessionId: evidenceSessionId }], count: 5, fix: { type: 'behavioral-nudge', label: 'x', content: 'y' },
+    }])
+
+  it('resolves a prior card when its contributing repo now has enough clean sessions', () => {
+    const { db, store, ctx } = setup()
+    for (let i = 0; i < 10; i++) seedSession(db, `s${i}`, smallSession) // repo o/r, ≥ MIN, no compactions
+    seedPriorCard(store, 's0')
+    expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
+    expect(contextExhaustion.run(ctx)).toEqual([])
+    expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('resolved')
+  })
+
+  it('does NOT resolve when the contributing repo has too few sessions — not enough data', () => {
+    const { db, store, ctx } = setup()
+    for (let i = 0; i < 3; i++) seedSession(db, `s${i}`, smallSession) // repo o/r, < MIN
+    seedPriorCard(store, 's0')
+    // A user back from a break: too little data to conclude "you fixed it".
+    expect(contextExhaustion.run(ctx)).toEqual([])
+    expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
+  })
+
+  it('does NOT resolve on a corpus-wide total when no single contributing repo has enough data', () => {
+    const { db, store, ctx } = setup()
+    // Contributing repo o/a has 5 sessions; o/b has 5. The sum clears MIN, but neither
+    // repo alone does — so o/a still lacks the data to call it clean.
+    for (let i = 0; i < 5; i++) seedSession(db, `a${i}`, smallSession, { repo: 'o/a' })
+    for (let i = 0; i < 5; i++) seedSession(db, `b${i}`, smallSession, { repo: 'o/b' })
+    seedPriorCard(store, 'a0')
+    expect(contextExhaustion.run(ctx)).toEqual([])
+    expect(store.insightStatus('context-exhaustion', '*', 'context-exhaustion')!.state).toBe('surfaced')
   })
 })

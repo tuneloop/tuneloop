@@ -13,10 +13,17 @@ export interface DetectorRunOptions {
   llm: LlmClient | null
   /** Optional step-2 progress bar; all detectors share one aggregator backing it. */
   progress?: Progress
+  /**
+   * The run's `--limit`, when set. Bounds detector work the same way it bounds
+   * session processing: P-tier detectors judge at most this many candidates (via
+   * `ctx.limit`), and X-tier (cross-session) detectors are skipped entirely — their
+   * accumulation over the whole corpus can't be partially bounded.
+   */
+  limit?: number
 }
 
 export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
-  const { detectors, store, log, llmEnabled, llm, progress } = opts
+  const { detectors, store, log, llmEnabled, llm, progress, limit } = opts
 
   // One shared reporter backing the step-2 bar: every detector's addUnits/unitDone/
   // addCost aggregates into the same Progress, even though detectors run in parallel
@@ -39,10 +46,20 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
     unseenSessions: () => store.detectorUnseen(d.name),
     loadSession: (id) => store.hydrateSession(id),
     progress: reporter,
+    limit,
   })
 
   const applicable = detectors.filter((d) => {
     if (d.needsLlm && !llmEnabled) return false
+    // A bounded run (--limit) skips X-tier detectors: their cross-session
+    // accumulation (extract-per-session, then reconcile + surface over the WHOLE
+    // corpus) can't be partially bounded without leaving the written rows in an
+    // inconsistent state. Logged, not silent — the user asked for a full pass to
+    // get them. P-tier detectors instead cap their candidate count via ctx.limit.
+    if (limit != null && d.tier === 'X') {
+      log.info(`detector ${d.name} (tier X, cross-session) skipped under --limit; run without --limit for a full pass`)
+      return false
+    }
     if (d.applicable && !d.applicable(contextFor(d))) {
       log.debug(`detector ${d.name} not applicable, skipping`)
       return false

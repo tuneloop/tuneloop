@@ -43,9 +43,10 @@ function init() {
   // (so an empty or partial hash becomes its canonical form).
   withoutSync(function () {
     state.artKind = route.artKind;
-    state.metric = route.metric; // the KPI tile that's expanded (default success_rate)
+    state.metric = route.metric; // the KPI tile that's expanded (default cost_artifact)
     state.skill = route.skill; // the open per-skill page (null = the roster)
-    // Restore per-view query state only when landing there (query is view-scoped).
+    // Restore the artifacts table's search/sort only when we're landing there
+    // (the query params are scoped to the active view).
     if (route.view === 'artifacts') {
       state.art = { q: route.query.q || '', sort: route.query.sort || 'created', dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
     }

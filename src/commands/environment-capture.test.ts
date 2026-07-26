@@ -1,4 +1,8 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { readCodexEnvironment } from '../adapters/codex/environment'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import { captureEnvironment } from './analyze'
@@ -15,7 +19,7 @@ function setup() {
 /** A minimal adapter whose readEnvironment returns per-path payloads from a map. */
 function stubAdapter(
   id: string,
-  read?: (projectPath?: string) => EnvCategorySnapshot[],
+  read?: (projectPath?: string) => EnvCategorySnapshot[] | Promise<EnvCategorySnapshot[]>,
 ): SourceAdapter {
   return {
     id,
@@ -106,6 +110,34 @@ describe('captureEnvironment', () => {
     await new Promise((r) => setTimeout(r, 2))
     await captureEnvironment(adapter, store, new Set(), log)
     expect(store.envSnapshotCurrent('claude-code', 'global', '_global', 'settings')?.payload).toEqual({ allow: ['a'] })
+  })
+
+  it('preserves a prior Codex snapshot when a present config becomes malformed', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'codex-capture-invalid-'))
+    const config = join(repo, '.codex', 'config.toml')
+    mkdirSync(dirname(config), { recursive: true })
+    writeFileSync(config, 'sandbox_mode = "read-only"\n')
+    const store = setup()
+    const adapter = stubAdapter('codex', (projectPath) =>
+      projectPath === undefined ? [] : readCodexEnvironment(projectPath),
+    )
+
+    try {
+      await captureEnvironment(adapter, store, new Set([repo]), log)
+      expect(store.envSnapshotCurrent('codex', 'project', repo, 'settings')?.payload).toEqual({
+        '.codex/config.toml': { sandbox_mode: 'read-only' },
+      })
+
+      writeFileSync(config, 'sandbox_mode = [')
+      await new Promise((resolve) => setTimeout(resolve, 2))
+      await captureEnvironment(adapter, store, new Set([repo]), log)
+      expect(store.envSnapshotCurrent('codex', 'project', repo, 'settings')?.payload).toEqual({
+        '.codex/config.toml': { sandbox_mode: 'read-only' },
+      })
+    } finally {
+      store.close()
+      rmSync(repo, { recursive: true, force: true })
+    }
   })
 
   it('a read failure for one scope is skipped, not fatal', async () => {

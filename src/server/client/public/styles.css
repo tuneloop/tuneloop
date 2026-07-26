@@ -289,7 +289,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-tr.srow:hover, tr.ins-row:hover { background: #fbf8f1; cursor: pointer; }
+tr.srow:hover { background: #fbf8f1; cursor: pointer; }
 .pr-title { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
 .b-success { background: #e2f0e8; color: var(--emerald); }
@@ -308,7 +308,7 @@ tr.srow:hover, tr.ins-row:hover { background: #fbf8f1; cursor: pointer; }
 .sr-tbl .swatch { width: 11px; height: 11px; border-radius: 2px; display: inline-block; margin-right: 7px; vertical-align: middle; }
 .sr-tbl tr.off td { opacity: .42; }
 /* Sessions + Insights tables: keep every row to a single line. */
-tr.srow td, tr.ins-row td { vertical-align: middle; }
+tr.srow td { vertical-align: middle; }
 .nowrap { white-space: nowrap; }
 .s-title { display: inline-block; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-rest { display: none; }
@@ -699,33 +699,32 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .site-footer a:hover { text-decoration: underline; }
 .site-footer .dot { color: var(--line); }
 
-/* Insights tab — the detector ledger, as a filterable/sortable TABLE (mirrors the
-   Sessions table for a consistent feel). Reuses the generic table/th/td/.srow rules;
-   the classes below are insight-specific hooks (severity dot in the title cell, the
-   sortable-header arrow, the inline Copy-fix button). Full fix + occurrences live in
-   the drawer detail (openInsight). */
-.ins-row-title-wrap { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ins-row-title { max-width: 420px; }
+/* Recommendations tab — a block per item (not a table): the signal, the recommended
+   action (↳), a compact stats line, and a "View →" affordance on the right. The whole
+   block is clickable → detail drawer (full fix + occurrences, openInsight); a drag-select
+   is guarded in JS so the recommendation/title text stays selectable. */
+.ins-intro { margin-bottom: 4px; }              /* reuses .hl-head for the bordered orienting header */
+.ins-list { display: flex; flex-direction: column; }
+.ins-row { padding: 16px 8px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 22px; cursor: pointer; }
+.ins-row:last-child { border-bottom: 0; }
+/* Hover (whole row is the target) + selected (its detail drawer is open): background only. */
+.ins-row:hover, .ins-row.on { background: #fbf8f1; }
+/* Row hover lights up the View affordance so the whole row reads as clickable. */
+.ins-row:hover .ins-row-view { color: var(--emerald); }
+.ins-row:hover .ins-row-view i { transform: translateX(3px); }
+.ins-row-main { flex: 1; min-width: 0; }
+.ins-row-title-wrap { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+/* Serif title matching the Highlights headlines exactly — 17px, normal weight. */
+.ins-row-title { font-family: Georgia, "Times New Roman", serif; font-weight: 400; color: var(--ink); font-size: 17px; }
 .ins-row-repo { flex: 0 0 auto; }
-.ins-row-rec { color: var(--gray); }
-/* Sortable column headers. */
-th.ins-th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
-th.ins-th-sort:hover { color: var(--ink); }
-.ins-sort { color: var(--line); font-size: 10px; }
-.ins-sort.on { color: var(--emerald); }
-/* Selected row (its detail drawer is open). */
-tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
-
-/* Severity dot (cell label row + detail header). */
-.ins-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
-.ins-dot.sev-high { background: var(--red); }
-.ins-dot.sev-medium { background: var(--amber); }
-.ins-dot.sev-low { background: var(--gray); }
-
-/* Lifecycle state (grid + detail). */
-.ins-state { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
-.ins-state.st-fix_issued { color: var(--amber); }
-.ins-state.st-adopted, .ins-state.st-resolved { color: var(--emerald); }
+/* The recommended action, beneath the signal — the payload of this tab, so it reads as real
+   content (--muted). Hanging ↳ so wrapped lines align under the text. */
+.ins-row-rec-line { margin-top: 5px; max-width: 820px; color: var(--muted); font-size: 14px; line-height: 1.45; padding-left: 20px; text-indent: -20px; }
+.ins-rec-arrow { color: var(--emerald); margin-right: 8px; }
+/* Compact stats footer — occ · sessions · last seen. Faint, monospace to match the app's numerics. */
+.ins-row-meta { margin-top: 8px; color: var(--gray); font-size: 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+/* "View →" — the row's explicit affordance (reuses the Highlights tab's .hrow-to link style). */
+.ins-row-view { flex: none; }
 
 /* ---- insight detail (rendered into the shared right drawer) ---- */
 .ins-detail-head .drawer-head-top h2 { display: flex; align-items: center; gap: 9px; }
@@ -735,9 +734,11 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 .ins-section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 18px 0 8px; }
 .ins-btn { border: 1px solid var(--line); background: var(--paper); border-radius: 6px; padding: 3px 10px; font-size: 12px; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .ins-btn:hover { border-color: var(--emerald); color: var(--emerald); }
-.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 4px; }
+.ins-fix { border: 1px solid var(--line); background: var(--track); border-radius: 8px; padding: 12px 14px; margin-top: 0; }
 .ins-fix-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
 .ins-fix-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.ins-fix-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.ins-fix-hint::before { content: "↳ "; color: var(--emerald); }
 .ins-fix-prose { font-size: 13px; }
 .ins-desc pre.md-code, .ins-fix pre.md-code { margin: 6px 0; padding: 8px 10px; background: var(--track); border-radius: 6px; overflow-x: auto; }
 .ins-fix pre.md-code { margin: 0; background: var(--paper); max-height: 420px; overflow-y: auto; }
@@ -745,6 +746,9 @@ tr.ins-row.on { background: #fbf8f1; box-shadow: inset 3px 0 0 var(--emerald); }
 
 /* Occurrences: one clickable row per stored event → its transcript turn. */
 .ins-occ-list { display: flex; flex-direction: column; gap: 8px; }
+/* Cap the evidence list so the Fix section below stays on screen; the occurrence rows
+   scroll within this box while the "Evidence (N)" label stays fixed above it. */
+.ins-occ-scroll { display: flex; flex-direction: column; gap: 8px; max-height: 40vh; overflow-y: auto; padding-right: 4px; }
 .ins-occ { text-align: left; width: 100%; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
   padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 5px; transition: border-color .12s, background .12s; }
 .ins-occ:hover { border-color: var(--emerald); background: var(--track); }

@@ -11,11 +11,15 @@ import type {
   ToolCall,
   UserMessage,
 } from '../../core/model'
-import { mapAction } from './actions'
+import { synthSkillCall } from '../skill-invocation'
+import { explicitSkillName, mapAction } from './actions'
 import { findBranchPaths, findCanonicalLeaf, findLeaves, walkToLeaf } from './tree'
 import type { TreeEntry } from './tree'
 
-export const PARSE_VERSION = 1
+// 2: capture skill invocations — reclassify a `read` of a SKILL.md as `action='skill'`
+//    (implicit path) and synthesize a skill tool call from the `<skill name=…>` message
+//    envelope (explicit `/skill:` path), which Pi injects instead of emitting a tool call.
+export const PARSE_VERSION = 2
 const SOURCE = 'pi'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -177,7 +181,7 @@ function walkPath(linearPath: TreeEntry[]): {
         const mapped = mapAction(pending.name, pending.args)
         toolCalls.push({
           id,
-          name: pending.name,
+          name: mapped.name ?? pending.name,
           action: mapped.action,
           input: pending.args,
           target: mapped.target,
@@ -228,14 +232,20 @@ function walkPath(linearPath: TreeEntry[]): {
           }
         }
       }
+      // Explicit `/skill:name`: Pi injects the skill body as a `<skill name=…>` message
+      // instead of emitting a tool call. Synthesize one, and flag the turn as injected
+      // machinery (isMeta) so it doesn't count as a human prompt.
+      const skill = explicitSkillName(text)
       const ev: UserMessage = {
         kind: 'user',
         ts,
         isSidechain: false,
         text,
         blocks,
+        ...(skill ? { isMeta: true } : {}),
       }
       events.push(ev)
+      if (skill) toolCalls.push(synthSkillCall(skill, { id: `skill-${toolCalls.length}`, ts, isSidechain: false }))
     } else if (m.role === 'toolResult') {
       const toolCallId = m.toolCallId as string | undefined
       if (toolCallId && pendingTools.has(toolCallId)) {
@@ -243,7 +253,7 @@ function walkPath(linearPath: TreeEntry[]): {
         const mapped = mapAction(pending.name, pending.args)
         toolCalls.push({
           id: toolCallId,
-          name: pending.name,
+          name: mapped.name ?? pending.name,
           action: mapped.action,
           input: pending.args,
           target: mapped.target,

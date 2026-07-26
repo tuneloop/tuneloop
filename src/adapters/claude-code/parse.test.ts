@@ -163,3 +163,24 @@ describe('claude-code isMeta (harness-injected user turns)', () => {
     expect(users.map((u) => (u.kind === 'user' ? !!u.isMeta : null))).toEqual([false, true])
   })
 })
+
+describe('claude-code explicit skill invocation (/skill-name)', () => {
+  const EXP_SID = 'dddd0000-1111-2222-3333-444444444444'
+
+  it('captures a skill invoked via the /skill-name command envelope as a skill tool call', async () => {
+    const path = join(dir, `${EXP_SID}.jsonl`)
+    // The explicit `/hello-world` path: a <command-name> user turn, then an isMeta user
+    // turn injecting the SKILL.md body prefixed "Base directory for this skill: <dir>".
+    // No `Skill` tool_use is emitted — the model acts directly (Bash). We synthesize the
+    // skill invocation from the isMeta body so `action='skill'` capture is not lost.
+    const lines = [
+      { parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EXP_SID, uuid: 'x1', timestamp: '2026-07-24T13:12:00.000Z', message: { role: 'user', content: '<command-message>hello-world</command-message>\n<command-name>/hello-world</command-name>' } },
+      { parentUuid: 'x1', isSidechain: false, isMeta: true, type: 'user', cwd: '/repo', sessionId: EXP_SID, uuid: 'x2', timestamp: '2026-07-24T13:12:00.100Z', message: { role: 'user', content: 'Base directory for this skill: /repo/.claude/skills/hello-world\n\n# Hello World\n\nRun ./greet.sh' } },
+      { parentUuid: 'x2', isSidechain: false, type: 'assistant', cwd: '/repo', sessionId: EXP_SID, uuid: 'x3', timestamp: '2026-07-24T13:12:01.000Z', message: { id: 'msg_x1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'b1', name: 'Bash', input: { command: './greet.sh' } }], usage: USAGE } },
+    ]
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'))
+    const session = (await parseClaudeCode(path))!
+    const skills = session.toolCalls.filter((t) => t.action === 'skill')
+    expect(skills.map((s) => s.name)).toEqual(['hello-world'])
+  })
+})

@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { openDb } from '../../store/db'
 import { Store } from '../../store/store'
 import { emptyUsage } from '../../core/model'
@@ -30,7 +30,7 @@ interface Canned {
  * returns no merges; the fix pass (draft_fix) returns a canned fix-prompt. Each
  * tool call is recorded so tests can assert which passes ran.
  */
-function stubLlm(byLabelOrder: Canned[], fix?: { fix_type?: string; content?: string; worth_surfacing?: boolean; reason?: string }): { llm: LlmClient; calls: string[] } {
+function stubLlm(byLabelOrder: Canned[], fix?: { fix_type?: string; content?: string; worth_surfacing?: boolean; reason?: string; recommendation?: string }): { llm: LlmClient; calls: string[] } {
   const queue = [...byLabelOrder]
   const calls: string[] = []
   const llm: LlmClient = {
@@ -116,6 +116,49 @@ async function runAndMark(c: DetectorContext): Promise<InsightInput[]> {
   if (norm.seen?.length) c.store.markDetectorSessionSeen('recurring-themes', norm.seen)
   return norm.insights
 }
+
+describe('recurring-themes model gate (applicable)', () => {
+  /** Minimal ctx for applicable(): only llm + log.warn are read. */
+  function gateCtx(model: string | null): { c: DetectorContext; warnings: string[] } {
+    const warnings: string[] = []
+    const llm = model == null ? null : ({ provider: 'anthropic', model } as LlmClient)
+    const c = {
+      llm,
+      log: { debug() {}, info() {}, warn: (m: string) => warnings.push(m), error() {} },
+    } as unknown as DetectorContext
+    return { c, warnings }
+  }
+
+  it('runs on a Sonnet-class-or-stronger detector model', () => {
+    for (const model of ['claude-sonnet-5', 'claude-opus-4-8', 'gemini-2.5-pro', 'gpt-5']) {
+      const { c, warnings } = gateCtx(model)
+      expect(recurringThemes.applicable!(c)).toBe(true)
+      expect(warnings).toHaveLength(0)
+    }
+  })
+
+  it('skips (with an actionable warning) on a weak or unrecognised model', () => {
+    for (const model of ['claude-haiku-4-5', 'gpt-5.4-mini', 'gemini-2.5-flash', 'deepseek-chat']) {
+      const { c, warnings } = gateCtx(model)
+      expect(recurringThemes.applicable!(c)).toBe(false)
+      expect(warnings[0]).toContain(model)
+      expect(warnings[0]).toContain('TUNELOOP_LLM_MODEL_HEAVY')
+    }
+  })
+
+  it('runs on a weak model when TUNELOOP_RECURRING_THEMES_FORCE is set', () => {
+    vi.stubEnv('TUNELOOP_RECURRING_THEMES_FORCE', '1')
+    const { c, warnings } = gateCtx('claude-haiku-4-5')
+    expect(recurringThemes.applicable!(c)).toBe(true)
+    expect(warnings).toHaveLength(0)
+    vi.unstubAllEnvs()
+  })
+
+  it('does not gate when no LLM is configured (the needsLlm gate owns that)', () => {
+    const { c } = gateCtx(null)
+    expect(recurringThemes.applicable!(c)).toBe(true)
+  })
+})
 
 describe('recurring-themes detector', () => {
   it('surfaces a theme only once it recurs across the threshold (3 events, >=2 sessions)', async () => {
@@ -241,6 +284,20 @@ describe('recurring-themes detector', () => {
     expect(ins.fix.content).toContain(`tuneloop-fix: ${expectedId}`)
     expect(ins.count).toBe(3)
     expect(ins.severity).toBe('low') // 3 events < medium(4)
+  })
+
+  it('carries the LLM-drafted recommendation onto the insight', async () => {
+    const { db, store } = setup()
+    for (const id of ['r1', 'r2', 'r3']) seedSession(db, store, id)
+    const one: Canned = { events: [{ turn: 1, type: 'context-supply', description: 'user had to supply the db config path', new_theme_label: 'Db Config Location Not Found' }] }
+    const { llm } = stubLlm([one, one, one], {
+      fix_type: 'fix-prompt',
+      content: 'Add a CLAUDE.md section documenting the db config path.',
+      recommendation: 'Document the db config path in CLAUDE.md.',
+    })
+    const res = await recurringThemes.run(ctx(store, llm))
+    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
+    expect(insights[0]!.recommendation).toBe('Document the db config path in CLAUDE.md.')
   })
 
   it('surfaces a theme that recurred intensely within ONE session (>= strong single-session count)', async () => {
