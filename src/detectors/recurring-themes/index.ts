@@ -3,6 +3,7 @@ import { addUsage, emptyUsage, type Session, type TokenUsage } from '../../core/
 import { insightId } from '../../core/detector'
 import { arrayField } from '../../llm/json'
 import { costOfUsage } from '../../pricing/pricing'
+import { meetsMinTier } from '../../llm/capability'
 import { collectFollowups } from './followups'
 import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
 import { buildPrompt, extractionSchema, REMEDIES, TOOL_NAME, TRIGGERS, TYPES } from './prompt'
@@ -52,6 +53,23 @@ export const recurringThemes: Detector = {
   version: 2,
   tier: 'X',
   needsLlm: true,
+  // Weak models produce noisy, over-clustered output here (magnet themes, abstract
+  // labels, taste false-positives — measured on Haiku vs Sonnet), so gate the
+  // detector to a Sonnet-class-or-stronger DETECTOR model (the heavy-model pass).
+  // Fail-closed: an unrecognised model is skipped too, unless explicitly forced.
+  applicable(ctx: DetectorContext): boolean {
+    const llm = ctx.llm
+    if (!llm) return true // no LLM at all → the needsLlm gate owns that; nothing to judge
+    if (forceEnabled()) return true
+    if (meetsMinTier(llm.model, 'strong')) return true
+    ctx.log.warn(
+      `${DETECTOR}: skipped — detector model "${llm.model}" is below the recommended Sonnet-class tier; ` +
+        'weak models produce noisy, over-clustered themes. Set a stronger detector model via ' +
+        '--llm-model-heavy / TUNELOOP_LLM_MODEL_HEAVY (e.g. claude-sonnet-5, gpt-5, gemini-2.5-pro), ' +
+        'or set TUNELOOP_RECURRING_THEMES_FORCE=1 to run anyway.',
+    )
+    return false
+  },
   async run(ctx: DetectorContext): Promise<DetectorResult> {
     const { store, llm, log } = ctx
     if (!llm) return { insights: [] }
@@ -126,6 +144,14 @@ export const recurringThemes: Detector = {
 }
 
 registerDetector(recurringThemes)
+
+// ---- gates ------------------------------------------------------------------
+
+/** Escape hatch: run despite a below-floor / unrecognised model. Any truthy-ish value. */
+function forceEnabled(): boolean {
+  const v = process.env.TUNELOOP_RECURRING_THEMES_FORCE
+  return v != null && v !== '' && v !== '0' && v.toLowerCase() !== 'false'
+}
 
 // ---- pre-gate ---------------------------------------------------------------
 
