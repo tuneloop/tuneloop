@@ -21,6 +21,8 @@ export interface ThemeFix {
   fixType: FixType
   /** The deliverable, WITHOUT the tuneloop-fix marker — the caller prepends it for non-nudge types. */
   content: string
+  /** One-line imperative action summarizing the fix, for the list row. Empty if the model omitted it. */
+  recommendation: string
 }
 
 /**
@@ -103,6 +105,10 @@ export async function generateFix(
     'concrete things the user kept supplying/correcting, and the concrete inventory items by name. Do NOT invent',
     'file paths, tool, or skill names you were not shown — if unsure of an exact name, describe what to add. Keep it',
     'tight. For fix-prompt: write the prompt body only (no marker line — that is added automatically).',
+    '',
+    'ALSO give a one-line `recommendation`: an imperative, verb-first summary of the action (≤ ~90 chars) that says',
+    'WHAT TO CHANGE — never restates the problem. It shows beneath the signal in the list. e.g. "Add a \'verify before',
+    'asserting\' rule to CLAUDE.md for docs and copy." or "Pin exact file paths for \'the PRD/repo/db\' in CLAUDE.md."',
   ].filter(Boolean).join('\n')
 
   const { data, usage: u } = await llm.completeStructured({ system, user, schema: fixSchema, toolName: TOOL_NAME, maxTokens: 2048 })
@@ -112,7 +118,8 @@ export async function generateFix(
   if (!worthSurfacing) return { verdict: { worthSurfacing: false, reason, fix: null }, usage }
   const fixType = oneOf(data.fix_type, FIX_TYPES, 'behavioral-nudge')
   const content = typeof data.content === 'string' ? data.content.trim() : ''
-  return { verdict: { worthSurfacing: true, reason, fix: content ? { fixType, content } : null }, usage }
+  const recommendation = typeof data.recommendation === 'string' ? data.recommendation.trim() : ''
+  return { verdict: { worthSurfacing: true, reason, fix: content ? { fixType, content, recommendation } : null }, usage }
 }
 
 /** The "what you already have" block; explicit when empty so the model doesn't invent tools. */
@@ -147,7 +154,7 @@ export async function ensureThemeFix(
   log: Logger,
   theme: {
     id: string; label: string; description: string | null; type: string; repo: string | null
-    fixType: string | null; fixContent: string | null; fixHash: string | null
+    fixType: string | null; fixContent: string | null; fixRecommendation: string | null; fixHash: string | null
   },
   descriptions: string[],
   buildOccurrences: () => FixOccurrence[],
@@ -156,16 +163,21 @@ export async function ensureThemeFix(
   if (theme.fixHash === hash && theme.fixType) {
     // Unchanged since last generation — reuse the cached verdict, no hydration, no LLM.
     if (theme.fixType === VETOED) return { verdict: { worthSurfacing: false, reason: '', fix: null }, usage: emptyUsage() }
-    if (theme.fixContent) return { verdict: { worthSurfacing: true, reason: '', fix: { fixType: theme.fixType as FixType, content: theme.fixContent } }, usage: emptyUsage() }
+    // Require that the recommendation column was WRITTEN (non-null) too: a cache from
+    // before this field existed has NULL, so treat it as a miss and regenerate once to
+    // backfill it. A post-upgrade fix always writes a string (possibly '') so it stays cached.
+    if (theme.fixContent && theme.fixRecommendation !== null) {
+      return { verdict: { worthSurfacing: true, reason: '', fix: { fixType: theme.fixType as FixType, content: theme.fixContent, recommendation: theme.fixRecommendation } }, usage: emptyUsage() }
+    }
   }
   const inventory = buildEnvInventory(store, theme.repo)
   const { verdict, usage } = await generateFix(llm, theme, buildOccurrences(), inventory)
   if (verdict.fix) {
-    store.setThemeFix(theme.id, verdict.fix.fixType, verdict.fix.content, hash)
+    store.setThemeFix(theme.id, verdict.fix.fixType, verdict.fix.content, verdict.fix.recommendation, hash)
     log.debug(`recurring-themes: generated ${verdict.fix.fixType} fix for "${theme.label}"`)
   } else if (!verdict.worthSurfacing) {
     // Cache the veto so a quiet re-analyze doesn't re-ask; re-evaluated on a hash miss.
-    store.setThemeFix(theme.id, VETOED, verdict.reason || 'not worth surfacing', hash)
+    store.setThemeFix(theme.id, VETOED, verdict.reason || 'not worth surfacing', null, hash)
     log.debug(`recurring-themes: fix pass vetoed "${theme.label}" — ${verdict.reason || 'not worth surfacing'}`)
   }
   return { verdict, usage }
@@ -189,5 +201,6 @@ const fixSchema: JsonSchema = {
     reason: { type: 'string', description: 'One line: why it is (or is not) worth surfacing.' },
     fix_type: { type: 'string', enum: FIX_TYPES as unknown as string[], description: 'Omit when worth_surfacing is false.' },
     content: { type: 'string', description: 'The fix deliverable (omit when worth_surfacing is false). For fix-prompt: the prompt body (no marker). For config/command: the exact block/command. For a nudge: the prose.' },
+    recommendation: { type: 'string', description: 'One-line imperative action (≤ ~90 chars) summarizing what to change — shown beneath the signal in the list. Omit when worth_surfacing is false.' },
   },
 }

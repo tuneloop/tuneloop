@@ -329,6 +329,7 @@ CREATE TABLE IF NOT EXISTS insights (
   fix_type          TEXT,
   fix_label         TEXT,
   fix_content       TEXT,
+  recommendation    TEXT,             -- one-line action shown beneath the signal in the list
   first_seen_at     TEXT NOT NULL,
   last_seen_at      TEXT NOT NULL,
   state_changed_at  TEXT,
@@ -440,6 +441,7 @@ CREATE TABLE IF NOT EXISTS theme (
   -- quiet re-analyze reuses it. fix_type is the InsightInput fix.type the LLM chose.
   fix_type    TEXT,
   fix_content TEXT,
+  fix_recommendation TEXT,        -- one-line action for the fix, cached beside it (regenerated with the fix)
   fix_hash    TEXT                -- hash of the occurrence set the current fix was generated from
 );
 
@@ -726,6 +728,16 @@ function migrate(db: DB): void {
   // recurring-themes v2: themes gained a description + a cached LLM-generated fix.
   for (const col of ['description', 'fix_type', 'fix_content', 'fix_hash']) {
     if (tableExists('theme') && !has('theme', col)) db.exec(`ALTER TABLE theme ADD COLUMN ${col} TEXT`)
+  }
+  // Recommendation line: a one-line action shown beneath each signal in the list.
+  // On insights directly (static detectors write it on upsert); on theme as the
+  // cached companion to the LLM fix (a NULL there reads as a cache miss, so existing
+  // themes regenerate their fix once to backfill the recommendation).
+  if (tableExists('insights') && !has('insights', 'recommendation')) {
+    db.exec('ALTER TABLE insights ADD COLUMN recommendation TEXT')
+  }
+  if (tableExists('theme') && !has('theme', 'fix_recommendation')) {
+    db.exec('ALTER TABLE theme ADD COLUMN fix_recommendation TEXT')
   }
   // recurring-themes v3: theme_events carry the user message's own timestamp, so
   // first/last-seen reflect when friction actually happened (not the analyze run).

@@ -51,6 +51,39 @@ describe('deterministic insight ids', () => {
   })
 })
 
+describe('recommendation', () => {
+  it('persists and returns the recommendation, and defaults to null when omitted', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [
+      mkInsight({ signalKey: 'with', recommendation: 'Split large tasks into scoped sessions.' }),
+      mkInsight({ signalKey: 'without' }),
+    ])
+    const rows = store.insights()
+    expect(rows.find((r) => r.signalKey === 'with')!.recommendation).toBe('Split large tasks into scoped sessions.')
+    expect(rows.find((r) => r.signalKey === 'without')!.recommendation).toBeNull()
+  })
+
+  it('a re-detection updates the recommendation', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [mkInsight({ recommendation: 'Old line.' })])
+    store.persistInsights('det', 1, [mkInsight({ recommendation: 'New line.' })])
+    expect(store.insights()[0]!.recommendation).toBe('New line.')
+  })
+})
+
+describe('ranking + limit', () => {
+  it('limit caps to the top N of the severity → recency ranking', () => {
+    const { store } = setup()
+    store.persistInsights('det', 1, [
+      mkInsight({ signalKey: 'lo', severity: 'low' }),
+      mkInsight({ signalKey: 'hi', severity: 'high' }),
+      mkInsight({ signalKey: 'md', severity: 'medium' }),
+    ])
+    expect(store.insights().map((r) => r.signalKey)).toEqual(['hi', 'md', 'lo'])
+    expect(store.insights({ limit: 2 }).map((r) => r.signalKey)).toEqual(['hi', 'md'])
+  })
+})
+
 describe('insight_state_log', () => {
   it('logs null→surfaced on first insert and resolved→surfaced on reopen', () => {
     const { db, store } = setup()

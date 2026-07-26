@@ -252,6 +252,7 @@ function buildLevelInsight(qualifying: Array<[string, RepoAgg]>): InsightInput {
           `models rewrites the cached prefix. Batch quick follow-ups while the cache is warm, and settle ` +
           `config and model choices before long working sessions.`,
       },
+      recommendation: 'Batch quick follow-ups while the cache is warm; settle config and model before long sessions.',
     }
 }
 

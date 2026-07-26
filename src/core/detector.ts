@@ -151,6 +151,14 @@ export interface InsightInput {
     /** The deliverable: JSON config to paste, prose suggestion, or shell command. */
     content: string
   }
+  /**
+   * One-line recommended action shown beneath the signal in the list — the "so do
+   * this" that makes the tab read as recommendations, not just problems. Imperative,
+   * verb-first, states what to change (not the problem). Optional: when a detector
+   * can't produce one (e.g. recurring-themes' fix-generation fallback), the row shows
+   * the signal alone.
+   */
+  recommendation?: string
 }
 
 /**

@@ -504,6 +504,18 @@ describe('buildCards', () => {
     expect(two[0]!.severity).toBe('low')
   })
 
+  it('recommendation adapts to the verdict mix (scope-only, remove-only, both)', () => {
+    const scopeOnly = buildCards([scope(gcap('skill', 'frontend-design'), ['web'])], noInv)[0]!
+    expect(scopeOnly.recommendation).toBe("Move repo-only skills/servers out of global config so they don't load every session.")
+
+    // A per-repo removal counts as a remove, too.
+    const removeOnly = buildCards([remove(pcap('mcp', 'pg', 'web'))], noInv)[0]!
+    expect(removeOnly.recommendation).toBe('Remove capabilities that are never used from your config.')
+
+    const both = buildCards([remove(gcap('mcp', 'sentry')), scope(gcap('skill', 'frontend-design'), ['web'])], noInv)[0]!
+    expect(both.recommendation).toBe('Remove never-used capabilities and move repo-only ones out of global config.')
+  })
+
   it('scope evidence is the capability’s invocations; a co-present removal adds none', () => {
     const cap = gcap('mcp', 'sentry')
     const scopeInv = new Map<string, EvidenceRef[]>([[capIdentity(cap), [

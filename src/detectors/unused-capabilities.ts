@@ -336,6 +336,16 @@ export function buildCards(
 
   const total = classified.length
   const problem = [globalProblem(globals), projectProblem(byRepo)].filter(Boolean).join(' ')
+  // One-line action adapts to what the card actually contains: never-used caps get
+  // removed, repo-only caps loaded globally get relocated, and a card can hold both.
+  const hasRemove = classified.some((c) => c.verdict === 'remove')
+  const hasScope = classified.some((c) => c.verdict === 'scope')
+  const recommendation =
+    hasScope && hasRemove
+      ? 'Remove never-used capabilities and move repo-only ones out of global config.'
+      : hasScope
+        ? "Move repo-only skills/servers out of global config so they don't load every session."
+        : 'Remove capabilities that are never used from your config.'
   return [{
     signalKey: signalKeyFor(source),
     repo: '*',
@@ -349,6 +359,7 @@ export function buildCards(
       label: 'Trim unused capabilities',
       content: fixPromptContent(problem, sections, source),
     },
+    recommendation,
   }]
 }
 

@@ -357,6 +357,9 @@ async function surfaceInsights(
     }
 
     let fix: InsightInput['fix']
+    // The one-line action shown beneath the signal. Only a real generated fix carries
+    // one; the fallback placeholder leaves it undefined so the row shows the signal alone.
+    let recommendation: string | undefined
     try {
       const res = await ensureThemeFix(store, llm, log, t, t.descriptions, buildOccurrences)
       usage = addUsage(usage, res.usage)
@@ -374,6 +377,7 @@ async function surfaceInsights(
         const f = res.verdict.fix
         const content = f.fixType === 'behavioral-nudge' ? f.content : `tuneloop-fix: ${id}\n\n${f.content}`
         fix = { type: f.fixType, label: FIX_LABEL[f.fixType] ?? 'Suggested fix', content }
+        recommendation = f.recommendation || undefined
       } else {
         fix = fallbackFix()
       }
@@ -398,6 +402,7 @@ async function surfaceInsights(
       firstSeenAt: t.firstSeenAt ?? undefined,
       lastSeenAt: t.lastSeenAt ?? undefined,
       fix,
+      recommendation,
     })
   }
   return { insights, usage }

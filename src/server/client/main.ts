@@ -42,7 +42,7 @@ function init() {
   // (so an empty or partial hash becomes its canonical form).
   withoutSync(function () {
     state.artKind = route.artKind;
-    state.metric = route.metric; // the KPI tile that's expanded (default success_rate)
+    state.metric = route.metric; // the KPI tile that's expanded (default cost_artifact)
     // Restore the artifacts table's search/sort only when we're landing there
     // (the query params are scoped to the active view).
     if (route.view === 'artifacts') {
