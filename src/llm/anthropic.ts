@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { parseJsonObject } from './json'
+import { parseJsonObject, sanitizeToolInput } from './json'
 import type { ClientOpts, LlmClient, LlmResult, StructuredRequest } from './types'
 
 /** The one slice of the Anthropic SDK surface the enrichment path uses — also satisfied by the Bedrock client. */
@@ -27,19 +27,26 @@ export function anthropicShapedClient(
     provider,
     model,
     async completeStructured(req: StructuredRequest): Promise<LlmResult> {
-      const { system, user, schema, toolName, maxTokens = 1024 } = req
+      const { system, user, schema, toolName, maxTokens = 1024, cacheSystem } = req
+      // cacheSystem → send system as a cacheable block (repeat calls read it at ~10% cost).
+      const systemParam = cacheSystem
+        ? [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }]
+        : system
       const resp = await client.messages.create({
         model,
         max_tokens: maxTokens,
-        system,
+        system: systemParam,
         messages: [{ role: 'user', content: user }],
         tools: [{ name: toolName, description: 'Record the structured analysis.', input_schema: schema as Anthropic.Tool.InputSchema }],
         tool_choice: { type: 'tool', name: toolName },
         ...extraParams,
       })
       // The forced tool's input IS the structured result; salvage any text if absent.
+      // sanitizeToolInput strips tool-call XML a model (notably Sonnet-5) can bleed
+      // into a long string param — e.g. a fix's `content` capturing the sibling
+      // `<parameter name="reason">…` block.
       for (const b of resp.content) {
-        if (b.type === 'tool_use' && b.name === toolName) return { data: b.input as Record<string, unknown>, usage: usageOf(resp.usage) }
+        if (b.type === 'tool_use' && b.name === toolName) return { data: sanitizeToolInput(b.input as Record<string, unknown>), usage: usageOf(resp.usage) }
       }
       return { data: parseJsonObject(textOf(resp.content)) ?? {}, usage: usageOf(resp.usage) }
     },

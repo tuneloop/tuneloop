@@ -4,6 +4,7 @@ import { registerAdapter } from '../../core/registry'
 import type { Session } from '../../core/model'
 import type { SourceAdapter } from '../types'
 import { dbPathFor, openOpencodeDb } from './db'
+import { readOpencodeEnvironment } from './environment'
 import { buildSessions, PARSE_VERSION, SOURCE } from './parse'
 
 /**
@@ -34,6 +35,7 @@ export const opencodeAdapter: SourceAdapter = {
     }
     return out
   },
+  readEnvironment: readOpencodeEnvironment,
 }
 
 registerAdapter(opencodeAdapter)

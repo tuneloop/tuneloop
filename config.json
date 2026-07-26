@@ -1,0 +1,18 @@
+{
+  "processors": {
+    "segment-blocks": { "enabled": true },
+    "files-touched": { "enabled": true },
+    "fix-marker": { "enabled": true },
+    "outcomes-git": { "enabled": true },
+    "pr-content-match": { "enabled": true },
+    "enrich-session": { "enabled": true },
+    "steering": { "enabled": true }
+  },
+  "detectors": {
+    "cache-miss": { "enabled": true },
+    "unused-capabilities": { "enabled": true },
+    "context-exhaustion": { "enabled": true },
+    "recurring-themes": { "enabled": true },
+    "kitchen-sink": { "enabled": true }
+  }
+}

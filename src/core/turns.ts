@@ -3,6 +3,11 @@
  * "user" messages. Several features need this distinction: the session digest
  * (so autonomy/intent aren't skewed by slash-command echoes) and the
  * Files-changed view (so an edit links to the prompt that actually caused it).
+ *
+ * Also home to the turn-spine helpers (userTurns / followupTurns / isApproval)
+ * shared by the steering processor and the recurring-themes detector — one
+ * definition of "substantive follow-up" so the deterministic count and the LLM
+ * prompt can never disagree.
  */
 
 import type { Session } from './model'
@@ -35,6 +40,19 @@ export function isRealUserText(text: string): boolean {
 }
 
 /**
+ * Event-level form of isRealUserText, and the one to prefer when you hold the
+ * event: it also honours the source's own `isMeta` flag.
+ *
+ * The text heuristic can only catch injected turns that LOOK injected (a
+ * `<command-name>` tag, a caveat preamble). An expanded skill body doesn't — it
+ * reads as a well-written prompt, because it is one; only the flag distinguishes
+ * it. Sources that don't mark their injections still get the heuristic.
+ */
+export function isRealUserEvent(ev: { isMeta?: boolean; text: string }): boolean {
+  return !ev.isMeta && isRealUserText(ev.text)
+}
+
+/**
  * The session's first REAL human turn, in full — the fallback session title
  * when neither the adapter nor LLM enrichment supplied one. Skips sidechain and
  * injected/machinery turns and collapses whitespace to a single line, but does
@@ -43,11 +61,65 @@ export function isRealUserText(text: string): boolean {
  */
 export function firstUserPrompt(s: Session): string | null {
   for (const ev of s.events) {
-    if (ev.kind !== 'user' || ev.isSidechain) continue
-    const t = stripReminders(ev.text)
-    if (!t || isSyntheticUser(t)) continue
-    const clean = t.replace(/\s+/g, ' ').trim()
+    if (ev.kind !== 'user' || ev.isSidechain || !isRealUserEvent(ev)) continue
+    const clean = stripReminders(ev.text).replace(/\s+/g, ' ').trim()
     if (clean) return clean
   }
   return null
 }
+
+/**
+ * All main-thread human turns, in order. Excludes sidechain (subagent) turns,
+ * strips injected reminders, and drops Claude-injected pseudo-user turns —
+ * slash-command echoes, local-command caveats/stdout, interrupts, tool
+ * rejections. Those are machinery, not the human steering the agent; counting
+ * them skews the opener (the first REAL prompt) and the steering signal.
+ */
+export function userTurns(s: Session): string[] {
+  return userTurnEvents(s).map((t) => t.text)
+}
+
+/** A real human turn plus its main-thread seq — the evidence pointer theme events persist. */
+export interface UserTurn {
+  text: string
+  seq?: number
+  /** The message's own timestamp (when the user actually sent it). */
+  ts?: string
+}
+
+/** Same filter as userTurns, but keeps each turn's seq + ts (see UserTurn). */
+export function userTurnEvents(s: Session): UserTurn[] {
+  const out: UserTurn[] = []
+  for (const ev of s.events) {
+    if (ev.kind !== 'user' || ev.isSidechain || !isRealUserEvent(ev)) continue
+    out.push({ text: stripReminders(ev.text), seq: ev.seq, ts: ev.ts })
+  }
+  return out
+}
+
+/**
+ * Substantive follow-up turns: the user turns AFTER the opening request, minus
+ * bare approvals/continuations ("yes", "continue"). This is a CEILING on
+ * steering, not steering itself — a follow-up may be genuine direction
+ * ("use Postgres instead") or mere workflow progression ("commit and open a PR",
+ * "mark it done"), and only a model can tell those apart from the text. The
+ * count feeds the deterministic `followup_count` annotation (steering processor)
+ * and the recurring-themes pre-gate. Deliberately conservative: only whole-turn
+ * known approvals are dropped, so nothing substantive is hidden.
+ */
+export function followupTurns(turns: string[]): string[] {
+  return turns.slice(1).filter((t) => !isApproval(t))
+}
+
+/** A short, content-free affirmation/continuation ("yes", "ok continue") that lets the agent proceed rather than redirecting it. */
+export function isApproval(text: string): boolean {
+  const t = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!t) return true
+  if (t.split(' ').length > 6) return false // too long to be a bare approval
+  return APPROVAL_RE.test(t)
+}
+
+// Whole-turn approval/continuation phrases (matched against punctuation-stripped,
+// lowercased text). Kept conservative — when unsure, a turn counts as steering.
+const APPROVAL_RE =
+  /^(y|yes|yep|yup|yeah|ya|ok|okay|k|kk|sure|fine|cool|great|perfect|nice|good|awesome|excellent|thanks|thank you|thanks a lot|thank you so much|ty|thx|continue|please continue|proceed|go|go ahead|go for it|go on|do it|do that|keep going|carry on|next|lgtm|looks good|looks great|that works|sounds good|ship it|approved|correct|right|exactly|agreed|got it|makes sense|yes please|ok thanks|perfect thanks|great thanks|yes continue|ok continue|ok go ahead|sure go ahead)$/

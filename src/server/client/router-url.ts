@@ -2,6 +2,7 @@
 // so it's unit-testable under Node and reusable by router.ts. The grammar:
 //
 //   #/highlights                    the landing digest (empty hash also lands here)
+//   #/recommendations               the recommendations ledger (legacy alias: #/insights)
 //   #/dashboard/<metric>            e.g. #/dashboard/cost_artifact
 //   #/artifacts/<kind>[?q=&sort=&dir=]
 //   #/sessions[?win=&q=&outcomes=&artifact=&artifactKind=&f.<facet>=…]
@@ -14,7 +15,7 @@
 // defaults rather than erroring, so a stale or hand-mangled hash always resolves.
 
 export interface Route {
-  view: 'highlights' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string // dashboard sub-selection (which KPI is expanded)
   artKind: string // artifacts sub-selection (feature | pr)
   session: string | null // open drawer target, or null (mirror of query.session)
@@ -23,7 +24,7 @@ export interface Route {
 
 /** The path-level slice of client state that maps to the URL path. */
 export interface NavState {
-  view: 'highlights' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string | null
   artKind: string
 }
@@ -32,10 +33,15 @@ export interface NavState {
 // but it is NOT the parse fallback — an empty or unknown hash still resolves to
 // 'dashboard' (see parseHash). main.ts decides to LAND on highlights when the hash
 // is empty; an explicit deep link to any other view wins.
-export const VIEWS = ['highlights', 'dashboard', 'artifacts', 'sessions']
+export const VIEWS = ['highlights', 'insights', 'dashboard', 'artifacts', 'sessions']
+// URL slug ↔ internal view id. Only the 'insights' view differs: its tab is user-facing
+// "Recommendations", so its shareable URL reads #/recommendations while every DOM id,
+// /api/insights call, and setView('insights') keeps the internal 'insights' id. The old
+// #/insights slug still resolves (legacy bookmarks) — see parseHash.
+const SLUG_TO_VIEW: Record<string, string> = { recommendations: 'insights' }
 export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions', 'ops']
 export const ART_KINDS = ['feature', 'pr']
-export const DEFAULT_METRIC = 'success_rate'
+export const DEFAULT_METRIC = 'cost_artifact'
 export const DEFAULT_ARTKIND = 'feature'
 
 /** Decode a `a=1&b=2` query string into a map (tolerant of junk / bad encoding). */
@@ -74,7 +80,10 @@ export function parseHash(hash: string): Route {
   const query = parseQuery(qIdx >= 0 ? raw.slice(qIdx + 1) : '')
   const parts = path.split('/').filter(Boolean)
 
-  const view = (VIEWS.indexOf(parts[0]) >= 0 ? parts[0] : 'dashboard') as Route['view']
+  // Map the URL slug to the internal view id (only 'recommendations' → 'insights'); the
+  // legacy '#/insights' slug passes through unchanged and still resolves.
+  const slug = SLUG_TO_VIEW[parts[0]] || parts[0]
+  const view = (VIEWS.indexOf(slug) >= 0 ? slug : 'dashboard') as Route['view']
   const metric = view === 'dashboard' && METRICS.indexOf(parts[1]) >= 0 ? parts[1] : DEFAULT_METRIC
   const artKind = view === 'artifacts' && ART_KINDS.indexOf(parts[1]) >= 0 ? parts[1] : DEFAULT_ARTKIND
 
@@ -86,11 +95,13 @@ export function serializeRoute(nav: NavState, query: Record<string, string>): st
   const base =
     nav.view === 'highlights'
       ? '#/highlights'
-      : nav.view === 'artifacts'
-        ? '#/artifacts/' + (nav.artKind || DEFAULT_ARTKIND)
-        : nav.view === 'sessions'
-          ? '#/sessions'
-          : '#/dashboard/' + (nav.metric || DEFAULT_METRIC)
+      : nav.view === 'insights'
+        ? '#/recommendations'
+        : nav.view === 'artifacts'
+          ? '#/artifacts/' + (nav.artKind || DEFAULT_ARTKIND)
+          : nav.view === 'sessions'
+            ? '#/sessions'
+            : '#/dashboard/' + (nav.metric || DEFAULT_METRIC)
   const qs = serializeQuery(query)
   return qs ? base + '?' + qs : base
 }

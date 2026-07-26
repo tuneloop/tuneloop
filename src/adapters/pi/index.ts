@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { registerAdapter } from '../../core/registry'
 import { walkFiles } from '../../util/walk'
 import type { SourceAdapter } from '../types'
+import { readPiEnvironment } from './environment'
 import { parsePi, PARSE_VERSION } from './parse'
 
 export const piAdapter: SourceAdapter = {
@@ -16,6 +17,7 @@ export const piAdapter: SourceAdapter = {
     return all
   },
   parse: parsePi,
+  readEnvironment: readPiEnvironment,
 }
 
 registerAdapter(piAdapter)

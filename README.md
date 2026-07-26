@@ -59,7 +59,24 @@ Handy flags:
 
 - `--no-serve` — build the store and exit, no dashboard
 - `--port <n>` — serve on a different port
+- `--config <path>` — a JSON file selecting which processors/detectors run (see below)
 - `npx tuneloop serve` — open the dashboard over an already-analyzed store, without re-analyzing
+
+### Choosing what runs
+
+By default `analyze` runs every built-in processor and detector. To run only a
+subset, copy the shipped [`config.json`](./config.json) — it lists everything —
+delete or disable what you don't want, and pass it with `--config`:
+
+```bash
+npx tuneloop analyze --config ./my-config.json
+```
+
+Each entry is keyed by name with an `enabled` flag; omit a whole section
+(`processors` or `detectors`) to keep all of that kind. A processor's
+dependencies are pulled in automatically, so you can't accidentally starve one
+of its inputs. See [ARCHITECTURE.md](./ARCHITECTURE.md#built-in-processors) for
+the full list and what each does.
 
 ## What you get
 
@@ -221,6 +238,23 @@ interactive prompt. It's cheap — a typical corpus of ~80
 sessions runs about **$0.60** with Claude Haiku. This cost shows up as **Analysis
 spend** in the summary, priced from a built-in table with an OpenRouter public
 price list filling gaps (cached under `~/.tuneloop/`).
+
+**Two model tiers (optional).** By default one model does everything. The work
+splits into two shapes, though: per-session enrichment is one call per session
+(the volume — a cheap model is the right call), while the pattern **detectors**
+make a handful of cross-session synthesis calls where reasoning quality shows up
+in the insights. Set `TUNELOOP_LLM_MODEL_HEAVY` (or `--llm-model-heavy`) to give
+the detector pass a stronger sibling model on the same provider:
+
+```bash
+TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
+  npx tuneloop analyze --llm-model claude-haiku-4-5 --llm-model-heavy claude-sonnet-5
+```
+
+Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
+differs. Leave it unset and detectors keep using the base model, unchanged.
+Changing it re-analyzes the full corpus for LLM detectors, since extractions made
+by the old model aren't comparable to the new one's.
 
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the

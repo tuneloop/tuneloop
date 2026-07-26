@@ -1,6 +1,6 @@
 // The headline KPI tile row + the tile-as-nav behaviour: clicking a tile opens
 // that metric's full-width detail section, and exactly one section is always
-// expanded (default success_rate, set in main.ts).
+// expanded (default cost_artifact, set in main.ts).
 import { state, $, esc, usd, num, get, fmtVal, kpiDelta, cxLabelList } from './core'
 import { syncHash } from './router'
 import { clearAsked } from './askbanner'
@@ -113,12 +113,12 @@ export function paintKpis() {
   // paintKpis callers in main.ts) and the enrichment nudge explains why.
   var srKnown = successDefinable();
   var tiles = [
-    { label: 'Session Outcome Rate', value: srKnown ? fmtVal(cur.successRate, 'pct') : '—',
-      delta: srKnown ? kpiDelta(cur.successRate, prev.successRate, 'points', 'up') : '',
-      sub: srKnown ? 'of sessions in window' : 'no matching outcomes yet', metric: 'success_rate' },
     { label: 'Cost per shipped artifact', value: caData.cur.costPerUnit != null ? usd(caData.cur.costPerUnit) : '—',
       delta: kpiDelta(caData.cur.costPerUnit, caData.prev.costPerUnit, 'rel', 'down'), sub: caSub,
       metric: 'cost_artifact' },
+    { label: 'Session Outcome Rate', value: srKnown ? fmtVal(cur.successRate, 'pct') : '—',
+      delta: srKnown ? kpiDelta(cur.successRate, prev.successRate, 'points', 'up') : '',
+      sub: srKnown ? 'of sessions in window' : 'no matching outcomes yet', metric: 'success_rate' },
     { label: 'Total spend', value: usd(cur.totalSpend),
       delta: kpiDelta(cur.totalSpend, prev.totalSpend, 'rel', null), sub: '', metric: 'total_spend' },
     { label: 'Sessions', value: num(cur.sessions),

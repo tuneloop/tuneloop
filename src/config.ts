@@ -8,7 +8,7 @@ export interface TuneloopConfig {
   dataDir: string
   dbPath: string
   /** LLM provider for enrichment (BYO key), or null when not configured. */
-  llm: { provider: string; model: string; apiKey: string; baseURL?: string } | null
+  llm: { provider: string; model: string; apiKey: string; baseURL?: string; heavyModel?: string } | null
 }
 
 /**
@@ -20,6 +20,8 @@ export interface TuneloopConfig {
 export interface LlmOverrides {
   provider?: string
   model?: string
+  /** Optional stronger model for the detector pass; unset = detectors reuse `model`. */
+  heavyModel?: string
   baseURL?: string
   /** In-process override (interactive prompt); never exposed as a CLI flag. */
   apiKey?: string
@@ -46,8 +48,13 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   if (preset && !preset.keyless && !apiKey) return null
 
   const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
+  // Opt-in second tier: per-session processors keep the cheap `model`, while the
+  // cross-session detector pass gets this one. Deliberately has NO preset default —
+  // unset means one model for everything, exactly as before. Same provider/key/URL
+  // as `model`, so it only makes sense as a sibling id on the same endpoint.
+  const heavyModel = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? undefined
   const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL
-  return { provider, model, apiKey, baseURL }
+  return { provider, model, apiKey, baseURL, heavyModel }
 }
 
 export function loadConfig(opts?: { dataDir?: string; db?: string; llm?: LlmOverrides }): TuneloopConfig {

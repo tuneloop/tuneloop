@@ -14,7 +14,7 @@
  * cross-processor store reads.
  */
 import type { Event, Session, ToolCall } from './model'
-import { isRealUserText, stripReminders } from './turns'
+import { isRealUserEvent, stripReminders } from './turns'
 
 /** A tool action that closes a block (cost-attribution boundary). */
 export type BoundaryKind = 'commit' | 'pr_create' | 'pr_merge' | 'pr_review'
@@ -115,7 +115,7 @@ export function deterministicBlocks(session: Session): Block[] {
   const closeKind: (BoundaryKind | null)[] = new Array(m).fill(null)
   for (let i = 0; i < m; i++) {
     const ev = main[i]!
-    if (ev.kind === 'user' && isRealUserText(ev.text)) userStart[i] = true
+    if (ev.kind === 'user' && isRealUserEvent(ev)) userStart[i] = true
     else if (ev.kind === 'assistant') {
       let bk: BoundaryKind | null = null
       for (const b of ev.blocks) {
@@ -275,7 +275,7 @@ export function blockSpine(session: Session, blocks: Block[]): string {
     let opener = ''
     for (let s = b.startSeq; s <= b.endSeq; s++) {
       const ev = bySeq.get(s)
-      if (ev && ev.kind === 'user' && isRealUserText(ev.text)) {
+      if (ev && ev.kind === 'user' && isRealUserEvent(ev)) {
         opener = stripReminders(ev.text).replace(/\s+/g, ' ')
         break
       }

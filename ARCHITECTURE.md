@@ -238,6 +238,15 @@ Config lives in `~/.tuneloop/` by default (store at `tuneloop.sqlite`);
 `TUNELOOP_*` environment variables and CLI flags override paths, ports, and the
 enrichment provider/model. See the README for the full env reference.
 
+**Selecting the pipeline.** `analyze --config <path>` reads a JSON file
+(`src/pipeline-config.ts`) that selects which processors and detectors run;
+without the flag, the shipped default (`config.json`, kept complete by a drift
+test) runs everything. Each section maps a component name to `{ "enabled": … }`.
+An omitted section runs every component of that kind; a present section is an
+allowlist. Unknown names are warned and ignored, and an enabled processor's
+`requires` deps are auto-enabled — so a config can't silently starve a dependent
+of its upstream data.
+
 ## Where things live
 
 ```

@@ -16,6 +16,10 @@ export default defineConfig([
     sourcemap: true,
     // better-sqlite3 (native) and commander stay external — tsup externalizes
     // package.json dependencies by default, which is what we want here.
+    // langfuse is a devDependency (personal debug-only, dynamically imported), so
+    // externalize it explicitly: it must NOT be bundled, and the runtime import
+    // simply fails gracefully when it isn't installed in a user's environment.
+    external: ['langfuse'],
   },
   {
     // dashboard client (browser) — bundled separately and served as a static

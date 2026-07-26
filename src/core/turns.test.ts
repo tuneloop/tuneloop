@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { emptyUsage, type Event, type Session } from './model'
-import { firstUserPrompt } from './turns'
+import { firstUserPrompt, followupTurns, isApproval, userTurnEvents } from './turns'
 
 function session(events: Event[]): Session {
   return {
@@ -56,5 +56,80 @@ describe('firstUserPrompt', () => {
       { kind: 'assistant', blocks: [], usage: emptyUsage(), isSidechain: false },
     ])
     expect(firstUserPrompt(s)).toBeNull()
+  })
+})
+
+describe('isApproval', () => {
+  it('treats bare affirmations/continuations as approvals (case- and punctuation-insensitive)', () => {
+    for (const t of ['yes', 'Yes!', 'ok', 'sure, go ahead', 'lgtm', 'looks good', 'ship it', 'continue', 'thanks']) {
+      expect(isApproval(t)).toBe(true)
+    }
+  })
+
+  it('empty / whitespace-only turns are approvals (nothing to steer with)', () => {
+    expect(isApproval('')).toBe(true)
+    expect(isApproval('   ')).toBe(true)
+  })
+
+  it('substantive turns are not approvals', () => {
+    for (const t of ['no, use postgres instead', 'that broke the build', 'why did you delete that file']) {
+      expect(isApproval(t)).toBe(false)
+    }
+  })
+
+  it('a long turn is never a bare approval even if it opens with an approval word', () => {
+    expect(isApproval('yes but also please refactor the parser and add tests')).toBe(false)
+  })
+})
+
+describe('followupTurns', () => {
+  it('drops the opener and bare approvals, keeps substantive follow-ups', () => {
+    const turns = ['fix the bug', 'yes', 'no, the other file', 'lgtm', 'now add a test']
+    expect(followupTurns(turns)).toEqual(['no, the other file', 'now add a test'])
+  })
+
+  it('an opener with no follow-ups yields nothing', () => {
+    expect(followupTurns(['just the opener'])).toEqual([])
+    expect(followupTurns([])).toEqual([])
+  })
+})
+
+describe('userTurnEvents', () => {
+  it('keeps each real turn with its seq; skips sidechain and synthetic turns', () => {
+    const s = session([
+      user('opener', { seq: 0 }),
+      user('subagent', { seq: 1, isSidechain: true }),
+      user('<command-name>/compact</command-name>', { seq: 2 }),
+      user('real follow-up', { seq: 3 }),
+    ])
+    expect(userTurnEvents(s)).toEqual([
+      { text: 'opener', seq: 0 },
+      { text: 'real follow-up', seq: 3 },
+    ])
+  })
+
+  // A skill/slash-command body the harness expanded into a user-role message.
+  // Nothing in its TEXT marks it as machinery, so only the source's isMeta flag
+  // can tell it from a genuine turn — without it the block reads as steering.
+  it('drops isMeta turns even when the text looks like a genuine prompt', () => {
+    const s = session([
+      user('review PR#62.', { seq: 0 }),
+      user('Review target: GitHub pull request `62`.\n\nGather this target\'s diff with…', { seq: 1, isMeta: true }),
+      user('post 1,2,3,4 as comments please', { seq: 2 }),
+    ])
+    expect(userTurnEvents(s)).toEqual([
+      { text: 'review PR#62.', seq: 0 },
+      { text: 'post 1,2,3,4 as comments please', seq: 2 },
+    ])
+  })
+})
+
+describe('firstUserPrompt with isMeta', () => {
+  it('skips an injected turn to find the real opener', () => {
+    const s = session([
+      user('Review target: GitHub pull request `62`.', { isMeta: true }),
+      user('the actual ask'),
+    ])
+    expect(firstUserPrompt(s)).toBe('the actual ask')
   })
 })

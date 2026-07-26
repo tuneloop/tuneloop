@@ -4,6 +4,7 @@ import { registerAdapter } from '../../core/registry'
 import { walkFiles } from '../../util/walk'
 import type { SourceAdapter } from '../types'
 import { parseClaudeCode, PARSE_VERSION } from './parse'
+import { readClaudeCodeEnvironment } from './environment'
 
 export const claudeCodeAdapter: SourceAdapter = {
   id: 'claude-code',
@@ -16,6 +17,7 @@ export const claudeCodeAdapter: SourceAdapter = {
     return all
   },
   parse: parseClaudeCode,
+  readEnvironment: readClaudeCodeEnvironment,
 }
 
 registerAdapter(claudeCodeAdapter)
