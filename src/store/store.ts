@@ -3213,6 +3213,7 @@ export class Store {
     resolved: number
     fixType: string | null
     fixContent: string | null
+    fixRecommendation: string | null
     fixHash: string | null
     eventCount: number
     sessionCount: number
@@ -3226,12 +3227,12 @@ export class Store {
     const themes = this.db
       .prepare(
         `SELECT id, COALESCE(label,'') AS label, description, COALESCE(type,'other') AS type, remedy, repo, resolved,
-                fix_type AS fixType, fix_content AS fixContent, fix_hash AS fixHash
+                fix_type AS fixType, fix_content AS fixContent, fix_recommendation AS fixRecommendation, fix_hash AS fixHash
          FROM theme ORDER BY first_seen`,
       )
       .all() as Array<{
         id: string; label: string; description: string | null; type: string; remedy: string | null; repo: string | null
-        resolved: number; fixType: string | null; fixContent: string | null; fixHash: string | null
+        resolved: number; fixType: string | null; fixContent: string | null; fixRecommendation: string | null; fixHash: string | null
       }>
     const evStmt = this.db.prepare(
       // Chronological, most-recent friction first — by when the friction actually
@@ -3260,9 +3261,11 @@ export class Store {
     })
   }
 
-  /** Cache a theme's LLM-generated fix + the hash of the occurrence set it was built from. */
-  setThemeFix(id: string, fixType: string, fixContent: string, fixHash: string): void {
-    this.db.prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_hash = ? WHERE id = ?').run(fixType, fixContent, fixHash, id)
+  /** Cache a theme's LLM-generated fix (+ its one-line recommendation) and the hash of the occurrence set it was built from. */
+  setThemeFix(id: string, fixType: string, fixContent: string, fixRecommendation: string | null, fixHash: string): void {
+    this.db
+      .prepare('UPDATE theme SET fix_type = ?, fix_content = ?, fix_recommendation = ?, fix_hash = ? WHERE id = ?')
+      .run(fixType, fixContent, fixRecommendation, fixHash, id)
   }
 
   /**
@@ -3370,7 +3373,7 @@ export class Store {
           this.db
             .prepare(
               `UPDATE insights SET severity = ?, title = ?, description = ?, count = ?,
-               fix_type = ?, fix_label = ?, fix_content = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
+               fix_type = ?, fix_label = ?, fix_content = ?, recommendation = ?, first_seen_at = MIN(first_seen_at, COALESCE(?, first_seen_at)), last_seen_at = ?, detector_version = ?,
                state = CASE WHEN state = 'resolved' THEN 'surfaced' ELSE state END,
                state_changed_at = CASE WHEN state = 'resolved' THEN ? ELSE state_changed_at END
                WHERE id = ?`,
@@ -3383,6 +3386,7 @@ export class Store {
               input.fix.type,
               input.fix.label,
               input.fix.content,
+              input.recommendation ?? null,
               input.firstSeenAt ?? null,
               lastSeen,
               version,
@@ -3397,8 +3401,8 @@ export class Store {
           this.db
             .prepare(
               `INSERT INTO insights (id, detector, signal_key, repo, severity, state, title, description, count,
-               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, detector_version)
-               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               fix_type, fix_label, fix_content, recommendation, first_seen_at, last_seen_at, detector_version)
+               VALUES (?, ?, ?, ?, ?, 'surfaced', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -3412,6 +3416,7 @@ export class Store {
               input.fix.type,
               input.fix.label,
               input.fix.content,
+              input.recommendation ?? null,
               firstSeen,
               lastSeen,
               version,
@@ -3501,9 +3506,9 @@ export class Store {
     ).map((r) => r.repo)
   }
 
-  insights(opts?: { state?: InsightState; detector?: string; repo?: string }): InsightRow[] {
+  insights(opts?: { state?: InsightState; detector?: string; repo?: string; limit?: number }): InsightRow[] {
     let sql = `SELECT id, detector, signal_key, repo, severity, state, title, description, count,
-               fix_type, fix_label, fix_content, first_seen_at, last_seen_at, state_changed_at, detector_version
+               fix_type, fix_label, fix_content, recommendation, first_seen_at, last_seen_at, state_changed_at, detector_version
                FROM insights WHERE state != 'dismissed'`
     const params: unknown[] = []
     if (opts?.state) {
@@ -3523,6 +3528,13 @@ export class Store {
     // vs a handful of theme events), so sorting on it lets one high-cardinality detector
     // monopolize the list. detector/signal_key are a stable final tiebreak.
     sql += ` ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC, detector, signal_key`
+    // Optional cap: with the ranking above, LIMIT N yields the N most valuable (highest
+    // severity, most recent). Applied in SQL so the per-row evidence/session subqueries
+    // below never run for rows we'd drop.
+    if (opts?.limit != null) {
+      sql += ' LIMIT ?'
+      params.push(opts.limit)
+    }
 
     const rows = this.db.prepare(sql).all(...params) as Array<{
       id: string
@@ -3537,6 +3549,7 @@ export class Store {
       fix_type: string | null
       fix_label: string | null
       fix_content: string | null
+      recommendation: string | null
       first_seen_at: string
       last_seen_at: string
       state_changed_at: string | null
@@ -3574,6 +3587,7 @@ export class Store {
         description: r.description,
         count: r.count,
         fix: { type: r.fix_type ?? '', label: r.fix_label ?? '', content: r.fix_content ?? '' },
+        recommendation: r.recommendation,
         firstSeenAt: r.first_seen_at,
         lastSeenAt: r.last_seen_at,
         stateChangedAt: r.state_changed_at,

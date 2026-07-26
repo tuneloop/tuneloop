@@ -237,6 +237,8 @@ export interface InsightRow {
     label: string
     content: string
   }
+  /** One-line recommended action shown beneath the signal; null when the detector produced none. */
+  recommendation: string | null
   firstSeenAt: string
   lastSeenAt: string
   stateChangedAt: string | null

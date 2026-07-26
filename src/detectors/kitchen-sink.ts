@@ -365,6 +365,7 @@ export function buildAggregate(evidence: EvidenceRef[], firstSeenAt?: string, la
         `Each occurrence below points at where that session began a separate objective — ` +
         `a natural place to have opened a fresh session.`,
     },
+    recommendation: 'Split unrelated objectives into separate sessions.',
   }
 }
 

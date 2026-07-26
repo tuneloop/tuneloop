@@ -708,7 +708,7 @@ export function openDetail(id, focus?: any) {
     // occurrence, so the user can return to the insight detail (not just close).
     var backToInsight = focus && focus.backToInsight;
     var backBtn = backToInsight
-      ? '<button class="drawer-back" type="button" id="drawerBackBtn">&larr; Insights</button>'
+      ? '<button class="drawer-back" type="button" id="drawerBackBtn">&larr; Recommendations</button>'
       : '';
     var headTop = '<div class="drawer-head-top">' + backBtn +
       '<h2 title="' + esc(s.title || '') + '">' + esc(clipLine(s.title, 120) || '(untitled)') + '</h2>' +

@@ -182,11 +182,20 @@ function present(h) {
 // The most recent /api/highlights payload, kept so the tab can repaint (e.g. to
 // add the store-state nudge) once the overview lands, without a refetch.
 var lastHl: any = null;
+// Count of surfaced recommendations, for the Highlights CTA button. Null until fetched;
+// the button is hidden while null or zero.
+var recCount: number | null = null;
 
 // Highlights is its own tab, fixed to HL_DAYS (no window selector).
 export function renderHighlights() {
   get('/api/highlights?days=' + HL_DAYS).then(function (d) {
     lastHl = d;
+    paintHighlights();
+  });
+  // Recommendation count for the CTA button — repaint once it lands (fills in after the
+  // digest). /api/insights returns the surfaced top set, so this matches the tab's list.
+  get('/api/insights').then(function (d) {
+    recCount = Array.isArray(d) ? d.length : 0;
     paintHighlights();
   });
 }
@@ -233,13 +242,18 @@ export function paintHighlights() {
       '<button type="button" class="hrow-to" data-i="' + i + '">See the data <i>→</i></button></div>';
   }).join('');
   if (!rows) rows = '<div class="empty">Nothing notable in ' + esc(winLabel) + ' yet — widen the window, or run more sessions.</div>';
+  // Lead CTA: jump to the Recommendations tab, with its count. Hidden when there are none.
+  var recBtn = (recCount && recCount > 0)
+    ? '<button class="see-tx" type="button" data-view="insights">' + recCount + ' recommendation' + (recCount === 1 ? '' : 's') + ' →</button>'
+    : '';
   $('#highlights').innerHTML =
     '<div class="hl">' +
     noticeHtml() + // enrichment nudge when un-enriched; '' once enrichment has run
     '<div class="hl-head">Notable in ' + esc(winLabel) + '</div>' +
     '<div class="hlist">' + rows + '</div>' +
-    // Order mirrors the top tabs (Dashboard, Artifacts, Sessions).
+    // Order mirrors the top tabs (Recommendations, Dashboard, Artifacts, Sessions).
     '<div class="see-tx-wrap">' +
+      recBtn +
       '<button class="see-tx" type="button" data-view="dashboard">Headline metrics →</button>' +
       '<button class="see-tx" type="button" data-view="artifacts">Artifacts →</button>' +
       '<button class="see-tx" type="button" data-view="sessions">Your sessions →</button>' +

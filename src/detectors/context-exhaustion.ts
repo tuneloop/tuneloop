@@ -182,6 +182,7 @@ export const contextExhaustion: Detector = {
           `files, or running searches in a subagent keeps that bulk out of the main thread's context.\n` +
           `• Watch for the tell — a session that compacts more than once is doing too much in one place.`,
       },
+      recommendation: 'Split large tasks at natural breakpoints and push investigation into subagents.',
     }]
   },
 }

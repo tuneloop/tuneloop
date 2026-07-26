@@ -9,6 +9,9 @@ import { ERROR_CATEGORIES } from '../core/error-category'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
+/** How many recommendations the tab surfaces — the top few by severity → recency. */
+const TOP_RECOMMENDATIONS = 5
+
 /**
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
  * time; POST endpoints write user judgment only — curation (features +
@@ -162,11 +165,11 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/insights') {
-    // The full insight read model (dismissed excluded, ranked severity → recency). The
-    // client fetches once and filters/searches/sorts entirely client-side, so it must
-    // receive every row — a server-side cap here silently breaks those filters (e.g.
-    // "Severity: low" would find nothing whenever enough higher rows exist).
-    sendJson(res, 200, store.insights())
+    // The Recommendations tab shows a fixed top-N with no client filtering/search/sort,
+    // so the cap lives here: the store ranks severity → recency, and LIMIT takes the most
+    // valuable few. (When the tab had client-side filters this had to return every row;
+    // it no longer does, so a server cap is safe.)
+    sendJson(res, 200, store.insights({ limit: TOP_RECOMMENDATIONS }))
     return
   }
   if (path === '/api/insight/evidence') {

@@ -30,7 +30,7 @@ interface Canned {
  * returns no merges; the fix pass (draft_fix) returns a canned fix-prompt. Each
  * tool call is recorded so tests can assert which passes ran.
  */
-function stubLlm(byLabelOrder: Canned[], fix?: { fix_type?: string; content?: string; worth_surfacing?: boolean; reason?: string }): { llm: LlmClient; calls: string[] } {
+function stubLlm(byLabelOrder: Canned[], fix?: { fix_type?: string; content?: string; worth_surfacing?: boolean; reason?: string; recommendation?: string }): { llm: LlmClient; calls: string[] } {
   const queue = [...byLabelOrder]
   const calls: string[] = []
   const llm: LlmClient = {
@@ -284,6 +284,20 @@ describe('recurring-themes detector', () => {
     expect(ins.fix.content).toContain(`tuneloop-fix: ${expectedId}`)
     expect(ins.count).toBe(3)
     expect(ins.severity).toBe('low') // 3 events < medium(4)
+  })
+
+  it('carries the LLM-drafted recommendation onto the insight', async () => {
+    const { db, store } = setup()
+    for (const id of ['r1', 'r2', 'r3']) seedSession(db, store, id)
+    const one: Canned = { events: [{ turn: 1, type: 'context-supply', description: 'user had to supply the db config path', new_theme_label: 'Db Config Location Not Found' }] }
+    const { llm } = stubLlm([one, one, one], {
+      fix_type: 'fix-prompt',
+      content: 'Add a CLAUDE.md section documenting the db config path.',
+      recommendation: 'Document the db config path in CLAUDE.md.',
+    })
+    const res = await recurringThemes.run(ctx(store, llm))
+    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
+    expect(insights[0]!.recommendation).toBe('Document the db config path in CLAUDE.md.')
   })
 
   it('surfaces a theme that recurred intensely within ONE session (>= strong single-session count)', async () => {
