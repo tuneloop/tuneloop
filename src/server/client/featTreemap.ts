@@ -129,6 +129,7 @@ function drillable(n: TNode): boolean {
 var active: { chartEl: HTMLElement; render: () => void } | null = null;
 var tipEl: HTMLElement | null = null;
 var resizeBound = false;
+var ro: ResizeObserver | null = null;
 
 function getTip(): HTMLElement {
   if (!tipEl) { tipEl = document.createElement('div'); tipEl.className = 'tm-tip'; document.body.appendChild(tipEl); }
@@ -140,6 +141,7 @@ function onResize() { if (active && active.chartEl.isConnected) active.render();
 // handler stops firing and the tooltip hides.
 export function disposeFeatTreemap(): void {
   active = null;
+  if (ro) { ro.disconnect(); ro = null; }
   if (tipEl) tipEl.style.display = 'none';
 }
 
@@ -169,6 +171,7 @@ export function renderFeatTreemap(host: HTMLElement, nodes: any[], rootName: str
 
   var stack: TNode[] = [root];
   var threshold = 1; // dollars; below this, siblings collapse into "Other"
+  var lastW = -1; // width the current cells were laid out for (see the ResizeObserver below)
 
   function render() {
     var node = stack[stack.length - 1];
@@ -183,6 +186,7 @@ export function renderFeatTreemap(host: HTMLElement, nodes: any[], rootName: str
     });
 
     var W = chartEl.clientWidth, H = chartEl.clientHeight;
+    lastW = W;
     chartEl.innerHTML = '';
     // The direct-work tile is always kept; only real sub-features roll up into "Other".
     var kids = (node.children || []).filter(function (c) { return c.total > 0; });
@@ -244,6 +248,22 @@ export function renderFeatTreemap(host: HTMLElement, nodes: any[], rootName: str
   thrVal.textContent = fmt(threshold);
 
   active = { chartEl: chartEl, render: render };
-  if (!resizeBound) { window.addEventListener('resize', onResize); resizeBound = true; }
+  // chartEl.clientWidth is 0 while the treemap's tab is hidden (.view is display:none),
+  // so a first render in that state lays out zero-size cells — a blank map. Switching
+  // tabs fires no window 'resize', so the resize handler never corrects it (the bug
+  // where the feature map stays blank until you leave the sub-tab and come back).
+  // Observe the element instead and re-render the moment it actually gains width, e.g.
+  // when the Metrics tab is first shown. Guarded on a real width change, so render()'s
+  // own (absolutely-positioned) cells can't re-trigger it.
+  if (ro) { ro.disconnect(); ro = null; }
+  if (typeof ResizeObserver !== 'undefined') {
+    ro = new ResizeObserver(function () {
+      if (!active || active.render !== render || !chartEl.isConnected) return;
+      if (chartEl.clientWidth > 0 && chartEl.clientWidth !== lastW) render();
+    });
+    ro.observe(chartEl);
+  } else if (!resizeBound) {
+    window.addEventListener('resize', onResize); resizeBound = true;
+  }
   render();
 }
