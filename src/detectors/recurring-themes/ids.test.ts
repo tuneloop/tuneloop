@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { clampLabel, MAX_LABEL_CHARS, slug, themeId } from './ids'
+import { clampLabel, isJunkLabel, MAX_LABEL_CHARS, slug, themeId } from './ids'
 
 describe('recurring-themes ids', () => {
   it('gives distinct ids to labels that differ only past char 60 (within the label bound)', () => {
@@ -17,5 +17,14 @@ describe('recurring-themes ids', () => {
   it('slug preserves the full clamped-label length', () => {
     const label = 'x'.repeat(MAX_LABEL_CHARS)
     expect(slug(label).length).toBe(MAX_LABEL_CHARS)
+  })
+
+  it('isJunkLabel rejects placeholder tokens (any casing/punctuation) but keeps real titles', () => {
+    for (const junk of ['placeholder', 'Placeholder.', ' TBD ', 'N/A', 'untitled', 'todo', 'none', 'theme', 'New', '']) {
+      expect(isJunkLabel(junk)).toBe(true)
+    }
+    for (const real of ['Agent Cannot Verify Rendered UI', 'New PR Flow', 'Unverified Claims Stated As Fact', 'TBD Migration Plan']) {
+      expect(isJunkLabel(real)).toBe(false) // substring "TBD"/"New" inside a real multi-word title survives
+    }
   })
 })
