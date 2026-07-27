@@ -66,9 +66,9 @@ describe('defaultHeavyModel (interactive enrichment setup)', () => {
     expect(defaultHeavyModel('anthropic')).toBe('claude-sonnet-5')
   })
 
-  it('seeds the US Sonnet-5 inference profile for bedrock', () => {
+  it('seeds the undated US Sonnet-5 inference profile for bedrock', () => {
     unsetHeavy()
-    expect(defaultHeavyModel('bedrock')).toBe('us.anthropic.claude-sonnet-5-20260203-v1:0')
+    expect(defaultHeavyModel('bedrock')).toBe('us.anthropic.claude-sonnet-5')
   })
 
   it('seeds a strong sibling for openai/openrouter/gemini', () => {
