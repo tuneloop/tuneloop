@@ -59,8 +59,13 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
   openai: { shape: 'openai', keyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-5.4-mini', defaultHeavyModel: 'gpt-5.4' },
   // Keyless = the AWS SDK credential chain (SigV4); the key env is Bedrock's bearer API key.
   // Default model is a US inference profile — other regions set TUNELOOP_LLM_MODEL (eu., apac., …).
-  // Heavy sibling is the US Sonnet-5 profile (same region prefix as the default).
-  bedrock: { shape: 'bedrock', keyEnv: 'AWS_BEARER_TOKEN_BEDROCK', defaultModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', defaultHeavyModel: 'us.anthropic.claude-sonnet-5-20260203-v1:0', keyless: { fallback: 'AWS credentials', isConfigured: hasAwsCredentials } },
+  // The two ids use different id forms because Anthropic changed the naming scheme at the 4.6
+  // generation (see docs.claude.com "Model IDs and versioning"). Sonnet-5 is a 4.6+-generation
+  // model, so its canonical id is DATELESS (`anthropic.claude-sonnet-5`) — a pinned snapshot, not an
+  // evergreen alias, and the only Bedrock form it has; a dated `…sonnet-5-YYYYMMDD-v1:0` does not
+  // exist and 400s. Haiku-4-5 predates that change, so it carries a snapshot DATE and that dated id
+  // is its only valid form. Both are still region-scoped (`us.` prefix); other regions override.
+  bedrock: { shape: 'bedrock', keyEnv: 'AWS_BEARER_TOKEN_BEDROCK', defaultModel: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', defaultHeavyModel: 'us.anthropic.claude-sonnet-5', keyless: { fallback: 'AWS credentials', isConfigured: hasAwsCredentials } },
 
   openrouter: { shape: 'openai-compatible', baseURL: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', defaultModel: 'openai/gpt-5-mini', defaultHeavyModel: 'openai/gpt-5' },
   groq: { shape: 'openai-compatible', baseURL: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', defaultModel: 'llama-3.3-70b-versatile' },
