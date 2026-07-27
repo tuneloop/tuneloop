@@ -5,11 +5,12 @@ import type { ToolCall } from '../core/model'
  * harness records as a MESSAGE rather than a tool call.
  *
  * Three of the four harnesses expose an explicit skill trigger (Claude Code
- * `/skill-name`, Codex `$skill-name`, Pi `/skill:name`) that injects the skill body
- * as a user-role message and then acts directly — so no real tool call reaches the
- * transcript, and `capability_invocation` (which reads `tool_calls`) would never see
- * the invocation. Each adapter detects its own envelope, pulls the skill name out, and
- * pushes one of these into `session.toolCalls` so the invocation is captured uniformly.
+ * `/skill-name`, Codex `$skill-name`, Pi `/skill:name`) that injects the skill body as
+ * a user-role message with no accompanying tool call, so `capability_invocation` (which
+ * reads `tool_calls`) would never see the invocation. Each adapter detects its own
+ * envelope, pulls the skill name out, and pushes one of these into `session.toolCalls`
+ * so the invocation is captured uniformly — but only when no real tool call already
+ * covers it (CC also fires a `Skill` tool call for some invocations; see parse.ts).
  *
  * Only `action`/`name`/`isSidechain`/`ts` matter to the capability views; the rest are
  * filled with benign defaults. `id` must be unique within the session and must not

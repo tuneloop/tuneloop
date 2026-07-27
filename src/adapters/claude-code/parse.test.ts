@@ -183,4 +183,35 @@ describe('claude-code explicit skill invocation (/skill-name)', () => {
     const skills = session.toolCalls.filter((t) => t.action === 'skill')
     expect(skills.map((s) => s.name)).toEqual(['hello-world'])
   })
+
+  it('does not double-count a Skill tool call plus its injected SKILL.md body', async () => {
+    const path = join(dir, `${EXP_SID}-dup.jsonl`)
+    // A `Skill` tool_use, then the injected "Base directory" body pointing back at it via
+    // `sourceToolUseID` — one invocation. Synthesizing for the body would double-count it.
+    const lines = [
+      { parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EXP_SID, uuid: 'd1', timestamp: '2026-07-24T13:12:00.000Z', message: { role: 'user', content: 'review PR#62.' } },
+      { parentUuid: 'd1', isSidechain: false, type: 'assistant', cwd: '/repo', sessionId: EXP_SID, uuid: 'd2', timestamp: '2026-07-24T13:12:00.500Z', message: { id: 'msg_d1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'sk1', name: 'Skill', input: { skill: 'review', args: '62' } }], usage: USAGE } },
+      { parentUuid: 'd2', isSidechain: false, isMeta: true, type: 'user', cwd: '/repo', sessionId: EXP_SID, uuid: 'd3', timestamp: '2026-07-24T13:12:00.600Z', sourceToolUseID: 'sk1', message: { role: 'user', content: 'Base directory for this skill: /repo/.claude/skills/review\n\n# Review\n\nCheck the diff.' } },
+    ]
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'))
+    const session = (await parseClaudeCode(path))!
+    const skills = session.toolCalls.filter((t) => t.action === 'skill')
+    expect(skills.map((s) => s.name)).toEqual(['review'])
+  })
+
+  it('keeps both when the same skill is invoked by a tool call and explicitly', async () => {
+    const path = join(dir, `${EXP_SID}-both.jsonl`)
+    // Same skill, two invocations: one `Skill` tool call (with its sourceToolUseID-linked
+    // body) and one explicit `/review` body with no source id. The id link keeps them
+    // distinct where a by-name heuristic would collapse them into one.
+    const lines = [
+      { parentUuid: null, isSidechain: false, type: 'assistant', cwd: '/repo', sessionId: EXP_SID, uuid: 'b1', timestamp: '2026-07-24T13:12:00.000Z', message: { id: 'msg_b1', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'sk9', name: 'Skill', input: { skill: 'review', args: '1' } }], usage: USAGE } },
+      { parentUuid: 'b1', isSidechain: false, isMeta: true, type: 'user', cwd: '/repo', sessionId: EXP_SID, uuid: 'b2', timestamp: '2026-07-24T13:12:00.100Z', sourceToolUseID: 'sk9', message: { role: 'user', content: 'Base directory for this skill: /repo/.claude/skills/review\n\n# Review' } },
+      { parentUuid: 'b2', isSidechain: false, isMeta: true, type: 'user', cwd: '/repo', sessionId: EXP_SID, uuid: 'b3', timestamp: '2026-07-24T13:12:05.000Z', message: { role: 'user', content: 'Base directory for this skill: /repo/.claude/skills/review\n\n# Review' } },
+    ]
+    writeFileSync(path, lines.map((l) => JSON.stringify(l)).join('\n'))
+    const session = (await parseClaudeCode(path))!
+    const skills = session.toolCalls.filter((t) => t.action === 'skill')
+    expect(skills.map((s) => s.name)).toEqual(['review', 'review'])
+  })
 })

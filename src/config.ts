@@ -57,6 +57,20 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   return { provider, model, apiKey, baseURL, heavyModel }
 }
 
+/**
+ * The detector-pass ("heavy") model to seed when a provider is configured
+ * INTERACTIVELY — analyze's run-only enrichment setup, where the user gives a
+ * provider + key but no model. Precedence mirrors resolveLlm: an explicit flag
+ * ▸ TUNELOOP_LLM_MODEL_HEAVY ▸ the preset's strong sibling. Unlike resolveLlm's
+ * `heavyModel` this DOES fall back to the preset default: a fresh user who just
+ * opted in should get a strong model for the Sonnet-class-or-stronger detectors,
+ * not the cheap session model. Returns undefined for providers with no strong
+ * sibling (or one already strong, e.g. xai) — leaving one model for everything.
+ */
+export function defaultHeavyModel(provider: string, overrides?: LlmOverrides): string | undefined {
+  return overrides?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? PROVIDERS[provider]?.defaultHeavyModel
+}
+
 export function loadConfig(opts?: { dataDir?: string; db?: string; llm?: LlmOverrides }): TuneloopConfig {
   const dataDir = resolve(opts?.dataDir ?? process.env.TUNELOOP_DATA_DIR ?? join(homedir(), '.tuneloop'))
   const dbPath = resolve(opts?.db ?? join(dataDir, 'tuneloop.sqlite'))

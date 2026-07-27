@@ -27,9 +27,12 @@ import { explicitSkillName, mapAction } from './actions'
 // 9: carry `isMeta` on user events so harness-injected turns (expanded skill and
 //    slash-command bodies) stop counting as human steering.
 // 10: capture EXPLICIT `/skill-name` invocations. CC injects the SKILL.md body as an
-//    isMeta user turn and acts directly (no `Skill` tool call), so synthesize a skill
-//    tool call from it — else the invocation is invisible to capability usage.
-export const PARSE_VERSION = 10
+//    isMeta user turn; synthesize a skill tool call from it — else the invocation is
+//    invisible to capability usage.
+// 11: don't double-count — a `Skill` tool call and the SKILL.md body it injects (linked by
+//    the body's `sourceToolUseID`) are one invocation, so synthesize from a body only when
+//    it isn't the expansion of a real tool call.
+export const PARSE_VERSION = 11
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -84,6 +87,10 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
   const models = new Set<string>()
   let tokens = emptyUsage()
   const usageCountedIds = new Set<string>()
+  // tool_use ids of real `Skill` tool calls — the injected SKILL.md body points back at
+  // its trigger via `sourceToolUseID`, so a body carrying a known id is that call's
+  // expansion, not a separate invocation to synthesize.
+  const skillToolUseIds = new Set<string>()
   const finalUsageById = lastUsageByMessageId(records)
   let title: string | undefined
   let cwd: string | undefined
@@ -172,6 +179,7 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
               isSidechain,
               ts,
             })
+            if (mapped.action === 'skill') skillToolUseIds.add(b.id)
           }
         }
       }
@@ -217,10 +225,14 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
         ...(r.isMeta ? { isMeta: true } : {}),
       }
       events.push(ev)
-      // Explicit `/skill-name` invocation: the isMeta body names the skill dir but no
-      // `Skill` tool call is emitted. Synthesize one so capability usage sees it.
+      // The injected SKILL.md body names its skill dir. If it expands a real `Skill` tool
+      // call (`sourceToolUseID` points at one), that call already captured the invocation
+      // — skip it. Otherwise (an explicit `/skill` with no tool call) synthesize one so
+      // capability usage still sees the invocation.
       const skill = r.isMeta ? explicitSkillName(text) : null
-      if (skill) toolCalls.push(synthSkillCall(skill, { id: `skill-${toolCalls.length}`, ts, isSidechain }))
+      if (skill && !skillToolUseIds.has(r.sourceToolUseID)) {
+        toolCalls.push(synthSkillCall(skill, { id: `skill-${toolCalls.length}`, ts, isSidechain }))
+      }
     } else if (r.type === 'system') {
       const ev: SystemEvent = {
         kind: 'system',
