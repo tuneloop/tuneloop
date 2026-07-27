@@ -68,15 +68,19 @@ export class Progress {
     this.render()
   }
 
-  tick(didWork: boolean, elapsedMs: number, costUsd: number) {
+  /**
+   * One session scanned. `totalElapsedMs` is wall-clock since the phase started
+   * (not per-session) — same contract as unitDone — so the rate is throughput and
+   * the ETA stays honest when sessions run concurrently: a per-session average
+   * would converge on the individual call latency and over-state the ETA by ~the
+   * concurrency factor. `didWork` gates the rate so instant cache hits don't skew it.
+   */
+  tick(didWork: boolean, totalElapsedMs: number, costUsd: number) {
     this.state.current++
     this.state.costUsd += costUsd
     if (didWork) {
       this.state.worked++
-      this.state.avgMs =
-        this.state.avgMs == null
-          ? elapsedMs
-          : this.state.avgMs + (elapsedMs - this.state.avgMs) / this.state.worked
+      this.state.avgMs = this.state.worked > 0 ? totalElapsedMs / this.state.worked : null
     }
     this.absorbOverrun()
     this.render()
@@ -153,7 +157,7 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n))
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const secs = Math.round(ms / 1000)
   if (secs < 60) return `${secs}s`
   const mins = Math.floor(secs / 60)

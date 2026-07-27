@@ -395,7 +395,7 @@ export const kitchenSink: Detector = {
     // Keep the FULL unseen set (not just this run's slice) so the resolve gate below
     // can tell whether the window's backfill is actually complete.
     const found = ctx.limit != null && unseen.length > ctx.limit ? unseen.slice(0, ctx.limit) : unseen
-    ctx.log.info(`kitchen-sink: ${found.length} unseen candidate session(s) after pre-gate`)
+    ctx.log.debug(`kitchen-sink: ${found.length} unseen candidate session(s) after pre-gate`)
     ctx.progress?.addUnits(found.length) // declare this detector's step-2 delta
 
     // This run's verdicts (positive AND negative), persisted below before the card
@@ -456,7 +456,7 @@ export const kitchenSink: Detector = {
       if (active && !unjudgedInWindow) ctx.store.resolveInsight(NAME, AGG_REPO, AGG_SIGNAL)
     }
 
-    ctx.log.info(`kitchen-sink: ${evidence.length} flagged session(s) in the last ${WINDOW_DAYS} days`)
+    ctx.log.debug(`kitchen-sink: ${evidence.length} flagged session(s) in the last ${WINDOW_DAYS} days`)
     const result: DetectorResult = { insights: insight ? [insight] : [], seen }
     // Only record cost when the LLM actually ran, so a no-op analyze (nothing
     // unseen) doesn't write a $0 detector_runs row or price an empty usage.

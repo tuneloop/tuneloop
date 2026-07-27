@@ -25,6 +25,7 @@ import type {
   SessionArtifactInput,
 } from '../store/types'
 import type { LlmClient } from '../llm/types'
+import type { Store } from '../store/store'
 import type { Logger } from '../util/log'
 
 export type ProcessorKind = 'static' | 'enrichment'
@@ -123,6 +124,18 @@ export interface RefreshResult {
   outcomes?: OutcomeInput[]
 }
 
+/**
+ * Context for a cross-session `finalize()` pass — run once after every session is
+ * processed, with read/write access to the whole store (unlike per-session `run()`).
+ */
+export interface FinalizeContext {
+  store: Store
+  /** Base LLM client (same tier the processor's run() uses); null when not configured. */
+  llm: LlmClient | null
+  llmEnabled: boolean
+  log: Logger
+}
+
 export interface Processor {
   name: string
   /** Bump to invalidate cached results and force reprocessing. */
@@ -139,4 +152,10 @@ export interface Processor {
   run(ctx: ProcessorContext): Promise<ProcessorResult> | ProcessorResult
   /** Re-check artifacts this processor owns that may have gone stale. */
   refresh?(ctx: RefreshContext): Promise<RefreshResult>
+  /**
+   * Cross-session consolidation, run ONCE after every session has been processed —
+   * like refresh(), but over the whole corpus. enrich-session uses it to reconcile the
+   * feature taxonomy its per-session run() proposed. Optional; most processors omit it.
+   */
+  finalize?(ctx: FinalizeContext): Promise<void>
 }

@@ -8,6 +8,8 @@ import { collectFollowups } from './followups'
 import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
 import { buildPrompt, extractionSchema, REMEDIES, TOOL_NAME, TRIGGERS, TYPES } from './prompt'
 import { runThemeMerge } from './merge'
+import { runPool } from '../../util/pool'
+import { formatDuration } from '../../util/progress'
 import { ensureThemeFix, type FixOccurrence } from './fix'
 import { maybeSummarizeFollowups } from './summarize'
 import type { Detector, DetectorContext, DetectorResult, InsightInput } from '../../core/detector'
@@ -94,6 +96,10 @@ export const recurringThemes: Detector = {
     let usage = emptyUsage()
     const processed: Array<{ sessionId: string; contentHash: string }> = []
 
+    // Time the three Step-2 phases separately so a benchmark run shows where the detector's
+    // wall-clock actually goes (extraction is sequential, the tail is not).
+    const tExtract = Date.now()
+
     // 2. Per-session extraction (sequential — see class doc). Each reads the LIVE theme
     // list, persists its own themes+events immediately (a mid-run failure keeps prior
     // work), and on success is recorded as processed. The bar ticks once per window;
@@ -131,15 +137,26 @@ export const recurringThemes: Detector = {
       processed.push(cand)
     }
 
-    // 3 + 4: the cross-session tail (the reserved finalize unit) — reconcile the taxonomy,
-    // then surface themes past the threshold with an LLM fix. Both hash-gated (no-op when
-    // unchanged). Spend rides the finalize unit's unitDone so it feeds est-total like any unit.
+    const extractMs = Date.now() - tExtract
+
+    // 3 + 4: the cross-session tail — reconcile the taxonomy (the reserved finalize unit),
+    // then surface themes past the threshold with an LLM fix (each fix its own unit, declared
+    // and ticked inside surfaceInsights). Both hash-gated (no-op when unchanged).
+    const tReconcile = Date.now()
     const merge = await runThemeMerge(store, llm, log)
+    const reconcileMs = Date.now() - tReconcile
     usage = addUsage(usage, merge.usage)
-    const surfaced = await surfaceInsights(store, llm, log)
+    // Resolve the reserved finalize unit with the reconcile spend; the fix pass carries its own.
+    ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, merge.usage))
+    const tFix = Date.now()
+    const surfaced = await surfaceInsights(store, llm, log, ctx.progress)
+    const fixMs = Date.now() - tFix
     usage = addUsage(usage, surfaced.usage)
-    const tailUsage = addUsage(merge.usage, surfaced.usage)
-    ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, tailUsage))
+
+    log.debug(
+      `${DETECTOR}: step-2 timing — extraction ${formatDuration(extractMs)} (${candidates.length} session(s)) · ` +
+        `reconcile ${formatDuration(reconcileMs)} · fixes ${formatDuration(fixMs)}`,
+    )
 
     const cost = { inTokens: usage.input, outTokens: usage.output, usd: costOfUsage(llm.provider, llm.model, usage), model: llm.model }
     return { insights: surfaced.insights, cost, seen: processed }
@@ -334,6 +351,11 @@ const FIX_LABEL: Record<string, string> = {
   'fix-prompt': 'Apply fix-prompt',
 }
 
+// Fix generation is one heavy-model call per surfaced theme — the detector's dominant tail
+// on a cold run. It runs through a bounded pool (the same knob as the session pool) so those
+// independent calls parallelize over the connection pool instead of going one at a time.
+const FIX_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.TUNELOOP_ANALYZE_CONCURRENCY) || 4))
+
 /**
  * Recurrence gate. The single-session arm surfaces heavy in-session friction (a claim
  * corrected 10× in one session is real) that the strict cross-session gate would hide.
@@ -352,31 +374,36 @@ async function surfaceInsights(
   store: DetectorContext['store'],
   llm: NonNullable<DetectorContext['llm']>,
   log: DetectorContext['log'],
+  progress: DetectorContext['progress'],
 ): Promise<{ insights: InsightInput[]; usage: TokenUsage }> {
-  const insights: InsightInput[] = []
-  let usage = emptyUsage()
+  // Gate first (cheap SQL, no LLM): the themes that clear the recurrence + re-surface
+  // guards. Re-surface guard: don't re-emit a theme whose insight the user already
+  // resolved or dismissed, UNLESS it genuinely recurred (new occurrences since that insight
+  // was last persisted) — else a resolved insight flips back to surfaced every analyze.
+  const candidates = store
+    .themesWithEvents()
+    .filter((t) => surfaces(t.eventCount, t.sessionCount))
+    .map((t) => ({ t, repo: t.repo ?? '*' }))
+    .filter(({ t, repo }) => {
+      const prior = store.insightStatus(DETECTOR, repo, t.id)
+      return !(prior && (prior.state === 'dismissed' || (prior.state === 'resolved' && t.eventCount <= prior.count)))
+    })
 
-  for (const t of store.themesWithEvents()) {
-    if (!surfaces(t.eventCount, t.sessionCount)) continue
-    const repo = t.repo ?? '*'
+  // Declare one progress unit per surfaced theme, now that the gate has settled the count.
+  // The step-2 total grows here (it can't be known before extraction + reconcile) — the bar
+  // dips once, then ticks down as fixes land, instead of freezing on a single reserved unit
+  // through the detector's most expensive phase.
+  progress?.addUnits(candidates.length)
 
-    // Re-surface guard: don't re-emit a theme whose insight the user already
-    // resolved or dismissed, UNLESS it genuinely recurred (new occurrences since
-    // that insight was last persisted). Presence of old events is not a recurrence
-    // — without this, a resolved insight flips back to surfaced on every analyze.
-    const prior = store.insightStatus(DETECTOR, repo, t.id)
-    if (prior && (prior.state === 'dismissed' || (prior.state === 'resolved' && t.eventCount <= prior.count))) continue
-
-    const id = insightId(DETECTOR, repo, t.id)
-    const severity = t.eventCount >= SEVERITY_EVENTS.high ? 'high' : t.eventCount >= SEVERITY_EVENTS.medium ? 'medium' : 'low'
-
-    // Evidence: the theme's member turns, ranked most-recent-first (store orders
-    // by occurred_at desc — real friction recency). The occurrence description rides as the note.
-    const evidence = t.evidence.map((e) => ({ sessionId: e.sessionId, turnIdx: e.turnSeq ?? undefined, note: e.description }))
-
-    // Fix input is built LAZILY: ensureThemeFix hashes the descriptions first and
-    // only calls buildOccurrences() on a cache miss — so a quiet re-analyze skips
-    // the session-blob hydration entirely.
+  // Generate the tailored fix for each surfaced theme CONCURRENTLY — each is an independent
+  // heavy-model call, hash-gated (a quiet re-analyze reuses cached fixes at no cost). A cold
+  // run does one call per theme, the detector's dominant tail, so it runs through a bounded
+  // pool over the connection pool instead of one at a time. Each fix touches only its own
+  // theme's row, so concurrent generation is safe.
+  const verdicts = new Array(candidates.length).fill(null) as Array<Awaited<ReturnType<typeof ensureThemeFix>> | null>
+  await runPool(candidates, FIX_CONCURRENCY, async ({ t }, i) => {
+    // Fix input is built LAZILY: ensureThemeFix hashes the descriptions first and only calls
+    // buildOccurrences() on a cache miss — so a quiet re-analyze skips blob hydration.
     const buildOccurrences = (): FixOccurrence[] => {
       const snippets = store.turnTexts(t.evidence.map((e) => ({ sessionId: e.sessionId, seq: e.turnSeq })))
       return t.evidence.map((e) => ({
@@ -384,25 +411,44 @@ async function surfaceInsights(
         snippet: e.turnSeq != null ? snippets.get(`${e.sessionId}:${e.turnSeq}`) : undefined,
       }))
     }
+    try {
+      verdicts[i] = await ensureThemeFix(store, llm, log, t, t.descriptions, buildOccurrences)
+    } catch (err) {
+      // A failed fix call is non-fatal — surfaced below with a placeholder; the hash gate
+      // stays unstamped so the next analyze retries generation.
+      log.warn(`${DETECTOR}: fix generation failed for "${t.label}": ${(err as Error).message}`)
+    }
+    // Tick this theme's unit as it resolves — success, cache hit, or failure — so every
+    // declared unit lands and the bar reaches 100%. Cost rides the tick (0 on a cache hit or
+    // failure, which report no usage). Concurrent calls are serialized by the single JS thread.
+    const u = verdicts[i]?.usage
+    progress?.unitDone(u ? costOfUsage(llm.provider, llm.model, u) : 0)
+  })
+
+  // Assemble the insights in gate order (sequential store writes + usage accumulation).
+  const insights: InsightInput[] = []
+  let usage = emptyUsage()
+  for (let i = 0; i < candidates.length; i++) {
+    const { t, repo } = candidates[i]!
+    const id = insightId(DETECTOR, repo, t.id)
+    const severity = t.eventCount >= SEVERITY_EVENTS.high ? 'high' : t.eventCount >= SEVERITY_EVENTS.medium ? 'medium' : 'low'
+    // Evidence: the theme's member turns, most-recent-first; the description rides as the note.
+    const evidence = t.evidence.map((e) => ({ sessionId: e.sessionId, turnIdx: e.turnSeq ?? undefined, note: e.description }))
 
     let fix: InsightInput['fix']
-    // The one-line action shown beneath the signal. Only a real generated fix carries
-    // one; the fallback placeholder leaves it undefined so the row shows the signal alone.
     let recommendation: string | undefined
-    try {
-      const res = await ensureThemeFix(store, llm, log, t, t.descriptions, buildOccurrences)
+    const res = verdicts[i]
+    if (res) {
       usage = addUsage(usage, res.usage)
-      // The fix pass can veto a theme that crossed the count threshold (a clustered
-      // one-off, taste iteration, too vague). Skip surfacing it, and retire any insight
-      // it had surfaced before (a later verdict flip) so the ledger doesn't lag.
+      // The fix pass can veto a theme that crossed the count threshold (a clustered one-off,
+      // taste iteration, too vague): skip surfacing it and retire any insight it had before.
       if (!res.verdict.worthSurfacing) {
         store.retireInsightForTheme(DETECTOR, t.id)
         continue
       }
       if (res.verdict.fix) {
-        // Non-nudge fixes carry the tuneloop-fix marker so the fix session self-
-        // identifies on the next analyze (loop closure). A nudge has no artifact
-        // to adopt, so no marker.
+        // Non-nudge fixes carry the tuneloop-fix marker so the fix session self-identifies
+        // on the next analyze (loop closure). A nudge has no artifact to adopt, so no marker.
         const f = res.verdict.fix
         const content = f.fixType === 'behavioral-nudge' ? f.content : `tuneloop-fix: ${id}\n\n${f.content}`
         fix = { type: f.fixType, label: FIX_LABEL[f.fixType] ?? 'Suggested fix', content }
@@ -410,11 +456,8 @@ async function surfaceInsights(
       } else {
         fix = fallbackFix()
       }
-    } catch (err) {
-      // A failed fix call is non-fatal — surface the insight with a placeholder;
-      // the hash gate stays unstamped so the next analyze retries generation.
-      log.warn(`${DETECTOR}: fix generation failed for "${t.label}": ${(err as Error).message}`)
-      fix = fallbackFix()
+    } else {
+      fix = fallbackFix() // generation threw (logged above)
     }
 
     insights.push({

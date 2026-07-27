@@ -382,6 +382,7 @@ export class Store {
                  title = excluded.title,
                  repo = COALESCE(artifacts.repo, excluded.repo),
                  parent_artifact_id = COALESCE(excluded.parent_artifact_id, artifacts.parent_artifact_id),
+                 created_at = MIN(COALESCE(artifacts.created_at, excluded.created_at), COALESCE(excluded.created_at, artifacts.created_at)),
                  producer = excluded.producer
                WHERE COALESCE(artifacts.source, '') <> 'user'`,
             )
@@ -2676,6 +2677,105 @@ export class Store {
       this.db.prepare('DELETE FROM artifact_links WHERE from_id = ? OR to_id = ?').run(id, id)
       this.db.prepare('DELETE FROM artifacts WHERE id = ?').run(id)
     })()
+    return true
+  }
+
+  /**
+   * Fold a derived feature `fromId` into `toId`: repoint every reference (session &
+   * block links, artifact links, outcomes, reject tombstones, and child features'
+   * parent) onto `toId`, keep the earliest mint time on the survivor, then delete the
+   * `fromId` row. No-op (returns false) when either id is missing/not a feature, they
+   * are equal, or `fromId` is user-authored (those are never absorbed).
+   *
+   * Mirrors applyThemeMerge, but features live in shared tables with composite PKs
+   * (session_artifacts/block_artifacts include artifact_id), so a blind repoint can hit
+   * a UNIQUE collision when the target already shares that (session/block, role) link —
+   * hence UPDATE OR IGNORE to move the non-colliding rows, then DELETE the leftovers.
+   */
+  mergeFeature(fromId: string, toId: string): boolean {
+    if (fromId === toId) return false
+    const from = this.db
+      .prepare("SELECT source, parent_artifact_id AS p, created_at AS c FROM artifacts WHERE id = ? AND kind = 'feature'")
+      .get(fromId) as { source: string | null; p: string | null; c: string | null } | undefined
+    const to = this.db.prepare("SELECT 1 FROM artifacts WHERE id = ? AND kind = 'feature'").get(toId)
+    if (!from || !to) return false
+    if ((from.source ?? '') === 'user') return false // user features are never absorbed
+    this.db.transaction(() => {
+      // Composite-PK link tables (PK includes artifact_id): move the rows that don't
+      // collide, then drop any leftover — the target already had that (session/block, role).
+      for (const tbl of ['session_artifacts', 'block_artifacts', 'user_link_overrides']) {
+        this.db.prepare(`UPDATE OR IGNORE ${tbl} SET artifact_id = ? WHERE artifact_id = ?`).run(toId, fromId)
+        this.db.prepare(`DELETE FROM ${tbl} WHERE artifact_id = ?`).run(fromId)
+      }
+      // artifact_links: repoint both ends, drop leftovers and any self-link the merge made.
+      this.db.prepare('UPDATE OR IGNORE artifact_links SET from_id = ? WHERE from_id = ?').run(toId, fromId)
+      this.db.prepare('UPDATE OR IGNORE artifact_links SET to_id = ? WHERE to_id = ?').run(toId, fromId)
+      this.db.prepare('DELETE FROM artifact_links WHERE from_id = ? OR to_id = ? OR from_id = to_id').run(fromId, fromId)
+      // outcomes has no unique constraint on artifact_id, so a blind repoint can't collide.
+      this.db.prepare('UPDATE outcomes SET artifact_id = ? WHERE artifact_id = ?').run(toId, fromId)
+      // Absorb the subtree: fromId's children become toId's; and if toId was itself a
+      // child of fromId, promote it to fromId's parent so it can't end up parenting itself.
+      this.db.prepare('UPDATE artifacts SET parent_artifact_id = ? WHERE parent_artifact_id = ? AND id <> ?').run(toId, fromId, toId)
+      this.db.prepare('UPDATE artifacts SET parent_artifact_id = ? WHERE id = ? AND parent_artifact_id = ?').run(from.p ?? null, toId, fromId)
+      // Keep the earliest mint time on the survivor (reconcile canonical choice aside).
+      if (from.c != null) {
+        this.db.prepare('UPDATE artifacts SET created_at = MIN(COALESCE(created_at, ?), ?) WHERE id = ?').run(from.c, from.c, toId)
+      }
+      this.db.prepare('DELETE FROM artifacts WHERE id = ?').run(fromId)
+    })()
+    return true
+  }
+
+  /**
+   * All derived (non-user) features with their mint time and session-usage count —
+   * the reconcile pass's input. `createdAt` is the earliest minting session's start
+   * time (see the feature upsert); `sessions` counts distinct linked sessions, a
+   * canonical-choice tiebreaker.
+   */
+  derivedFeaturesForReconcile(): Array<{ id: string; title: string; repo: string | null; parentId: string | null; createdAt: string | null; sessions: number; glosses: string[] }> {
+    // Each feature carries up to 3 example session intents (the enrich-session `intent_summary`
+    // annotations of its linked sessions, most-recent distinct first). Title-only clustering
+    // fragments — the reconcile pass needs to see what the sessions actually did to recognize
+    // that two differently-worded titles are the same capability.
+    const rows = this.db
+      .prepare(
+        `SELECT a.id, COALESCE(a.title, '') AS title, a.repo, a.parent_artifact_id AS parentId,
+                a.created_at AS createdAt, COUNT(DISTINCT sa.session_id) AS sessions,
+                (SELECT json_group_array(g) FROM (
+                   SELECT json_extract(an.value,'$') AS g, MAX(s.started_at) AS recent
+                     FROM session_artifacts sa2
+                     JOIN annotations an ON an.session_id = sa2.session_id AND an.key = 'intent_summary'
+                     JOIN sessions s ON s.id = sa2.session_id
+                    WHERE sa2.artifact_id = a.id
+                      AND TRIM(COALESCE(json_extract(an.value,'$'), '')) <> ''
+                    GROUP BY g
+                    ORDER BY recent DESC
+                    LIMIT 3
+                 )) AS glossesJson
+           FROM artifacts a
+           LEFT JOIN session_artifacts sa ON sa.artifact_id = a.id
+          WHERE a.kind = 'feature' AND COALESCE(a.source, '') <> 'user'
+          GROUP BY a.id
+          ORDER BY a.created_at IS NULL, a.created_at, a.id`,
+      )
+      .all() as Array<{ id: string; title: string; repo: string | null; parentId: string | null; createdAt: string | null; sessions: number; glossesJson: string | null }>
+    return rows.map(({ glossesJson, ...rest }) => {
+      const parsed = safeJson<unknown[]>(glossesJson, [])
+      return { ...rest, glosses: parsed.filter((x): x is string => typeof x === 'string') }
+    })
+  }
+
+  /**
+   * Reparent a derived feature under `parentId` (null = top-level). No-op (returns
+   * false) for a missing/user feature, a self-parent, or an edge that would create a
+   * cycle. Mirrors applyFeatureRevisions' guards for use from the reconcile pass.
+   */
+  setFeatureParent(id: string, parentId: string | null): boolean {
+    const row = this.db.prepare("SELECT source FROM artifacts WHERE id = ? AND kind = 'feature'").get(id) as { source: string | null } | undefined
+    if (!row || (row.source ?? '') === 'user') return false
+    if (parentId === id) return false
+    if (parentId != null && this.wouldCreateFeatureCycle(id, parentId)) return false
+    this.db.prepare('UPDATE artifacts SET parent_artifact_id = ? WHERE id = ?').run(parentId, id)
     return true
   }
 
