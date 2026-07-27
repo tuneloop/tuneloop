@@ -107,10 +107,12 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   } catch (err) {
     log.warn((err as Error).message)
   }
-  // Two-tier model routing: `llm` drives the per-session processors (one call per
-  // session — the volume, hence the cheap model), `heavyLlm` drives the detector
-  // pass (a handful of cross-session synthesis calls, where reasoning quality pays).
-  // Unset TUNELOOP_LLM_MODEL_HEAVY → the same client does both, as it always has.
+  // Two-tier model routing: `llm` is the cheap model — it drives the per-session
+  // processors (one call per session — the volume) AND every detector by default.
+  // `heavyLlm` is the stronger model; only detectors that opt in (model: 'heavy',
+  // e.g. recurring-themes) run on it, where cross-session synthesis quality pays.
+  // Unset TUNELOOP_LLM_MODEL_HEAVY → heavyLlm === llm, so those detectors use the
+  // cheap model too, as it always has.
   // A build failure here degrades to the base client rather than losing detectors.
   let heavyLlm = llm
   if (llm && config.llm?.heavyModel && config.llm.heavyModel !== llm.model) {
@@ -394,7 +396,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   if (detectors.length > 0) {
     log.debug(`Running ${detectors.length} detector(s)...`)
     const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
-    await runDetectors({ detectors, store, log, llmEnabled, llm: heavyLlm, progress: detectorProgress, limit: opts.limit })
+    await runDetectors({ detectors, store, log, llmEnabled, llm, heavyLlm, progress: detectorProgress, limit: opts.limit })
     detectorProgress.clear()
   }
 

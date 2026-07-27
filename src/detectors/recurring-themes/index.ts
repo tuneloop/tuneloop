@@ -53,6 +53,9 @@ export const recurringThemes: Detector = {
   version: 2,
   tier: 'X',
   needsLlm: true,
+  // The one detector that opts into the heavy model: weak models over-cluster themes
+  // here (see the applicable() gate). Every other detector stays on the cheap default.
+  model: 'heavy',
   // Weak models produce noisy, over-clustered output here (magnet themes, abstract
   // labels, taste false-positives — measured on Haiku vs Sonnet), so gate the
   // detector to a Sonnet-class-or-stronger DETECTOR model (the heavy-model pass).
