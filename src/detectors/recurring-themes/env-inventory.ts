@@ -1,3 +1,4 @@
+import { basename } from 'node:path'
 import type { Store } from '../../store/store'
 
 // What the user already has installed (skills / agents / mcp / plugins, from the
@@ -55,10 +56,21 @@ function envSources(store: Store): string[] {
 }
 
 /**
- * Project scope_keys (repo ROOT PATHS) belonging to `repo`. Resolved via this repo's
- * sessions — a snapshot matches when a session tagged with `repo` ran at or under that
- * path — so two repos sharing a leaf name (…/app) can't leak each other's config. A
- * repo with no matching session cwd just falls back to global.
+ * Project scope_keys (repo ROOT PATHS) belonging to `repo`. A scope_key matches when
+ * EITHER:
+ *   - some session tagged with `repo` ran at or under that path (cwd is the root or a
+ *     descendant), OR
+ *   - the scope_key's basename IS this repo's name AND no other scope_key shares that
+ *     basename.
+ *
+ * The cwd test alone misses a linked git worktree checked out OUTSIDE the repo (a session
+ * at `…/aivue-wt/…` whose canonical scope_key is `…/aivue`): the cwd isn't under the root,
+ * so its project config would be dropped. The name test recovers it, since analyze.ts
+ * resolveRepo keys both sides on the canonical repo — `sessions.repo` = basename of the
+ * scope_key path. The name test is gated on that basename being UNIQUE among scope_keys
+ * so two repos sharing a leaf (…/work/app, …/side/app) still can't leak each other's
+ * config — they fall back to the cwd test, which disambiguates by where sessions ran.
+ * A repo matched by neither just falls back to global.
  */
 function projectScopeKeys(store: Store, source: string, repo: string): string[] {
   const keys = (store.queryAll(
@@ -70,8 +82,13 @@ function projectScopeKeys(store: Store, source: string, repo: string): string[] 
     `SELECT DISTINCT cwd FROM sessions WHERE repo = ? AND cwd IS NOT NULL`,
     repo,
   ) as Array<{ cwd: string }>).map((r) => r.cwd)
-  // A scope_key matches when some session of this repo ran at or under that root path.
-  return keys.filter((key) => cwds.some((cwd) => cwd === key || cwd.startsWith(key + '/')))
+  // Distinct scope_keys per basename — a name backed by exactly one path is safe to
+  // attribute by name; a shared basename is ambiguous and left to the cwd test.
+  const keysWithName = keys.filter((key) => basename(key) === repo).length
+  return keys.filter((key) => {
+    if (cwds.some((cwd) => cwd === key || cwd.startsWith(key + '/'))) return true // a session ran under this root
+    return basename(key) === repo && keysWithName === 1 // else attribute an unambiguous canonical name (external worktree)
+  })
 }
 
 function collectScope(store: Store, inv: EnvInventory, source: string, scope: string, scopeKey: string, label: string): void {

@@ -76,6 +76,35 @@ describe('buildEnvInventory', () => {
     expect(inv.mcpServers).not.toContain('theirs') // the collision leak the fix prevents
   })
 
+  it('resolves an EXTERNAL git worktree by canonical repo name when cwd is not under the repo root', () => {
+    const { db, store } = setup()
+    // A linked worktree checked out OUTSIDE the repo: analyze canonicalizes the session's
+    // repo→'aivue' and its scope_key→the MAIN checkout /Users/x/aivue, but the session
+    // ran at /Users/x/aivue-wt/... — NOT under that root. The scope_key still belongs to
+    // this repo because its basename IS the (unambiguous) repo name.
+    store.recordEnvSnapshot({ source: 'claude-code', scope: 'project', scopeKey: '/Users/x/aivue', category: 'mcp',
+      payload: { '.mcp.json': { servers: { github: { type: 'stdio' } } } } })
+    seedSessionCwd(db, 's1', 'aivue', '/Users/x/aivue-wt/src') // external worktree cwd
+    const inv = buildEnvInventory(store, 'aivue')
+    expect(inv.mcpServers).toContain('github')
+    expect(inv.scopes).toContain('project aivue')
+  })
+
+  it('does NOT name-match across two project roots sharing a basename (external-worktree ambiguity guard)', () => {
+    const { db, store } = setup()
+    // Both repos canonicalize to basename "app"; a session ran in an external worktree of
+    // one (cwd under NEITHER root). Name-matching alone would pull both — the ambiguity
+    // guard must suppress it so neither config leaks.
+    store.recordEnvSnapshot({ source: 'claude-code', scope: 'project', scopeKey: '/Users/x/work/app', category: 'mcp',
+      payload: { '.mcp.json': { servers: { mine: { type: 'stdio' } } } } })
+    store.recordEnvSnapshot({ source: 'claude-code', scope: 'project', scopeKey: '/Users/x/side/app', category: 'mcp',
+      payload: { '.mcp.json': { servers: { theirs: { type: 'stdio' } } } } })
+    seedSessionCwd(db, 's1', 'app', '/Users/x/external-wt/app-branch/src') // under neither root
+    const inv = buildEnvInventory(store, 'app')
+    expect(inv.mcpServers).not.toContain('mine')
+    expect(inv.mcpServers).not.toContain('theirs')
+  })
+
   it('a repo with no matching session cwd falls back to global (no project scope)', () => {
     const { store } = setup()
     store.recordEnvSnapshot({ source: 'claude-code', scope: 'project', scopeKey: '/Users/x/work/app', category: 'mcp',
