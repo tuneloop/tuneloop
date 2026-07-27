@@ -208,3 +208,32 @@ describe('Progress — unit overflow', () => {
     expect(f.last()).toContain('2/2')
   })
 })
+
+describe('Progress — concurrency-aware session rate/ETA', () => {
+  it('derives the session rate from wall-clock throughput, not per-call latency', () => {
+    const f = fakeStream()
+    // 10 sessions need work. Four finish by wall-clock 12s because they ran
+    // concurrently — each individual call was slow, but four completed in 12s.
+    // tick() receives wall-clock-since-phase-start (like unitDone), so the rate is
+    // throughput (12s / 4 = 3s/session), not the ~10s individual-call time — and the
+    // ETA over the 6 remaining is 18s, not the ~1m a per-call average would extrapolate.
+    const p = new Progress(10, 10, f.stream, 'Step 1/2 · Processing sessions')
+    p.tick(true, 9000, 0)
+    p.tick(true, 10000, 0)
+    p.tick(true, 11000, 0)
+    p.tick(true, 12000, 0)
+    expect(f.last()).toContain('3.0s/session')
+    expect(f.last()).toContain('~ETA: 18s')
+  })
+
+  it('cached (no-work) sessions advance the count but not the rate', () => {
+    const f = fakeStream()
+    const p = new Progress(10, 3, f.stream, 'Step 1/2')
+    p.tick(true, 6000, 0) // one real unit, wall-clock 6s
+    p.tick(false, 6001, 0) // cached — count only, must not move the rate
+    p.tick(false, 6002, 0)
+    expect(f.last()).toContain('3/10')
+    expect(f.last()).toContain('6.0s/session')
+    expect(f.last()).toContain('~ETA: 12s') // 2 remaining × 6s
+  })
+})

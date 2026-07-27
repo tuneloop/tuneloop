@@ -1,6 +1,7 @@
 import type { TuneloopConfig } from '../config'
 import { createAnthropicClient } from './anthropic'
 import { createBedrockClient } from './bedrock'
+import { tuneHttpForConcurrentLlm } from './http-transport'
 import { createOpenAiClient } from './openai'
 import { PROVIDERS } from './providers'
 import { withTracing } from './tracing'
@@ -14,6 +15,9 @@ export { startLlmTrace, endLlmTrace } from './tracing'
 /** Build an LLM client from config, or null if enrichment isn't configured. */
 export function createLlmClient(llm: TuneloopConfig['llm']): LlmClient | null {
   if (!llm) return null
+  // Tune the HTTP transport before any request goes out (idempotent) so the concurrent
+  // enrichment pass runs over a connection pool instead of one serialized HTTP/2 stream.
+  tuneHttpForConcurrentLlm()
   // Sole validator for recoverable enrichment misconfig: these throws land in
   // analyze's try/catch and degrade to static-only, instead of aborting the command.
   const preset = PROVIDERS[llm.provider]

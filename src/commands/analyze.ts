@@ -20,7 +20,8 @@ import { openDb } from '../store/db'
 import { Store } from '../store/store'
 import type { Summary } from '../store/store'
 import { createLogger } from '../util/log'
-import { Progress } from '../util/progress'
+import { runPool } from '../util/pool'
+import { formatDuration, Progress } from '../util/progress'
 import { askLine, askSecret } from '../util/prompt'
 import { makeSh } from '../util/sh'
 
@@ -44,6 +45,7 @@ export interface AnalyzeOptions {
  * `search`, and `observe` all read it.
  */
 export async function analyze(opts: AnalyzeOptions): Promise<void> {
+  const runStart = Date.now()
   const log = createLogger(opts.verbose ? 'debug' : 'info')
   let config = loadConfig({ db: opts.db, llm: opts.llm })
 
@@ -314,14 +316,25 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // scope keys (one snapshot per unique repo, not per session).
   const reposBySource = new Map<string, Set<string>>()
 
-  let processed = 0
-  for (const session of merged) {
-    if (opts.limit != null && processed >= opts.limit) break
+  // Process sessions through a bounded-concurrency pool. The per-session LLM
+  // enrichment call dominates wall-clock, so overlapping independent calls can cut the
+  // run; how much depends on the provider's HTTP transport and rate limits. The default
+  // is deliberately conservative; TUNELOOP_ANALYZE_CONCURRENCY overrides it (1 = serial).
+  //
+  // Tradeoff: sessions no longer commit in chronological order, so enrich-session's
+  // incremental feature taxonomy can fragment (a parallel session reads the feature
+  // tree before its peers have added to it, minting near-duplicate features). A
+  // post-loop feature-reconcile pass is the intended mitigation (planned, not yet built).
+  const concurrency = Math.max(1, Math.min(32, Number(process.env.TUNELOOP_ANALYZE_CONCURRENCY) || 4))
+  const phaseStart = Date.now()
+  await runPool(sessionsToProcess, concurrency, async (session) => {
     assignSeq(session) // main-thread seq, post-merge — the block partition's coordinate
     const resolved = await resolveRepo(session.project.cwd)
     const repo = resolved?.name ?? null
     if (repo) session.project.repo = repo
     if (resolved) {
+      // Synchronous get→add→set (no await between), so concurrent workers never
+      // drop a root the way an interleaved read-modify-write across an await could.
       const set = reposBySource.get(session.source) ?? new Set<string>()
       set.add(resolved.root)
       reposBySource.set(session.source, set)
@@ -347,11 +360,14 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     const { costUsd: sessionCost } = await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
     const elapsedMs = Date.now() - t0
 
+    // `elapsedMs` (this session's own time) decides whether it did real work; the
+    // bar's rate takes wall-clock-since-phase-start so the ETA reflects concurrent
+    // throughput rather than the individual call latency.
     const didWork = elapsedMs > 50 || sessionCost > 0
-    progress.tick(didWork, elapsedMs, sessionCost)
-    processed++
-  }
+    progress.tick(didWork, Date.now() - phaseStart, sessionCost)
+  })
   progress.clear()
+  const processingMs = Date.now() - phaseStart
 
   // Refresh stale artifacts: let each processor with a refresh() method re-check
   // its unresolved artifacts against the live source (e.g. open PRs → gh).
@@ -364,10 +380,22 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
       const result = await p.refresh({ artifacts: stale, log, sh })
       if (result.artifacts?.length || result.outcomes?.length) {
         store.persistRefresh(p.name, result)
-        log.info(`${p.name}: refreshed ${result.artifacts?.length ?? 0} artifact(s)`)
+        log.debug(`${p.name}: refreshed ${result.artifacts?.length ?? 0} artifact(s)`)
       }
     } catch (err) {
       log.warn(`refresh failed for ${p.name}: ${(err as Error).message}`)
+    }
+  }
+
+  // Cross-session finalize: each processor's once-after-all pass over the whole corpus
+  // (e.g. enrich-session reconciling the feature taxonomy its per-session run proposed).
+  // Runs after every session's results are persisted; never fatal.
+  for (const p of processors) {
+    if (!p.finalize) continue
+    try {
+      await p.finalize({ store, llm, llmEnabled, log })
+    } catch (err) {
+      log.warn(`finalize failed for ${p.name}: ${(err as Error).message}`)
     }
   }
 
@@ -391,11 +419,14 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Run detectors (cross-session pattern detection) after all processors complete.
   // Step 2/2: a shared bar whose total grows as each LLM detector declares its delta
   // (starts at 0 — S-tier detectors add nothing and it completes instantly).
+  let detectorMs = 0
   if (detectors.length > 0) {
+    const detectorStart = Date.now()
     log.debug(`Running ${detectors.length} detector(s)...`)
     const detectorProgress = new Progress(0, 0, process.stderr, 'Step 2/2 · Detecting patterns')
     await runDetectors({ detectors, store, log, llmEnabled, llm: heavyLlm, progress: detectorProgress, limit: opts.limit })
     detectorProgress.clear()
+    detectorMs = Date.now() - detectorStart
   }
 
   // Interpret fix-marker sightings AFTER detectors, so sightings scanned before
@@ -417,6 +448,10 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
   // Per-directory provenance, stamped with the same completion time.
   store.recordAnalyzedRoots(scannedRoots, finishedAt)
   printSummary(store.summary())
+  log.info(
+    `Analysis finished in ${formatDuration(Date.now() - runStart)} ` +
+      `(Step 1 processing ${formatDuration(processingMs)} · Step 2 detectors ${formatDuration(detectorMs)}).`,
+  )
   // Echo the heavy model only when a distinct second tier actually ran, so the
   // persist hint tells the user how to keep it.
   if (promptedProvider && llmEnabled) {
