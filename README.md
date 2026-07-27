@@ -1,14 +1,16 @@
 # tuneloop
 
-Local analytics for your AI coding sessions. **Count outcomes, not tokens.**
+Local analytics for your AI coding sessions. **Understand and improve your
+coding agent usage.**
 
 tuneloop turns the session transcripts your AI coding tools already write into a
-local dashboard of what you actually shipped, what it cost, and your work patterns.
+local dashboard that gives you cost attribution (what each PR / feature cost)
+and recommendations for more effective usage grounded in your sessions.
 
 <br>
 
 <p align="center">
-  <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (outcome rate, cost per shipped artifact, spend, sessions, tool error rate) above a per-PR cost breakdown treemap" width="900">
+  <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (cost per shipped artifact, session outcome rate, spend, sessions, tool error rate) above a per-PR cost breakdown treemap" width="900">
 </p>
 
 <br>
@@ -22,6 +24,10 @@ Concretely, it enriches each session with:
 - **Work type**
 - **Key decisions**
 - **Tool error categories**
+
+and across sessions, identifies:
+- **Agent re-work / re-steer themes**
+- **Patterns of deviations from best practices**
 
 Combined with the data already in the transcript — model, agent harness, repo, and
 more — this data lets you answer questions like:
@@ -82,15 +88,10 @@ the full list and what each does.
 
 The dashboard reads everything live from a local SQLite store:
 
-- **Session outcome rate** — how many of your sessions ended in a win (you pick what counts).
 - **Cost per shipped artifact** — dollars of AI spend per merged PR or per shipped feature.
+- **Session outcome rate** — how many of your sessions ended in a win (you pick what counts).
 - **Total spend** — over time, split by model, work type, or repo.
 - **Tool & skill usage** — call counts, error rates, and error categories across every session.
-- A **filterable session viewer**, with the full transcript and file changes behind each one.
-    - Easy transcript navigation (turn-by-turn, errors, free text search, and
-      outcomes). For example: you can jump to the part of the session where
-      you worked on a particular feature or code change.
-    - Filter sessions that touched a particular file / PR / feature.
 
 Cost, tools, files, and git/PR outcomes come from static analysis — no setup or
 API key. Work type, complexity, autonomy, and feature names come from [LLM
@@ -107,8 +108,10 @@ dashboard useful depends on it.
 
 <br>
 
-And every session is a readable transcript you can navigate turn-by-turn, by work
-type, or by error — with the files it changed alongside:
+A **filterable session viewer**, with the full transcript and file changes behind each one.
+
+- Easy transcript navigation (turn-by-turn, errors, free text search, and outcomes). For example: you can jump to the part of the session where you worked on a particular feature or code change.
+- Filter sessions that touched a particular file / PR / feature.
 
 <br>
 
@@ -117,6 +120,16 @@ type, or by error — with the files it changed alongside:
 </p>
 
 <br>
+
+A set of **recommendations**, grounded in evidence from across your sessions,
+that surface fixes for re-steering you repeatedly had to do, or deviations from
+best practices.
+
+<br>
+
+<p align="center">
+  <img src="docs/img/recommendations_tab.png" alt="tuneloop recommendations — detects re-work themes and deviations from best practices and offers fix recommendations" width="900">
+</p>
 
 ## How it works
 
@@ -150,6 +163,16 @@ block, so a per-PR or per-feature cost reflects only the work that went into it.
 **Metrics** — the five dashboard headlines (outcome rate, cost per shipped artifact,
 total spend, sessions, tool error rate) are each explained in
 [ARCHITECTURE.md](./ARCHITECTURE.md#the-metrics-explained).
+
+**Detection of recurring agent re-work / re-steer themes** — LLM-based analysis
+that identifies patterns from across your sessions where you had to step in and
+course-correct. Surfaces recommendations to fix these — updates to agent files
+(CLAUDE.md / AGENTS.md), skills, tooling or config.
+
+**Identification of deviations from best practices** — Deterministic and
+LLM-as-a-judge checkers that look at things like cache hit rate, context
+management, and unused startup bloat. Surfaces recommendations to fix these —
+updates to config, or simply an informational nudge.
 
 ## Query it from your coding agent
 
@@ -185,6 +208,8 @@ own** LLM key. Your session data goes only to the provider you choose:
 export TUNELOOP_LLM_PROVIDER=anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
 # optional: export TUNELOOP_LLM_MODEL=claude-haiku-4-5
+# recommended (powers the recurring-themes recommendations):
+# export TUNELOOP_LLM_MODEL_HEAVY=claude-sonnet-5
 npx tuneloop analyze
 ```
 
@@ -234,10 +259,12 @@ TUNELOOP_LLM_API_KEY=… npx tuneloop analyze --llm-model my-model
 Enrichment is one structured **tool call** per session, so use a
 tool-call-capable model (all the hosted defaults qualify). Flags override the env
 for one run; the API key is never a flag — set it in the env or paste it at the
-interactive prompt. It's cheap — a typical corpus of ~80
-sessions runs about **$0.60** with Claude Haiku. This cost shows up as **Analysis
-spend** in the summary, priced from a built-in table with an OpenRouter public
-price list filling gaps (cached under `~/.tuneloop/`).
+interactive prompt. It's inexpensive: analyzing ~100 sessions on a Sonnet-class
+model runs about **$6** — per-session enrichment plus the cross-session
+recommendation passes. (Enrich on the default Haiku model and reserve the
+Sonnet-class model for the recommendation detectors, and it costs less.) This
+cost shows up as **Analysis spend** in the summary, priced from a built-in table
+with an OpenRouter public price list filling gaps (cached under `~/.tuneloop/`).
 
 **Two model tiers (optional).** By default one model does everything. The work
 splits into two shapes, though: per-session enrichment is one call per session
@@ -254,9 +281,11 @@ TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
 ```
 
 Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
-differs. Leave it unset and every detector uses the base model, unchanged.
-Changing it re-analyzes the full corpus for the detectors that use it, since
-extractions made by the old model aren't comparable to the new one's.
+differs. Leave it unset and every detector uses the base model, unchanged —
+except **recurring-themes**, which needs a Sonnet-class model and is skipped (with
+a warning) when the base model isn't one. Changing it re-analyzes the full corpus
+for the detectors that use it, since extractions made by the old model aren't
+comparable to the new one's.
 
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the

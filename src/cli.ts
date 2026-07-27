@@ -17,7 +17,7 @@ const program = new Command()
 
 program
   .name('tuneloop')
-  .description('Local analytics for your AI coding sessions. Count outcomes, not tokens.')
+  .description('Local analytics for your AI coding sessions. Understand and improve your coding agent usage.')
   .version(version)
 
 const appendValue = (val: string, acc: string[]): string[] => (acc.push(val), acc)
