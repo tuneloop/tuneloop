@@ -241,10 +241,12 @@ price list filling gaps (cached under `~/.tuneloop/`).
 
 **Two model tiers (optional).** By default one model does everything. The work
 splits into two shapes, though: per-session enrichment is one call per session
-(the volume — a cheap model is the right call), while the pattern **detectors**
-make a handful of cross-session synthesis calls where reasoning quality shows up
-in the insights. Set `TUNELOOP_LLM_MODEL_HEAVY` (or `--llm-model-heavy`) to give
-the detector pass a stronger sibling model on the same provider:
+(the volume — a cheap model is the right call), and most detectors run fine on
+that same cheap model, while a few make cross-session synthesis calls where
+reasoning quality shows up in the insights. Detectors opt into the stronger tier
+individually — today the **recurring-themes** detector does; the rest stay on the
+base model. Set `TUNELOOP_LLM_MODEL_HEAVY` (or `--llm-model-heavy`) to give those
+opted-in detectors a stronger sibling model on the same provider:
 
 ```bash
 TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
@@ -252,9 +254,9 @@ TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
 ```
 
 Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
-differs. Leave it unset and detectors keep using the base model, unchanged.
-Changing it re-analyzes the full corpus for LLM detectors, since extractions made
-by the old model aren't comparable to the new one's.
+differs. Leave it unset and every detector uses the base model, unchanged.
+Changing it re-analyzes the full corpus for the detectors that use it, since
+extractions made by the old model aren't comparable to the new one's.
 
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the

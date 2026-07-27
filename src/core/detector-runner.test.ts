@@ -215,6 +215,84 @@ describe('runDetectors — delta cache invalidation', () => {
   })
 })
 
+describe('runDetectors — per-detector model tier routing', () => {
+  it('gives ctx.llm the heavy client to a model:"heavy" detector and the default client otherwise', async () => {
+    const { store, log } = setup()
+    let heavySaw = ''
+    let defaultSaw = ''
+    const heavyD: Detector = {
+      name: 'heavyd', version: 1, tier: 'X', needsLlm: true, model: 'heavy',
+      run: (ctx) => { heavySaw = ctx.llm!.model; return [] },
+    }
+    const defaultD: Detector = {
+      name: 'defaultd', version: 1, tier: 'P', needsLlm: true,
+      run: (ctx) => { defaultSaw = ctx.llm!.model; return [] },
+    }
+    await runDetectors({
+      detectors: [heavyD, defaultD], store, log, llmEnabled: true,
+      llm: fakeLlm('cheap'), heavyLlm: fakeLlm('strong'),
+    })
+    expect(heavySaw).toBe('strong')
+    expect(defaultSaw).toBe('cheap')
+  })
+
+  it('routes applicable() through the same per-detector client as run()', async () => {
+    const { store, log } = setup()
+    let gateSaw = ''
+    const d: Detector = {
+      name: 'gated', version: 1, tier: 'X', needsLlm: true, model: 'heavy',
+      applicable: (ctx) => { gateSaw = ctx.llm!.model; return true },
+      run: () => [],
+    }
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: fakeLlm('cheap'), heavyLlm: fakeLlm('strong') })
+    expect(gateSaw).toBe('strong')
+  })
+
+  it('falls back to the default client for a heavy detector when no heavy client is provided', async () => {
+    const { store, log } = setup()
+    let saw = ''
+    const d: Detector = {
+      name: 'heavyfallback', version: 1, tier: 'X', needsLlm: true, model: 'heavy',
+      run: (ctx) => { saw = ctx.llm!.model; return [] },
+    }
+    // No heavyLlm passed → 'heavy' resolves to the default client, single-tier behaviour.
+    await runDetectors({ detectors: [d], store, log, llmEnabled: true, llm: fakeLlm('cheap') })
+    expect(saw).toBe('cheap')
+  })
+
+  it('keys delta invalidation on the heavy model for a model:"heavy" detector', async () => {
+    const { db, store, log } = setup()
+    seedSession(db, 's1', 'h1')
+    function heavyDelta(model: string) {
+      let sawUnseen = -1
+      const d: Detector = {
+        name: 'hdelta', version: 1, tier: 'X', needsLlm: true, model: 'heavy',
+        run: (ctx) => {
+          const unseen = ctx.unseenSessions()
+          sawUnseen = unseen.length
+          return { insights: [insight('a')], seen: unseen, cost: { inTokens: 1, outTokens: 1, usd: 0.01, model } }
+        },
+      }
+      return { d, unseen: () => sawUnseen }
+    }
+    // First run extracts the corpus on heavy model 'big1'.
+    const first = heavyDelta('big1')
+    await runDetectors({ detectors: [first.d], store, log, llmEnabled: true, llm: fakeLlm('cheap'), heavyLlm: fakeLlm('big1') })
+    expect(first.unseen()).toBe(1)
+
+    // Default model churns but the HEAVY model is unchanged → the heavy detector's
+    // delta must stay cached (it never used the default client).
+    const second = heavyDelta('big1')
+    await runDetectors({ detectors: [second.d], store, log, llmEnabled: true, llm: fakeLlm('cheap2'), heavyLlm: fakeLlm('big1') })
+    expect(second.unseen()).toBe(0)
+
+    // Heavy model swaps → the delta resets and the corpus is re-analyzed.
+    const third = heavyDelta('big2')
+    await runDetectors({ detectors: [third.d], store, log, llmEnabled: true, llm: fakeLlm('cheap'), heavyLlm: fakeLlm('big2') })
+    expect(third.unseen()).toBe(1)
+  })
+})
+
 describe('runDetectors — --limit bounds detectors', () => {
   it('skips X-tier detectors under a limit but still runs S/P-tier', async () => {
     const { db, store, log } = setup()
