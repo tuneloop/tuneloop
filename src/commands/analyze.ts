@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
-import { defaultHeavyModel, loadConfig } from '../config'
+import { loadConfig } from '../config'
 import type { LlmOverrides } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
 import { INTRINSIC_MEASURES } from '../core/measures'
@@ -72,14 +72,13 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     const answer = await promptForEnrichment()
     if (answer) {
       promptedProvider = answer.provider
-      // Re-resolve through the normal config path so the preset's default
-      // model / base URL apply exactly as they would from env. Also seed the
-      // detector-pass model with the provider's strong sibling — a fresh opt-in
-      // otherwise reuses the cheap session model for detectors, which the
-      // Sonnet-class-or-stronger pass gates out (a flag / env still win).
+      // Re-resolve through the normal config path so the preset's default model,
+      // base URL, and strong-sibling heavy model apply exactly as they would from
+      // env. resolveLlm seeds heavyModel from the preset when nothing sets it, so a
+      // fresh opt-in gets the Sonnet-class-or-stronger detectors too (flag / env win).
       config = loadConfig({
         db: opts.db,
-        llm: { ...opts.llm, provider: answer.provider, apiKey: answer.apiKey, heavyModel: defaultHeavyModel(answer.provider, opts.llm) },
+        llm: { ...opts.llm, provider: answer.provider, apiKey: answer.apiKey },
       })
     }
   }

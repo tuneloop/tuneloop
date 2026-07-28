@@ -229,9 +229,8 @@ own** LLM key. Your session data goes only to the provider you choose:
 ```bash
 export TUNELOOP_LLM_PROVIDER=anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
-# optional: export TUNELOOP_LLM_MODEL=claude-haiku-4-5
-# recommended (powers the recurring-themes recommendations):
-# export TUNELOOP_LLM_MODEL_HEAVY=claude-sonnet-5
+# optional: export TUNELOOP_LLM_MODEL=claude-haiku-4-5        # base (per-session) model
+# optional: export TUNELOOP_LLM_MODEL_HEAVY=claude-sonnet-5   # detector model — auto-selected for anthropic; set to override
 npx tuneloop analyze
 ```
 
@@ -282,20 +281,21 @@ Enrichment is one structured **tool call** per session, so use a
 tool-call-capable model (all the hosted defaults qualify). Flags override the env
 for one run; the API key is never a flag — set it in the env or paste it at the
 interactive prompt. It's inexpensive: analyzing ~100 sessions runs about **$6**
-with the recommended pairing — a cheap model (e.g. Claude Haiku) for the
-per-session enrichment and a Sonnet-class heavy model for the cross-session
-recommendation detectors. This cost shows up as **Analysis spend** in the summary,
+with the default pairing — a cheap model (e.g. Claude Haiku) for the per-session
+enrichment and a Sonnet-class heavy model for the cross-session recommendation
+detectors. This cost shows up as **Analysis spend** in the summary,
 priced from a built-in table with an OpenRouter public price list filling gaps
 (cached under `~/.tuneloop/`).
 
-**Two model tiers (optional).** By default one model does everything. The work
-splits into two shapes, though: per-session enrichment is one call per session
-(the volume — a cheap model is the right call), and most detectors run fine on
-that same cheap model, while a few make cross-session synthesis calls where
-reasoning quality shows up in the insights. Detectors opt into the stronger tier
-individually — today the **recurring-themes** detector does; the rest stay on the
-base model. Set `TUNELOOP_LLM_MODEL_HEAVY` (or `--llm-model-heavy`) to give those
-opted-in detectors a stronger sibling model on the same provider:
+**Two model tiers.** The work splits into two shapes: per-session enrichment is one
+call per session (the volume — a cheap model is the right call), while a few
+detectors make cross-session synthesis calls where reasoning quality shows up in
+the insights. Detectors opt into the stronger tier individually — today the
+**recurring-themes** detector does; the rest stay on the base model. On the
+built-in providers with a strong sibling (Anthropic, OpenAI, Bedrock, OpenRouter,
+Gemini), that heavy model is **selected automatically**, so the recommendations
+work out of the box. Override it with `TUNELOOP_LLM_MODEL_HEAVY` (or
+`--llm-model-heavy`) — a sibling model on the same provider:
 
 ```bash
 TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
@@ -303,11 +303,12 @@ TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
 ```
 
 Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
-differs. Leave it unset and every detector uses the base model, unchanged —
-except **recurring-themes**, which needs a Sonnet-class model and is skipped (with
-a warning) when the base model isn't one. Changing it re-analyzes the full corpus
-for the detectors that use it, since extractions made by the old model aren't
-comparable to the new one's.
+differs. Leave it unset and tuneloop uses the provider's default heavy model where
+it has one (the strong siblings above); a provider without one falls back to the
+base model, which skips **recurring-themes** (with a warning) when that model is
+below the Sonnet-class tier. Changing it re-analyzes the full corpus for the
+detectors that use it, since extractions made by the old model aren't comparable to
+the new one's.
 
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the

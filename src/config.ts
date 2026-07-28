@@ -20,7 +20,8 @@ export interface TuneloopConfig {
 export interface LlmOverrides {
   provider?: string
   model?: string
-  /** Optional stronger model for the detector pass; unset = detectors reuse `model`. */
+  /** Optional stronger model for the detector pass; unset = the provider's default
+   * heavy model, or the base `model` when the provider has no strong sibling. */
   heavyModel?: string
   baseURL?: string
   /** In-process override (interactive prompt); never exposed as a CLI flag. */
@@ -48,27 +49,16 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   if (preset && !preset.keyless && !apiKey) return null
 
   const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
-  // Opt-in second tier: per-session processors keep the cheap `model`, while the
-  // cross-session detector pass gets this one. Deliberately has NO preset default —
-  // unset means one model for everything, exactly as before. Same provider/key/URL
-  // as `model`, so it only makes sense as a sibling id on the same endpoint.
-  const heavyModel = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? undefined
+  // Second tier for the cross-session detector pass: per-session processors keep the
+  // cheap `model`, while detectors that opt in (model: 'heavy', e.g. recurring-themes)
+  // run on this one. When nothing sets it, fall back to the provider's strong sibling
+  // (`defaultHeavyModel`) so the Sonnet-class-or-stronger detectors run by default
+  // instead of being silently gated out; providers with no strong sibling (or one
+  // already strong) resolve to undefined and reuse the base `model`. Same
+  // provider/key/URL as `model` — only ever a sibling id on the same endpoint.
+  const heavyModel = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? preset?.defaultHeavyModel
   const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL
   return { provider, model, apiKey, baseURL, heavyModel }
-}
-
-/**
- * The detector-pass ("heavy") model to seed when a provider is configured
- * INTERACTIVELY — analyze's run-only enrichment setup, where the user gives a
- * provider + key but no model. Precedence mirrors resolveLlm: an explicit flag
- * ▸ TUNELOOP_LLM_MODEL_HEAVY ▸ the preset's strong sibling. Unlike resolveLlm's
- * `heavyModel` this DOES fall back to the preset default: a fresh user who just
- * opted in should get a strong model for the Sonnet-class-or-stronger detectors,
- * not the cheap session model. Returns undefined for providers with no strong
- * sibling (or one already strong, e.g. xai) — leaving one model for everything.
- */
-export function defaultHeavyModel(provider: string, overrides?: LlmOverrides): string | undefined {
-  return overrides?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? PROVIDERS[provider]?.defaultHeavyModel
 }
 
 export function loadConfig(opts?: { dataDir?: string; db?: string; llm?: LlmOverrides }): TuneloopConfig {
