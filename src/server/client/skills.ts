@@ -464,16 +464,31 @@ function loadOutcomes(name) {
 }
 
 var OUTCOME_META = {
-  used: { label: 'Used', color: 'var(--emerald)' },
+  used: { label: 'Followed', color: 'var(--emerald)' },
   reworked: { label: 'Reworked', color: 'var(--amber)' },
-  ignored: { label: 'Ignored', color: 'var(--red)' },
+  ignored: { label: 'Bypassed', color: 'var(--red)' },
   unclear: { label: 'Unclear', color: 'var(--gray)' }
 };
 
 function outcomesHtml(d) {
   var total = d.classified || 1;
+  var bypassed = d.bypassed || 0;
+  var bypassPct = Math.round((bypassed / total) * 100);
+
+  // Headline (C): does the skill pull its weight? Lead with the bypass rate — the one
+  // actionable number — instead of a mostly-"used" bar.
+  var verdict, vClass;
+  if (bypassPct >= 50) { verdict = 'Often bypassed'; vClass = 'sk-w-bad'; }
+  else if (bypassPct >= 20) { verdict = 'Sometimes reworked'; vClass = 'sk-w-warn'; }
+  else { verdict = 'Mostly followed'; vClass = 'sk-w-ok'; }
+  var html = '<div class="sk-weight ' + vClass + '">' +
+    '<span class="sk-weight-v">' + esc(verdict) + '</span>' +
+    '<span class="sk-weight-d">The agent bypassed or reworked its output in <b>' + num(bypassed) + ' of ' + num(total) +
+      '</b> judged firing' + (total === 1 ? '' : 's') + ' (' + bypassPct + '%).</span>' +
+    '</div>';
+
+  // The full breakdown, still a stacked proportion bar + legend, but secondary now.
   var order = ['used', 'reworked', 'ignored', 'unclear'];
-  // A single stacked proportion bar + a legend line per outcome with counts.
   var seg = order.map(function (k) {
     var n = d[k] || 0;
     if (!n) return '';
@@ -487,8 +502,7 @@ function outcomesHtml(d) {
     return '<span class="sk-oc-leg"><span class="sk-oc-dot" style="background:' + m.color + '"></span>' +
       esc(m.label) + ' ' + Math.round((n / total) * 100) + '% <span class="sk-oc-legn">(' + num(n) + ')</span></span>';
   }).join('');
-
-  var html = '<div class="sk-oc-bar">' + seg + '</div>' +
+  html += '<div class="sk-oc-bar">' + seg + '</div>' +
     '<div class="sk-oc-legend">' + legend + '</div>';
 
   if (d.userCorrectionAdjacent > 0) {
@@ -496,7 +510,7 @@ function outcomesHtml(d) {
       num(d.userCorrectionAdjacent) + ' of ' + num(d.classified) + ' firings.</div>';
   }
 
-  // A couple of observational evidence snippets, clearly labelled as examples.
+  // Evidence — bypass cases first (the read model orders them that way), clearly examples.
   if (d.examples && d.examples.length) {
     html += '<div class="sk-oc-examples">' + d.examples.slice(0, 3).map(function (e) {
       var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
@@ -505,9 +519,11 @@ function outcomesHtml(d) {
     }).join('') + '</div>';
   }
 
-  html += '<div class="sk-sect-note">A cheap LLM read of the turns around each firing: did the agent <b>use</b>, <b>rework</b>, or <b>ignore</b> the skill’s output. ' +
-    'This is <b>observational</b> — what happened after the skill ran — not a verdict that the skill succeeded or failed, and never a cost. ' +
-    'Classified ' + num(d.classified) + ' firing' + (d.classified === 1 ? '' : 's') + ' in this window.</div>';
+  html += '<div class="sk-sect-note">A cheap LLM read of the turns around each firing: did the agent <b>follow</b> the skill’s output, ' +
+    '<b>rework</b> it, or <b>bypass</b> it entirely. This is <b>observational</b> — what happened after the skill ran — not a verdict ' +
+    'that the skill succeeded or failed, and never a cost. Judged ' + num(d.classified) + ' firing' + (d.classified === 1 ? '' : 's') + ' in this window.' +
+    (d.insufficientContext > 0 ? ' ' + num(d.insufficientContext) + ' more had too little captured context to judge and are excluded.' : '') +
+    '</div>';
   return html;
 }
 

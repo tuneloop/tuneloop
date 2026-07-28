@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { skillHealth } from './skill-health'
+import { skillHealth, skillOutcomeStats } from './skill-health'
 import { MIN_SESSIONS } from '../detectors/unused-capabilities'
 
 const SOURCE = 'claude-code'
@@ -181,5 +181,58 @@ describe('skillHealth', () => {
     // that windows, not the session's start.
     const tight = skillHealth(store, { days: 1, nowMs: NOW }).rows.find((x) => x.name === 'usedskill')
     expect(tight?.calls ?? 0).toBe(0)
+  })
+})
+
+describe('skillOutcomeStats', () => {
+  let dir: string
+  let dbN = 0
+  let store: Store
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'skill-oc-'))
+  })
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  beforeEach(() => {
+    db = openDb(join(dir, `oc${dbN++}.db`))
+    store = new Store(db)
+  })
+  afterEach(() => store.close())
+
+  /** Seed one skill firing (tool_call) + its outcome verdict. */
+  const seedFiring = (sid: string, idx: number, outcome: string, correction = false, evidence = 'e') => {
+    if (idx === 0) {
+      db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, 'r', ?, 1, 1)`).run(sid, sid, SOURCE, iso(2))
+    }
+    db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, ?, 'commit', 'skill', 1, 0, 0, ?)`).run(sid, idx, iso(2))
+    return { idx, name: 'commit', outcome, userCorrectionAdjacent: correction, evidence: outcome + ': ' + evidence }
+  }
+
+  it('excludes insufficient-context from the distribution and derives bypassed', () => {
+    const v = [
+      seedFiring('s', 0, 'used'),
+      seedFiring('s', 1, 'reworked', true),
+      seedFiring('s', 2, 'ignored'),
+      seedFiring('s', 3, 'insufficient-context'),
+      seedFiring('s', 4, 'insufficient-context'),
+    ]
+    db.prepare(`INSERT INTO annotations (session_id, processor, key, value) VALUES ('s', 'skill-outcomes', 'skill_outcomes', ?)`).run(JSON.stringify(v))
+
+    const o = skillOutcomeStats(store, 'commit', { from: iso(30), to: iso(0) })!
+    expect(o.classified).toBe(3) // the 2 insufficient-context firings are NOT judged
+    expect(o.used).toBe(1)
+    expect(o.reworked).toBe(1)
+    expect(o.ignored).toBe(1)
+    expect(o.bypassed).toBe(2) // reworked + ignored
+    expect(o.insufficientContext).toBe(2) // counted separately for the footnote
+    expect(o.userCorrectionAdjacent).toBe(1)
+    // Bypass examples (reworked/ignored) are ordered ahead of the followed one.
+    expect(['reworked', 'ignored']).toContain(o.examples[0]!.outcome)
+  })
+
+  it('returns null when a skill has only insufficient-context firings', () => {
+    const v = [seedFiring('s2', 0, 'insufficient-context')]
+    db.prepare(`INSERT INTO annotations (session_id, processor, key, value) VALUES ('s2', 'skill-outcomes', 'skill_outcomes', ?)`).run(JSON.stringify(v))
+    // No judged verdict → nothing to show (the panel stays hidden).
+    expect(skillOutcomeStats(store, 'commit', { from: iso(30), to: iso(0) })).toBeNull()
   })
 })

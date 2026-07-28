@@ -870,8 +870,14 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-ver-hash { font-size: 11px; color: var(--gray); }
 .sk-ver-use { font-size: 12px; color: var(--muted); text-align: right; }
 
-/* Activation outcomes — stacked proportion bar + legend + evidence. */
-.sk-oc-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--track); margin-top: 10px; max-width: 720px; }
+/* Activation outcomes — "pulls its weight" headline, then a stacked bar + evidence. */
+.sk-weight { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 8px; border-left: 3px solid var(--muted); background: var(--track); max-width: 720px; }
+.sk-weight-v { font-size: 13px; font-weight: 600; color: var(--ink); }
+.sk-weight-d { font-size: 12.5px; color: var(--muted); }
+.sk-w-ok { border-left-color: var(--emerald); }
+.sk-w-warn { border-left-color: var(--amber); }
+.sk-w-bad { border-left-color: var(--red); }
+.sk-oc-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--track); margin-top: 14px; max-width: 720px; }
 .sk-oc-seg { display: block; height: 100%; }
 .sk-oc-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
 .sk-oc-leg { font-size: 12px; color: var(--ink); display: inline-flex; align-items: center; gap: 6px; }

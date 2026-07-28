@@ -709,15 +709,27 @@ export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWi
 /** Per-skill rollup of the LLM-classified activation outcomes. */
 export interface SkillOutcomeStats {
   name: string
-  /** Firings that carry a verdict in the window (the distribution denominator). */
+  /** Judged firings = the distribution denominator: used + reworked + ignored + unclear.
+   *  `insufficient-context` verdicts are NOT judged (our view was too small to tell) and
+   *  are excluded from this and every count below — they'd be noise, not signal. */
   classified: number
+  /** Followed the skill's output as-is. */
   used: number
+  /** Used it but then corrected/redid it (partial bypass). */
   reworked: number
+  /** Set the output aside and did the work another way (full bypass). */
   ignored: number
+  /** Enough context to see it, but the outcome is genuinely ambiguous. */
   unclear: number
+  /** reworked + ignored — the headline "the skill didn't earn its invocation" count. */
+  bypassed: number
   /** Firings whose verdict flagged an adjacent user correction. */
   userCorrectionAdjacent: number
-  /** A few example evidence snippets (observational), newest-ish first. */
+  /** Firings we couldn't judge because the captured window was too small — surfaced as an
+   *  honest footnote, never mixed into the distribution. */
+  insufficientContext: number
+  /** A few example evidence snippets (observational), newest-ish first — bypass cases first,
+   *  since those are the actionable ones. */
   examples: Array<{ outcome: string; evidence: string }>
 }
 
@@ -730,8 +742,11 @@ const MAX_OUTCOME_EXAMPLES = 5
  * each verdict back to its firing's tool_call so it windows by tool-run time `t.ts` — the
  * same clock as every other invocation-fact read (queryInvokedDetail et al.), not the
  * session start. Reconciles plugin-namespaced names to the roster name via skillMatches.
- * Returns null when no verdicts exist for the skill (the classifier hasn't run / didn't
- * cover it).
+ *
+ * `insufficient-context` verdicts are counted separately (insufficientContext) and kept OUT
+ * of the used/reworked/ignored/unclear distribution — they mean our captured window was too
+ * small to judge, not that the outcome was ambiguous. Returns null when no JUDGED verdict
+ * exists for the skill (a skill with only insufficient-context firings shows nothing).
  */
 export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWindow = {}): SkillOutcomeStats | null {
   const { sinceIso, untilIso } = resolveWindow(store, win)
@@ -760,12 +775,21 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
     reworked: 0,
     ignored: 0,
     unclear: 0,
+    bypassed: 0,
     userCorrectionAdjacent: 0,
+    insufficientContext: 0,
     examples: [],
   }
+  // Collect bypass examples first (the actionable ones), then fill from the rest.
+  const bypassEx: Array<{ outcome: string; evidence: string }> = []
+  const otherEx: Array<{ outcome: string; evidence: string }> = []
   for (const r of rows) {
     // Match the verdict's skill name to the requested skill (incl. plugin-namespaced).
     if (!r.vname || !(r.vname === name || skillMatches(name, r.vname))) continue
+    if (r.outcome === 'insufficient-context') {
+      stats.insufficientContext++
+      continue // never a judged verdict — kept out of the distribution
+    }
     stats.classified++
     switch (r.outcome) {
       case 'used': stats.used++; break
@@ -774,10 +798,13 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
       default: stats.unclear++; break
     }
     if (r.correction) stats.userCorrectionAdjacent++
-    if (r.evidence && stats.examples.length < MAX_OUTCOME_EXAMPLES) {
-      stats.examples.push({ outcome: r.outcome ?? 'unclear', evidence: r.evidence })
+    if (r.evidence) {
+      const ex = { outcome: r.outcome ?? 'unclear', evidence: r.evidence }
+      ;(r.outcome === 'reworked' || r.outcome === 'ignored' ? bypassEx : otherEx).push(ex)
     }
   }
+  stats.bypassed = stats.reworked + stats.ignored
+  stats.examples = [...bypassEx, ...otherEx].slice(0, MAX_OUTCOME_EXAMPLES)
   return stats.classified > 0 ? stats : null
 }
 

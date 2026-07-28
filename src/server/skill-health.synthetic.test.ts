@@ -99,6 +99,7 @@ describe('synthetic skill seed', () => {
     expect(stats.reworked).toBe(exp.reviewOutcomes.reworked)
     expect(stats.ignored).toBe(exp.reviewOutcomes.ignored)
     expect(stats.userCorrectionAdjacent).toBe(exp.reviewOutcomes.userCorrectionAdjacent)
+    expect(stats.bypassed).toBe(stats.reworked + stats.ignored) // headline = the actionable count
     expect(stats.examples.length).toBeGreaterThan(0)
   })
 
