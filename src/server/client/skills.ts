@@ -496,11 +496,12 @@ function outcomesHtml(d) {
       num(d.userCorrectionAdjacent) + ' of ' + num(d.classified) + ' firings.</div>';
   }
 
-  // Evidence — bypass cases first (the read model orders them that way), clearly examples.
+  // Evidence — one row per judged firing, bypass cases first (the read model orders them
+  // that way). Full text, no truncation; the outcome tag is colour-coded.
   if (d.examples && d.examples.length) {
-    html += '<div class="sk-oc-examples">' + d.examples.slice(0, 3).map(function (e) {
+    html += '<div class="sk-oc-examples">' + d.examples.map(function (e) {
       var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
-      return '<div class="sk-oc-ex"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
+      return '<div class="sk-oc-ex" style="border-left-color:' + m.color + '"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
         '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span></div>';
     }).join('') + '</div>';
   }

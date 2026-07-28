@@ -884,10 +884,14 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-oc-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
 .sk-oc-legn { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .sk-oc-corr { margin-top: 12px; font-size: 12.5px; color: var(--red); }
-.sk-oc-examples { margin-top: 12px; display: flex; flex-direction: column; gap: 5px; max-width: 720px; }
-.sk-oc-ex { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
-.sk-oc-ex-tag { flex: none; width: 74px; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-.sk-oc-ex-txt { color: var(--muted); font-style: italic; }
+.sk-oc-examples { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; max-width: 820px; }
+/* One evidence card per judged firing: a coloured outcome pill + the full sentence,
+   wrapping cleanly. A left border tints the card to the outcome for quick scanning. */
+.sk-oc-ex { display: flex; gap: 12px; align-items: flex-start; font-size: 13px; line-height: 1.5;
+  padding: 9px 12px; background: var(--track); border-radius: 8px; border-left: 3px solid var(--line); }
+.sk-oc-ex-tag { flex: none; width: 72px; font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em; padding-top: 1px; }
+.sk-oc-ex-txt { color: var(--ink); }
 
 /* Co-occurrence list — other skills sharing sessions. */
 #sk-cooc { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-width: 720px; }

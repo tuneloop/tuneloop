@@ -176,6 +176,37 @@ describe('skillDrift', () => {
     expect(r.singleVersion).toBe(true)
   })
 
+  it('starts a new version when the description changes even if the body is identical', () => {
+    // The frontmatter `description` steers the agent, so a reword is a behavioral edit.
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'desc', body: 'same body', bodyHash: 'h1', description: 'Review a diff' }], count: 1 } },
+      iso(20),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'desc', body: 'same body', bodyHash: 'h1', description: 'Review a diff AND suggest fixes' }], count: 1 } },
+      iso(10),
+    )
+    const r = skillDrift(store, 'desc', NOW)
+    expect(r.versions.length).toBe(2) // description change → new version
+    // The displayed bodyHash stays the pure body hash (both versions share it).
+    expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h1'])
+  })
+
+  it('does NOT start a new version on pure-metadata churn (version/tags), body+desc unchanged', () => {
+    // Only a non-behavioral field changed — must stay one version. The payload hash differs
+    // (so a snapshot row IS appended), but drift segments on body+description, not metadata.
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'meta', body: 'b', bodyHash: 'h1', description: 'Do a thing', version: '1.0' }], count: 1 } },
+      iso(20),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'meta', body: 'b', bodyHash: 'h1', description: 'Do a thing', version: '1.1' }], count: 1 } },
+      iso(10),
+    )
+    const r = skillDrift(store, 'meta', NOW)
+    expect(r.versions.length).toBe(1) // version-string bump is not a behavioral edit
+  })
+
   it('withholds the delta when a side is too thin', () => {
     // A skill edited once, but with only 1 call after the edit → not enough to judge.
     store.recordEnvSnapshot(

@@ -701,12 +701,10 @@ export interface SkillOutcomeStats {
   /** Firings we couldn't judge because the captured window was too small — surfaced as an
    *  honest footnote, never mixed into the distribution. */
   insufficientContext: number
-  /** A few example evidence snippets (observational), newest-ish first — bypass cases first,
-   *  since those are the actionable ones. */
+  /** One evidence snippet per judged firing (observational), bypass cases first since those
+   *  are the actionable ones, then the rest newest-first. Not capped — the UI shows them all. */
   examples: Array<{ outcome: string; evidence: string }>
 }
-
-const MAX_OUTCOME_EXAMPLES = 5
 
 /**
  * Roll up activation-outcome verdicts for one skill in the window. Each session's
@@ -777,7 +775,7 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
     }
   }
   stats.bypassed = stats.reworked + stats.ignored
-  stats.examples = [...bypassEx, ...otherEx].slice(0, MAX_OUTCOME_EXAMPLES)
+  stats.examples = [...bypassEx, ...otherEx] // all judged firings, bypass-first
   return stats.classified > 0 ? stats : null
 }
 
@@ -862,18 +860,39 @@ function editedAtOf(payload: unknown, name: string): string | null {
   return null
 }
 
-/** Read a skill entry's body hash from a skills-category snapshot payload. */
-function bodyHashOf(payload: unknown, name: string): string | null {
+/** Locate the skill entry named `name` in a skills-category snapshot payload, or null. */
+function skillEntry(payload: unknown, name: string): Record<string, unknown> | null {
   const skills = (payload as { skills?: unknown } | null)?.skills
   if (!Array.isArray(skills)) return null
   for (const s of skills) {
     const o = s as Record<string, unknown> | null
-    if (!o || o.name !== name) continue
-    if (typeof o.bodyHash === 'string') return o.bodyHash
-    if (typeof o.body === 'string') return o.body // fall back to the body itself as identity
-    return '' // present but bodyless — a stable (empty) identity
+    if (o && o.name === name) return o
   }
-  return null // the skill isn't in this snapshot
+  return null
+}
+
+/** A skill entry's body hash (the display identity for a version), or null if absent. */
+function bodyHashOf(payload: unknown, name: string): string | null {
+  const o = skillEntry(payload, name)
+  if (!o) return null // the skill isn't in this snapshot
+  if (typeof o.bodyHash === 'string') return o.bodyHash
+  if (typeof o.body === 'string') return o.body // fall back to the body itself as identity
+  return '' // present but bodyless — a stable (empty) identity
+}
+
+/**
+ * A skill entry's VERSION identity for drift segmentation: the body PLUS the frontmatter
+ * `description` — both steer the agent, so a reworded description is a behavioral edit and
+ * starts a new version. Pure-metadata churn (version:, tags, author, models) is deliberately
+ * excluded — a version-string bump is not a behavior change. Distinct from bodyHashOf, which
+ * is the display hash. Null when the skill is absent from this snapshot.
+ */
+function versionIdOf(payload: unknown, name: string): string | null {
+  const body = bodyHashOf(payload, name)
+  if (body === null) return null
+  const o = skillEntry(payload, name)
+  const desc = o && typeof o.description === 'string' ? o.description : ''
+  return desc ? `${body} ${desc}` : body
 }
 
 /** Which install location a drift timeline reflects. */
@@ -975,18 +994,19 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
   // predates the prior version or postdates when we observed it is implausible → fall back
   // to capture time. This dates an edit to when it happened, safely.
   const nowIso = new Date(nowMs).toISOString()
-  const segments: Array<{ bodyHash: string; startIso: string }> = []
+  // Segment on the VERSION identity (body + description); display the pure body hash.
+  const segments: Array<{ versionId: string; bodyHash: string; startIso: string }> = []
   for (const row of hist) {
-    const h = bodyHashOf(row.payload, name)
-    if (h === null) continue // skill absent from this snapshot (installed/removed later) — skip
+    const id = versionIdOf(row.payload, name)
+    if (id === null) continue // skill absent from this snapshot (installed/removed later) — skip
     const prev = segments[segments.length - 1]
-    if (prev && prev.bodyHash === h) continue // same version, still live
+    if (prev && prev.versionId === id) continue // same version, still live
     const capturedIso = row.capturedAt
     const edited = editedAtOf(row.payload, name)
     const lowerExclusive = prev?.startIso // must be strictly after the previous boundary
     const startIso =
       edited && edited <= capturedIso && (!lowerExclusive || edited > lowerExclusive) ? edited : capturedIso
-    segments.push({ bodyHash: h, startIso })
+    segments.push({ versionId: id, bodyHash: bodyHashOf(row.payload, name) ?? '', startIso })
   }
   if (segments.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
 
