@@ -2004,8 +2004,11 @@ export class Store {
     return this.db.prepare(sql).all(...params) as ErrorOccurrence[]
   }
 
-  /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
-  sessionList(f: SessionFilter): SessionListItem[] {
+  /**
+   * WHERE + params for a session filter, shared by sessionList and sessionCount
+   * so the page rows and the pager total always agree.
+   */
+  private sessionWhere(f: SessionFilter): { where: string; params: unknown[] } {
     const scalar = (key: string) =>
       `(SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='${key}')`
     const clauses: string[] = []
@@ -2065,8 +2068,37 @@ export class Store {
       )
       params.push(...outcomeTypes)
     }
-    const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''
+    return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', params }
+  }
+
+  /** Total sessions matching a filter — the denominator for sessionList's pager. */
+  sessionCount(f: SessionFilter): number {
+    const { where, params } = this.sessionWhere(f)
+    const r = this.db.prepare(`SELECT COUNT(*) AS n FROM sessions s ${where}`).get(...params) as { n: number }
+    return r.n
+  }
+
+  /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
+  sessionList(f: SessionFilter): SessionListItem[] {
+    const scalar = (key: string) =>
+      `(SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='${key}')`
+    const { where, params } = this.sessionWhere(f)
     const limit = Math.min(Math.max(1, f.limit ?? 200), 1000)
+    const offset = Math.max(0, f.offset ?? 0)
+
+    // ORDER BY: a whitelist keyed by the API's `sort` param — every expression is
+    // a constant here, user input only SELECTS one. Complexity sorts by its
+    // ordinal, with untagged sessions below every tagged one. Non-`started` sorts
+    // tiebreak on recency so equal values keep a stable, newest-first order.
+    const sortExprs: Record<string, string> = {
+      started: 's.started_at',
+      cost: 'COALESCE(s.cost_usd, 0)',
+      title: `COALESCE(${titleExpr('s')}, '(untitled)') COLLATE NOCASE`,
+      complexity: `CASE ${scalar('complexity')} WHEN 'trivial' THEN 1 WHEN 'routine' THEN 2 WHEN 'substantial' THEN 3 WHEN 'open-ended' THEN 4 ELSE 0 END`,
+    }
+    const sortExpr = sortExprs[f.sort ?? ''] ?? sortExprs.started
+    const dir = f.dir === 'asc' ? 'ASC' : 'DESC'
+    const tiebreak = sortExpr === sortExprs.started ? '' : ', s.started_at DESC'
 
     const rows = this.db
       .prepare(
@@ -2076,7 +2108,7 @@ export class Store {
                 (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
                 ${scalar('intent_summary')} AS intent,
                 (SELECT json_group_array(t) FROM (SELECT DISTINCT type AS t FROM outcomes WHERE session_id=s.id ORDER BY t)) AS outcomesJson
-         FROM sessions s ${where} ORDER BY s.started_at DESC LIMIT ${limit}`,
+         FROM sessions s ${where} ORDER BY ${sortExpr} ${dir}${tiebreak} LIMIT ${limit} OFFSET ${offset}`,
       )
       .all(...params) as Array<Record<string, any>>
 
@@ -4182,6 +4214,11 @@ export interface SessionFilter {
   /** Match sessions that produced ANY of these outcome types (OR). */
   outcomeTypes?: string[]
   limit?: number
+  /** Sort column: started (default) | cost | title | complexity. Unknown values fall back to started. */
+  sort?: string
+  dir?: 'asc' | 'desc'
+  /** Row index of the first returned row (pagination; default 0). */
+  offset?: number
 }
 
 export interface SessionListItem {

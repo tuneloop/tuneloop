@@ -873,3 +873,49 @@ describe('featureCostTree', () => {
     expect(windowed[0]!.parentId).toBeNull() // parent filtered out → child becomes a root
   })
 })
+
+describe('sessionList sorting + pagination', () => {
+  function seed(db: ReturnType<typeof openDb>, id: string, startedAt: string, cost: number | null, complexity?: string) {
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, title, started_at, cost_usd) VALUES (?,?,?,?,?,?,?)')
+      .run(id, id, 'claude-code', 'anthropic', id, startedAt, cost)
+    if (complexity) {
+      db.prepare("INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'enrich-session', 'complexity', ?)")
+        .run(id, JSON.stringify(complexity))
+    }
+  }
+  function make() {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    seed(db, 's-a', '2026-06-01T00:00:00Z', 5, 'routine')
+    seed(db, 's-b', '2026-06-02T00:00:00Z', 1, 'open-ended')
+    seed(db, 's-c', '2026-06-03T00:00:00Z', 9, 'trivial')
+    seed(db, 's-d', '2026-06-04T00:00:00Z', null) // no cost, untagged complexity
+    return store
+  }
+  const ids = (rows: Array<{ id: string }>) => rows.map((r) => r.id)
+
+  it('defaults to newest-first; unknown sort keys fall back to it', () => {
+    const store = make()
+    expect(ids(store.sessionList({}))).toEqual(['s-d', 's-c', 's-b', 's-a'])
+    expect(ids(store.sessionList({ sort: 'nonsense' }))).toEqual(['s-d', 's-c', 's-b', 's-a'])
+  })
+
+  it('sorts by cost (null as 0) and by complexity ordinal (untagged last on desc)', () => {
+    const store = make()
+    expect(ids(store.sessionList({ sort: 'cost', dir: 'desc' }))).toEqual(['s-c', 's-a', 's-b', 's-d'])
+    expect(ids(store.sessionList({ sort: 'cost', dir: 'asc' }))).toEqual(['s-d', 's-b', 's-a', 's-c'])
+    // Ordinal, not alphabetical: open-ended > routine > trivial > untagged.
+    expect(ids(store.sessionList({ sort: 'complexity', dir: 'desc' }))).toEqual(['s-b', 's-a', 's-c', 's-d'])
+  })
+
+  it('pages with limit/offset while sessionCount reports the whole filtered set', () => {
+    const store = make()
+    expect(store.sessionCount({})).toBe(4)
+    expect(ids(store.sessionList({ limit: 2 }))).toEqual(['s-d', 's-c'])
+    expect(ids(store.sessionList({ limit: 2, offset: 2 }))).toEqual(['s-b', 's-a'])
+    // Count honors the same filters the list applies.
+    const windowed = { from: '2026-06-02T00:00:00Z', to: '2026-06-04T00:00:00Z' }
+    expect(store.sessionCount(windowed)).toBe(2)
+    expect(ids(store.sessionList(windowed))).toEqual(['s-c', 's-b'])
+  })
+})
