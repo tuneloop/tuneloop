@@ -50,12 +50,34 @@ npx tuneloop analyze
 ```
 
 This scans typical session folders like `~/.claude/projects`, builds a local
-store, and prints a summary. The **first run** processes every transcript, so
-expect a few minutes (around 4 for ~80 sessions with [LLM
-enrichment](#llm-enrichment) on; static-only runs are faster); later runs are
-incremental and only re-process sessions that changed, so they finish quickly. On completion the
-CLI prints the dashboard URL — press **Enter** to open it in your browser
-(`Ctrl+C` to stop). Point it at other locations with a comma-separated list:
+store, and prints a summary like this:
+
+```
+Scanned 336 file(s), parsed 334 session(s) into 118 unique session(s), 118 new/changed.
+
+  Sessions      118
+  Total spend   $1566.56
+  Tokens        1,769,497,264
+  Range         2026-04-16 → 2026-07-27
+  Cost / merged PR  $15.31 (56 merged)
+  Analysis spend  $6.92 (enrichment)
+
+Analysis finished in 6m 11s (Step 1 processing 3m 28s · Step 2 detectors 2m 34s).
+
+  tuneloop dashboard  http://localhost:4319
+  store: ~/.tuneloop/tuneloop.sqlite
+  Enter to open in your browser · Ctrl+C to stop
+```
+
+Press **Enter** and it opens the dashboard, where you see everything from the
+[What you get](#what-you-get) section below. In the summary above, `Total spend` is your
+analyzed sessions' AI cost, while `Analysis spend` is what tuneloop's own LLM
+calls cost to produce all of it — a few dollars, here with a Claude Haiku + Sonnet
+model pair (see [LLM enrichment](#llm-enrichment)). The **first run** processes
+every transcript, so expect a few minutes (about 6 for ~120 sessions with
+enrichment on; static-only runs are faster); later runs are incremental and only
+re-process sessions that changed, so they finish quickly. Point it at other
+locations with a comma-separated list:
 
 ```bash
 npx tuneloop analyze ~/.claude/projects,/path/to/more/sessions
@@ -259,12 +281,12 @@ TUNELOOP_LLM_API_KEY=… npx tuneloop analyze --llm-model my-model
 Enrichment is one structured **tool call** per session, so use a
 tool-call-capable model (all the hosted defaults qualify). Flags override the env
 for one run; the API key is never a flag — set it in the env or paste it at the
-interactive prompt. It's inexpensive: analyzing ~100 sessions on a Sonnet-class
-model runs about **$6** — per-session enrichment plus the cross-session
-recommendation passes. (Enrich on the default Haiku model and reserve the
-Sonnet-class model for the recommendation detectors, and it costs less.) This
-cost shows up as **Analysis spend** in the summary, priced from a built-in table
-with an OpenRouter public price list filling gaps (cached under `~/.tuneloop/`).
+interactive prompt. It's inexpensive: analyzing ~100 sessions runs about **$6**
+with the recommended pairing — a cheap model (e.g. Claude Haiku) for the
+per-session enrichment and a Sonnet-class heavy model for the cross-session
+recommendation detectors. This cost shows up as **Analysis spend** in the summary,
+priced from a built-in table with an OpenRouter public price list filling gaps
+(cached under `~/.tuneloop/`).
 
 **Two model tiers (optional).** By default one model does everything. The work
 splits into two shapes, though: per-session enrichment is one call per session
