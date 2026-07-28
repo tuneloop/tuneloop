@@ -74,6 +74,27 @@ describe('heavy model resolution', () => {
     const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', heavyModel: 'from-flag' } }).llm
     expect(llm?.heavyModel).toBe('from-flag')
   })
+
+  it('reuses an already-strong base model instead of downgrading to the preset default', () => {
+    unsetHeavy()
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', model: 'claude-opus-4-8' } }).llm
+    expect(llm?.heavyModel).toBeUndefined() // opus already clears the strong tier — detectors reuse it
+    expect(llm?.model).toBe('claude-opus-4-8')
+  })
+
+  it('an explicit heavy still applies over an already-strong base', () => {
+    unsetHeavy()
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', model: 'claude-opus-4-8', heavyModel: 'claude-sonnet-5' } }).llm
+    expect(llm?.heavyModel).toBe('claude-sonnet-5')
+  })
+
+  it('aligns the Bedrock default heavy profile to the base model region', () => {
+    unsetHeavy()
+    const eu = loadConfig({ llm: { provider: 'bedrock', model: 'eu.anthropic.claude-haiku-4-5-20251001-v1:0' } }).llm
+    expect(eu?.heavyModel).toBe('eu.anthropic.claude-sonnet-5')
+    const apac = loadConfig({ llm: { provider: 'bedrock', model: 'apac.anthropic.claude-haiku-4-5-20251001-v1:0' } }).llm
+    expect(apac?.heavyModel).toBe('apac.anthropic.claude-sonnet-5')
+  })
 })
 
 describe('keyless presets', () => {

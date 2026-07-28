@@ -304,9 +304,10 @@ TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
 
 Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
 differs. Leave it unset and tuneloop uses the provider's default heavy model where
-it has one (the strong siblings above); a provider without one falls back to the
-base model, which skips **recurring-themes** (with a warning) when that model is
-below the Sonnet-class tier. Changing it re-analyzes the full corpus for the
+it has one (the strong siblings above) — unless your base model already clears the
+Sonnet-class tier, in which case detectors just reuse it. A provider with no strong
+sibling falls back to the base model, which skips **recurring-themes** (with a
+warning) when that model is below the tier. Changing it re-analyzes the full corpus for the
 detectors that use it, since extractions made by the old model aren't comparable to
 the new one's.
 

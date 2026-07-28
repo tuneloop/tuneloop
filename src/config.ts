@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { PROVIDERS } from './llm/providers'
+import { PROVIDERS, type ProviderPreset } from './llm/providers'
+import { meetsMinTier } from './llm/capability'
 
 /** Resolved runtime configuration for a single invocation. */
 export interface TuneloopConfig {
@@ -28,6 +29,29 @@ export interface LlmOverrides {
   apiKey?: string
 }
 
+// Bedrock inference profiles are geography-scoped (`us.` / `eu.` / `apac.`). The
+// preset's default heavy model is a `us.` profile, so if the base model targets a
+// different region, retarget the heavy profile to match — a cross-region profile id
+// 400s (docs.aws.amazon.com/bedrock geographic cross-region inference).
+function alignBedrockRegion(heavy: string, base: string): string {
+  const region = base.match(/^(us|eu|apac)\./)?.[1]
+  return region ? heavy.replace(/^(us|eu|apac)\./, `${region}.`) : heavy
+}
+
+// Resolve the detector-pass ("heavy") model. Precedence: an explicit flag/env ▸ an
+// already-strong base (reuse it — don't downgrade e.g. opus to the preset's Sonnet
+// default) ▸ the provider's strong sibling (region-matched for Bedrock) ▸ undefined,
+// which leaves detectors on the base `model`. Same provider/key/URL as `model` — only
+// ever a sibling id on the same endpoint.
+function resolveHeavyModel(o: LlmOverrides | undefined, preset: ProviderPreset | undefined, model: string): string | undefined {
+  const explicit = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY
+  if (explicit) return explicit
+  if (model && meetsMinTier(model, 'strong')) return undefined
+  const def = preset?.defaultHeavyModel
+  if (!def) return undefined
+  return preset.shape === 'bedrock' ? alignBedrockRegion(def, model) : def
+}
+
 function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   const provider = (o?.provider ?? process.env.TUNELOOP_LLM_PROVIDER)?.toLowerCase()
   if (!provider) return null
@@ -49,14 +73,7 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   if (preset && !preset.keyless && !apiKey) return null
 
   const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
-  // Second tier for the cross-session detector pass: per-session processors keep the
-  // cheap `model`, while detectors that opt in (model: 'heavy', e.g. recurring-themes)
-  // run on this one. When nothing sets it, fall back to the provider's strong sibling
-  // (`defaultHeavyModel`) so the Sonnet-class-or-stronger detectors run by default
-  // instead of being silently gated out; providers with no strong sibling (or one
-  // already strong) resolve to undefined and reuse the base `model`. Same
-  // provider/key/URL as `model` — only ever a sibling id on the same endpoint.
-  const heavyModel = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? preset?.defaultHeavyModel
+  const heavyModel = resolveHeavyModel(o, preset, model)
   const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL
   return { provider, model, apiKey, baseURL, heavyModel }
 }

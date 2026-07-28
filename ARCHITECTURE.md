@@ -306,9 +306,10 @@ Two model tiers share one provider: `TUNELOOP_LLM_MODEL` handles the per-session
 volume (a cheap model is the right call), while detectors that opt in via
 `model: 'heavy'` (today only `recurring-themes`) run on a stronger sibling. That
 heavy model resolves from `TUNELOOP_LLM_MODEL_HEAVY` if set, otherwise the
-provider's `defaultHeavyModel` — so on the built-in providers that have one, the
-Sonnet-class recommendations run by default; a provider with no strong sibling
-falls back to the base model and skips `recurring-themes` (with a warning) when it
+provider's `defaultHeavyModel` (region-matched for Bedrock), or the base model
+itself when it already clears the strong tier — so on the built-in providers with a
+strong sibling, the Sonnet-class recommendations run by default; a provider with no
+strong sibling falls back to the base model and skips `recurring-themes` (with a warning) when it
 is below that tier. Without any key, every static processor and every S-tier
 detector still runs; you lose only the LLM-derived labels and the LLM-backed
 recommendations.
