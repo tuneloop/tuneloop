@@ -91,6 +91,41 @@ describe('skillDrift', () => {
     expect(r.versions[1]!.bodyHash).not.toBe(r.versions[0]!.bodyHash) // B != A
   })
 
+  it('scopes drift per (skill, repo): same name edited in one repo only', () => {
+    // Same skill name in two repos, edited in one only. Drift must judge each repo's own
+    // timeline — the old bug picked an arbitrary repo and missed the real edit.
+    const snap = (path: string, hash: string, daysAgo: number) =>
+      store.recordEnvSnapshot(
+        { source: SOURCE, scope: 'project', scopeKey: path, category: 'skills', payload: { skills: [{ name: 'commit', body: 'b-' + hash, bodyHash: hash }], count: 1 } },
+        iso(daysAgo),
+      )
+    // repo `alpha` edits commit (h1 → h2); repo `beta` never changes it (h9 throughout).
+    snap('/work/alpha', 'h1', 30)
+    snap('/work/alpha', 'h2', 15)
+    snap('/work/beta', 'h9', 30)
+    snap('/work/beta', 'h9', 1)
+    const mk = (id: string, repo: string, daysAgo: number) => {
+      db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, ?, ?, 1, 1)`).run(id, id, SOURCE, repo, iso(daysAgo))
+      db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, 0, 'commit', 'skill', 1, 0, 0, ?)`).run(id, iso(daysAgo))
+    }
+    // alpha: 3 before the edit, 3 after → a real, ratable delta.
+    mk('a0', 'alpha', 22); mk('a1', 'alpha', 20); mk('a2', 'alpha', 18)
+    mk('a3', 'alpha', 12); mk('a4', 'alpha', 10); mk('a5', 'alpha', 8)
+    // beta: some usage, but the body never changed → single version, no delta.
+    mk('b0', 'beta', 20); mk('b1', 'beta', 10)
+
+    // alpha is the busiest repo (6 calls vs 2) → that's the timeline drift reflects.
+    const r = skillDrift(store, 'commit', NOW)
+    expect(r.repo).toBe('alpha')
+    expect(r.singleVersion).toBe(false)
+    expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h2'])
+    expect(r.delta).not.toBeNull()
+    expect(r.delta!.enoughData).toBe(true)
+    // Usage is scoped to alpha too — beta's 2 calls must NOT leak in.
+    expect(r.delta!.before.calls).toBe(3)
+    expect(r.delta!.after.calls).toBe(3)
+  })
+
   it('withholds the delta when a side is too thin', () => {
     // A skill edited once, but with only 1 call after the edit → not enough to judge.
     store.recordEnvSnapshot(

@@ -838,6 +838,10 @@ export interface SkillDriftDelta {
 
 export interface SkillDriftReport {
   name: string
+  /** The repo this timeline reflects (short name), or null for a global-scope skill.
+   *  Versions and usage are both scoped to it — the same name in another repo is a
+   *  separate timeline, never merged in. */
+  repo: string | null
   /** All captured versions, oldest→newest. Empty when there's no snapshot history. */
   versions: SkillVersion[]
   /** Before/after around the most recent edit; null when <2 versions. */
@@ -862,33 +866,58 @@ function bodyHashOf(payload: unknown, name: string): string | null {
   return null // the skill isn't in this snapshot
 }
 
+/** Which install location a drift timeline reflects. */
+interface DriftScope {
+  scope: 'global' | 'project'
+  scopeKey: string
+  /** Short repo name for a project scope; null for global. */
+  repo: string | null
+}
+
 /**
- * The skills-category snapshot history that contains `name`, oldest→newest. Prefers
- * the global inventory (where most skills live); falls back to the first project
- * scope whose history mentions the skill. Returns [] when no history mentions it.
+ * Resolve the ONE install location a skill's version timeline is read from. Drift is
+ * per-(skill, location): the same name in two repos can be two unrelated skills, so scopes
+ * are never merged. A project skill is judged in its busiest repo; a global skill (one
+ * shared body) uses the global timeline. Null when no snapshot mentions the skill.
  */
-function skillSnapshotHistory(store: Store, name: string): Array<{ payload: unknown; capturedAt: string }> {
-  const globalHist = store.envSnapshotHistory(SOURCE, 'global', '_global', 'skills')
-  if (globalHist.some((r) => bodyHashOf(r.payload, name) !== null)) {
-    return globalHist.map((r) => ({ payload: r.payload, capturedAt: r.capturedAt }))
-  }
+function resolveDriftScope(store: Store, name: string): DriftScope | null {
+  const hasName = (scope: 'global' | 'project', scopeKey: string): boolean =>
+    store.envSnapshotHistory(SOURCE, scope, scopeKey, 'skills').some((r) => bodyHashOf(r.payload, name) !== null)
+
+  // Project scopes ranked by usage, so a project skill is judged in its busiest repo.
+  const usedRepos = store.queryAll(
+    `SELECT s.repo AS repo, COUNT(*) AS calls
+       FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+      WHERE t.action = 'skill' AND t.is_sidechain = 0 AND (t.name = ? OR t.name LIKE ?)
+        AND s.source = ? AND s.repo IS NOT NULL
+      GROUP BY s.repo ORDER BY calls DESC, s.repo`,
+    name,
+    '%:' + name,
+    SOURCE,
+  ) as Array<{ repo: string; calls: number }>
   const projectKeys = (
     store.queryAll(
       `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
       SOURCE,
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
-  for (const key of projectKeys) {
-    const hist = store.envSnapshotHistory(SOURCE, 'project', key, 'skills')
-    if (hist.some((r) => bodyHashOf(r.payload, name) !== null)) {
-      return hist.map((r) => ({ payload: r.payload, capturedAt: r.capturedAt }))
-    }
+  const { byRepo } = mapScopeKeysToRepos(projectKeys)
+  for (const { repo } of usedRepos) {
+    const scopeKey = byRepo.get(repo)
+    if (scopeKey && hasName('project', scopeKey)) return { scope: 'project', scopeKey, repo }
   }
-  return []
+  // Not per-repo installed where it ran → a global skill (one shared body).
+  if (hasName('global', '_global')) return { scope: 'global', scopeKey: '_global', repo: null }
+  // Fallback: any project scope with it, deterministic by path.
+  for (const scopeKey of [...projectKeys].sort()) {
+    if (hasName('project', scopeKey)) return { scope: 'project', scopeKey, repo: basename(scopeKey) }
+  }
+  return null
 }
 
-/** Usage facts for one skill in [sinceIso, untilIso) — reused for versions + delta sides. */
-function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: string): SkillVersionUsage {
+/** Usage facts for one skill in [sinceIso, untilIso) — reused for versions + delta sides.
+ *  `repo` scopes a project skill to match its version timeline; null (global) counts cross-repo. */
+function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: string, repo: string | null): SkillVersionUsage {
   const row = store.queryOne(
     `SELECT COUNT(*) AS calls,
             COUNT(DISTINCT t.session_id) AS sessions,
@@ -902,11 +931,13 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND t.ts >= ? AND t.ts < ?`,
+       AND s.source = ? AND (? IS NULL OR s.repo = ?) AND t.ts >= ? AND t.ts < ?`,
     FRICTION_LOOKAHEAD,
     name,
     '%:' + name,
     SOURCE,
+    repo,
+    repo,
     sinceIso,
     untilIso,
   ) as { calls: number; sessions: number; errorCalls: number | null; frictionAdjacent: number | null }
@@ -924,8 +955,12 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
  * on symmetric, edit-bounded, capped windows so no window straddles two versions.
  */
 export function skillDrift(store: Store, name: string, nowMs: number = Date.now()): SkillDriftReport {
-  const hist = skillSnapshotHistory(store, name)
-  if (hist.length === 0) return { name, versions: [], delta: null, singleVersion: false, noHistory: true }
+  // Resolve the ONE install location this timeline reflects — versions AND usage both
+  // come from it, so the same name in two repos never merges into a phantom timeline.
+  const loc = resolveDriftScope(store, name)
+  if (!loc) return { name, repo: null, versions: [], delta: null, singleVersion: false, noHistory: true }
+  const hist = store.envSnapshotHistory(SOURCE, loc.scope, loc.scopeKey, 'skills')
+  if (hist.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
 
   // Collapse consecutive same-hash snapshots into version segments. A run of rows with
   // the same body hash is one version, live from its first capture until the next
@@ -939,12 +974,12 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
     const prev = segments[segments.length - 1]
     if (!prev || prev.bodyHash !== h) segments.push({ bodyHash: h, startIso: row.capturedAt })
   }
-  if (segments.length === 0) return { name, versions: [], delta: null, singleVersion: false, noHistory: true }
+  if (segments.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
 
   const versions: SkillVersion[] = segments.map((seg, i) => {
     const next = segments[i + 1]
     const endIso = next ? next.startIso : null
-    const usage = usageInWindow(store, name, seg.startIso, endIso ?? nowIso)
+    const usage = usageInWindow(store, name, seg.startIso, endIso ?? nowIso, loc.repo)
     return {
       bodyHash: seg.bodyHash,
       startIso: seg.startIso,
@@ -968,8 +1003,8 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
     const halfMs = Math.min(prevLifeMs, thisLifeMs, DRIFT_MAX_HALF_DAYS * DAY_MS)
     const beforeSinceIso = new Date(editMs - halfMs).toISOString()
     const afterUntilIso = new Date(editMs + halfMs).toISOString()
-    const before = usageInWindow(store, name, beforeSinceIso, editIso)
-    const after = usageInWindow(store, name, editIso, afterUntilIso)
+    const before = usageInWindow(store, name, beforeSinceIso, editIso, loc.repo)
+    const after = usageInWindow(store, name, editIso, afterUntilIso, loc.repo)
     delta = {
       editIso,
       windowDays: Math.max(1, Math.round(halfMs / DAY_MS)),
@@ -979,7 +1014,7 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
     }
   }
 
-  return { name, versions, delta, singleVersion, noHistory: false }
+  return { name, repo: loc.repo, versions, delta, singleVersion, noHistory: false }
 }
 
 function minIso(a: string | null, b: string | null): string | null {

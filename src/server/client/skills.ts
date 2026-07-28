@@ -545,6 +545,11 @@ function loadDrift(name) {
 // "changed after the edit", never "the edit caused it".
 function driftHtml(d) {
   var html = '';
+  // Drift is scoped to one install location; name it so its numbers aren't read as the
+  // cross-repo roster counts.
+  html += '<div class="sk-sect-note">' + (d.repo
+    ? 'Version history + usage for this skill in <b>' + esc(d.repo) + '</b>. A same-named skill in another repo is tracked separately.'
+    : 'Version history + usage for this globally-installed skill (one shared body across repos).') + '</div>';
   var delta = d.delta;
   if (delta) {
     if (delta.enoughData) {
