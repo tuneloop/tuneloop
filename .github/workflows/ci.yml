@@ -43,6 +43,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        env:
+          # engines mismatches are only warnings by default; make them fail the
+          # install so the pinned-floor job actually catches a raised floor.
+          npm_config_engine_strict: 'true'
 
       - name: Run ${{ matrix.task.name }}
         run: ${{ matrix.task.command }}
