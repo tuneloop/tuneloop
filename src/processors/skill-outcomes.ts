@@ -30,13 +30,20 @@ import type { JsonSchema } from '../llm/types'
 import { costOfUsage } from '../pricing/pricing'
 import { isRealUserEvent, stripReminders } from '../core/turns'
 
-/** The 4-way outcome taxonomy (user-approved). `unclear` lets the model abstain. */
-export const SKILL_OUTCOMES = ['used', 'reworked', 'ignored', 'unclear'] as const
+/**
+ * Outcome taxonomy. `used`/`reworked`/`ignored` are the substantive verdicts (followed vs
+ * bypassed the skill's output); `unclear` = the context was enough but the outcome is
+ * genuinely ambiguous; `insufficient-context` = we couldn't send enough of the session to
+ * tell (window truncated / firing at the very end) — a defect of OUR view, kept separate so
+ * the read model can exclude it from the distribution rather than count it as noise.
+ */
+export const SKILL_OUTCOMES = ['used', 'reworked', 'ignored', 'unclear', 'insufficient-context'] as const
 export type SkillOutcome = (typeof SKILL_OUTCOMES)[number]
 
-/** How many events before/after a skill firing we include as its context. */
+/** Events of leading context before a firing (its triggering user turn + agent reasoning). */
 const CONTEXT_BEFORE = 2
-const CONTEXT_AFTER = 4
+/** Hard cap on events after a firing, when no user turn / next skill bounds it sooner. */
+const MAX_CONTEXT_AFTER = 30
 /** Cap on how much text we send per event (keeps a chatty session cheap). */
 const MAX_EVENT_CHARS = 600
 /** Safety cap on firings classified per session (a pathological session guard; logged). */
@@ -59,7 +66,10 @@ export interface SkillOutcomeVerdict {
 
 export const skillOutcomes: Processor = {
   name: 'skill-outcomes',
-  version: 1,
+  // 2: window extends to the next user turn / skill firing (was fixed ±few events) and
+  //    surfaces interrupts + tool errors, so the model judges from real friction; taxonomy
+  //    gains `insufficient-context` (distinct from genuine `unclear`). Bump re-runs the LLM.
+  version: 2,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
@@ -127,13 +137,19 @@ function collectFirings(session: Session): Firing[] {
   return out
 }
 
-/** Compact text for one event — role-tagged, truncated, reminders stripped. */
+/** Compact text for one event — role-tagged, truncated, reminders stripped. Surfaces
+ *  friction inline: an Esc-interrupt user turn and an errored tool call are the raw
+ *  signals the model needs to tell "followed" from "reworked/bypassed". */
 function eventText(ev: Event): string | null {
   if (ev.isSidechain) return null
   if (ev.kind === 'user') {
-    if (!isRealUserEvent(ev)) return null // skip harness/skill-body machinery
-    const t = stripReminders(ev.text).trim()
-    return t ? 'USER: ' + clip(t) : null
+    const raw = stripReminders(ev.text).trim()
+    if (/^\[Request interrupted/i.test(raw)) return 'USER: [interrupted the agent]'
+    // A tool_result-only turn isn't steering, but an ERROR in it is friction worth showing.
+    if (!isRealUserEvent(ev)) {
+      return ev.blocks.some((b) => b.type === 'tool_result' && b.isError) ? 'SYSTEM: [a tool call errored]' : null
+    }
+    return raw ? 'USER: ' + clip(raw) : null
   }
   if (ev.kind === 'assistant') {
     const parts: string[] = []
@@ -151,11 +167,45 @@ function clip(s: string): string {
   return s.length > MAX_EVENT_CHARS ? s.slice(0, MAX_EVENT_CHARS) + '…' : s
 }
 
-/** The window of events around a firing, as compact role-tagged lines. */
-function windowFor(session: Session, f: Firing): string {
-  if (f.eventIdx < 0) return '(context unavailable)'
+/** True if this event is a substantive user turn — the natural end of "what the agent did
+ *  with the skill before the user spoke again". An Esc-interrupt is NOT a boundary: it's
+ *  mid-action friction, and the re-steer that follows is part of the same episode, so the
+ *  window extends through it to the next real turn (the interrupt still renders inline). */
+function isTurnBoundary(ev: Event): boolean {
+  if (ev.kind !== 'user' || ev.isSidechain) return false
+  if (/^\[Request interrupted/i.test(stripReminders(ev.text))) return false
+  return isRealUserEvent(ev)
+}
+
+/** True if the assistant event at `i` emits a skill tool_use other than this firing. */
+function firesAnotherSkill(session: Session, i: number, self: number): boolean {
+  if (i === self) return false
+  const ev = session.events[i]
+  if (!ev || ev.kind !== 'assistant' || ev.isSidechain) return false
+  return ev.blocks.some((b) => b.type === 'tool_use' && b.name === 'Skill')
+}
+
+/**
+ * The window around a firing: a little leading context, then everything the agent did
+ * with the skill up to the NEXT user turn or NEXT skill firing (whichever comes first),
+ * capped at MAX_CONTEXT_AFTER. Returns the rendered lines plus whether the after-side was
+ * cut by the cap while the session still ran on — the signal that our view (not the
+ * outcome) was the limiter, so the model should answer `insufficient-context`.
+ */
+function windowFor(session: Session, f: Firing): { text: string; truncated: boolean } {
+  if (f.eventIdx < 0) return { text: '(context unavailable)', truncated: true }
   const lo = Math.max(0, f.eventIdx - CONTEXT_BEFORE)
-  const hi = Math.min(session.events.length - 1, f.eventIdx + CONTEXT_AFTER)
+  // Extend forward to the boundary: next user turn or next skill firing, capped.
+  const capHi = Math.min(session.events.length - 1, f.eventIdx + MAX_CONTEXT_AFTER)
+  let hi = capHi
+  for (let i = f.eventIdx + 1; i <= capHi; i++) {
+    if (isTurnBoundary(session.events[i]!) || firesAnotherSkill(session, i, f.eventIdx)) {
+      hi = i // include the boundary line itself (the user's next words are evidence)
+      break
+    }
+  }
+  // Truncated = we hit the cap with more session after it AND no boundary closed the window.
+  const truncated = hi === capHi && capHi < session.events.length - 1
   const lines: string[] = []
   for (let i = lo; i <= hi; i++) {
     const ev = session.events[i]
@@ -165,23 +215,31 @@ function windowFor(session: Session, f: Firing): string {
     if (txt) lines.push(txt + marker)
     else if (marker) lines.push('ASSISTANT: [calls ' + f.name + ']' + marker)
   }
-  return lines.join('\n')
+  return { text: lines.join('\n'), truncated }
 }
 
 function buildPrompt(session: Session, firings: Firing[]): { system: string; user: string } {
   const system = [
-    'You classify what happened AROUND each skill invocation in a coding-agent session.',
-    'For each firing, judge ONLY from the surrounding turns how the agent treated the skill’s output:',
-    '- used: the agent proceeded with the skill’s output as-is.',
-    '- reworked: the agent used it but then corrected, redid, or substantially modified it.',
-    '- ignored: the agent set it aside and did something else instead.',
-    '- unclear: the surrounding turns don’t show enough to tell. Prefer this over guessing.',
-    'Also flag userCorrectionAdjacent=true when a nearby USER turn corrects or re-steers right around the firing.',
-    'Be OBSERVATIONAL: describe what happened after ("the agent re-ran the diff manually"), never assert the skill caused anything.',
-    'Return exactly one verdict object per firing, echoing its idx.',
+    'You classify how a coding agent treated each skill invocation — did it FOLLOW the skill’s',
+    'output or BYPASS it? Judge ONLY from the shown turns.',
+    '- used: the agent proceeded with the skill’s output as-is (followed).',
+    '- reworked: the agent used it but then corrected, redid, or substantially changed it (partly bypassed).',
+    '- ignored: the agent set it aside and did the work another way (bypassed).',
+    '- unclear: the shown turns ARE enough to see what happened, but the outcome is genuinely ambiguous.',
+    '- insufficient-context: the shown window doesn’t contain enough to tell (e.g. it ends right after the',
+    '  firing). Use this — NOT `unclear` — when the limit is how much you were shown.',
+    'Flag userCorrectionAdjacent=true when a USER turn corrects, re-steers, or interrupts right around the firing.',
+    'Be OBSERVATIONAL: describe what happened ("the agent re-ran the diff manually"), never assert the skill caused it.',
+    'Return exactly one verdict per firing, echoing its idx.',
   ].join('\n')
 
-  const blocks = firings.map((f) => `--- firing idx=${f.idx} (skill: ${f.name}) ---\n${windowFor(session, f)}`).join('\n\n')
+  const blocks = firings
+    .map((f) => {
+      const w = windowFor(session, f)
+      const note = w.truncated ? '\n(window truncated here — the session continued past what is shown)' : ''
+      return `--- firing idx=${f.idx} (skill: ${f.name}) ---\n${w.text}${note}`
+    })
+    .join('\n\n')
   const user = [
     `Session in repo ${session.project.repo ?? 'unknown'}. ${firings.length} skill firing(s) to classify.`,
     '',

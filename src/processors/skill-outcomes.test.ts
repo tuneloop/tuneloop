@@ -171,4 +171,31 @@ describe('skill-outcomes', () => {
     expect(r.annotations).toBeUndefined()
     expect(llm.calls.length).toBe(0)
   })
+
+  it('accepts insufficient-context as a distinct outcome (kept out of the noise later)', async () => {
+    const s = buildSession([{ assistant: 'a', skill: 'review' }])
+    const llm = stubLlm([{ idx: 0, outcome: 'insufficient-context', userCorrectionAdjacent: false, evidence: 'ends here' }])
+    const r = await skillOutcomes.run(ctx(s, llm))
+    const verdicts = r.annotations?.find((a) => a.key === 'skill_outcomes')?.value as SkillOutcomeVerdict[]
+    expect(verdicts[0]!.outcome).toBe('insufficient-context') // preserved, NOT coerced to unclear
+  })
+
+  it('extends the window to the next user turn and shows a following interrupt as friction', async () => {
+    const s = buildSession([
+      { user: 'commit this' },
+      { assistant: 'using the helper', skill: 'git-commit-helper' }, // idx 0
+      { assistant: 'staging files' },
+      { assistant: 'writing the message' },
+      { user: '[Request interrupted by user]' }, // friction after the firing, before the next real turn
+      { user: 'no, do it manually' },
+      { assistant: 'ok, manually then' },
+    ])
+    const llm = stubLlm([{ idx: 0, outcome: 'reworked', userCorrectionAdjacent: true, evidence: '' }])
+    await skillOutcomes.run(ctx(s, llm))
+    const sent = llm.calls[0]!.user
+    // The window reaches past the +4 events the old fixed window stopped at, up to the
+    // next user turn — so the interrupt and the re-steer are both visible to the model.
+    expect(sent).toContain('interrupted the agent')
+    expect(sent).toContain('do it manually')
+  })
 })
