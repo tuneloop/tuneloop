@@ -201,8 +201,8 @@ describe('skill-outcomes', () => {
 
   it('clips over-long evidence at a word boundary, never mid-word', async () => {
     const s = buildSession([{ assistant: 'a', skill: 'review' }])
-    // A 300-char run of "wordN " tokens — well over the backstop budget.
-    const longText = Array.from({ length: 60 }, (_, i) => 'word' + i).join(' ')
+    // A ~700-char run of "wordN" tokens — past the 500-char backstop budget.
+    const longText = Array.from({ length: 120 }, (_, i) => 'word' + i).join(' ')
     const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: longText }])
     const r = await skillOutcomes.run(ctx(s, llm))
     const ev = (r.annotations?.find((a) => a.key === 'skill_outcomes')?.value as SkillOutcomeVerdict[])[0]!.evidence

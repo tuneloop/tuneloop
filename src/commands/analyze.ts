@@ -344,7 +344,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     if (repo) store.setSessionRepo(session.id, repo)
 
     const t0 = Date.now()
-    const { costUsd: sessionCost } = await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
+    const { costUsd: sessionCost } = await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, heavyLlm, heavyLlmModel: heavyLlm?.model ?? null, sh })
     const elapsedMs = Date.now() - t0
 
     const didWork = elapsedMs > 50 || sessionCost > 0

@@ -128,8 +128,13 @@ export interface Processor {
   /** Bump to invalidate cached results and force reprocessing. */
   version: number
   kind: ProcessorKind
-  /** Gates execution: `llm` skips when no provider is configured. */
-  needs?: { llm?: boolean; network?: boolean }
+  /**
+   * Gates + tiers execution. `llm`/`heavyLlm` both skip when no provider is configured;
+   * `heavyLlm` additionally routes this processor to the strong (detector-tier) model
+   * instead of the cheap per-session one — for the rare enrichment where judgement quality
+   * matters more than the per-session cost. `network` gates on connectivity.
+   */
+  needs?: { llm?: boolean; heavyLlm?: boolean; network?: boolean }
   /** Names of processors that must run first (topo-sorted). */
   requires?: string[]
   /** Facets this processor contributes to the dashboard registry. */

@@ -71,9 +71,13 @@ export const skillOutcomes: Processor = {
   //    gains `insufficient-context` (distinct from genuine `unclear`). Bump re-runs the LLM.
   // 3: evidence must be ONE complete <200-char sentence + a word-boundary clip backstop, so
   //    snippets stop getting cut off mid-word ("…summary at t"). Bump re-runs the LLM.
-  version: 3,
+  // 4: route to the heavy (detector-tier) model — the followed/bypassed judgement is worth
+  //    the stronger model. Model change re-keys the cache, so this re-runs the LLM.
+  // 5: raise the evidence clip to 500 (UI shows evidence in full) so a complete sentence is
+  //    never truncated. Bump re-runs the LLM.
+  version: 5,
   kind: 'enrichment',
-  needs: { llm: true },
+  needs: { heavyLlm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
     const { llm, session } = ctx
     if (!llm) return {}
@@ -304,11 +308,12 @@ function normalizeVerdicts(data: Record<string, unknown>, firings: Firing[]): Sk
 
 /**
  * Trim evidence to a safety length WITHOUT cutting mid-word. We ask the model for one
- * <200-char sentence; this is a backstop for an over-long reply — cut at the last sentence
- * end within budget, else the last word boundary, and only then hard-truncate. Avoids the
- * "…summary at t" mid-word stumps the raw slice produced.
+ * <200-char sentence and the UI shows evidence in full, so this only guards against a
+ * pathologically long reply — the budget is generous (a normal 1-2 sentence reply passes
+ * through untouched). When it does trigger, cut at the last sentence end within budget,
+ * else the last word boundary, never mid-word ("…summary at t").
  */
-function clipEvidence(s: string, max = 240): string {
+function clipEvidence(s: string, max = 500): string {
   const t = s.trim()
   if (t.length <= max) return t
   const head = t.slice(0, max)
