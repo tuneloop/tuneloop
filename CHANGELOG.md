@@ -5,6 +5,45 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-28
+
+### Added
+
+- **Recommendations v1** — a new Recommendations tab that surfaces evidence-backed,
+  cross-session recommendations for more effective agent usage, each with a concrete
+  fix. It's powered by five detectors: ([#66], [#74])
+  - **Recurring themes** — LLM analysis of patterns across your sessions where you
+    repeatedly stepped in to course-correct, recommending fixes to agent files
+    (CLAUDE.md / AGENTS.md), skills, tooling, or config. Runs on a Sonnet-class heavy
+    model. ([#84])
+  - **Unused capabilities** — flags installed MCP servers and skills that never get
+    invoked yet inflate every session's startup, recommending their removal or
+    scoping. Covers all supported harnesses. ([#83])
+  - **Prompt cache misses** — flags steady, avoidable spend from sessions that
+    repeatedly miss the prompt cache, gated to a dollar floor so only material waste
+    surfaces. ([#71])
+  - **Context exhaustion** — flags sessions that grew large enough to trigger
+    compaction, pointing at context-management fixes. ([#82])
+  - **Kitchen-sink sessions** — an LLM-as-judge detector that flags sessions mixing
+    unrelated work in one context, recommending tighter session scoping. ([#85])
+- On providers with a strong sibling (Anthropic, OpenAI, Bedrock, OpenRouter, Gemini),
+  a Sonnet-class **heavy model** is now selected automatically for the recommendation
+  detectors, so recurring-themes works out of the box without setting
+  `TUNELOOP_LLM_MODEL_HEAVY`. ([#105])
+- `TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY` opts out of that automatic heavy model, keeping
+  every detector on the cheaper base model to hold down analysis spend. An explicit
+  `TUNELOOP_LLM_MODEL_HEAVY` / `--llm-model-heavy` still takes precedence, and the heavy
+  detectors can also be turned off individually via `config.json`.
+
+### Fixed
+
+- Worktree sessions are now handled correctly. Repo detection canonicalizes through
+  `git rev-parse --git-common-dir`, so a session run inside a linked git worktree is
+  attributed to its main repo instead of the worktree's branch slug — previously each
+  worktree fragmented into its own phantom repo, splitting that repo's sessions and
+  config timeline. Project config for worktrees checked out outside the repo directory
+  is matched by canonical repo name as well. ([#103])
+
 ## [0.4.1] - 2026-07-15
 
 ### Fixed
@@ -78,6 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
+[0.5.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.5.0
 [0.4.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.1
 [0.4.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.0
 [0.3.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.3.1
@@ -85,6 +125,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#105]: https://github.com/tuneloop/tuneloop/pull/105
+[#103]: https://github.com/tuneloop/tuneloop/pull/103
+[#85]: https://github.com/tuneloop/tuneloop/pull/85
+[#84]: https://github.com/tuneloop/tuneloop/pull/84
+[#83]: https://github.com/tuneloop/tuneloop/pull/83
+[#82]: https://github.com/tuneloop/tuneloop/pull/82
+[#74]: https://github.com/tuneloop/tuneloop/pull/74
+[#71]: https://github.com/tuneloop/tuneloop/pull/71
+[#66]: https://github.com/tuneloop/tuneloop/pull/66
 [#80]: https://github.com/tuneloop/tuneloop/pull/80
 [#79]: https://github.com/tuneloop/tuneloop/pull/79
 [#76]: https://github.com/tuneloop/tuneloop/pull/76
