@@ -198,4 +198,16 @@ describe('skill-outcomes', () => {
     expect(sent).toContain('interrupted the agent')
     expect(sent).toContain('do it manually')
   })
+
+  it('clips over-long evidence at a word boundary, never mid-word', async () => {
+    const s = buildSession([{ assistant: 'a', skill: 'review' }])
+    // A 300-char run of "wordN " tokens — well over the backstop budget.
+    const longText = Array.from({ length: 60 }, (_, i) => 'word' + i).join(' ')
+    const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: longText }])
+    const r = await skillOutcomes.run(ctx(s, llm))
+    const ev = (r.annotations?.find((a) => a.key === 'skill_outcomes')?.value as SkillOutcomeVerdict[])[0]!.evidence
+    expect(ev.length).toBeLessThan(longText.length) // was trimmed
+    // No word was cut in half: the visible text (minus a trailing …) ends on a whole token.
+    expect(ev.replace(/…$/, '').trimEnd()).toMatch(/word\d+$/)
+  })
 })

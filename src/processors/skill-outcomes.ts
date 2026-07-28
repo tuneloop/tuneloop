@@ -69,7 +69,9 @@ export const skillOutcomes: Processor = {
   // 2: window extends to the next user turn / skill firing (was fixed ±few events) and
   //    surfaces interrupts + tool errors, so the model judges from real friction; taxonomy
   //    gains `insufficient-context` (distinct from genuine `unclear`). Bump re-runs the LLM.
-  version: 2,
+  // 3: evidence must be ONE complete <200-char sentence + a word-boundary clip backstop, so
+  //    snippets stop getting cut off mid-word ("…summary at t"). Bump re-runs the LLM.
+  version: 3,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
@@ -230,6 +232,7 @@ function buildPrompt(session: Session, firings: Firing[]): { system: string; use
     '  firing). Use this — NOT `unclear` — when the limit is how much you were shown.',
     'Flag userCorrectionAdjacent=true when a USER turn corrects, re-steers, or interrupts right around the firing.',
     'Be OBSERVATIONAL: describe what happened ("the agent re-ran the diff manually"), never assert the skill caused it.',
+    'evidence: ONE complete, self-contained sentence under 200 characters — a finished thought, not a fragment cut off mid-way.',
     'Return exactly one verdict per firing, echoing its idx.',
   ].join('\n')
 
@@ -267,7 +270,7 @@ function outputSchema(): JsonSchema {
             idx: { type: 'integer', description: 'The firing idx from the prompt.' },
             outcome: { type: 'string', enum: SKILL_OUTCOMES, description: 'How the agent treated the skill output.' },
             userCorrectionAdjacent: { type: 'boolean', description: 'A nearby user turn corrected/re-steered around the firing.' },
-            evidence: { type: 'string', description: 'A short observational snippet: what happened after the firing.' },
+            evidence: { type: 'string', description: 'ONE complete, self-contained sentence (<200 chars) on what happened after the firing — a finished thought, never cut off mid-way.' },
           },
         },
       },
@@ -293,8 +296,24 @@ function normalizeVerdicts(data: Record<string, unknown>, firings: Firing[]): Sk
       name: f.name,
       outcome,
       userCorrectionAdjacent: o.userCorrectionAdjacent === true,
-      evidence: typeof o.evidence === 'string' ? o.evidence.slice(0, 300) : '',
+      evidence: typeof o.evidence === 'string' ? clipEvidence(o.evidence) : '',
     })
   }
   return out
+}
+
+/**
+ * Trim evidence to a safety length WITHOUT cutting mid-word. We ask the model for one
+ * <200-char sentence; this is a backstop for an over-long reply — cut at the last sentence
+ * end within budget, else the last word boundary, and only then hard-truncate. Avoids the
+ * "…summary at t" mid-word stumps the raw slice produced.
+ */
+function clipEvidence(s: string, max = 240): string {
+  const t = s.trim()
+  if (t.length <= max) return t
+  const head = t.slice(0, max)
+  const sentenceEnd = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '))
+  if (sentenceEnd >= max * 0.5) return head.slice(0, sentenceEnd + 1)
+  const wordEnd = head.lastIndexOf(' ')
+  return (wordEnd >= max * 0.5 ? head.slice(0, wordEnd) : head).trimEnd() + '…'
 }
