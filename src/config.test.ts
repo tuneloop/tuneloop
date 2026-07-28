@@ -38,7 +38,12 @@ describe('LLM key resolution', () => {
 })
 
 describe('heavy model resolution', () => {
-  const unsetHeavy = () => vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', undefined)
+  // Clear both heavy-model knobs so a value inherited from the dev's shell can't
+  // flip the default-heavy expectations (TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY would).
+  const unsetHeavy = () => {
+    vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', undefined)
+    vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', undefined)
+  }
 
   it("falls back to the provider's default heavy model when nothing sets it, so strong-gated detectors run", () => {
     unsetHeavy()
