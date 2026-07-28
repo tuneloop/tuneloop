@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { PROVIDERS } from './llm/providers'
+import { PROVIDERS, type ProviderPreset } from './llm/providers'
+import { meetsMinTier } from './llm/capability'
 
 /** Resolved runtime configuration for a single invocation. */
 export interface TuneloopConfig {
@@ -20,11 +21,35 @@ export interface TuneloopConfig {
 export interface LlmOverrides {
   provider?: string
   model?: string
-  /** Optional stronger model for the detector pass; unset = detectors reuse `model`. */
+  /** Optional stronger model for the detector pass; unset = the provider's default
+   * heavy model, or the base `model` when the provider has no strong sibling. */
   heavyModel?: string
   baseURL?: string
   /** In-process override (interactive prompt); never exposed as a CLI flag. */
   apiKey?: string
+}
+
+// Bedrock inference profiles are geography-scoped (`us.` / `eu.` / `apac.`). The
+// preset's default heavy model is a `us.` profile, so if the base model targets a
+// different region, retarget the heavy profile to match — a cross-region profile id
+// 400s (docs.aws.amazon.com/bedrock geographic cross-region inference).
+function alignBedrockRegion(heavy: string, base: string): string {
+  const region = base.match(/^(us|eu|apac)\./)?.[1]
+  return region ? heavy.replace(/^(us|eu|apac)\./, `${region}.`) : heavy
+}
+
+// Resolve the detector-pass ("heavy") model. Precedence: an explicit flag/env ▸ an
+// already-strong base (reuse it — don't downgrade e.g. opus to the preset's Sonnet
+// default) ▸ the provider's strong sibling (region-matched for Bedrock) ▸ undefined,
+// which leaves detectors on the base `model`. Same provider/key/URL as `model` — only
+// ever a sibling id on the same endpoint.
+function resolveHeavyModel(o: LlmOverrides | undefined, preset: ProviderPreset | undefined, model: string): string | undefined {
+  const explicit = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY
+  if (explicit) return explicit
+  if (model && meetsMinTier(model, 'strong')) return undefined
+  const def = preset?.defaultHeavyModel
+  if (!def) return undefined
+  return preset.shape === 'bedrock' ? alignBedrockRegion(def, model) : def
 }
 
 function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
@@ -48,27 +73,9 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   if (preset && !preset.keyless && !apiKey) return null
 
   const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
-  // Opt-in second tier: per-session processors keep the cheap `model`, while the
-  // cross-session detector pass gets this one. Deliberately has NO preset default —
-  // unset means one model for everything, exactly as before. Same provider/key/URL
-  // as `model`, so it only makes sense as a sibling id on the same endpoint.
-  const heavyModel = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? undefined
+  const heavyModel = resolveHeavyModel(o, preset, model)
   const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL
   return { provider, model, apiKey, baseURL, heavyModel }
-}
-
-/**
- * The detector-pass ("heavy") model to seed when a provider is configured
- * INTERACTIVELY — analyze's run-only enrichment setup, where the user gives a
- * provider + key but no model. Precedence mirrors resolveLlm: an explicit flag
- * ▸ TUNELOOP_LLM_MODEL_HEAVY ▸ the preset's strong sibling. Unlike resolveLlm's
- * `heavyModel` this DOES fall back to the preset default: a fresh user who just
- * opted in should get a strong model for the Sonnet-class-or-stronger detectors,
- * not the cheap session model. Returns undefined for providers with no strong
- * sibling (or one already strong, e.g. xai) — leaving one model for everything.
- */
-export function defaultHeavyModel(provider: string, overrides?: LlmOverrides): string | undefined {
-  return overrides?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY ?? PROVIDERS[provider]?.defaultHeavyModel
 }
 
 export function loadConfig(opts?: { dataDir?: string; db?: string; llm?: LlmOverrides }): TuneloopConfig {

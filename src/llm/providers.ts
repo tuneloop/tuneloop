@@ -17,16 +17,14 @@ export interface ProviderPreset {
   keyEnv: string
   defaultModel: string
   /**
-   * Strong sibling to seed the detector pass (`heavyModel`) with when a provider
-   * is configured INTERACTIVELY — analyze's run-only enrichment setup, where the
-   * user gives a provider + key but no model. `defaultModel` is a cheap model
-   * (high-volume per-session work), which the Sonnet-class-or-stronger detectors
-   * gate out; without a strong sibling a freshly-onboarded user would silently
-   * get no reasoning-heavy detectors. Deliberately NOT applied from env/flags —
-   * only the interactive nudge opts in — so existing configured users keep
-   * one-model-for-everything (see config.ts `heavyModel`). Omitted when the
-   * default model is already strong (xai) or has no clear strong sibling on the
-   * same endpoint (local / open-weights hosts).
+   * Strong sibling for the detector pass (`heavyModel`). When
+   * TUNELOOP_LLM_MODEL_HEAVY / --llm-model-heavy is unset, `resolveLlm` seeds the
+   * heavy model with this, so the Sonnet-class-or-stronger detectors (e.g.
+   * recurring-themes) run by default instead of being silently gated out —
+   * `defaultModel` is a cheap high-volume session model they'd skip. Omitted when
+   * the default model is already strong (xai) or has no clear strong sibling on the
+   * same endpoint (local / open-weights hosts), in which case the detector pass
+   * reuses `defaultModel`.
    */
   defaultHeavyModel?: string
   /**

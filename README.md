@@ -1,14 +1,16 @@
 # tuneloop
 
-Local analytics for your AI coding sessions. **Count outcomes, not tokens.**
+Local analytics for your AI coding sessions. **Understand and improve your
+coding agent usage.**
 
 tuneloop turns the session transcripts your AI coding tools already write into a
-local dashboard of what you actually shipped, what it cost, and your work patterns.
+local dashboard that gives you cost attribution (what each PR / feature cost)
+and recommendations for more effective usage grounded in your sessions.
 
 <br>
 
 <p align="center">
-  <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (outcome rate, cost per shipped artifact, spend, sessions, tool error rate) above a per-PR cost breakdown treemap" width="900">
+  <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (cost per shipped artifact, session outcome rate, spend, sessions, tool error rate) above a per-PR cost breakdown treemap" width="900">
 </p>
 
 <br>
@@ -22,6 +24,10 @@ Concretely, it enriches each session with:
 - **Work type**
 - **Key decisions**
 - **Tool error categories**
+
+and across sessions, identifies:
+- **Agent re-work / re-steer themes**
+- **Patterns of deviations from best practices**
 
 Combined with the data already in the transcript — model, agent harness, repo, and
 more — this data lets you answer questions like:
@@ -44,12 +50,34 @@ npx tuneloop analyze
 ```
 
 This scans typical session folders like `~/.claude/projects`, builds a local
-store, and prints a summary. The **first run** processes every transcript, so
-expect a few minutes (around 4 for ~80 sessions with [LLM
-enrichment](#llm-enrichment) on; static-only runs are faster); later runs are
-incremental and only re-process sessions that changed, so they finish quickly. On completion the
-CLI prints the dashboard URL — press **Enter** to open it in your browser
-(`Ctrl+C` to stop). Point it at other locations with a comma-separated list:
+store, and prints a summary like this:
+
+```
+Scanned 336 file(s), parsed 334 session(s) into 118 unique session(s), 118 new/changed.
+
+  Sessions      118
+  Total spend   $1566.56
+  Tokens        1,769,497,264
+  Range         2026-04-16 → 2026-07-27
+  Cost / merged PR  $15.31 (56 merged)
+  Analysis spend  $6.92 (enrichment)
+
+Analysis finished in 6m 11s (Step 1 processing 3m 28s · Step 2 detectors 2m 34s).
+
+  tuneloop dashboard  http://localhost:4319
+  store: ~/.tuneloop/tuneloop.sqlite
+  Enter to open in your browser · Ctrl+C to stop
+```
+
+Press **Enter** and it opens the dashboard, where you see everything from the
+[What you get](#what-you-get) section below. In the summary above, `Total spend` is your
+analyzed sessions' AI cost, while `Analysis spend` is what tuneloop's own LLM
+calls cost to produce all of it — a few dollars, here with a Claude Haiku + Sonnet
+model pair (see [LLM enrichment](#llm-enrichment)). The **first run** processes
+every transcript, so expect a few minutes (about 6 for ~120 sessions with
+enrichment on; static-only runs are faster); later runs are incremental and only
+re-process sessions that changed, so they finish quickly. Point it at other
+locations with a comma-separated list:
 
 ```bash
 npx tuneloop analyze ~/.claude/projects,/path/to/more/sessions
@@ -82,15 +110,10 @@ the full list and what each does.
 
 The dashboard reads everything live from a local SQLite store:
 
-- **Session outcome rate** — how many of your sessions ended in a win (you pick what counts).
 - **Cost per shipped artifact** — dollars of AI spend per merged PR or per shipped feature.
+- **Session outcome rate** — how many of your sessions ended in a win (you pick what counts).
 - **Total spend** — over time, split by model, work type, or repo.
 - **Tool & skill usage** — call counts, error rates, and error categories across every session.
-- A **filterable session viewer**, with the full transcript and file changes behind each one.
-    - Easy transcript navigation (turn-by-turn, errors, free text search, and
-      outcomes). For example: you can jump to the part of the session where
-      you worked on a particular feature or code change.
-    - Filter sessions that touched a particular file / PR / feature.
 
 Cost, tools, files, and git/PR outcomes come from static analysis — no setup or
 API key. Work type, complexity, autonomy, and feature names come from [LLM
@@ -107,8 +130,10 @@ dashboard useful depends on it.
 
 <br>
 
-And every session is a readable transcript you can navigate turn-by-turn, by work
-type, or by error — with the files it changed alongside:
+A **filterable session viewer**, with the full transcript and file changes behind each one.
+
+- Easy transcript navigation (turn-by-turn, errors, free text search, and outcomes). For example: you can jump to the part of the session where you worked on a particular feature or code change.
+- Filter sessions that touched a particular file / PR / feature.
 
 <br>
 
@@ -117,6 +142,16 @@ type, or by error — with the files it changed alongside:
 </p>
 
 <br>
+
+A set of **recommendations**, grounded in evidence from across your sessions,
+that surface fixes for re-steering you repeatedly had to do, or deviations from
+best practices.
+
+<br>
+
+<p align="center">
+  <img src="docs/img/recommendations_tab.png" alt="tuneloop recommendations — detects re-work themes and deviations from best practices and offers fix recommendations" width="900">
+</p>
 
 ## How it works
 
@@ -151,6 +186,16 @@ block, so a per-PR or per-feature cost reflects only the work that went into it.
 total spend, sessions, tool error rate) are each explained in
 [ARCHITECTURE.md](./ARCHITECTURE.md#the-metrics-explained).
 
+**Detection of recurring agent re-work / re-steer themes** — LLM-based analysis
+that identifies patterns from across your sessions where you had to step in and
+course-correct. Surfaces recommendations to fix these — updates to agent files
+(CLAUDE.md / AGENTS.md), skills, tooling or config.
+
+**Identification of deviations from best practices** — Deterministic and
+LLM-as-a-judge checkers that look at things like cache hit rate, context
+management, and unused startup bloat. Surfaces recommendations to fix these —
+updates to config, or simply an informational nudge.
+
 ## Query it from your coding agent
 
 Everything on the dashboard is a query over the store — and so is anything it
@@ -184,7 +229,8 @@ own** LLM key. Your session data goes only to the provider you choose:
 ```bash
 export TUNELOOP_LLM_PROVIDER=anthropic
 export ANTHROPIC_API_KEY=sk-ant-...
-# optional: export TUNELOOP_LLM_MODEL=claude-haiku-4-5
+# optional: export TUNELOOP_LLM_MODEL=claude-haiku-4-5        # base (per-session) model
+# optional: export TUNELOOP_LLM_MODEL_HEAVY=claude-sonnet-5   # detector model — auto-selected for anthropic; set to override
 npx tuneloop analyze
 ```
 
@@ -234,19 +280,22 @@ TUNELOOP_LLM_API_KEY=… npx tuneloop analyze --llm-model my-model
 Enrichment is one structured **tool call** per session, so use a
 tool-call-capable model (all the hosted defaults qualify). Flags override the env
 for one run; the API key is never a flag — set it in the env or paste it at the
-interactive prompt. It's cheap — a typical corpus of ~80
-sessions runs about **$0.60** with Claude Haiku. This cost shows up as **Analysis
-spend** in the summary, priced from a built-in table with an OpenRouter public
-price list filling gaps (cached under `~/.tuneloop/`).
+interactive prompt. It's inexpensive: analyzing ~100 sessions runs about **$6**
+with the default pairing — a cheap model (e.g. Claude Haiku) for the per-session
+enrichment and a Sonnet-class heavy model for the cross-session recommendation
+detectors. This cost shows up as **Analysis spend** in the summary,
+priced from a built-in table with an OpenRouter public price list filling gaps
+(cached under `~/.tuneloop/`).
 
-**Two model tiers (optional).** By default one model does everything. The work
-splits into two shapes, though: per-session enrichment is one call per session
-(the volume — a cheap model is the right call), and most detectors run fine on
-that same cheap model, while a few make cross-session synthesis calls where
-reasoning quality shows up in the insights. Detectors opt into the stronger tier
-individually — today the **recurring-themes** detector does; the rest stay on the
-base model. Set `TUNELOOP_LLM_MODEL_HEAVY` (or `--llm-model-heavy`) to give those
-opted-in detectors a stronger sibling model on the same provider:
+**Two model tiers.** The work splits into two shapes: per-session enrichment is one
+call per session (the volume — a cheap model is the right call), while a few
+detectors make cross-session synthesis calls where reasoning quality shows up in
+the insights. Detectors opt into the stronger tier individually — today the
+**recurring-themes** detector does; the rest stay on the base model. On the
+built-in providers with a strong sibling (Anthropic, OpenAI, Bedrock, OpenRouter,
+Gemini), that heavy model is **selected automatically**, so the recommendations
+work out of the box. Override it with `TUNELOOP_LLM_MODEL_HEAVY` (or
+`--llm-model-heavy`) — a sibling model on the same provider:
 
 ```bash
 TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
@@ -254,9 +303,13 @@ TUNELOOP_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... \
 ```
 
 Same provider, key, and base URL as `TUNELOOP_LLM_MODEL` — only the model id
-differs. Leave it unset and every detector uses the base model, unchanged.
-Changing it re-analyzes the full corpus for the detectors that use it, since
-extractions made by the old model aren't comparable to the new one's.
+differs. Leave it unset and tuneloop uses the provider's default heavy model where
+it has one (the strong siblings above) — unless your base model already clears the
+Sonnet-class tier, in which case detectors just reuse it. A provider with no strong
+sibling falls back to the base model, which skips **recurring-themes** (with a
+warning) when that model is below the tier. Changing it re-analyzes the full corpus for the
+detectors that use it, since extractions made by the old model aren't comparable to
+the new one's.
 
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the

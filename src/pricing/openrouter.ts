@@ -53,13 +53,35 @@ export async function loadOpenRouterPrices(dataDir: string, log?: { debug(msg: s
 }
 
 /**
- * Synchronous backfill lookup (post-load). Tries the more-specific
- * `"<provider>/<model>"` first (e.g. deepseek + deepseek-chat), then the bare id
- * (already a full OpenRouter id when provider=openrouter). Miss → undefined → $0.
+ * Candidate OpenRouter catalog keys for (provider, model), most specific first:
+ * the `"<provider>/<model>"` form, then the bare id (already a full OpenRouter id
+ * when provider=openrouter).
+ */
+// tuneloop provider name → OpenRouter vendor prefix, where they differ. OpenRouter
+// keys models as "<vendor>/<model>" (google/gemini-…, x-ai/grok-…), but our provider
+// presets are named for the endpoint (gemini, xai), so a bare "<provider>/<model>"
+// lookup misses and the model silently prices at $0. Map to the catalog vendor.
+const OPENROUTER_VENDOR: Record<string, string> = { gemini: 'google', xai: 'x-ai' }
+
+export function openrouterKeys(provider: string, model: string): string[] {
+  const vendor = OPENROUTER_VENDOR[provider]
+  const keys = [`${provider}/${model}`]
+  if (vendor) keys.push(`${vendor}/${model}`)
+  keys.push(model)
+  return keys
+}
+
+/**
+ * Synchronous backfill lookup (post-load): the first candidate key that hits.
+ * Miss → undefined → $0.
  */
 export function backfillPrice(provider: string, model: string): ModelPrice | undefined {
   if (!table || !model) return undefined
-  return table.get(`${provider}/${model}`) ?? table.get(model)
+  for (const key of openrouterKeys(provider, model)) {
+    const price = table.get(key)
+    if (price) return price
+  }
+  return undefined
 }
 
 function normalize(models: RawModel[]): Record<string, ModelPrice> {
