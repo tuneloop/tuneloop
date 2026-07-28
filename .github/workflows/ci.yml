@@ -14,12 +14,16 @@ concurrency:
 
 jobs:
   checks:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.task.name }} (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
+        # 22.19.0 is the declared engines floor (inherited from undici) — pin it
+        # exactly so a dependency quietly raising the floor fails CI instead of
+        # only failing users. 22/24 float to the latest of each supported major.
+        node: ['22.19.0', 22, 24]
+        task:
           - name: Typecheck
             command: npm run typecheck
           - name: Client typecheck
@@ -34,11 +38,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Run ${{ matrix.name }}
-        run: ${{ matrix.command }}
+      - name: Run ${{ matrix.task.name }}
+        run: ${{ matrix.task.command }}
