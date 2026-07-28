@@ -126,6 +126,56 @@ describe('skillDrift', () => {
     expect(r.delta!.after.calls).toBe(3)
   })
 
+  it('dates a version boundary to the file mtime (editedAt), not the analyze run', () => {
+    // v2 was analyzed at day 10, but the file's own mtime says it was edited at day 20.
+    // The boundary must be the real edit time (day 20), clamped to (prev-start, capture].
+    const editedV2 = iso(20)
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'mt', body: 'v1', bodyHash: 'h1', editedAt: iso(40) }], count: 1 } },
+      iso(40),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'mt', body: 'v2', bodyHash: 'h2', editedAt: editedV2 }], count: 1 } },
+      iso(10), // analyzed 10 days AFTER the real edit
+    )
+    const r = skillDrift(store, 'mt', NOW)
+    expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h2'])
+    expect(r.versions[1]!.startIso).toBe(editedV2) // mtime wins over the day-10 capture
+    expect(r.delta!.editIso).toBe(editedV2)
+  })
+
+  it('falls back to capture time when the mtime is implausible (e.g. clone reset it)', () => {
+    // A clone/checkout can set mtime to "now" — an editedAt AFTER the capture. That's
+    // implausible as an edit time, so we clamp it away and keep the capture timestamp.
+    const capturedV2 = iso(10)
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'cl', body: 'v1', bodyHash: 'h1', editedAt: iso(40) }], count: 1 } },
+      iso(40),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'cl', body: 'v2', bodyHash: 'h2', editedAt: iso(2) }], count: 1 } }, // mtime AFTER capture
+      capturedV2,
+    )
+    const r = skillDrift(store, 'cl', NOW)
+    expect(r.versions[1]!.startIso).toBe(capturedV2) // implausible mtime rejected
+  })
+
+  it('does not append a new version when only the mtime changed (same body)', () => {
+    // A touch/clone bumps mtime without changing content. Change-detection hashes only
+    // content (editedAt is stripped), so this must NOT create a spurious second version.
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'touch', body: 'same', bodyHash: 'h1', editedAt: iso(30) }], count: 1 } },
+      iso(30),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'touch', body: 'same', bodyHash: 'h1', editedAt: iso(5) }], count: 1 } }, // mtime moved, body identical
+      iso(1),
+    )
+    const r = skillDrift(store, 'touch', NOW)
+    expect(r.versions.length).toBe(1)
+    expect(r.singleVersion).toBe(true)
+  })
+
   it('withholds the delta when a side is too thin', () => {
     // A skill edited once, but with only 1 call after the edit → not enough to judge.
     store.recordEnvSnapshot(

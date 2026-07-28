@@ -3740,8 +3740,10 @@ export class Store {
     // Hash a canonical serialization (object keys sorted at every level; array order
     // preserved) so a meaning-preserving key reorder in the source config doesn't read
     // as a change. Arrays aren't sorted — element order can be meaningful (e.g. the
-    // order of permission rules) and is already consistent across reads.
-    const hash = contentHash(canonicalJson(input.payload))
+    // order of permission rules) and is already consistent across reads. `editedAt` (a
+    // file mtime) is stripped from the hash — it's advisory metadata, so a touch/clone that
+    // bumps mtime without changing content must NOT append a spurious version row.
+    const hash = contentHash(canonicalJson(input.payload, VOLATILE_META_KEYS))
     this.db.transaction(() => {
       const existing = this.db
         .prepare(
@@ -3852,12 +3854,18 @@ export class Store {
  * Deterministic JSON for hashing: object keys sorted recursively, array order kept.
  * So `{a:1,b:2}` and `{b:2,a:1}` hash identically, but `[1,2]` and `[2,1]` do not.
  */
-function canonicalJson(value: unknown): string {
+/** Payload keys that are advisory metadata, not content — stripped before change-detection
+ *  hashing so they never trigger a spurious snapshot row. `editedAt` is a file mtime. */
+const VOLATILE_META_KEYS = ['editedAt']
+
+function canonicalJson(value: unknown, dropKeys: string[] = []): string {
+  const drop = new Set(dropKeys)
   const canon = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(canon)
     if (v && typeof v === 'object') {
       return Object.fromEntries(
         Object.keys(v as Record<string, unknown>)
+          .filter((k) => !drop.has(k))
           .sort()
           .map((k) => [k, canon((v as Record<string, unknown>)[k])]),
       )

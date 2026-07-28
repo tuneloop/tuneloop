@@ -1,17 +1,16 @@
 /**
  * Skill-health read model: per installed/invoked skill, everything we can say
  * HONESTLY from real sessions — trigger frequency + trend, a used/dead/mis-scoped
- * verdict (reusing the unused-capabilities policy), the skill's own-call error rate,
- * and a clearly-labelled friction-adjacency PROXY. Plus the installed SKILL.md
- * `description` so the UI can show what each skill is.
+ * verdict (reusing the unused-capabilities policy), and the skill's own-call error
+ * rate. Plus the installed SKILL.md `description` so the UI can show what each skill is.
  *
  * Deliberate NON-claims (see docs/plans/skill-health.md and [[correctness-over-coverage]]):
  *  - NO per-skill token/time cost. Tokens live per-assistant-message, never on the
  *    ToolCall; attributing cost to a skill would be fabricated. Frequency is honest;
  *    cost per skill is not.
- *  - The friction-adjacency number is a PROXY ("an errored tool call followed the
- *    skill within the same session"), not a quality verdict. It is labelled as such
- *    and never phrased as "the skill was wrong".
+ *  - No "friction" proxy from nearby tool errors — an unrelated error near a skill isn't
+ *    friction FROM it. Whether the agent reworked/bypassed the skill's output is the
+ *    LLM-classified activation-outcome signal (skill-outcomes), grounded in real evidence.
  *
  * This is a pure read over the store — analyze WRITES, serve/this only READ.
  */
@@ -30,8 +29,6 @@ import {
 
 /** The harness this reads: skill grammar + config layout are Claude-Code-specific (matches unused-capabilities). */
 const SOURCE = 'claude-code'
-/** How many tool calls after a skill engagement we scan for an error, for the friction proxy. */
-const FRICTION_LOOKAHEAD = 3
 
 const DAY_MS = 86_400_000
 
@@ -117,10 +114,7 @@ export interface SkillHealthRow {
     sessions: number
     calls: number
     errorCalls: number
-    frictionAdjacent: number
   }>
-  /** Proxy: invocations followed by an errored tool call within FRICTION_LOOKAHEAD calls, same session. */
-  frictionAdjacent: number
   firstUsedAt: string | null
   lastUsedAt: string | null
   /** Per-bucket invocation counts, oldest→newest, aligned 1:1 with report.sparkBuckets. */
@@ -224,22 +218,19 @@ function loadInstalledSkills(store: Store): InstalledSkill[] {
   return out
 }
 
-/** One invoked-skill row with timeline + error/friction facts (main-thread, in-window). */
+/** One invoked-skill row with timeline + own-call error facts (main-thread, in-window). */
 interface InvokedDetail {
   name: string
   repo: string | null
   sessions: number
   calls: number
   errorCalls: number
-  frictionAdjacent: number
   firstUsedAt: string | null
   lastUsedAt: string | null
 }
 
 /**
- * Per (name, repo) invocation facts. The friction-adjacency proxy is computed with a
- * correlated subquery: for each skill call, is there an errored tool call in the same
- * session within the next FRICTION_LOOKAHEAD idx positions? Main-thread only.
+ * Per (name, repo) invocation facts (sessions, calls, own-call errors, first/last used).
  *
  * Windowed by the tool-call timestamp `t.ts` (when the skill actually ran), NOT the
  * session's start — matching the shared `capability_usage` view (see queryInvoked): a
@@ -253,19 +244,12 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
             COUNT(DISTINCT t.session_id) AS sessions,
             COUNT(*) AS calls,
             SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls,
-            SUM(CASE WHEN EXISTS (
-                  SELECT 1 FROM tool_calls e
-                  WHERE e.session_id = t.session_id
-                    AND e.idx > t.idx AND e.idx <= t.idx + ?
-                    AND e.is_error = 1
-                ) THEN 1 ELSE 0 END) AS frictionAdjacent,
             MIN(t.ts) AS firstUsedAt,
             MAX(t.ts) AS lastUsedAt
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
      GROUP BY t.name, s.repo`,
-    FRICTION_LOOKAHEAD,
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -445,7 +429,6 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         errorCalls: 0,
         usedRepos: [],
         perRepo: [],
-        frictionAdjacent: 0,
         firstUsedAt: null,
         lastUsedAt: null,
         spark: spark.get(name) ?? new Array(sparkBuckets.length).fill(0),
@@ -478,7 +461,6 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     row.sessions += iv.sessions
     row.calls += iv.calls
     row.errorCalls += iv.errorCalls
-    row.frictionAdjacent += iv.frictionAdjacent
     // Keep the per-repo grain instead of only summing it away — the scope-down evidence.
     // A skill can reconcile from multiple raw names (plugin-namespaced) into one row, so
     // merge same-repo entries rather than assuming one iv per repo.
@@ -487,9 +469,8 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
       bucket.sessions += iv.sessions
       bucket.calls += iv.calls
       bucket.errorCalls += iv.errorCalls
-      bucket.frictionAdjacent += iv.frictionAdjacent
     } else {
-      row.perRepo.push({ repo: iv.repo, sessions: iv.sessions, calls: iv.calls, errorCalls: iv.errorCalls, frictionAdjacent: iv.frictionAdjacent })
+      row.perRepo.push({ repo: iv.repo, sessions: iv.sessions, calls: iv.calls, errorCalls: iv.errorCalls })
     }
     if (iv.repo) row.usedRepos.push(iv.repo)
     row.firstUsedAt = minIso(row.firstUsedAt, iv.firstUsedAt)
@@ -560,8 +541,6 @@ export interface SkillInvocation {
   ts: string | null
   /** True when its own tool call errored. */
   isError: boolean
-  /** Proxy: an errored tool call followed within FRICTION_LOOKAHEAD calls, same session. */
-  frictionAfter: boolean
 }
 
 /** Cap on the invocations list (mirrors errorOccurrences). The page notes the true
@@ -581,18 +560,13 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
   const title = `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='title'), NULLIF(s.title, ''), NULLIF(s.first_prompt, ''))`
   const rows = store.queryAll(
     `SELECT t.session_id AS sessionId, ${title} AS title, t.idx AS idx, s.repo AS repo,
-            t.ts AS ts, t.is_error AS isError,
-            (CASE WHEN EXISTS (
-               SELECT 1 FROM tool_calls e WHERE e.session_id = t.session_id
-                 AND e.idx > t.idx AND e.idx <= t.idx + ? AND e.is_error = 1
-             ) THEN 1 ELSE 0 END) AS frictionAfter
+            t.ts AS ts, t.is_error AS isError
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND (t.name = ? OR t.name LIKE ?)
        AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
      ORDER BY t.ts DESC, t.idx ASC
      LIMIT ?`,
-    FRICTION_LOOKAHEAD,
     name,
     '%:' + name, // plugin-namespaced form (<plugin>:<name>)
     SOURCE,
@@ -600,7 +574,7 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
     untilIso ?? null,
     untilIso ?? null,
     MAX_INVOCATIONS,
-  ) as Array<{ sessionId: string; title: string | null; idx: number; repo: string | null; ts: string | null; isError: number; frictionAfter: number }>
+  ) as Array<{ sessionId: string; title: string | null; idx: number; repo: string | null; ts: string | null; isError: number }>
 
   return rows.map((r) => ({
     sessionId: r.sessionId,
@@ -609,7 +583,6 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
     repo: r.repo,
     ts: r.ts,
     isError: r.isError === 1,
-    frictionAfter: r.frictionAfter === 1,
   }))
 }
 
@@ -810,7 +783,7 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
 
 // ---- Skill drift & version comparison (the hero feature) ------------------
 // Reconstructs a skill's edit timeline from the append-on-change snapshot history
-// and reports usage/error/friction on each side of each edit. Deliberately EDIT-
+// and reports usage + own-call error rate on each side of each edit. Deliberately EDIT-
 // anchored, not time-window-scoped: the parent tab's time filter governs the "how
 // is it doing lately" widgets, but "did the last change help?" is answered against
 // the versions' own lifetimes, so the filter must not clip it.
@@ -833,7 +806,6 @@ export interface SkillVersionUsage {
   calls: number
   sessions: number
   errorCalls: number
-  frictionAdjacent: number
 }
 
 /** One captured version of a skill: its body hash + the window it was the live body. */
@@ -877,6 +849,17 @@ export interface SkillDriftReport {
   singleVersion: boolean
   /** True when we have no skills-snapshot history for this name at all. */
   noHistory: boolean
+}
+
+/** Read a skill entry's file mtime (`editedAt`, ISO) from a snapshot payload, or null. */
+function editedAtOf(payload: unknown, name: string): string | null {
+  const skills = (payload as { skills?: unknown } | null)?.skills
+  if (!Array.isArray(skills)) return null
+  for (const s of skills) {
+    const o = s as Record<string, unknown> | null
+    if (o && o.name === name && typeof o.editedAt === 'string') return o.editedAt
+  }
+  return null
 }
 
 /** Read a skill entry's body hash from a skills-category snapshot payload. */
@@ -948,18 +931,11 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
   const row = store.queryOne(
     `SELECT COUNT(*) AS calls,
             COUNT(DISTINCT t.session_id) AS sessions,
-            SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls,
-            SUM(CASE WHEN EXISTS (
-                  SELECT 1 FROM tool_calls e
-                  WHERE e.session_id = t.session_id
-                    AND e.idx > t.idx AND e.idx <= t.idx + ?
-                    AND e.is_error = 1
-                ) THEN 1 ELSE 0 END) AS frictionAdjacent
+            SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE t.action = 'skill' AND t.is_sidechain = 0
        AND (t.name = ? OR t.name LIKE ?)
        AND s.source = ? AND (? IS NULL OR s.repo = ?) AND t.ts >= ? AND t.ts < ?`,
-    FRICTION_LOOKAHEAD,
     name,
     '%:' + name,
     SOURCE,
@@ -967,12 +943,11 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
     repo,
     sinceIso,
     untilIso,
-  ) as { calls: number; sessions: number; errorCalls: number | null; frictionAdjacent: number | null }
+  ) as { calls: number; sessions: number; errorCalls: number | null }
   return {
     calls: row?.calls ?? 0,
     sessions: row?.sessions ?? 0,
     errorCalls: row?.errorCalls ?? 0,
-    frictionAdjacent: row?.frictionAdjacent ?? 0,
   }
 }
 
@@ -993,13 +968,25 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
   // the same body hash is one version, live from its first capture until the next
   // differing capture (the edit boundary). A→B→A yields three segments (honest: the
   // body was reverted, a distinct period).
+  //
+  // Boundary timestamp: prefer the file's own mtime (`editedAt`) — the REAL edit time —
+  // over `captured_at` (when we happened to analyze). But mtime is advisory (a clone or
+  // checkout resets it), so clamp it to (previous boundary, capture time]: an mtime that
+  // predates the prior version or postdates when we observed it is implausible → fall back
+  // to capture time. This dates an edit to when it happened, safely.
   const nowIso = new Date(nowMs).toISOString()
   const segments: Array<{ bodyHash: string; startIso: string }> = []
   for (const row of hist) {
     const h = bodyHashOf(row.payload, name)
     if (h === null) continue // skill absent from this snapshot (installed/removed later) — skip
     const prev = segments[segments.length - 1]
-    if (!prev || prev.bodyHash !== h) segments.push({ bodyHash: h, startIso: row.capturedAt })
+    if (prev && prev.bodyHash === h) continue // same version, still live
+    const capturedIso = row.capturedAt
+    const edited = editedAtOf(row.payload, name)
+    const lowerExclusive = prev?.startIso // must be strictly after the previous boundary
+    const startIso =
+      edited && edited <= capturedIso && (!lowerExclusive || edited > lowerExclusive) ? edited : capturedIso
+    segments.push({ bodyHash: h, startIso })
   }
   if (segments.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
 

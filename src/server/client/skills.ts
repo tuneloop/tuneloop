@@ -1,6 +1,6 @@
 // Skill Health tab: a per-skill roster built from real sessions — trigger
-// frequency (with a sparkline), a used/dead/idle/scope verdict, own-call error
-// rate, and a clearly-LABELLED friction-adjacency proxy. Clicking a row opens a
+// frequency (with a sparkline), a used/dead/idle/scope verdict, and the skill's
+// own-call error rate. Clicking a row opens a
 // full per-skill DETAIL PAGE (routed at #/skills/<name>, back-button aware), which
 // shows the skill's SKILL.md description and the honest metric grid. Deliberately
 // makes NO per-skill cost claim (tokens aren't attributable to a tool call — see
@@ -294,7 +294,6 @@ function skRow(r) {
 function paintSkillPage(box, r) {
   var s = STATUS[r.status] || STATUS.unused;
   var errRate = r.calls > 0 ? Math.round((r.errorCalls / r.calls) * 100) : 0;
-  var fricRate = r.calls > 0 ? Math.round((r.frictionAdjacent / r.calls) * 100) : 0;
   var chips = (r.flags || []).map(function (f) {
     var fl = FLAGS[f];
     return fl ? '<span class="sk-flag sk-flag-lg" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(fl.tip) + '">' + esc(fl.label) + '</span>' : '';
@@ -322,7 +321,6 @@ function paintSkillPage(box, r) {
     pageTile(num(r.calls), 'Invocations', winSub) +
     pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
     pageTile(r.calls > 0 ? errRate + '%' : '—', 'Own-call error rate', r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls errored' : 'no calls to measure') +
-    pageTile(r.calls > 0 ? fricRate + '%' : '—', 'Friction-adjacent · PROXY', r.calls > 0 ? num(r.frictionAdjacent) + ' calls followed by an error' : 'no calls to measure') +
     '</div>';
 
   // Usage trend — a labeled bar chart (count axis + real calendar date ticks + a JS
@@ -367,15 +365,6 @@ function paintSkillPage(box, r) {
   }
   html += '</div></div>';
 
-  // The friction proxy needs its honesty caveat spelled out on the page.
-  if (r.calls > 0) {
-    html += '<div class="sk-page-sect">' +
-      '<div class="sk-sect-h">What “friction-adjacent” means</div>' +
-      '<div class="sk-sect-note sk-sect-note-block">A skill invocation counts as friction-adjacent when an errored tool call followed it within the same session. ' +
-      'This is <b>adjacency only</b> — not a judgment that the skill was wrong, and not a cost. It is a signal to go read the sessions, not a verdict.</div>' +
-      '</div>';
-  }
-
   // Verdict-specific guidance.
   html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
 
@@ -383,7 +372,7 @@ function paintSkillPage(box, r) {
   // hidden unless the classifier has produced verdicts for this skill in the window.
   if (r.calls > 0) {
     html += '<div class="sk-page-sect" id="sk-oc-sect" style="display:none">' +
-      '<div class="sk-sect-h">Activation outcomes</div>' +
+      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each firing: did the agent follow, rework, or bypass the skill’s output. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
       '<div id="sk-oc"></div>' +
       '</div>';
   }
@@ -392,7 +381,7 @@ function paintSkillPage(box, r) {
   // Windowed like usage; hidden until we find at least one co-occurring skill.
   if (r.calls > 0) {
     html += '<div class="sk-page-sect" id="sk-cooc-sect" style="display:none">' +
-      '<div class="sk-sect-h">Frequently used with</div>' +
+      sectHead('Frequently used with', 'Share = the fraction of this skill’s sessions that also ran the other skill. “often first” marks skills that tended to fire before it — a pattern to eyeball, not a dependency. A high share is a candidate to compose into one workflow.') +
       '<div id="sk-cooc"></div>' +
       '</div>';
   }
@@ -437,10 +426,7 @@ function loadCoOccurrence(name) {
     var host = $('#sk-cooc');
     if (!sect || !host) return;
     if (!d || !d.items || !d.items.length) return;
-    host.innerHTML = d.items.map(function (it) { return cooccRow(it, name); }).join('') +
-      '<div class="sk-sect-note">Share = the fraction of <b>' + esc(name) + '</b>’s sessions that also ran the other skill. ' +
-      '“often first” marks skills that tended to fire before it — a pattern to eyeball, not a dependency. ' +
-      'A high share is a candidate to compose into one workflow.</div>';
+    host.innerHTML = d.items.map(function (it) { return cooccRow(it, name); }).join('');
     sect.style.display = '';
     // Clicking a co-occurring skill navigates to its own detail page (keeps the window).
     Array.prototype.forEach.call(host.querySelectorAll('.sk-cooc'), function (el) {
@@ -519,9 +505,7 @@ function outcomesHtml(d) {
     }).join('') + '</div>';
   }
 
-  html += '<div class="sk-sect-note">A cheap LLM read of the turns around each firing: did the agent <b>follow</b> the skill’s output, ' +
-    '<b>rework</b> it, or <b>bypass</b> it entirely. This is <b>observational</b> — what happened after the skill ran — not a verdict ' +
-    'that the skill succeeded or failed, and never a cost. Judged ' + num(d.classified) + ' firing' + (d.classified === 1 ? '' : 's') + ' in this window.' +
+  html += '<div class="sk-sect-note">Judged ' + num(d.classified) + ' firing' + (d.classified === 1 ? '' : 's') + ' in this window.' +
     (d.insufficientContext > 0 ? ' ' + num(d.insufficientContext) + ' more had too little captured context to judge and are excluded.' : '') +
     '</div>';
   return html;
@@ -573,7 +557,6 @@ function driftHtml(d) {
         '<div class="sk-drift-delta-h">Around the last edit · ' + esc(String(delta.editIso).slice(0, 10)) +
           ' <span class="sk-drift-win">(± ' + num(delta.windowDays) + (delta.windowDays === 1 ? ' day' : ' days') + ')</span></div>' +
         '<div class="sk-drift-cmp">' +
-          driftMetric('Friction-adjacent', delta.before, delta.after, 'frictionAdjacent', true) +
           driftMetric('Own-call errors', delta.before, delta.after, 'errorCalls', true) +
           driftMetric('Invocations', delta.before, delta.after, 'calls', false) +
         '</div>' +
@@ -595,7 +578,7 @@ function driftHtml(d) {
     var span = String(v.startIso).slice(0, 10) + ' → ' + (v.endIso ? String(v.endIso).slice(0, 10) : 'now');
     var label = v.current ? 'current' : 'v' + (vs.length - i);
     var usage = v.enoughData
-      ? num(v.usage.calls) + ' calls · ' + Math.round((v.usage.frictionAdjacent / Math.max(1, v.usage.calls)) * 100) + '% friction-adj'
+      ? num(v.usage.calls) + ' calls · ' + Math.round((v.usage.errorCalls / Math.max(1, v.usage.calls)) * 100) + '% errored'
       : num(v.usage.calls) + ' calls · too few to rate';
     html += '<div class="sk-ver' + (v.current ? ' sk-ver-cur' : '') + '">' +
       '<div class="sk-ver-tag">' + esc(label) + '</div>' +
@@ -613,9 +596,9 @@ function driftHtml(d) {
 // increase red (regressed); for neutral counts (invocations) we don't colour direction.
 function driftMetric(label, before, after, key, lowerBetter) {
   var bv = before[key] || 0, av = after[key] || 0;
-  // Rates for friction/errors (per call) read better than raw counts across uneven windows.
+  // Error rate (per call) reads better than raw counts across uneven windows.
   var pct = function (u) { return Math.round(((u[key] || 0) / Math.max(1, u.calls || 0)) * 100); };
-  var showRate = key === 'frictionAdjacent' || key === 'errorCalls';
+  var showRate = key === 'errorCalls';
   var bs = showRate ? pct(before) + '%' : num(bv);
   var as = showRate ? pct(after) + '%' : num(av);
   var dir = '';
@@ -658,7 +641,6 @@ function invocationRow(o) {
   var when = o.ts ? String(o.ts).slice(0, 10) : '—';
   var tags = '';
   if (o.isError) tags += '<span class="sk-inv-tag sk-inv-err">errored</span>';
-  if (o.frictionAfter) tags += '<span class="sk-inv-tag sk-inv-fric" title="An errored tool call followed within a few steps — adjacency, not a verdict.">friction after</span>';
   return '<button class="sk-inv" data-session="' + esc(o.sessionId) + '" data-idx="' + esc(String(o.idx)) + '">' +
     '<span class="sk-inv-title">' + esc(o.title || o.sessionId) + '</span>' +
     '<span class="sk-inv-tags">' + tags + '</span>' +
@@ -737,7 +719,14 @@ function advice(r) {
   if (hasFlag(r, 'not-in-config')) {
     return 'Used, but not found in your current config — a skill removed/relocated since it last ran, or a CLI-bundled skill we can\'t see on disk.';
   }
-  return 'Actively used. Frequency and error rate above are measured from real sessions.';
+  return 'Actively used.';
+}
+
+// A section header with a small "?" info affordance carrying the explanation as a
+// hover tooltip — keeps the page uncluttered vs a paragraph of prose under every section.
+function sectHead(label, tip) {
+  return '<div class="sk-sect-h">' + esc(label) +
+    (tip ? ' <span class="sk-info" title="' + esc(tip) + '">?</span>' : '') + '</div>';
 }
 
 // Tiny inline SVG sparkline of per-bucket invocation counts. Flat baseline when

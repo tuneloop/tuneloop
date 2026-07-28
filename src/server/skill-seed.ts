@@ -51,9 +51,8 @@ interface Invocation {
   skill: string
   /** Extra plugin namespace form, e.g. 'frontend-design:frontend-design'. */
   raw?: string
+  /** The skill's OWN tool call errored (drives errorCalls / the version-timeline error rate). */
   error?: boolean
-  /** Emit an errored non-skill tool call right after (drives the friction proxy). */
-  frictionAfter?: boolean
   /** A pre-classified activation outcome, stand-in for the LLM classifier's verdict
    *  (so the read model + UI can be exercised without a real LLM). */
   outcome?: 'used' | 'reworked' | 'ignored' | 'unclear'
@@ -106,8 +105,6 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
   let sid = 0
   const insertSession = (repo: string | null, dayAgo: number, invocations: Invocation[]): string => {
     const id = `syn-${sid++}`
-    // Interleave skill calls with the occasional plain tool call so idx gaps + the
-    // friction lookahead behave like real transcripts.
     const calls: Array<{ name: string; action: string; error: boolean }> = []
     // Verdicts stand in for the skill-outcomes processor's output, keyed by tool_call idx.
     const verdicts: Array<{ idx: number; name: string; outcome: string; userCorrectionAdjacent: boolean; evidence: string }> = []
@@ -123,7 +120,6 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
           evidence: 'synthetic: agent ' + inv.outcome + ' the ' + inv.skill + ' output',
         })
       }
-      if (inv.frictionAfter) calls.push({ name: 'Bash', action: 'shell', error: true })
     }
     db.prepare(
       `INSERT INTO sessions (id, session_id, source, repo, title, first_prompt, started_at, n_turns, n_tool_calls)
@@ -232,13 +228,13 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
 
   // ---- usage ----
   // review: the drift hero. Dense usage on both sides of each edit so before/after
-  // clears the min-sample guard. Low friction early, higher after the last edit
-  // (the "changed after the edit" story). All in 'aivue'. Also carries pre-classified
+  // clears the min-sample guard. Low own-call error rate early, higher after the last
+  // edit (the "changed after the edit" story). All in 'aivue'. Also carries pre-classified
   // activation outcomes (stand-in for the LLM classifier) skewing worse post-edit.
-  for (let i = 0; i < 6; i++) insertSession('aivue', 50 - i, [{ skill: 'review', frictionAfter: i === 0, outcome: 'used' }]) // v1 era, ~8% friction
-  for (let i = 0; i < 6; i++) insertSession('aivue', 33 - i, [{ skill: 'review', frictionAfter: i < 1, outcome: i < 1 ? 'reworked' : 'used' }]) // v2 era
+  for (let i = 0; i < 6; i++) insertSession('aivue', 50 - i, [{ skill: 'review', error: i === 0, outcome: 'used' }]) // v1 era, ~8% errored
+  for (let i = 0; i < 6; i++) insertSession('aivue', 33 - i, [{ skill: 'review', error: i < 1, outcome: i < 1 ? 'reworked' : 'used' }]) // v2 era
   for (let i = 0; i < 6; i++)
-    insertSession('aivue', 15 - (i % 15), [{ skill: 'review', frictionAfter: i >= 2, outcome: i >= 4 ? 'ignored' : i >= 2 ? 'reworked' : 'used', correction: i >= 4 }]) // v3 era, worse outcomes
+    insertSession('aivue', 15 - (i % 15), [{ skill: 'review', error: i >= 2, outcome: i >= 4 ? 'ignored' : i >= 2 ? 'reworked' : 'used', correction: i >= 4 }]) // v3 era, worse outcomes
 
   // review also co-occurs with grill-with-docs (not-in-config) and lint-fix.
   for (let i = 0; i < 4; i++)

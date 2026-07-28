@@ -85,19 +85,16 @@ describe('skillHealth', () => {
     expect(r.totalUnused).toBe(1)
   })
 
-  it('counts invocations, sessions, and the friction-adjacency proxy', () => {
+  it('counts invocations, sessions, and the own-call error rate', () => {
     seedInstalledGlobal(store, [{ name: 'usedskill', description: 'gets used' }])
-    // Two sessions invoke it; in one, an errored tool call follows within the lookahead.
-    seedSession('a', 'repoA', 3, [
-      { name: 'usedskill', action: 'skill' },
-      { name: 'Bash', action: 'shell', error: true },
-    ])
+    // Two sessions invoke it; in one, the skill's own tool call errored.
+    seedSession('a', 'repoA', 3, [{ name: 'usedskill', action: 'skill', error: true }])
     seedSession('b', 'repoA', 2, [{ name: 'usedskill', action: 'skill' }])
     const r = skillHealth(store, { nowMs: NOW })
     const row = r.rows.find((x) => x.name === 'usedskill')!
     expect(row.calls).toBe(2)
     expect(row.sessions).toBe(2)
-    expect(row.frictionAdjacent).toBe(1)
+    expect(row.errorCalls).toBe(1)
     expect(row.status).toBe('used')
     expect(r.totalUsed).toBe(1)
   })
