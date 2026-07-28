@@ -835,3 +835,41 @@ describe('display title fallback (first_prompt)', () => {
     expect(store.sessionList({}).find((r) => r.id === 's-empty')?.title).toBe('(untitled)')
   })
 })
+
+describe('featureCostTree', () => {
+  type Db = ReturnType<typeof openDb>
+  function feat(db: Db, id: string, completedAt: string | null, parent: string | null = null) {
+    db.prepare(
+      "INSERT INTO artifacts (id, kind, repo, source, title, completed_at, parent_artifact_id, producer) VALUES (?, 'feature', 'o/r', 'derived', ?, ?, ?, 'enrich-session')",
+    ).run(id, id, completedAt, parent)
+  }
+
+  // The breakdown shows where spend is going, including in-flight work: a window
+  // bounds SHIPPED features to those shipped inside it, while un-shipped features
+  // (no completed_at) always count — unlike the PR treemap, which stays merged-only.
+  it('includes un-shipped features; a window drops only features shipped outside it', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'f-inflight', null)
+    feat(db, 'f-shipped-in', '2026-06-15T00:00:00Z')
+    feat(db, 'f-shipped-before', '2026-01-05T00:00:00Z')
+
+    const windowed = store.featureCostTree(undefined, '2026-06-01T00:00:00Z', '2026-07-01T00:00:00Z')
+    expect(windowed.map((n) => n.id).sort()).toEqual(['f-inflight', 'f-shipped-in'])
+
+    // No window = every feature, shipped or not.
+    const all = store.featureCostTree()
+    expect(all.map((n) => n.id).sort()).toEqual(['f-inflight', 'f-shipped-before', 'f-shipped-in'])
+  })
+
+  it('re-roots an un-shipped child whose shipped parent falls outside the window', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'f-old-parent', '2026-01-05T00:00:00Z')
+    feat(db, 'f-live-child', null, 'f-old-parent')
+
+    const windowed = store.featureCostTree(undefined, '2026-06-01T00:00:00Z', '2026-07-01T00:00:00Z')
+    expect(windowed.map((n) => n.id)).toEqual(['f-live-child'])
+    expect(windowed[0]!.parentId).toBeNull() // parent filtered out → child becomes a root
+  })
+})

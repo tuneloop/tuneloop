@@ -2493,19 +2493,20 @@ export class Store {
     // surviving descendants — see the parentId/children normalization below.
     const cxNodes = complexityWhere(complexity, 'artifacts', 'feature')
     const cxCost = complexityWhere(complexity, 'a', 'feature')
-    // Only SHIPPED features (completed_at set) — the treemap decomposes the
-    // cost-per-shipped-feature KPI, so un-shipped features are excluded (matching
-    // costPerArtifact). A window further bounds it to features shipped in [from,to];
-    // per-feature cost stays all-time (the window picks which features count, not
-    // which spend). No window = all shipped features.
+    // EVERY feature, shipped or not — the breakdown shows where spend is going,
+    // including in-flight work (unlike the cost-per-shipped-feature KPI and the PR
+    // treemap, which stay merged/shipped-only). A window bounds shipped features to
+    // those shipped in [from,to]; un-shipped features are still accruing, so they
+    // always count. Per-feature cost stays all-time (the window picks which features
+    // count, not which spend). No window = every feature.
     const win = from && to
-    const rangeNodes = win ? 'AND completed_at >= ? AND completed_at < ?' : ''
-    const rangeCost = win ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const rangeNodes = win ? 'AND (completed_at IS NULL OR (completed_at >= ? AND completed_at < ?))' : ''
+    const rangeCost = win ? 'AND (a.completed_at IS NULL OR (a.completed_at >= ? AND a.completed_at < ?))' : ''
     const winParams = win ? [from, to] : []
     const rows = this.db
       .prepare(
         `SELECT id, title, parent_artifact_id AS parentId
-         FROM artifacts WHERE kind = 'feature' AND completed_at IS NOT NULL ${cxNodes} ${rangeNodes}`,
+         FROM artifacts WHERE kind = 'feature' ${cxNodes} ${rangeNodes}`,
       )
       .all(...winParams) as Array<{ id: string; title: string | null; parentId: string | null }>
     if (!rows.length) return []
@@ -2523,7 +2524,7 @@ export class Store {
              WHERE ba.artifact_id = a.id
            )
          ), 0) AS ownCost
-         FROM artifacts a WHERE a.kind = 'feature' AND a.completed_at IS NOT NULL ${cxCost} ${rangeCost}`,
+         FROM artifacts a WHERE a.kind = 'feature' ${cxCost} ${rangeCost}`,
       )
       .all(...winParams) as Array<{ id: string; ownCost: number }>
     const own = new Map<string, number>()

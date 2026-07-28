@@ -70,11 +70,11 @@ export var state: ClientState = {
   artKind: 'feature', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
-  days: 7,
+  days: 14,
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
   sr: { outcomes: ['session_success'], bucket: '', by: '', filters: {} },
-  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', complexity: '' },
+  ca: { kind: 'pr', defaultKind: 'pr', userPicked: false, bucket: '', complexity: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },

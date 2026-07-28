@@ -416,9 +416,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
   if (path === '/api/feature-costs') {
     // Hierarchical cost-per-feature for the cost-artifact section's breakdown
-    // charts (icicle / treemap): every feature with its own (direct) cost and the
-    // subtree rollup over parent_artifact_id. `days` scopes to features SHIPPED in
-    // the window (per-feature cost stays all-time); `complexity` scopes by bucket.
+    // charts (icicle / treemap): every feature — shipped or in-flight — with its
+    // own (direct) cost and the subtree rollup over parent_artifact_id. `days`
+    // scopes shipped features to the window; un-shipped ones always count
+    // (per-feature cost stays all-time); `complexity` scopes by bucket.
     const { from, to } = windowFromDays(url.searchParams.get('days'))
     sendJson(res, 200, { nodes: store.featureCostTree(url.searchParams.get('complexity') || undefined, from, to) })
     return

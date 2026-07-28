@@ -83,7 +83,9 @@ export function paintKpis() {
   var cur = k.current || {}, prev = k.previous || {};
   var cpf = cur.costPerFeature || {}, ppf = prev.costPerFeature || {};
   var cpr = cur.costPerPr || {}, ppr = prev.costPerPr || {};
-  var defaultKind = (cpf.count === 0 && (cpr.count || 0) > 0) ? 'pr' : 'feature';
+  // PR is the default lens; fall back to Feature only when the window has no
+  // merged PRs but does have features.
+  var defaultKind = (cpr.count === 0 && (cpf.count || 0) > 0) ? 'feature' : 'pr';
   state.ca.defaultKind = defaultKind;
   // The tile mirrors the kind the user picked in the detail; until then, the
   // smart default. Keep state.ca.kind synced so the detail opens on it too.

@@ -23,7 +23,7 @@ export function renderCostArtifact() {
   var shipVerb = pr ? 'merged' : 'shipped';
   var win = esc(caWinLabel());
   var tmTitle = pr ? 'PR cost breakdown' : 'Feature cost breakdown';
-  var tmSub = esc(caWinLabel()) + (pr ? ' &middot; total spend per merged PR' : ' &middot; total spend per feature &amp; sub-features');
+  var tmSub = esc(caWinLabel()) + (pr ? ' &middot; total spend per merged PR' : ' &middot; total spend per feature &amp; sub-features, shipped or in-flight');
   $('#metric-detail').innerHTML =
     '<div class="ca-controls" id="ca-controls"></div>' +
     // 1. Cost breakdown treemap (feature or PR, per the top-level toggle).
@@ -122,12 +122,14 @@ export function renderCaControls() {
   });
 }
 
-// Treemap nodes scope to the top-level window (artifacts completed in it) and the
-// complexity filter — both applied server-side — while each tile stays sized by the
-// artifact's all-time build cost, so the treemap decomposes the cost-per-artifact
-// KPI. Cached per (kind, complexity, window); a change to either invalidates both
-// kinds' caches (caTreeKey). Features come hierarchical from /api/feature-costs; PRs
-// are a flat set from /api/artifacts (each PR a tile sized by its all-time cost).
+// Treemap nodes scope to the top-level window and the complexity filter — both
+// applied server-side — while each tile stays sized by the artifact's all-time
+// build cost. PRs are merged-only (completed in the window), decomposing the
+// cost-per-merged-PR KPI; features include in-flight (un-shipped) work alongside
+// features shipped in the window, so the breakdown shows where spend is going
+// before anything ships. Cached per (kind, complexity, window); a change to either
+// invalidates both kinds' caches (caTreeKey). Features come hierarchical from
+// /api/feature-costs; PRs are a flat set from /api/artifacts.
 var caFeatNodes: any[] | null = null;
 var caPrNodes: any[] | null = null;
 var caTreeKey = '';
@@ -169,9 +171,10 @@ function renderTreemap() {
     var emptyMsg = state.ca.complexity
       ? 'No ' + (pr ? 'PRs' : 'features') + ' match this complexity filter — widen the Complexity selection above.'
       : state.days !== 'all'
-        ? 'No ' + (pr ? 'PRs merged' : 'features shipped') + ' in this window — widen the window above.'
-        : 'No ' + (pr ? 'merged PR' : 'shipped feature') + ' costs yet — ' +
-          (pr ? 'merge a PR with linked sessions' : 'ship a feature with linked sessions in the Features tab') + '.';
+        ? (pr ? 'No PRs merged in this window — widen the window above.'
+              : 'No features in this window — widen the window above.')
+        : 'No ' + (pr ? 'merged PR' : 'feature') + ' costs yet — ' +
+          (pr ? 'merge a PR with linked sessions' : 'link sessions to a feature in the Features tab') + '.';
     el.innerHTML = '<div class="empty">' + emptyMsg + '</div>';
     var leg0 = $('#ca-feat-legend'); if (leg0) leg0.innerHTML = '';
     return;
