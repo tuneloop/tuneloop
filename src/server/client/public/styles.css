@@ -180,7 +180,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
    containers — resolve identical column edges and the labels sit over the data. */
 .feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 104px 72px 84px 240px; align-items: center; gap: 12px; padding: 8px 12px; }
 .feat-head { position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 1px solid var(--line); }
-.feat-head span { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.feat-head span { color: var(--emerald); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .feat-row { border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .feat-row:last-child { border-bottom: none; }
 .feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; overflow: hidden; }
@@ -195,6 +195,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 /* Sortable table headers (PR table, feature list, sessions table). */
 .pr-th, .feat-th, .sess-th { cursor: pointer; user-select: none; white-space: nowrap; }
 .pr-th:hover, .feat-head span.feat-th:hover, .sess-th:hover { color: var(--ink); }
+/* Header rows of the three artifact/session tables carry the product green
+   (.feat-head span above does the same for the features grid). */
+#pr-table-wrap th, #sessions th { color: var(--emerald); }
 /* Sessions pager — below the table, matching the .btn idiom. */
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 10px 2px; }
 .pager .btn[disabled] { opacity: .45; cursor: default; pointer-events: none; }
