@@ -38,14 +38,26 @@ function alignBedrockRegion(heavy: string, base: string): string {
   return region ? heavy.replace(/^(us|eu|apac)\./, `${region}.`) : heavy
 }
 
-// Resolve the detector-pass ("heavy") model. Precedence: an explicit flag/env ▸ an
-// already-strong base (reuse it — don't downgrade e.g. opus to the preset's Sonnet
-// default) ▸ the provider's strong sibling (region-matched for Bedrock) ▸ undefined,
-// which leaves detectors on the base `model`. Same provider/key/URL as `model` — only
-// ever a sibling id on the same endpoint.
+/** Truthy-ish env flag: set to anything but ''/'0'/'false' to enable. */
+function envFlagEnabled(name: string): boolean {
+  const v = process.env[name]
+  return v != null && v !== '' && v !== '0' && v.toLowerCase() !== 'false'
+}
+
+// Resolve the detector-pass ("heavy") model. Precedence: an explicit flag/env ▸
+// TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY opt-out (skip the auto default) ▸ an already-strong
+// base (reuse it — don't downgrade e.g. opus to the preset's Sonnet default) ▸ the
+// provider's strong sibling (region-matched for Bedrock) ▸ undefined, which leaves
+// detectors on the base `model`. Same provider/key/URL as `model` — only ever a sibling
+// id on the same endpoint.
 function resolveHeavyModel(o: LlmOverrides | undefined, preset: ProviderPreset | undefined, model: string): string | undefined {
   const explicit = o?.heavyModel ?? process.env.TUNELOOP_LLM_MODEL_HEAVY
   if (explicit) return explicit
+  // Opt-out for users who don't want the auto strong-sibling default silently raising
+  // their analysis spend. Only suppresses the DEFAULT — an explicit heavy model above
+  // still wins. With no heavy model, detectors run on the base model and the
+  // Sonnet-class-gated ones (recurring-themes) skip themselves.
+  if (envFlagEnabled('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY')) return undefined
   if (model && meetsMinTier(model, 'strong')) return undefined
   const def = preset?.defaultHeavyModel
   if (!def) return undefined

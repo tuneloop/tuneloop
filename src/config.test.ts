@@ -88,6 +88,30 @@ describe('heavy model resolution', () => {
     expect(llm?.heavyModel).toBe('claude-sonnet-5')
   })
 
+  it('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY suppresses the auto default so detectors stay on the base model', () => {
+    unsetHeavy()
+    vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', '1')
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm
+    expect(llm?.heavyModel).toBeUndefined()
+    expect(llm?.model).toBe('claude-haiku-4-5') // base model untouched
+  })
+
+  it('an explicit heavy model still wins even when the default is disabled', () => {
+    vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', '1')
+    vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'claude-opus-4-8')
+    expect(loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('claude-opus-4-8')
+    // ...and the --llm-model-heavy flag too
+    expect(loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', heavyModel: 'from-flag' } }).llm?.heavyModel).toBe('from-flag')
+  })
+
+  it('treats falsey-ish values of the disable flag as unset', () => {
+    unsetHeavy()
+    for (const v of ['', '0', 'false', 'FALSE']) {
+      vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', v)
+      expect(loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('claude-sonnet-5')
+    }
+  })
+
   it('aligns the Bedrock default heavy profile to the base model region', () => {
     unsetHeavy()
     const eu = loadConfig({ llm: { provider: 'bedrock', model: 'eu.anthropic.claude-haiku-4-5-20251001-v1:0' } }).llm

@@ -311,6 +311,29 @@ warning) when that model is below the tier. Changing it re-analyzes the full cor
 detectors that use it, since extractions made by the old model aren't comparable to
 the new one's.
 
+**Keeping analysis spend down.** The automatic heavy model is what makes the recommendations
+work out of the box, but it does raise per-run spend over an enrichment-only run. Two
+ways to opt out:
+
+- **Turn off the automatic heavy model** — set `TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY=1`.
+  Every detector then runs on your base (cheap) model, and **recurring-themes** skips
+  itself with a warning (it's gated to a Sonnet-class model). This only suppresses the
+  *default* — an explicit `TUNELOOP_LLM_MODEL_HEAVY` / `--llm-model-heavy` still wins,
+  so you can disable the auto-pick yet still opt a single run into a heavy model.
+- **Turn off the heavy detector(s)** — disable them in `config.json` and pass it with
+  `--config`. `recurring-themes` is the only detector that uses the heavy model, so
+  disabling it removes all heavy-model spend while the rest of the recommendations keep
+  running; disable `kitchen-sink` too to drop the remaining (base-model) LLM detector:
+
+  ```json
+  {
+    "detectors": {
+      "recurring-themes": { "enabled": false },
+      "kitchen-sink": { "enabled": false }
+    }
+  }
+  ```
+
 **Local Ollama** needs a bigger context window and a capable model: the enrichment
 prompt is ~4–6k tokens but Ollama's ~2k default silently truncates it, so start the
 server with `OLLAMA_CONTEXT_LENGTH=8192 ollama serve` and use a tool-strong ≥7B
