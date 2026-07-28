@@ -1,8 +1,9 @@
 import { registerProcessor } from '../core/registry'
 import { blockMembership, blockSpine, deterministicBlocks } from '../core/blocks'
 import { enrichPrArtifact, parsePrRefs, prArtifactBase } from './github-pr'
+import { reconcileFeatures } from './feature-reconcile'
 import type { Block } from '../core/blocks'
-import type { FeatureRef, Processor, ProcessorContext, ProcessorResult } from '../core/processor'
+import type { Processor, ProcessorContext, ProcessorResult } from '../core/processor'
 import type { Session } from '../core/model'
 import { followupTurns, userTurns } from '../core/turns'
 import { costOfUsage } from '../pricing/pricing'
@@ -12,7 +13,6 @@ import type {
   ArtifactInput,
   BlockAnnotationInput,
   BlockArtifactInput,
-  FeatureRevisionInput,
   OutcomeInput,
   SessionArtifactInput,
 } from '../store/types'
@@ -62,9 +62,10 @@ const SUCCESS = ['success', 'partial', 'failure', 'unknown']
  */
 export const enrichSession: Processor = {
   name: 'enrich-session',
-  // 18: userTurns/followupTurns now come from core/turns (was a local copy), so
-  // harness-injected turns stop inflating the steering signal + autonomy call.
-  version: 18,
+  // 19: feature half decoupled — enrich proposes context-free feature titles (no tree,
+  // no matching/parenting); the cross-session finalize() reconcile fuses synonyms and
+  // builds the hierarchy over the whole corpus.
+  version: 19,
   kind: 'enrichment',
   needs: { llm: true },
   requires: ['segment-blocks'],
@@ -86,9 +87,8 @@ export const enrichSession: Processor = {
     const refs = parsePrRefs(session)
     const deterministicPrs = new Set(refs.filter((r) => r.kind === 'create' || r.kind === 'merge').map((r) => r.id))
     const userLinkedPrs = ctx.userLinkedArtifacts.filter((a) => a.kind === 'pr' && !deterministicPrs.has(a.artifactId))
-    const userLinkedFeatures = ctx.userLinkedArtifacts.filter((a) => a.kind === 'feature')
     const prContext: PrPromptContext = { userLinkedPrs, prBlockAttributions: ctx.prBlockAttributions }
-    const { system, user } = buildPrompt(session, ctx.existingFeatures, blocks, ctx.rejectedFeatureTitles, prContext, userLinkedFeatures)
+    const { system, user } = buildPrompt(session, blocks, ctx.rejectedFeatureTitles, prContext)
     const { data: parsed, usage } = await llm.completeStructured({
       system,
       user,
@@ -127,43 +127,30 @@ export const enrichSession: Processor = {
     }
 
     const repo = session.project.repo ?? null
-    const existing = new Map(ctx.existingFeatures.map((f) => [f.id, f]))
-    const isLocked = (id: string) => existing.get(id)?.source === 'user'
-    // Repo isolation guard: an existing feature is a safe auto-link target only if
-    // it is unscoped (global, e.g. a cross-repo epic) or already touches this repo.
-    // A feature owned by other repos is never auto-linked or auto-edited from here.
-    const inRepo = (f: FeatureRef) => !f.repos?.length || (repo != null && f.repos.includes(repo))
-    // A new derived feature may nest under user-owned (epic) parents or any
-    // parent this repo may use; otherwise it stays top-level.
-    const canParent = (id: string) => {
-      const p = existing.get(id)
-      return !!p && (p.source === 'user' || inRepo(p))
-    }
-
-    // Feature linkage is BLOCK-FIRST: the model attaches features to block ranges
-    // (feature_runs); the session's feature set is the UNION of its blocks'
-    // features (exactly like the use_case rollup). The `features` palette only
-    // NAMES the candidates that feature_runs reference by index — a palette entry
-    // never tied to a block is dropped, so session-level and block-level features
-    // can never diverge. We never link across repos.
-    // Features the user explicitly linked to THIS session (session_artifacts.source='user').
-    // Used two ways: an explicit link overrides the inRepo auto-link guard below (so a
-    // cross-repo linked feature resolves to itself instead of spawning a duplicate), and it
-    // guards the session-link re-emit further down from clobbering the user's row.
+    // Features the user explicitly linked to THIS session — guards the session-link
+    // re-emit below from clobbering the user's row (source='user').
     const userLinkedIds = new Set(ctx.userLinkedArtifacts.map((a) => a.artifactId))
+
+    // Feature proposal is context-free: enrich names the feature(s) this session
+    // advanced as short titles, with no view of the existing tree — a derived id is
+    // keyed off the title, so identical titles across sessions converge. The
+    // cross-session finalize() pass (feature-reconcile) fuses synonyms and builds the
+    // hierarchy; enrich no longer matches a tree or sets parents. Linkage stays
+    // BLOCK-FIRST: feature_runs reference the palette by index, and a palette entry
+    // never tied to a block is dropped, so session- and block-level features agree.
+    const rejected = new Set((ctx.rejectedFeatureTitles ?? []).map((t) => t.toLowerCase()))
     const features = Array.isArray(parsed.features) ? parsed.features : []
     const palette: Array<{ id: string; create?: ArtifactInput }> = []
     for (const f of features) {
-      const matched = str(f?.matched_feature_id)
-      const mf = matched ? existing.get(matched) : undefined
-      if (mf && (inRepo(mf) || userLinkedIds.has(mf.id))) { palette.push({ id: mf.id }); continue } // same-repo/global, or an explicit user link (overrides repo isolation)
-      // No usable match → propose a repo-scoped derived feature (created only if used).
-      const title = featureTitle(f?.new_title ?? f?.title) ?? (mf ? featureTitle(mf.title) : null)
-      if (!title) { palette.push({ id: '' }); continue }
+      const title = featureTitle((f as { title?: unknown })?.title)
+      if (!title || rejected.has(title.toLowerCase())) {
+        palette.push({ id: '' })
+        continue
+      }
       const id = derivedFeatureId(repo, title)
-      const parent = str(f?.parent_id)
-      const parentArtifactId = parent && parent !== id && canParent(parent) ? parent : undefined
-      palette.push({ id, create: { id, kind: 'feature', title, source: 'derived', repo: repo ?? undefined, parentArtifactId } })
+      // created_at = the session's start → the feature's mint time is chronological
+      // regardless of the parallel, out-of-order processing order (the store keeps the MIN).
+      palette.push({ id, create: { id, kind: 'feature', title, source: 'derived', repo: repo ?? undefined, createdAt: session.startedAt } })
     }
 
     // Block labels: use_case per block (use_case_runs) + block→feature links
@@ -222,21 +209,6 @@ export const enrichSession: Processor = {
       if (!userLinkedIds.has(slot.id)) {
         sessionArtifacts.push({ artifactId: slot.id, role: 'contributed', source: 'derived', confidence: 0.6 })
       }
-    }
-
-    // Taxonomy upkeep: REPARENT only, and only for a feature this session advanced
-    // (in `linked`). Auto-rename stays disabled; locked/user features untouched.
-    const featureRevisions: FeatureRevisionInput[] = []
-    const revs = Array.isArray(parsed.feature_revisions) ? parsed.feature_revisions : []
-    for (const r of revs) {
-      const id = str(r?.feature_id)
-      if (!id || isLocked(id) || !linked.has(id)) continue
-      const rawParent = str(r?.new_parent_id)
-      let parentId: string | null | undefined
-      if (rawParent === 'root') parentId = null
-      else if (rawParent && rawParent !== id && canParent(rawParent)) parentId = rawParent
-      if (parentId === undefined) continue
-      featureRevisions.push({ id, parentId })
     }
 
     // Reviewed-PR linkage (Layer 2, derived): a PR READ inside a `review`-labeled block
@@ -304,11 +276,18 @@ export const enrichSession: Processor = {
       outcomes,
       artifacts,
       sessionArtifacts,
-      featureRevisions,
       blockAnnotations,
       blockArtifacts,
       selfCost,
     }
+  },
+  // Cross-session: after every session has proposed its features, fuse synonyms and
+  // build the hierarchy over the whole corpus (see feature-reconcile). Runs on the base
+  // model — the same tier the per-session run() uses, so the processor cache stays keyed
+  // on one model.
+  async finalize(ctx) {
+    if (!ctx.llm) return
+    await reconcileFeatures(ctx.store, ctx.llm, ctx.log)
   },
 }
 
@@ -323,14 +302,11 @@ interface PrPromptContext {
   prBlockAttributions: PrBlockAttribution[]
 }
 
-function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], rejectedTitles?: string[], prContext?: PrPromptContext, userLinkedFeatures?: UserLinkedArtifact[]): { system: string; user: string } {
+function buildPrompt(session: Session, blocks: Block[], rejectedTitles?: string[], prContext?: PrPromptContext): { system: string; user: string } {
   const system =
-    'You analyze a single AI coding session, classify it, and maintain a hierarchical product-feature map. ' +
+    'You analyze a single AI coding session, classify it, and name the product feature(s) it advanced. ' +
     `Report your analysis by calling the ${TOOL_NAME} tool; its parameters define every field and its allowed values.`
 
-  const featureTree = features.length
-    ? renderFeatureTree(features)
-    : '(empty — no features yet)'
   const repoLabel = session.project.repo ?? '(no repo)'
 
   const user = [
@@ -341,21 +317,10 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], 
     `Blocks — the session split into ${blocks.length} contiguous slice(s); boundaries are FIXED (label every one):`,
     blockSpine(session, blocks),
     '',
-    'The full feature map across all repos (indentation = parent → child; "(locked)" = user-owned;',
-    '{...} = the repos that feature spans, "{any repo}" = unscoped/global):',
-    featureTree,
-    '',
     ...(rejectedTitles?.length
       ? [
-          'The user has REJECTED the following feature associations for this session. Do NOT propose them or semantically similar features:',
+          'The user has REJECTED these feature titles for this session. Do NOT propose them or semantically similar ones:',
           ...rejectedTitles.map((t) => `- "${t}"`),
-          '',
-        ]
-      : []),
-    ...(userLinkedFeatures?.length
-      ? [
-          'The user has EXPLICITLY linked the following features to this session. You MUST match them in your "features" list (via matched_feature_id) and assign at least one block to each in feature_runs:',
-          ...userLinkedFeatures.map((f) => `- [${f.artifactId}] "${f.title ?? f.artifactId}"`),
           '',
         ]
       : []),
@@ -403,16 +368,12 @@ function buildPrompt(session: Session, features: FeatureRef[], blocks: Block[], 
     'A feature name is NOT a summary of the session. Never string capabilities together with commas or "and".',
     '  Bad (a session summary crammed into one feature):  "analyze command with cost-per-PR metric, session outcome rate tracking, and adoption positioning"',
     '  Good (name the ONE dominant feature):  "Session outcome rate".',
-    'Rules for the feature map:',
-    '- Map the session to AS FEW features as possible — ideally EXACTLY ONE: the single feature it primarily advanced. List that primary feature first.',
-    '- Add a second feature (or, rarely, a third) ONLY when the session SUBSTANTIALLY advanced a genuinely separate capability. When unsure, pick just the one dominant feature. Incidental edits, fixups, or supporting changes do NOT each become a feature.',
-    `- Repo isolation: only match (matched_feature_id) a feature tagged for this repo ("${repoLabel}") or tagged "{any repo}". To advance a feature that belongs only to OTHER repos, create a new feature instead — do not match it.`,
-    '- Attach to the MOST SPECIFIC eligible feature via matched_feature_id; prefer matching an existing feature over creating a new one.',
+    'Rules for features:',
+    '- Name AS FEW features as possible — ideally EXACTLY ONE: the single capability this session primarily advanced. List it first.',
+    '- Add a second (rarely a third) ONLY when the session SUBSTANTIALLY advanced a genuinely separate capability. When unsure, pick just the one. Incidental edits, fixups, or supporting changes do NOT each become a feature.',
+    '- Give each a fresh, self-contained title — a short noun phrase, not a session summary. Do NOT try to match, reference, or nest under any other feature: name the capability plainly; duplicates across sessions are consolidated later.',
     '- Do not split one capability into several features, and do not merge several capabilities into one run-on title.',
-    '- Only set new_title when no eligible feature is specific enough. Keep it a short noun phrase (never a sentence or a list); place it under the best parent via parent_id (a same-repo, "{any repo}", or "(locked)" epic), leaving parent_id empty only for a genuinely top-level capability.',
-    '- feature_revisions is ONLY for moving a feature you advanced (one you matched or created above) under a better parent. You CANNOT rename features. Never touch features you did not advance, other repos\' features, or "(locked)" features.',
-    '- parent_id / new_parent_id must reference an id that already exists in the map above.',
-    '- If the work is not feature-level (e.g. a chore, refactor, or pure research), use empty "features" and "feature_revisions" arrays.',
+    '- If the work is not feature-level (a chore, refactor, or pure research), use an empty "features" array.',
     'Rules for use_case_runs (the use-case of each block, in time order):',
     `- Cover EVERY block index 0..${Math.max(0, blocks.length - 1)} with contiguous, non-overlapping runs (a partition). Merge adjacent blocks of the same use-case into one run; expect FEW runs (work changes use-case only a few times).`,
     '- Pick the single dominant use_case per run.',
@@ -454,7 +415,7 @@ const TOOL_NAME = 'record_analysis'
  */
 function outputSchema(nBlocks: number, hasUserLinkedPrs: boolean): JsonSchema {
   const lastBlock = Math.max(0, nBlocks - 1)
-  const required = ['title', 'complexity', 'autonomy', 'intent_summary', 'decisions', 'success', 'features', 'feature_revisions', 'use_case_runs', 'feature_runs']
+  const required = ['title', 'complexity', 'autonomy', 'intent_summary', 'decisions', 'success', 'features', 'use_case_runs', 'feature_runs']
   const properties: Record<string, unknown> = {
     title: { type: 'string', description: 'Short Title-Case phrase naming the OVERALL intent of the session (see guidance).' },
     complexity: { type: 'string', enum: COMPLEXITY, description: 'Difficulty of what the session set out to do.' },
@@ -464,24 +425,11 @@ function outputSchema(nBlocks: number, hasUserLinkedPrs: boolean): JsonSchema {
     success: { type: 'string', enum: SUCCESS, description: 'Whether the session accomplished its task(s).' },
     features: {
       type: 'array',
-      description: 'Features this session advanced — ideally exactly one; list the primary feature first.',
+      description: 'Features this session advanced — ideally exactly one; list the primary feature first. [] if not feature-level.',
       items: {
         type: 'object',
         properties: {
-          matched_feature_id: { type: 'string', description: 'Id of the most specific existing feature this session advanced, or empty.' },
-          new_title: { type: 'string', description: 'Title for a NEW feature when none fit, else empty.' },
-          parent_id: { type: 'string', description: 'Existing feature id to nest the new feature under, or empty for top-level.' },
-        },
-      },
-    },
-    feature_revisions: {
-      type: 'array',
-      description: 'Reparent a feature THIS session advanced under a better parent; [] otherwise.',
-      items: {
-        type: 'object',
-        properties: {
-          feature_id: { type: 'string', description: 'A feature this session advances, from the features above.' },
-          new_parent_id: { type: 'string', description: 'Existing feature id to reparent under, "root" for top-level, or empty to keep.' },
+          title: { type: 'string', description: 'A short Title-Case noun phrase naming this capability — a fresh, self-contained title; do not reference or match other features.' },
         },
       },
     },
@@ -561,32 +509,6 @@ function buildPrPromptSection(prContext: PrPromptContext | undefined, nBlocks: n
   })
   lines.push('')
   return lines
-}
-
-/** Render the feature list as an indented tree (parent → child) for the prompt. */
-function renderFeatureTree(features: FeatureRef[]): string {
-  const ids = new Set(features.map((f) => f.id))
-  const childrenOf = new Map<string, FeatureRef[]>()
-  for (const f of features) {
-    // Treat a feature whose parent is missing from the set as a root, so nothing is dropped.
-    const key = f.parentId && ids.has(f.parentId) ? f.parentId : ''
-    const arr = childrenOf.get(key) ?? []
-    arr.push(f)
-    childrenOf.set(key, arr)
-  }
-  const lines: string[] = []
-  const seen = new Set<string>()
-  const walk = (f: FeatureRef, depth: number) => {
-    if (seen.has(f.id)) return // guard against parent cycles
-    seen.add(f.id)
-    const lock = f.source === 'user' ? ' (locked)' : ''
-    const repos = f.repos && f.repos.length ? f.repos.join(', ') : 'any repo'
-    lines.push(`${'  '.repeat(depth)}- [${f.id}] ${f.title}${lock} {${repos}}`)
-    for (const c of childrenOf.get(f.id) ?? []) walk(c, depth + 1)
-  }
-  for (const root of childrenOf.get('') ?? []) walk(root, 0)
-  for (const f of features) if (!seen.has(f.id)) walk(f, 0) // any left by a cycle
-  return lines.join('\n')
 }
 
 function digest(s: Session): string {

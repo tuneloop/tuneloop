@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { defaultHeavyModel, loadConfig } from './config'
+import { loadConfig } from './config'
 
 // stubEnv(name, undefined) deletes the var for the test; unstubAllEnvs restores.
 const unsetKeys = () => {
@@ -38,61 +38,91 @@ describe('LLM key resolution', () => {
 })
 
 describe('heavy model resolution', () => {
-  it('is undefined when nothing sets it (detectors reuse the base client)', () => {
+  // Clear both heavy-model knobs so a value inherited from the dev's shell can't
+  // flip the default-heavy expectations (TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY would).
+  const unsetHeavy = () => {
     vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', undefined)
-    const llm = loadConfig({ llm: { provider: 'ollama' } }).llm
-    expect(llm?.heavyModel).toBeUndefined()
+    vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', undefined)
+  }
+
+  it("falls back to the provider's default heavy model when nothing sets it, so strong-gated detectors run", () => {
+    unsetHeavy()
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm
+    expect(llm?.heavyModel).toBe('claude-sonnet-5')
+    expect(llm?.model).toBe('claude-haiku-4-5') // base model untouched
   })
 
-  it('reads TUNELOOP_LLM_MODEL_HEAVY', () => {
+  it('seeds the right strong sibling per provider', () => {
+    unsetHeavy()
+    expect(loadConfig({ llm: { provider: 'bedrock' } }).llm?.heavyModel).toBe('us.anthropic.claude-sonnet-5')
+    expect(loadConfig({ llm: { provider: 'openai', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('gpt-5.4')
+    expect(loadConfig({ llm: { provider: 'openrouter', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('openai/gpt-5')
+    expect(loadConfig({ llm: { provider: 'gemini', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('gemini-3.1-pro-preview')
+  })
+
+  it('is undefined when the provider has no strong sibling (detectors reuse the base client)', () => {
+    unsetHeavy()
+    expect(loadConfig({ llm: { provider: 'ollama' } }).llm?.heavyModel).toBeUndefined()
+    expect(loadConfig({ llm: { provider: 'groq', apiKey: 'sk-x' } }).llm?.heavyModel).toBeUndefined()
+    expect(loadConfig({ llm: { provider: 'xai', apiKey: 'sk-x' } }).llm?.heavyModel).toBeUndefined() // grok-4 already clears the gate
+  })
+
+  it('TUNELOOP_LLM_MODEL_HEAVY overrides the preset default', () => {
     vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'claude-opus-4-8')
     const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm
     expect(llm?.heavyModel).toBe('claude-opus-4-8')
     expect(llm?.model).toBe('claude-haiku-4-5') // base model untouched
   })
 
-  it('the heavyModel override wins over env', () => {
+  it('an explicit heavyModel override wins over env and the preset default', () => {
     vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'from-env')
     const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', heavyModel: 'from-flag' } }).llm
     expect(llm?.heavyModel).toBe('from-flag')
   })
-})
 
-describe('defaultHeavyModel (interactive enrichment setup)', () => {
-  const unsetHeavy = () => vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', undefined)
-
-  it('seeds Sonnet-class for anthropic so strong-gated detectors run', () => {
+  it('reuses an already-strong base model instead of downgrading to the preset default', () => {
     unsetHeavy()
-    expect(defaultHeavyModel('anthropic')).toBe('claude-sonnet-5')
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', model: 'claude-opus-4-8' } }).llm
+    expect(llm?.heavyModel).toBeUndefined() // opus already clears the strong tier — detectors reuse it
+    expect(llm?.model).toBe('claude-opus-4-8')
   })
 
-  it('seeds the US Sonnet-5 inference profile for bedrock', () => {
+  it('an explicit heavy still applies over an already-strong base', () => {
     unsetHeavy()
-    expect(defaultHeavyModel('bedrock')).toBe('us.anthropic.claude-sonnet-5-20260203-v1:0')
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', model: 'claude-opus-4-8', heavyModel: 'claude-sonnet-5' } }).llm
+    expect(llm?.heavyModel).toBe('claude-sonnet-5')
   })
 
-  it('seeds a strong sibling for openai/openrouter/gemini', () => {
+  it('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY suppresses the auto default so detectors stay on the base model', () => {
     unsetHeavy()
-    expect(defaultHeavyModel('openai')).toBe('gpt-5.4')
-    expect(defaultHeavyModel('openrouter')).toBe('openai/gpt-5')
-    expect(defaultHeavyModel('gemini')).toBe('gemini-3.1-pro-preview')
+    vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', '1')
+    const llm = loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm
+    expect(llm?.heavyModel).toBeUndefined()
+    expect(llm?.model).toBe('claude-haiku-4-5') // base model untouched
   })
 
-  it('returns undefined when the provider has no strong sibling (or is already strong)', () => {
-    unsetHeavy()
-    expect(defaultHeavyModel('ollama')).toBeUndefined()
-    expect(defaultHeavyModel('groq')).toBeUndefined()
-    expect(defaultHeavyModel('xai')).toBeUndefined() // grok-4 already clears the gate
-  })
-
-  it('TUNELOOP_LLM_MODEL_HEAVY wins over the preset default', () => {
+  it('an explicit heavy model still wins even when the default is disabled', () => {
+    vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', '1')
     vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'claude-opus-4-8')
-    expect(defaultHeavyModel('anthropic')).toBe('claude-opus-4-8')
+    expect(loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('claude-opus-4-8')
+    // ...and the --llm-model-heavy flag too
+    expect(loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x', heavyModel: 'from-flag' } }).llm?.heavyModel).toBe('from-flag')
   })
 
-  it('an explicit override wins over env and the preset default', () => {
-    vi.stubEnv('TUNELOOP_LLM_MODEL_HEAVY', 'from-env')
-    expect(defaultHeavyModel('anthropic', { heavyModel: 'from-flag' })).toBe('from-flag')
+  it('treats falsey-ish values of the disable flag as unset', () => {
+    unsetHeavy()
+    for (const v of ['', '0', 'false', 'FALSE']) {
+      vi.stubEnv('TUNELOOP_DISABLE_DEFAULT_LLM_HEAVY', v)
+      expect(loadConfig({ llm: { provider: 'anthropic', apiKey: 'sk-x' } }).llm?.heavyModel).toBe('claude-sonnet-5')
+    }
+  })
+
+  it('aligns the Bedrock default heavy profile to the base model region', () => {
+    unsetHeavy()
+    const eu = loadConfig({ llm: { provider: 'bedrock', model: 'eu.anthropic.claude-haiku-4-5-20251001-v1:0' } }).llm
+    expect(eu?.heavyModel).toBe('eu.anthropic.claude-sonnet-5')
+    const apac = loadConfig({ llm: { provider: 'bedrock', model: 'apac.anthropic.claude-haiku-4-5-20251001-v1:0' } }).llm
+    expect(apac?.heavyModel).toBe('apac.anthropic.claude-sonnet-5')
   })
 })
 

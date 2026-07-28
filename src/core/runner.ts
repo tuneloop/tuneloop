@@ -49,15 +49,15 @@ export interface RunResult {
 /** Run every applicable processor for one session, honoring deps + the cache. */
 export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   const { session, store, log, llmEnabled, llmModel, llm, sh } = opts
-  // The heavy tier falls back to the light client/model when no distinct one was wired.
+  // The heavy tier falls back to the light client/model when no distinct one was wired,
+  // mirroring the detector runner's `heavyLlm ?? llm` (see detector-runner.ts clientFor).
   const heavyLlm = opts.heavyLlm ?? llm
   const heavyLlmModel = opts.heavyLlmModel ?? llmModel
-  // Read the feature hierarchy fresh for every session, not once per run, so a
-  // session sees features that earlier sessions in this run created, renamed, or
-  // reparented — letting the extractor grow one coherent tree instead of dupes.
-  // The whole (cross-repo) hierarchy is sent; repo isolation is enforced on
-  // linkage inside the processor, not by hiding other repos' features.
-  const existingFeatures: FeatureRef[] = store.listFeatures()
+  // enrich-session no longer needs the existing feature tree: it proposes features
+  // context-free, and a cross-session finalize() pass reconciles them afterward. So we
+  // skip the per-session store.listFeatures() read (which grew with the corpus). The
+  // field stays for the context shape; de-dup + hierarchy is the reconcile pass's job.
+  const existingFeatures: FeatureRef[] = []
   const rejectedFeatureTitles = store.rejectedFeatureTitles(session.id)
   const allUserLinked = store.userLinkedArtifactsAll(session.id)
   const userLinkedArtifacts = allUserLinked

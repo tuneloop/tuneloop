@@ -18,6 +18,21 @@ export function clampLabel(label: string): string {
   return label.length > MAX_LABEL_CHARS ? label.slice(0, MAX_LABEL_CHARS).trim() : label
 }
 
+// Tokens the model sometimes emits in place of a real title — most often when asked to
+// name a cluster it fused in the reconcile pass. Matched on the label reduced to bare
+// alphanumerics (so "TBD", "N/A", "Placeholder." all normalize in), never as a substring.
+const JUNK_LABELS = new Set(['placeholder', 'untitled', 'unknown', 'todo', 'tbd', 'na', 'none', 'theme', 'newtheme', 'new', 'notitle'])
+
+/**
+ * A model-proposed theme label is junk when it's empty or a bare placeholder token — reject
+ * it so it never mints a "placeholder" theme (extraction) or overwrites a real label (merge
+ * reword). Guards the full label, not a substring, so real titles like "New PR Flow" survive.
+ */
+export function isJunkLabel(label: string): boolean {
+  const norm = label.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  return norm.length === 0 || JUNK_LABELS.has(norm)
+}
+
 /**
  * A theme's stable id. Global by default; repo-scoped only when the gap is
  * inherent to a project (`projectSpecific` AND a repo to scope it to).

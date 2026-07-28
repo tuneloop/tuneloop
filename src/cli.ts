@@ -17,7 +17,7 @@ const program = new Command()
 
 program
   .name('tuneloop')
-  .description('Local analytics for your AI coding sessions. Count outcomes, not tokens.')
+  .description('Local analytics for your AI coding sessions. Understand and improve your coding agent usage.')
   .version(version)
 
 const appendValue = (val: string, acc: string[]): string[] => (acc.push(val), acc)
@@ -38,7 +38,7 @@ program
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
   .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, bedrock, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
   .option('--llm-model <id>', 'enrichment model id; overrides env')
-  .option('--llm-model-heavy <id>', 'stronger model for the detector pass (same provider); default: same as --llm-model')
+  .option('--llm-model-heavy <id>', "stronger model for the detector pass (same provider); default: the provider's strong sibling, else --llm-model")
   .option('--llm-base-url <url>', 'OpenAI-compatible endpoint URL (for openai-compatible / custom hosts); overrides env')
   .option('--no-serve', 'analyze only; do not serve the dashboard')
   .option('-v, --verbose', 'verbose logging')

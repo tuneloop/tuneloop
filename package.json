@@ -1,7 +1,7 @@
 {
   "name": "tuneloop",
-  "version": "0.4.1",
-  "description": "Local analytics for your AI coding sessions. Count outcomes, not tokens. Tuneloop turns the session transcripts your AI coding tools already write into a local dashboard of what you actually shipped, what it cost, and your work patterns.",
+  "version": "0.5.0",
+  "description": "Local analytics for your AI coding sessions. Understand and improve your coding agent usage. tuneloop turns the session transcripts your AI coding tools already write into a local dashboard that gives you cost attribution (what each PR / feature cost) and recommendations for more effective usage grounded in your sessions.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
   "homepage": "https://github.com/tuneloop/tuneloop#readme",
@@ -73,7 +73,8 @@
     "better-sqlite3": "^12.11.1",
     "commander": "^12.1.0",
     "openai": "^6.44.0",
-    "smol-toml": "^1.7.0"
+    "smol-toml": "^1.7.0",
+    "undici": "^8.9.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

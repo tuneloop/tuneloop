@@ -335,3 +335,35 @@ describe('enrich-session digest excludes harness-injected turns', () => {
     expect(prompt()).not.toContain('Review target')
   })
 })
+
+describe('enrich-session feature proposal (context-free)', () => {
+  it('proposes a derived feature from the title, stamps mint time from the session, links its block, and emits no revisions', async () => {
+    const session = buildSession([{ command: 'echo build' }])
+    session.startedAt = '2026-03-01T00:00:00Z'
+    const llm: LlmClient = {
+      provider: 'anthropic',
+      model: 'claude-haiku-4-5',
+      async completeStructured() {
+        return {
+          data: {
+            complexity: 'routine',
+            autonomy: 'autonomous',
+            intent_summary: 'add a cost metric',
+            decisions: [],
+            success: 'success',
+            features: [{ title: 'Cost Metric' }],
+            use_case_runs: [{ from: 0, to: 0, use_case: 'implement' }],
+            feature_runs: [{ from: 0, to: 0, feature: 0 }],
+          },
+          usage: emptyUsage(),
+        }
+      },
+    }
+    const res = await enrichSession.run(ctx(session, llm))
+    const feature = (res.artifacts ?? []).find((a) => a.kind === 'feature')
+    expect(feature).toMatchObject({ kind: 'feature', title: 'Cost Metric', source: 'derived', repo: 'o/r', createdAt: '2026-03-01T00:00:00Z' })
+    expect(feature).not.toHaveProperty('parentArtifactId') // no parenting in enrich anymore
+    expect((res.blockArtifacts ?? []).some((b) => b.artifactId === feature!.id && b.blockIdx === 0)).toBe(true)
+    expect((res as { featureRevisions?: unknown }).featureRevisions).toBeUndefined()
+  })
+})

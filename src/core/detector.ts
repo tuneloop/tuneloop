@@ -187,6 +187,16 @@ export interface Detector {
   tier: DetectorTier
   /** When true, the runner skips this detector if no LLM provider is configured. */
   needsLlm?: boolean
+  /**
+   * Which model tier this detector's LLM calls run on:
+   *  - 'default' (implied when omitted) — the cheap per-session model, same one the
+   *    processors use. Correct for most detectors.
+   *  - 'heavy' — opt into the stronger detector model (--llm-model-heavy /
+   *    TUNELOOP_LLM_MODEL_HEAVY). Reserve for detectors whose cross-session synthesis
+   *    genuinely needs the reasoning (e.g. recurring-themes). Falls back to the default
+   *    model when no heavy model is configured, so `ctx.llm` is always the right client.
+   */
+  model?: 'default' | 'heavy'
   /** Static pre-gate: return false to skip entirely. Avoids wasted work (especially LLM spend for P/X-tier). */
   applicable?(ctx: DetectorContext): boolean
   /**

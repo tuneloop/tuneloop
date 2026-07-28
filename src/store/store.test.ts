@@ -33,6 +33,159 @@ const stubPr: ArtifactInput = {
   status: 'open', // an offline reviewer only knows it's a PR, optimistically "open"
 }
 
+describe('mergeFeature', () => {
+  type Db = ReturnType<typeof openDb>
+  function feat(db: Db, id: string, opts: { source?: string; parent?: string | null; createdAt?: string } = {}) {
+    db.prepare(
+      "INSERT INTO artifacts (id, kind, repo, source, title, created_at, parent_artifact_id, producer) VALUES (?, 'feature', 'o/r', ?, ?, ?, ?, 'enrich-session')",
+    ).run(id, opts.source ?? 'derived', id, opts.createdAt ?? null, opts.parent ?? null)
+  }
+  function sess(db: Db, id: string) {
+    db.prepare('INSERT OR IGNORE INTO sessions (id, session_id, source, provider) VALUES (?,?,?,?)').run(id, id, 'claude-code', 'anthropic')
+  }
+  function sLink(db: Db, sid: string, aid: string, role = 'contributed') {
+    sess(db, sid)
+    db.prepare("INSERT OR IGNORE INTO session_artifacts (session_id, artifact_id, role, source, producer) VALUES (?,?,?, 'derived', 'enrich-session')").run(sid, aid, role)
+  }
+  function bLink(db: Db, sid: string, block: number, aid: string, role = 'contributed') {
+    sess(db, sid)
+    db.prepare("INSERT OR IGNORE INTO block_artifacts (session_id, block_idx, artifact_id, role, source, producer) VALUES (?,?,?,?, 'derived', 'enrich-session')").run(sid, block, aid, role)
+  }
+  const featureIds = (db: Db) => (db.prepare("SELECT id FROM artifacts WHERE kind='feature' ORDER BY id").all() as Array<{ id: string }>).map((r) => r.id)
+  const sessionsFor = (db: Db, aid: string) =>
+    (db.prepare('SELECT session_id AS s FROM session_artifacts WHERE artifact_id = ?').all(aid) as Array<{ s: string }>).map((r) => r.s).sort()
+  const parentOf = (db: Db, id: string) => (db.prepare('SELECT parent_artifact_id AS p FROM artifacts WHERE id = ?').get(id) as { p: string | null } | undefined)?.p ?? null
+  const count = (db: Db, sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n
+
+  it('repoints links, absorbs children, keeps the earliest mint, deletes the loser', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'keep', { createdAt: '2026-02-01T00:00:00Z' })
+    feat(db, 'drop', { createdAt: '2026-01-01T00:00:00Z' }) // minted earlier
+    feat(db, 'child', { parent: 'drop' })
+    sLink(db, 's1', 'drop')
+    bLink(db, 's1', 0, 'drop')
+
+    expect(store.mergeFeature('drop', 'keep')).toBe(true)
+    expect(featureIds(db)).toEqual(['child', 'keep']) // loser gone
+    expect(sessionsFor(db, 'keep')).toEqual(['s1']) // session link moved
+    expect(count(db, 'SELECT COUNT(*) n FROM block_artifacts WHERE artifact_id = ?', 'keep')).toBe(1)
+    expect(parentOf(db, 'child')).toBe('keep') // child absorbed onto the survivor
+    expect((db.prepare('SELECT created_at c FROM artifacts WHERE id = ?').get('keep') as { c: string }).c).toBe('2026-01-01T00:00:00Z')
+  })
+
+  it('collapses a session linked to both features without a UNIQUE collision', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'keep')
+    feat(db, 'drop')
+    sLink(db, 's1', 'keep')
+    sLink(db, 's1', 'drop') // same session + role links both features
+
+    expect(store.mergeFeature('drop', 'keep')).toBe(true)
+    expect(sessionsFor(db, 'keep')).toEqual(['s1']) // one row, no dup
+    expect(count(db, 'SELECT COUNT(*) n FROM session_artifacts WHERE artifact_id = ?', 'drop')).toBe(0)
+  })
+
+  it('never absorbs a user-authored feature, and no-ops on equal/missing ids', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'userfeat', { source: 'user' })
+    feat(db, 'keep')
+    expect(store.mergeFeature('userfeat', 'keep')).toBe(false)
+    expect(featureIds(db)).toContain('userfeat')
+    expect(store.mergeFeature('keep', 'keep')).toBe(false)
+    expect(store.mergeFeature('nope', 'keep')).toBe(false)
+    expect(store.mergeFeature('keep', 'nope')).toBe(false)
+  })
+})
+
+describe('feature reconcile store helpers', () => {
+  type Db = ReturnType<typeof openDb>
+  const feat = (db: Db, id: string, o: { source?: string; parent?: string | null; createdAt?: string } = {}) =>
+    db
+      .prepare("INSERT INTO artifacts (id, kind, repo, source, title, created_at, parent_artifact_id, producer) VALUES (?, 'feature', 'o/r', ?, ?, ?, ?, 'enrich-session')")
+      .run(id, o.source ?? 'derived', id, o.createdAt ?? null, o.parent ?? null)
+  const sess = (db: Db, id: string) => db.prepare('INSERT OR IGNORE INTO sessions (id, session_id, source, provider) VALUES (?,?,?,?)').run(id, id, 'claude-code', 'anthropic')
+  const sLink = (db: Db, sid: string, aid: string) => {
+    sess(db, sid)
+    db.prepare("INSERT OR IGNORE INTO session_artifacts (session_id, artifact_id, role, source, producer) VALUES (?,?, 'contributed', 'derived', 'enrich-session')").run(sid, aid)
+  }
+  const parentOf = (db: Db, id: string) => (db.prepare('SELECT parent_artifact_id AS p FROM artifacts WHERE id = ?').get(id) as { p: string | null }).p
+  const ann = (db: Db, sid: string, key: string, value: unknown) =>
+    db.prepare('INSERT OR REPLACE INTO annotations (session_id, processor, key, value) VALUES (?,?,?,?)').run(sid, 'enrich-session', key, JSON.stringify(value))
+
+  it('derivedFeaturesForReconcile returns derived features with mint time + session count, skipping user features', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'a', { createdAt: '2026-01-01T00:00:00Z' })
+    feat(db, 'b', { createdAt: '2026-02-01T00:00:00Z', parent: 'a' })
+    feat(db, 'u', { source: 'user' })
+    sLink(db, 's1', 'a')
+    sLink(db, 's2', 'a')
+    sLink(db, 's1', 'b')
+    const rows = store.derivedFeaturesForReconcile().sort((x, y) => x.id.localeCompare(y.id))
+    expect(rows.map((r) => r.id)).toEqual(['a', 'b']) // user feature excluded
+    expect(rows[0]).toMatchObject({ id: 'a', createdAt: '2026-01-01T00:00:00Z', parentId: null, sessions: 2 })
+    expect(rows[1]).toMatchObject({ id: 'b', parentId: 'a', sessions: 1 })
+  })
+
+  it('derivedFeaturesForReconcile attaches up to 3 distinct intent glosses, most-recent first', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'a', { createdAt: '2026-01-01T00:00:00Z' })
+    const link = (sid: string, startedAt: string, intent: string) => {
+      db.prepare('INSERT OR IGNORE INTO sessions (id, session_id, source, provider, started_at) VALUES (?,?,?,?,?)').run(sid, sid, 'claude-code', 'anthropic', startedAt)
+      db.prepare("INSERT OR IGNORE INTO session_artifacts (session_id, artifact_id, role, source, producer) VALUES (?,?, 'contributed', 'derived', 'enrich-session')").run(sid, 'a')
+      ann(db, sid, 'intent_summary', intent)
+    }
+    link('s1', '2026-01-01T00:00:00Z', 'oldest intent')
+    link('s2', '2026-02-01T00:00:00Z', 'second intent')
+    link('s3', '2026-03-01T00:00:00Z', 'third intent')
+    link('s4', '2026-04-01T00:00:00Z', 'newest intent')
+    link('s5', '2026-05-01T00:00:00Z', 'newest intent') // duplicate text collapses; its recency wins
+    const [row] = store.derivedFeaturesForReconcile()
+    expect(row!.glosses).toEqual(['newest intent', 'third intent', 'second intent']) // top-3 distinct, recent first
+  })
+
+  it('derivedFeaturesForReconcile yields an empty gloss list when no linked session has an intent', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'a', { createdAt: '2026-01-01T00:00:00Z' })
+    sLink(db, 's1', 'a') // linked session, but no intent_summary annotation
+    const [row] = store.derivedFeaturesForReconcile()
+    expect(row!.glosses).toEqual([])
+  })
+
+  it('setFeatureParent reparents a derived feature but refuses user features, self-parent, and cycles', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    feat(db, 'root')
+    feat(db, 'child')
+    feat(db, 'u', { source: 'user' })
+    expect(store.setFeatureParent('child', 'root')).toBe(true)
+    expect(parentOf(db, 'child')).toBe('root')
+    expect(store.setFeatureParent('child', 'child')).toBe(false) // self
+    expect(store.setFeatureParent('u', 'root')).toBe(false) // user locked
+    expect(store.setFeatureParent('root', 'child')).toBe(false) // cycle: root under its own descendant
+    expect(store.setFeatureParent('child', null)).toBe(true) // promote to top-level
+    expect(parentOf(db, 'child')).toBeNull()
+  })
+
+  it('feature created_at settles to the earliest minting session, regardless of persist order', () => {
+    const db = openDb(':memory:')
+    const store = new Store(db)
+    const result = (createdAt: string) => ({
+      artifacts: [{ id: 'feature:derived:o-r:x', kind: 'feature' as const, title: 'X', source: 'derived', repo: 'o/r', createdAt }],
+    })
+    // Persist the later session first (out of chronological order, as the pool would).
+    store.persistResult('s-late', 'enrich-session', 19, 'h', 'm', result('2026-02-01T00:00:00Z'))
+    store.persistResult('s-early', 'enrich-session', 19, 'h', 'm', result('2026-01-01T00:00:00Z'))
+    const c = (db.prepare("SELECT created_at c FROM artifacts WHERE id = 'feature:derived:o-r:x'").get() as { c: string }).c
+    expect(c).toBe('2026-01-01T00:00:00Z')
+  })
+})
+
 describe('Codex semantic child persistence and display', () => {
   it('preserves literal event names for direct non-envelope tool calls', () => {
     const db = openDb(':memory:')

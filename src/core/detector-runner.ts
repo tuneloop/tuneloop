@@ -10,7 +10,14 @@ export interface DetectorRunOptions {
   store: Store
   log: Logger
   llmEnabled: boolean
+  /** The default (cheap) client — what a detector gets on `ctx.llm` unless it declares `model: 'heavy'`. */
   llm: LlmClient | null
+  /**
+   * The stronger detector client (--llm-model-heavy). Detectors that declare
+   * `model: 'heavy'` receive this on `ctx.llm`; when omitted or null it falls back to
+   * `llm`, so a run with no heavy model configured behaves exactly like a single-tier run.
+   */
+  heavyLlm?: LlmClient | null
   /** Optional step-2 progress bar; all detectors share one aggregator backing it. */
   progress?: Progress
   /**
@@ -23,7 +30,14 @@ export interface DetectorRunOptions {
 }
 
 export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
-  const { detectors, store, log, llmEnabled, llm, progress, limit } = opts
+  const { detectors, store, log, llmEnabled, llm, heavyLlm, progress, limit } = opts
+
+  // Per-detector model choice: a detector opts into the stronger model with
+  // `model: 'heavy'`; everyone else runs on the default (cheap) client. When no heavy
+  // client was provided (no TUNELOOP_LLM_MODEL_HEAVY), 'heavy' falls back to the default,
+  // so a single-tier run is unchanged. This client is what the detector sees as ctx.llm,
+  // what its applicable() gate inspects, and what delta invalidation keys on below.
+  const clientFor = (d: Detector): LlmClient | null => (d.model === 'heavy' ? (heavyLlm ?? llm) : llm)
 
   // One shared reporter backing the step-2 bar: every detector's addUnits/unitDone/
   // addCost aggregates into the same Progress, even though detectors run in parallel
@@ -42,7 +56,7 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
     store,
     log,
     llmEnabled,
-    llm,
+    llm: clientFor(d),
     unseenSessions: () => store.detectorUnseen(d.name),
     loadSession: (id) => store.hydrateSession(id),
     progress: reporter,
@@ -88,11 +102,15 @@ export async function runDetectors(opts: DetectorRunOptions): Promise<void> {
       log.debug(`detector ${d.name} version ${prior.version}→${d.version}: re-analyzing full corpus`)
       continue
     }
-    if (!d.needsLlm || !llm) continue
+    // Compare against the model THIS detector actually uses (default vs heavy), not a
+    // single run-wide client — otherwise a heavy detector would reset every time the
+    // cheap model churns, and vice versa.
+    const client = clientFor(d)
+    if (!d.needsLlm || !client) continue
     const priorModel = store.detectorLastSuccessfulModel(d.name)
-    if (priorModel && priorModel !== llm.model) {
+    if (priorModel && priorModel !== client.model) {
       store.resetDetectorSessionRuns(d.name)
-      log.debug(`detector ${d.name} model ${priorModel}→${llm.model}: re-analyzing full corpus`)
+      log.debug(`detector ${d.name} model ${priorModel}→${client.model}: re-analyzing full corpus`)
     }
   }
 
