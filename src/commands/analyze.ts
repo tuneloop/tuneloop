@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { basename, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { loadConfig } from '../config'
 import type { LlmOverrides } from '../config'
 import { INTRINSIC_FACETS } from '../core/facets'
@@ -24,6 +24,7 @@ import { runPool } from '../util/pool'
 import { formatDuration, Progress } from '../util/progress'
 import { askLine, askSecret } from '../util/prompt'
 import { makeSh } from '../util/sh'
+import { resolveRepo as resolveRepoFromCwd } from '../util/repo'
 
 export interface AnalyzeOptions {
   dirs?: string[]
@@ -251,23 +252,18 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     else groups.set(key, [s])
   }
 
-  // Resolve a session's repo from its cwd via git (the parser only sees cwd, and
-  // cwd may be a subdir). Short name = basename of the git toplevel. Cached per
-  // cwd since sessions cluster into a few working dirs; null when the dir is gone
-  // or isn't a git checkout.
-  // Cache both the short name (sessions.repo) and the git toplevel path (the
-  // environment reader's project scope_key + where it reads <root>/.claude/...).
+  // Resolve a session's repo from its cwd via git (the parser only sees cwd, and cwd
+  // may be a subdir — or a linked worktree, which resolveRepo canonicalizes to the main
+  // repo). Cached per cwd since sessions cluster into a few working dirs; null when the
+  // dir is gone or isn't a git checkout. Caches both the short name (sessions.repo) and
+  // the repo root (the environment reader's project scope_key + where it reads
+  // <root>/.claude/...).
   const repoCache = new Map<string, { name: string; root: string } | null>()
   const resolveRepo = async (cwd: string | undefined): Promise<{ name: string; root: string } | null> => {
     if (!cwd) return null
     const cached = repoCache.get(cwd)
     if (cached !== undefined) return cached
-    let entry: { name: string; root: string } | null = null
-    const res = await sh('git', ['-C', cwd, 'rev-parse', '--show-toplevel'])
-    if (res && res.code === 0) {
-      const top = res.stdout.trim()
-      if (top) entry = { name: basename(top), root: top }
-    }
+    const entry = await resolveRepoFromCwd(sh, cwd)
     repoCache.set(cwd, entry)
     return entry
   }
