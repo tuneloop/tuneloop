@@ -10,7 +10,7 @@ import { ERROR_CATEGORIES } from '../core/error-category'
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
 /** How many recommendations the tab surfaces — the top few by severity → recency. */
-const TOP_RECOMMENDATIONS = 5
+const TOP_RECOMMENDATIONS = 7
 
 /**
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request

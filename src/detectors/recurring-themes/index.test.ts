@@ -180,6 +180,34 @@ describe('recurring-themes detector', () => {
     expect(themes[0]!.sessionCount).toBe(2)
   })
 
+  it('extracts sessions concurrently through the pool (the default) and still surfaces the theme', async () => {
+    const { db, store } = setup()
+    // 3 sessions each mint the same theme label → 3 events / 3 sessions clears the threshold.
+    // Identical labels auto-dedup by id, so the pool path consolidates evidence regardless of
+    // extraction order — the parity check that concurrent extraction persists + surfaces.
+    for (const id of ['s1', 's2', 's3']) seedSession(db, store, id)
+    const llm: LlmClient = {
+      provider: 'anthropic',
+      model: 'claude-fable-5',
+      async completeStructured(req: StructuredRequest): Promise<LlmResult> {
+        if (req.toolName === 'reconcile_taxonomy') return { data: { themes: [] }, usage: emptyUsage() }
+        if (req.toolName === 'draft_fix') return { data: { worth_surfacing: true, fix_type: 'fix-prompt', content: 'x' }, usage: emptyUsage() }
+        return {
+          data: { events: [{ turn: 1, type: 'context-supply', description: 'user pointed the agent at the db config file', new_theme_label: 'Db Config Location Not Found' }] },
+          usage: emptyUsage(),
+        }
+      },
+    }
+    const res = await recurringThemes.run(ctx(store, llm))
+    const insights = (Array.isArray(res) ? res : res.insights) as InsightInput[]
+    expect(insights).toHaveLength(1)
+    expect(insights[0]!.count).toBe(3)
+    const themes = store.themesWithEvents()
+    expect(themes).toHaveLength(1)
+    expect(themes[0]!.eventCount).toBe(3)
+    expect(themes[0]!.sessionCount).toBe(3)
+  })
+
   it('windows a large session into multiple extraction calls and unions their events', async () => {
     const { db, store } = setup()
     seedManyFollowups(db, store, 'big', 65) // 65 follow-ups, WINDOW=30 → 3 windows (30+30+5)

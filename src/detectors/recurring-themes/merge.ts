@@ -5,7 +5,7 @@ import type { Logger } from '../../util/log'
 import type { Store } from '../../store/store'
 import type { ThemeRef } from '../../store/types'
 import { addUsage, emptyUsage, type TokenUsage } from '../../core/model'
-import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
+import { DETECTOR, clampLabel, isJunkLabel, themeId as makeThemeId } from './ids'
 import { TYPES } from './prompt'
 
 const HASH_KEY = 'recurring_themes_merge_hash'
@@ -76,12 +76,17 @@ export async function runThemeMerge(
         'assertions — an unchecked comment, an unchecked technical claim, an unchecked convention — are one gap: the ' +
         'agent states unverified claims as fact; fuse them). Merge by shared gap, not merely shared topic: two ' +
         'DIFFERENT mistakes in the same area (e.g. producing a bad UI design vs. being unable to verify a UI) are two ' +
-        'gaps, not one. Merge by shared gap, not shared topic; when a merge is genuinely doubtful leave ' +
-        'it, but do NOT leave an obvious recurring pattern scattered across near-identical themes.',
+        'gaps, not one. These themes were often extracted independently, in parallel, so ONE gap routinely appears many ' +
+        'times under lexically DIFFERENT names — the same underlying pattern phrased around different specifics. Err ' +
+        'toward FUSING such families: a broad recurring gap left scattered across many near-duplicate singletons is the ' +
+        'failure to avoid here. Keep apart only mistakes that are genuinely different — that would need different fixes.',
       user: buildUser(themes, orphans),
       schema: reconcileSchema,
       toolName: TOOL_NAME,
-      maxTokens: 4096,
+      // Headroom for the output cluster list: concurrent extraction mints more wording-variant
+      // duplicates than a fully-sequential pass would, so this can need to express many merge
+      // families in one call. Truncated output would read as under-merging — stay clear of the ceiling.
+      maxTokens: 8192,
     })
     usage = addUsage(usage, u)
     // arrayField salvages the array even when Sonnet-5 returns it as a JSON string.
@@ -135,7 +140,10 @@ function applyCluster(
   byRef: Map<string, { sessionId: string; idx: number; repo: string | null; type: string }>,
 ): number {
   let applied = 0
-  const label = str(c.label)
+  // Drop a junk/placeholder label to '' — every use below is label-truthy-gated, so this
+  // makes the pass neither mint a "placeholder" theme nor overwrite a real keeper label with one.
+  const rawLabel = str(c.label)
+  const label = isJunkLabel(rawLabel) ? '' : rawLabel
   const description = str(c.description)
   // Ids were resolved from numbers already; re-guard against byId/byRef because a
   // prior cluster in this loop may have folded/attached one of them.
@@ -236,15 +244,19 @@ function buildUser(themes: ThemeRef[], orphans: Array<{ sessionId: string; idx: 
     '   unverified claims as fact) — merge them. This is the MOST IMPORTANT action: scan the whole theme list for',
     '   families of near-duplicates (the same gap under slightly different names) and fuse each family you find.',
     '   Merge by shared GAP (what the agent keeps doing), not merely shared topic: two different mistakes in the same',
-    '   area are two gaps, not one. Fuse only CLEAR duplicates; if you are unsure two themes are the same gap, leave',
-    '   them separate. Set keep_id to the survivor number, or set label+description to name the general pattern the',
-    '   merged specifics share; omit keep_id to keep the oldest.',
+    '   area are two gaps, not one. Apply the single-fix-prompt test: if ONE fix-prompt would address the whole family,',
+    '   fuse it — even when the names read very differently (the parallel-extraction case). Under-merging a real recurring',
+    '   gap into many singletons is the mistake to avoid; keep apart only genuinely different mistakes. Set keep_id to the',
+    '   survivor number, or set label+description to name the general pattern the merged specifics share; omit keep_id to',
+    '   keep the oldest.',
     '2. ATTACH an orphan to an EXISTING theme: set keep_id to that theme number and list the event token(s) (E1, E2, …) in orphan_refs.',
     '   Do this when the event is another occurrence of that theme\'s gap (its general pattern, not only its exact wording).',
     '3. MINT a new theme from orphans — ONLY when TWO OR MORE orphans independently describe the SAME recurring',
     '   gap that no existing theme covers. Set label + description and list all their event tokens (E1, E2, …) in orphan_refs.',
     '   Never mint from a single orphan: one incident is not a recurrence, and it can join a theme later if it recurs.',
-    'label/description may also REWORD a kept/merged theme so it best captures its members (omit to keep as-is).',
+    'label/description may also REWORD a kept/merged theme so it best captures its members. A label must be a',
+    'real, SPECIFIC Title-Case name for the gap — never a placeholder, "TBD", "untitled", or generic filler. If you',
+    'cannot name the merged group well, omit label entirely and the survivor keeps its current name.',
     'project_specific: TRUE only if the gap is inherent to ONE project; FALSE (default) for general gaps.',
     'Leave an event unassigned only when it fits no theme AND no other orphan — a wrong match is worse than an',
     'unassigned event. Most orphans stay unassigned; that is correct',
@@ -313,7 +325,7 @@ const reconcileSchema: JsonSchema = {
         properties: {
           merge_ids: { type: 'array', items: { type: 'integer' }, description: 'Theme [numbers] to fuse (duplicates of one gap); 0, or 2+.' },
           keep_id: { type: 'integer', description: 'Theme [number] that survives a merge / owns attached orphans; omit to keep the oldest.' },
-          label: { type: 'string', description: 'Title-Case label — required to mint a NEW theme (needs 2+ orphan_refs), optional reword for a merged one.' },
+          label: { type: 'string', description: 'A real, specific Title-Case name for the gap (never a placeholder/"TBD"/generic filler) — required to mint a NEW theme (needs 2+ orphan_refs), optional reword for a merged one; omit to keep the current label.' },
           description: { type: 'string', description: 'One-sentence definition of the gap (for a new or reworded theme).' },
           project_specific: { type: 'boolean', description: 'TRUE only if the gap is inherent to one project; FALSE (default) for general gaps.' },
           orphan_refs: { type: 'array', items: { type: 'string' }, description: 'Unassigned event tokens ("E1","E2",…) that belong to this gap; 2+ required when minting a new theme.' },

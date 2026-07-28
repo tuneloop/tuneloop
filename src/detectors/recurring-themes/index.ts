@@ -5,7 +5,7 @@ import { arrayField } from '../../llm/json'
 import { costOfUsage } from '../../pricing/pricing'
 import { meetsMinTier } from '../../llm/capability'
 import { collectFollowups } from './followups'
-import { DETECTOR, clampLabel, themeId as makeThemeId } from './ids'
+import { DETECTOR, clampLabel, isJunkLabel, themeId as makeThemeId } from './ids'
 import { buildPrompt, extractionSchema, REMEDIES, TOOL_NAME, TRIGGERS, TYPES } from './prompt'
 import { runThemeMerge } from './merge'
 import { runPool } from '../../util/pool'
@@ -16,6 +16,14 @@ import type { Detector, DetectorContext, DetectorResult, InsightInput } from '..
 import type { ThemeEventInput, ThemeInput, ThemeRef, ThemeRemedy, ThemeTrigger } from '../../store/types'
 
 const MAX_TURNS_GATE = 0 // pre-gate: a session needs > this many substantive follow-ups (steered) to extract
+
+// Per-session extraction runs concurrently through a bounded pool. Each worker reads the LIVE
+// theme list when it picks up a session, so it matches themes already persisted by COMPLETED
+// siblings rather than re-minting them; the residual wording-variant duplicates from the handful
+// of in-flight siblings are consolidated afterward by runThemeMerge. Set
+// TUNELOOP_ANALYZE_CONCURRENCY=1 for the fully-sequential path (each session then sees every
+// prior theme). Persists are synchronous/atomic, so only the LLM calls actually overlap.
+const EXTRACT_CONCURRENCY = Math.max(1, Math.min(16, Number(process.env.TUNELOOP_ANALYZE_CONCURRENCY) || 4))
 
 // Step-2 bar unit is an extraction WINDOW (= one LLM call), not a session, since
 // windows are homogeneous work. Plus one reserved unit for the cross-session tail
@@ -44,9 +52,10 @@ const SEVERITY_EVENTS = { high: 8, medium: 4 }
  * surface themes past the recurrence threshold. Themes persist in their own tables so
  * they outlive their insights (a resolved theme can reopen on recurrence).
  *
- * Extraction runs SEQUENTIALLY, not concurrently: parallel sessions read a stale theme
- * list and coin near-duplicate labels for the same gap. One at a time, each session
- * matches its predecessors' freshly-minted themes — far less fragmentation at the source.
+ * Extraction runs CONCURRENTLY through a bounded pool: each session reads the live theme
+ * list as it starts, so it matches themes already persisted by completed siblings; the
+ * near-duplicate labels the in-flight siblings still coin are consolidated by the reconcile
+ * pass. TUNELOOP_ANALYZE_CONCURRENCY=1 restores the fully-sequential, match-everything path.
  */
 export const recurringThemes: Detector = {
   name: DETECTOR,
@@ -97,45 +106,44 @@ export const recurringThemes: Detector = {
     const processed: Array<{ sessionId: string; contentHash: string }> = []
 
     // Time the three Step-2 phases separately so a benchmark run shows where the detector's
-    // wall-clock actually goes (extraction is sequential, the tail is not).
+    // wall-clock actually goes (per-session extraction, the reconcile, the fix generation).
     const tExtract = Date.now()
 
-    // 2. Per-session extraction (sequential — see class doc). Each reads the LIVE theme
-    // list, persists its own themes+events immediately (a mid-run failure keeps prior
-    // work), and on success is recorded as processed. The bar ticks once per window;
-    // a declared window that doesn't run (empty session, or a failure) is padded with a
-    // cost-0 tick so the declared total still resolves to 100%.
-    for (const cand of candidates) {
+    // 2. Per-session extraction, concurrent through the pool (see EXTRACT_CONCURRENCY). Each session
+    // persists its own themes+events immediately (a mid-run failure keeps prior work), and on success
+    // is recorded as processed. The bar ticks once per window; a declared window that doesn't run
+    // (empty session or failure) is padded with a cost-0 tick so the declared total resolves to 100%.
+    // The mutations below (usage, processed, persist) are all synchronous, so they stay safe when
+    // workers run concurrently on the single JS thread.
+    const extractInto = async (cand: (typeof candidates)[number]): Promise<void> => {
       const padRemaining = (ran: number) => {
         for (let i = ran; i < cand.windows; i++) ctx.progress?.unitDone(0)
       }
-
       const session = ctx.loadSession(cand.sessionId)
-      if (!session) {
-        padRemaining(0)
-        continue
-      }
+      if (!session) return padRemaining(0)
       const followups = collectFollowups(session)
       if (followups.length === 0) {
         // Steered by count but no substantive follow-ups survive filtering —
         // nothing to extract, but it IS processed (don't re-hydrate next run).
         padRemaining(0)
         processed.push(cand)
-        continue
+        return
       }
-
       const repo = session.project.repo ?? null
+      // Live read: pick up themes already persisted by completed siblings so this session matches
+      // rather than re-mints them; in-flight siblings stay invisible and reconcile mops up the rest.
       const visible = store.listThemes(repo)
       const res = await extractSession(session, followups, repo, visible, llm!, log, (u) =>
         ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, u)),
       )
       usage = addUsage(usage, res.usage)
       padRemaining(res.windowsRun)
-      if (res.failed) continue // a window failed → leave unprocessed (retried next analyze)
-
+      if (res.failed) return // a window failed → leave unprocessed (retried next analyze)
       store.persistThemeExtraction(cand.sessionId, res.themes, res.events)
       processed.push(cand)
     }
+
+    await runPool(candidates, EXTRACT_CONCURRENCY, (cand) => extractInto(cand))
 
     const extractMs = Date.now() - tExtract
 
@@ -505,6 +513,6 @@ function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T)
  */
 function themeLabel(raw: unknown): string | null {
   const t = str(raw)
-  if (!t) return null
+  if (!t || isJunkLabel(t)) return null // empty or a placeholder token → no theme; the event stays a topicless orphan
   return clampLabel(t)
 }

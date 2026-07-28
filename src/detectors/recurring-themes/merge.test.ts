@@ -98,6 +98,31 @@ describe('runThemeMerge', () => {
     expect(store.themesWithEvents().find((t) => t.id === 'recurring-themes:o-r:db-config-path')!.eventCount).toBe(2)
   })
 
+  it('rejects a junk/placeholder reword label — the merged keeper keeps its real name', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:ui-a', 'Agent Cannot Verify Rendered UI', null, 's1')
+    seedTheme(db, 'recurring-themes:global:ui-b', 'UI Rendering Not Checked', null, 's2')
+    const llm = themeLlm(store, [
+      { keep_id: 'recurring-themes:global:ui-a', merge_ids: ['recurring-themes:global:ui-a', 'recurring-themes:global:ui-b'], label: 'placeholder' },
+    ])
+    const { applied } = await runThemeMerge(store, llm, noopLog)
+    expect(applied).toBe(1) // the merge itself still happens
+    const label = (db.prepare('SELECT label FROM theme WHERE id = ?').get('recurring-themes:global:ui-a') as { label: string }).label
+    expect(label).toBe('Agent Cannot Verify Rendered UI') // junk reword ignored, real name preserved
+  })
+
+  it('applies a real reword label to a merged keeper', async () => {
+    const { db, store } = setup()
+    seedTheme(db, 'recurring-themes:global:ui-a', 'Agent Cannot Verify Rendered UI', null, 's1')
+    seedTheme(db, 'recurring-themes:global:ui-b', 'UI Rendering Not Checked', null, 's2')
+    const llm = themeLlm(store, [
+      { keep_id: 'recurring-themes:global:ui-a', merge_ids: ['recurring-themes:global:ui-a', 'recurring-themes:global:ui-b'], label: 'Agent Ships Unverified UI' },
+    ])
+    await runThemeMerge(store, llm, noopLog)
+    const label = (db.prepare('SELECT label FROM theme WHERE id = ?').get('recurring-themes:global:ui-a') as { label: string }).label
+    expect(label).toBe('Agent Ships Unverified UI') // a real reword still applies — the guard is specific to junk
+  })
+
   it('retires the absorbed theme\'s insight (no frozen duplicate left behind)', async () => {
     const { db, store } = setup()
     seedTheme(db, 'recurring-themes:global:a', 'Theme A', null, 's1')

@@ -147,7 +147,7 @@ export const extractionSchema: JsonSchema = {
           type: { type: 'string', enum: TYPES },
           description: { type: 'string', description: 'ONE abstract, self-contained sentence naming the friction (not a quote).' },
           matched_theme_id: { type: 'string', description: 'Id of the existing theme this is another occurrence of, or empty.' },
-          new_theme_label: { type: 'string', description: 'Concrete Title-Case label (max 6 words) for a NEW theme when none match, else empty.' },
+          new_theme_label: { type: 'string', description: 'Concrete, specific Title-Case label (max 6 words) for a NEW theme when none match — never a placeholder/"TBD"/generic filler; else empty.' },
           new_theme_description: { type: 'string', description: 'One-sentence definition of the NEW theme\'s gap (empty when matching an existing theme).' },
           new_theme_project_specific: { type: 'boolean', description: 'TRUE only if the NEW theme is inherent to this project; FALSE (default) for general/global gaps.' },
           remedy_hint: { type: 'string', enum: REMEDIES },
