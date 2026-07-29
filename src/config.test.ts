@@ -146,4 +146,31 @@ describe('keyless presets', () => {
     vi.stubEnv('AWS_BEARER_TOKEN_BEDROCK', 'bedrock-api-key')
     expect(loadConfig({ llm: { provider: 'bedrock' } }).llm?.apiKey).toBe('bedrock-api-key')
   })
+
+  it('openai-compatible-nokey is keyless — selecting it opts into a placeholder key, no env key needed', () => {
+    unsetKeys()
+    const llm = loadConfig({ llm: { provider: 'openai-compatible-nokey' } }).llm
+    expect(llm?.provider).toBe('openai-compatible-nokey')
+    expect(llm?.apiKey).toBe('unused') // the SDK rejects an empty key; auth rides on headers instead
+  })
+
+  it("the keyed openai-compatible still fails safe when no key is set (a forgotten key isn't silently keyless)", () => {
+    unsetKeys()
+    expect(loadConfig({ llm: { provider: 'openai-compatible' } }).llm).toBeNull()
+  })
+})
+
+describe('custom request headers (TUNELOOP_LLM_HEADERS)', () => {
+  it('carries the raw env value through to the llm config for the client to validate', () => {
+    unsetKeys()
+    vi.stubEnv('TUNELOOP_LLM_HEADERS', '{"x-user-id":"u-123"}')
+    const llm = loadConfig({ llm: { provider: 'openai-compatible-nokey' } }).llm
+    expect(llm?.headers).toBe('{"x-user-id":"u-123"}')
+  })
+
+  it('leaves headers undefined when the env var is unset', () => {
+    unsetKeys()
+    vi.stubEnv('TUNELOOP_LLM_HEADERS', undefined)
+    expect(loadConfig({ llm: { provider: 'openai-compatible-nokey' } }).llm?.headers).toBeUndefined()
+  })
 })

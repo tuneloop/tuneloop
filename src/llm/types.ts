@@ -31,6 +31,9 @@ export interface ClientOpts {
   provider?: string
   /** OpenAI-compatible endpoint override (OpenRouter, Groq, Ollama, …). */
   baseURL?: string
+  /** Extra HTTP headers sent on every request — a header-auth intranet gateway's
+   *  credential channel (TUNELOOP_LLM_HEADERS). Applied by the OpenAI-compatible client. */
+  headers?: Record<string, string>
 }
 
 /**

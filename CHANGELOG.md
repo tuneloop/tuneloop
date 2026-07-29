@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Keyless header-auth gateways.** A new `openai-compatible-nokey` provider preset
+  drives an OpenAI-compatible endpoint that authenticates by request headers instead
+  of an API key — an intranet or self-hosted gateway (e.g. a LiteLLM proxy). Set the
+  endpoint with `TUNELOOP_LLM_BASE_URL` and pass credentials as a JSON object in
+  `TUNELOOP_LLM_HEADERS` (attached to every request). Selecting the preset is the
+  keyless opt-in, so a forgotten key on the keyed `openai-compatible` variant still
+  fails safe. A malformed `TUNELOOP_LLM_HEADERS` warns and leaves enrichment off
+  rather than sending unauthenticated requests.
+
 ## [0.5.0] - 2026-07-28
 
 ### Added
@@ -117,6 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
+[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.5.0
 [0.4.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.1
 [0.4.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.0

@@ -300,7 +300,8 @@ request per session, and only if you supply a key. The P/X-tier **detectors**
 transcript. Provider presets (`src/llm/providers.ts`): `anthropic`, `openai`,
 `bedrock` (Claude via AWS), `openrouter`, `groq`, `deepseek`, `gemini`, `together`,
 `fireworks`, `xai`, `ollama`, plus `openai-compatible` for any other OpenAI-shaped
-endpoint.
+endpoint (and `openai-compatible-nokey` for a keyless one that authenticates by
+request headers, `TUNELOOP_LLM_HEADERS`).
 
 Two model tiers share one provider: `TUNELOOP_LLM_MODEL` handles the per-session
 volume (a cheap model is the right call), while detectors that opt in via

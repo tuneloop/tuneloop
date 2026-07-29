@@ -77,6 +77,14 @@ export const PROVIDERS: Record<string, ProviderPreset> = {
 
   // Escape hatch for anything unlisted; requires TUNELOOP_LLM_BASE_URL.
   'openai-compatible': { shape: 'openai-compatible', keyEnv: 'TUNELOOP_LLM_API_KEY', defaultModel: '' },
+
+  // Keyless sibling of `openai-compatible` for intranet / self-hosted gateways that
+  // authenticate by request headers (TUNELOOP_LLM_HEADERS) rather than an API key.
+  // Selecting this preset IS the keyless opt-in — exactly like `ollama` — so a forgotten
+  // key on the keyed variant above still fails safe instead of silently running
+  // unauthenticated. Requires TUNELOOP_LLM_BASE_URL; the OpenAI SDK rejects an empty key,
+  // so a placeholder stands in and auth rides on the headers.
+  'openai-compatible-nokey': { shape: 'openai-compatible', keyEnv: 'TUNELOOP_LLM_API_KEY', defaultModel: '', keyless: { placeholder: 'unused' } },
 }
 
 export const PROVIDER_NAMES = Object.keys(PROVIDERS)
