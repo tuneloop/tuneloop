@@ -214,7 +214,10 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       sendJson(res, 400, { error: 'name required' })
       return
     }
-    sendJson(res, 200, skillDrift(store, name, { source: url.searchParams.get('source') ?? undefined }))
+    sendJson(res, 200, skillDrift(store, name, {
+      source: url.searchParams.get('source') ?? undefined,
+      scopeKey: url.searchParams.get('scopeKey') ?? undefined,
+    }))
     return
   }
   if (path === '/api/skill-cooccurrence') {

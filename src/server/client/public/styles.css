@@ -847,7 +847,9 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-repo-bar { height: 100%; border-radius: 999px; min-width: 2px; }
 .sk-repo-n { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); white-space: nowrap; text-align: right; }
 
-/* Version drift (the hero) — "around the last edit" callout + version timeline. */
+/* Version drift (the hero) — location chooser + "around the last edit" callout + timeline. */
+.sk-drift-loc-row { display: inline-flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
+.sk-drift-loc-row select { font-size: 12.5px; }
 .sk-drift-delta { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-top: 10px; max-width: 720px; background: var(--paper); }
 .sk-drift-delta-h { font-size: 13px; color: var(--ink); font-weight: 600; margin-bottom: 12px; }
 .sk-drift-cmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 4px; margin-top: 14px; }

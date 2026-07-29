@@ -1008,12 +1008,31 @@ export interface SkillDriftDelta {
   enoughData: boolean
 }
 
+/** One install location a skill's drift can be read from (a chooser entry). */
+export interface DriftLocation {
+  scope: 'global' | 'project'
+  scopeKey: string
+  /** Short repo name for a project scope; null for global. */
+  repo: string | null
+  /** Display label — the repo name, or "Global". */
+  label: string
+  /** All-time invocations attributable to this location (drives the chooser order). */
+  calls: number
+  /** Distinct captured versions here — >1 means this location has an edit history worth showing. */
+  versionCount: number
+}
+
 export interface SkillDriftReport {
   name: string
   /** The repo this timeline reflects (short name), or null for a global-scope skill.
    *  Versions and usage are both scoped to it — the same name in another repo is a
    *  separate timeline, never merged in. */
   repo: string | null
+  /** The scopeKey of the resolved location — echoed so the client marks the chosen chooser entry. */
+  scopeKey: string | null
+  /** Every install location this skill has a version history in (global + per-project), most-used
+   *  first. The client shows a chooser when there's more than one. */
+  locations: DriftLocation[]
   /** All captured versions, oldest→newest. Empty when there's no snapshot history. */
   versions: SkillVersion[]
   /** Current vs. previous version around the most recent edit; null when <2 versions. */
@@ -1144,57 +1163,126 @@ function diffBody(prev: string, next: string): { rows: DiffRow[]; added: number;
   return { rows: collapsed, added, removed, skipped: false }
 }
 
-/** Which install location a drift timeline reflects. */
-interface DriftScope {
-  scope: 'global' | 'project'
-  scopeKey: string
-  /** Short repo name for a project scope; null for global. */
-  repo: string | null
+/** One version segment: its identity, display hash, start boundary, and the body+desc snapshotted. */
+interface Segment {
+  versionId: string
+  bodyHash: string
+  startIso: string
+  body: string
+  desc: string
 }
 
 /**
- * Resolve the ONE install location a skill's version timeline is read from. Drift is
- * per-(skill, location): the same name in two repos can be two unrelated skills, so scopes
- * are never merged. A project skill is judged in its busiest repo; a global skill (one
- * shared body) uses the global timeline. Null when no snapshot mentions the skill.
+ * Collapse a scope's snapshot history into version segments — a run of same-identity snapshots is
+ * one version (A→B→A → three honest segments). Boundary time prefers the file mtime (`editedAt`),
+ * clamped to (prev boundary, capture] so an implausible mtime falls back to capture time.
  */
-function resolveDriftScope(store: Store, source: string, name: string): DriftScope | null {
+function buildSegments(hist: ReturnType<Store['envSnapshotHistory']>, name: string): Segment[] {
+  const segments: Segment[] = []
+  for (const row of hist) {
+    const id = versionIdOf(row.payload, name)
+    if (id === null) continue // skill absent from this snapshot (installed/removed later) — skip
+    const prev = segments[segments.length - 1]
+    if (prev && prev.versionId === id) continue // same version, still live
+    const capturedIso = row.capturedAt
+    const edited = editedAtOf(row.payload, name)
+    const lowerExclusive = prev?.startIso // must be strictly after the previous boundary
+    const startIso =
+      edited && edited <= capturedIso && (!lowerExclusive || edited > lowerExclusive) ? edited : capturedIso
+    segments.push({ versionId: id, bodyHash: bodyHashOf(row.payload, name) ?? '', startIso, body: bodyOf(row.payload, name), desc: descOf(row.payload, name) })
+  }
+  return segments
+}
+
+/**
+ * Every install location a skill has a version history in — the global scope (one shared body)
+ * plus each project repo that installed it. Drift is per-(skill, location), never merged. Each
+ * carries its all-time calls + version count, so the caller defaults to the busiest with history
+ * and the client orders + labels the chooser. Also returns the project repos, so skillDrift can
+ * scope Global's usage by the same exclude-set. Empty when no snapshot mentions the skill.
+ */
+/**
+ * Which invocations attribute to a location. Project-first: a project install owns calls in its
+ * own repo; Global owns everything else (a call in a repo with its own install is served by that
+ * install, not the global one — never double-counted). `repo` is the sessions.repo basename.
+ */
+type RepoScope = { kind: 'repo'; repo: string } | { kind: 'global'; excludeRepos: string[] }
+
+/** SQL predicate (+ params) selecting the sessions a RepoScope owns. */
+function repoClause(scope: RepoScope): { sql: string; params: string[] } {
+  if (scope.kind === 'repo') return { sql: 's.repo = ?', params: [scope.repo] }
+  if (scope.excludeRepos.length === 0) return { sql: '1 = 1', params: [] } // pure global: all calls
+  const placeholders = scope.excludeRepos.map(() => '?').join(',')
+  return { sql: `(s.repo IS NULL OR s.repo NOT IN (${placeholders}))`, params: scope.excludeRepos }
+}
+
+function driftLocations(store: Store, source: string, name: string): { locations: DriftLocation[]; installedRepos: string[] } {
   const hasName = (scope: 'global' | 'project', scopeKey: string): boolean =>
     store.envSnapshotHistory(source, scope, scopeKey, 'skills').some((r) => bodyHashOf(r.payload, name) !== null)
+  const countVersions = (scope: 'global' | 'project', scopeKey: string): number =>
+    buildSegments(store.envSnapshotHistory(source, scope, scopeKey, 'skills'), name).length
+  const callsIn = (scope: RepoScope): number => {
+    const c = repoClause(scope)
+    const row = store.queryOne(
+      `SELECT COUNT(*) AS calls FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+        WHERE ${SKILL_CALL} AND ${NAME_MATCH} AND s.source = ? AND ${c.sql}`,
+      ...nameParams(name),
+      source,
+      ...c.params,
+    ) as { calls: number } | undefined
+    return row?.calls ?? 0
+  }
 
-  // Project scopes ranked by usage, so a project skill is judged in its busiest repo.
-  const usedRepos = store.queryAll(
-    `SELECT s.repo AS repo, COUNT(*) AS calls
-       FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-      WHERE ${SKILL_CALL} AND ${NAME_MATCH}
-        AND s.source = ? AND s.repo IS NOT NULL
-      GROUP BY s.repo ORDER BY calls DESC, s.repo`,
-    ...nameParams(name),
-    source,
-  ) as Array<{ repo: string; calls: number }>
+  // Project installs, by repo basename. mapScopeKeysToRepos flags basenames backed by >1 path as
+  // ambiguous — sessions.repo is only the basename, so their usage can't be split → skip them.
   const projectKeys = (
     store.queryAll(
       `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
       source,
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
-  const { byRepo } = mapScopeKeysToRepos(projectKeys)
-  for (const { repo } of usedRepos) {
-    const scopeKey = byRepo.get(repo)
-    if (scopeKey && hasName('project', scopeKey)) return { scope: 'project', scopeKey, repo }
+  const { ambiguous } = mapScopeKeysToRepos(projectKeys)
+  const projectInstalls = projectKeys
+    .filter((k) => !ambiguous.has(basename(k)) && hasName('project', k))
+    .map((scopeKey) => ({ scopeKey, repo: basename(scopeKey) }))
+  const installedRepos = projectInstalls.map((p) => p.repo)
+
+  const out: DriftLocation[] = []
+  // Global: project-first, so it owns only calls NOT in a project-installed repo.
+  if (hasName('global', '_global')) {
+    out.push({ scope: 'global', scopeKey: '_global', repo: null, label: 'Global', calls: callsIn({ kind: 'global', excludeRepos: installedRepos }), versionCount: countVersions('global', '_global') })
   }
-  // Not per-repo installed where it ran → a global skill (one shared body).
-  if (hasName('global', '_global')) return { scope: 'global', scopeKey: '_global', repo: null }
-  // Fallback: any project scope with it, deterministic by path.
-  for (const scopeKey of [...projectKeys].sort()) {
-    if (hasName('project', scopeKey)) return { scope: 'project', scopeKey, repo: basename(scopeKey) }
+  for (const { scopeKey, repo } of projectInstalls) {
+    out.push({ scope: 'project', scopeKey, repo, label: repo, calls: callsIn({ kind: 'repo', repo }), versionCount: countVersions('project', scopeKey) })
   }
-  return null
+  // Most-used first; ties broken by label for a stable order.
+  out.sort((a, b) => b.calls - a.calls || a.label.localeCompare(b.label))
+  return { locations: out, installedRepos }
 }
 
-/** Usage facts for one skill in [sinceIso, untilIso) — reused for versions + delta sides.
- *  `repo` scopes a project skill to match its version timeline; null (global) counts cross-repo. */
-function usageInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, repo: string | null): SkillVersionUsage {
+/** The RepoScope that owns a location's calls — the same attribution driftLocations counted with. */
+function scopeForLocation(loc: DriftLocation, installedRepos: string[]): RepoScope {
+  return loc.repo ? { kind: 'repo', repo: loc.repo } : { kind: 'global', excludeRepos: installedRepos }
+}
+
+/**
+ * Pick the ONE location a drift report reflects: an explicit `requestedScopeKey` wins, else the
+ * busiest location WITH an edit history (versionCount > 1) — so a skill edited in a quieter repo
+ * isn't hidden behind a busier single-version install. Falls back to busiest overall, then null.
+ */
+function pickDriftLocation(locations: DriftLocation[], requestedScopeKey?: string): DriftLocation | null {
+  if (requestedScopeKey) {
+    const found = locations.find((l) => l.scopeKey === requestedScopeKey)
+    if (found) return found
+  }
+  // locations is sorted most-used first; prefer the first with real history.
+  return locations.find((l) => l.versionCount > 1) ?? locations[0] ?? null
+}
+
+/** Usage facts for one skill in [sinceIso, untilIso), scoped to the location that owns the calls
+ *  (a project repo, or Global = everything not in a project-installed repo). */
+function usageInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, scope: RepoScope): SkillVersionUsage {
+  const c = repoClause(scope)
   const row = store.queryOne(
     `SELECT COUNT(*) AS calls,
             COUNT(DISTINCT t.session_id) AS sessions,
@@ -1202,11 +1290,10 @@ function usageInWindow(store: Store, source: string, name: string, sinceIso: str
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE ${SKILL_CALL}
        AND ${NAME_MATCH}
-       AND s.source = ? AND (? IS NULL OR s.repo = ?) AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
+       AND s.source = ? AND ${c.sql} AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
     ...nameParams(name),
     source,
-    repo,
-    repo,
+    ...c.params,
     sinceIso,
     untilIso,
   ) as { calls: number; sessions: number; errorCalls: number | null }
@@ -1218,12 +1305,13 @@ function usageInWindow(store: Store, source: string, name: string, sinceIso: str
 }
 
 /**
- * LLM-judged activation outcomes for one skill in [sinceIso, untilIso), scoped to source+repo
- * AND main-thread skill calls (SKILL_CALL) so the judged population matches usageInWindow's
- * `calls`. Joins each verdict to its tool_call to window by tool-run time. `insufficient-context`
- * is excluded (not judged); null when nothing was judged (UI shows no rate, not a fake 0%).
+ * LLM-judged activation outcomes for one skill in [sinceIso, untilIso), scoped to the same
+ * RepoScope + main-thread skill calls (SKILL_CALL) as usageInWindow so the judged population
+ * matches its `calls`. Joins each verdict to its tool_call to window by tool-run time.
+ * `insufficient-context` is excluded (not judged); null when nothing was judged (no fake 0%).
  */
-function outcomesInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, repo: string | null): SkillVersionOutcomes | null {
+function outcomesInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, scope: RepoScope): SkillVersionOutcomes | null {
+  const c = repoClause(scope)
   const rows = store.queryAll(
     `SELECT json_extract(j.value, '$.name') AS vname,
             json_extract(j.value, '$.outcome') AS outcome,
@@ -1234,11 +1322,10 @@ function outcomesInWindow(store: Store, source: string, name: string, sinceIso: 
      JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
      WHERE a.key = 'skill_outcomes'
        AND ${SKILL_CALL}
-       AND s.source = ? AND (? IS NULL OR s.repo = ?)
+       AND s.source = ? AND ${c.sql}
        AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
     source,
-    repo,
-    repo,
+    ...c.params,
     sinceIso,
     untilIso,
   ) as Array<{ vname: string | null; outcome: string | null; correction: number | null }>
@@ -1263,59 +1350,33 @@ function callsPerWeek(calls: number, startMs: number, endMs: number): number {
 }
 
 /** Build the drift report for one skill: its version timeline plus a current-vs-previous
- *  comparison around the most recent edit. See the section header above for the model. */
-export function skillDrift(store: Store, name: string, opts: { nowMs?: number; source?: string } = {}): SkillDriftReport {
+ *  comparison around the most recent edit. See the section header above for the model.
+ *  `scopeKey` picks which install location to read (from the chooser); default = busiest. */
+export function skillDrift(store: Store, name: string, opts: { nowMs?: number; source?: string; scopeKey?: string } = {}): SkillDriftReport {
   const nowMs = opts.nowMs ?? Date.now()
   // Drift is edit-anchored, not windowed. An explicit source (from the roster's resolved
   // choice) wins; else default to the source with the most skill activity (resolveSource is
   // all-time by design, which is exactly right here).
   const source = resolveSource(store, availableSkillSources(store), opts.source)
-  // Resolve the ONE install location this timeline reflects — versions AND usage both
-  // come from it, so the same name in two repos never merges into a phantom timeline.
-  const loc = resolveDriftScope(store, source, name)
-  if (!loc) return { name, repo: null, versions: [], delta: null, singleVersion: false, noHistory: true }
+  // Offer every location; read the ONE the caller chose (else busiest) — versions and usage both
+  // come from it, so same-named installs never merge into a phantom cross-repo history.
+  const { locations, installedRepos } = driftLocations(store, source, name)
+  const loc = pickDriftLocation(locations, opts.scopeKey)
+  if (!loc) return { name, repo: null, scopeKey: null, locations, versions: [], delta: null, singleVersion: false, noHistory: true }
   const hist = store.envSnapshotHistory(source, loc.scope, loc.scopeKey, 'skills')
-  if (hist.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
+  if (hist.length === 0) return { name, repo: loc.repo, scopeKey: loc.scopeKey, locations, versions: [], delta: null, singleVersion: false, noHistory: true }
 
-  // Collapse consecutive same-hash snapshots into version segments. A run of rows with
-  // the same body hash is one version, live from its first capture until the next
-  // differing capture (the edit boundary). A→B→A yields three segments (honest: the
-  // body was reverted, a distinct period).
-  //
-  // Boundary timestamp: prefer the file's own mtime (`editedAt`) — the REAL edit time —
-  // over `captured_at` (when we happened to analyze). But mtime is advisory (a clone or
-  // checkout resets it), so clamp it to (previous boundary, capture time]: an mtime that
-  // predates the prior version or postdates when we observed it is implausible → fall back
-  // to capture time. This dates an edit to when it happened, safely.
+  // Scope usage the same way the location's call count was — so timeline numbers match the chooser.
+  const usageScope = scopeForLocation(loc, installedRepos)
   const nowIso = new Date(nowMs).toISOString()
-  // Segment on the VERSION identity (body + description); display the pure body hash. Keep the
-  // body + description per segment so we can diff a version against the prior one.
-  const segments: Array<{ versionId: string; bodyHash: string; startIso: string; body: string; desc: string }> = []
-  for (const row of hist) {
-    const id = versionIdOf(row.payload, name)
-    if (id === null) continue // skill absent from this snapshot (installed/removed later) — skip
-    const prev = segments[segments.length - 1]
-    if (prev && prev.versionId === id) continue // same version, still live
-    const capturedIso = row.capturedAt
-    const edited = editedAtOf(row.payload, name)
-    const lowerExclusive = prev?.startIso // must be strictly after the previous boundary
-    const startIso =
-      edited && edited <= capturedIso && (!lowerExclusive || edited > lowerExclusive) ? edited : capturedIso
-    segments.push({
-      versionId: id,
-      bodyHash: bodyHashOf(row.payload, name) ?? '',
-      startIso,
-      body: bodyOf(row.payload, name),
-      desc: descOf(row.payload, name),
-    })
-  }
-  if (segments.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
+  const segments = buildSegments(hist, name)
+  if (segments.length === 0) return { name, repo: loc.repo, scopeKey: loc.scopeKey, locations, versions: [], delta: null, singleVersion: false, noHistory: true }
 
   const versions: SkillVersion[] = segments.map((seg, i) => {
     const next = segments[i + 1]
     const endIso = next ? next.startIso : null
-    const usage = usageInWindow(store, source, name, seg.startIso, endIso ?? nowIso, loc.repo)
-    const outcomes = outcomesInWindow(store, source, name, seg.startIso, endIso ?? nowIso, loc.repo)
+    const usage = usageInWindow(store, source, name, seg.startIso, endIso ?? nowIso, usageScope)
+    const outcomes = outcomesInWindow(store, source, name, seg.startIso, endIso ?? nowIso, usageScope)
     const prevSeg = segments[i - 1]
     const change: SkillVersionChange | null = prevSeg
       ? (() => {
@@ -1360,7 +1421,7 @@ export function skillDrift(store: Store, name: string, opts: { nowMs?: number; s
     }
   }
 
-  return { name, repo: loc.repo, versions, delta, singleVersion, noHistory: false }
+  return { name, repo: loc.repo, scopeKey: loc.scopeKey, locations, versions, delta, singleVersion, noHistory: false }
 }
 
 function minIso(a: string | null, b: string | null): string | null {

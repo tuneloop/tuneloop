@@ -596,18 +596,27 @@ function cooccRow(it, ownName) {
     '</button>';
 }
 
-// Fetch + render the version-drift section for a skill. Edit-anchored (no window
-// params). Stays hidden unless there's a multi-version history to compare.
-function loadDrift(name) {
-  get('/api/skill-drift?name=' + encodeURIComponent(name)).then(function (d) {
-    if (state.skill !== name) return; // navigated away while in flight
+// Monotonic token so a slow earlier fetch can't clobber a newer location switch.
+var skDriftReq = 0;
+
+// Fetch + render the version-drift section at one install location (scopeKey; default = busiest
+// with history). Shown when ANY location has a multi-version history — the chooser reaches it.
+function loadDrift(name, scopeKey?) {
+  var req = ++skDriftReq;
+  var q = '/api/skill-drift?name=' + encodeURIComponent(name) + (scopeKey ? '&scopeKey=' + encodeURIComponent(scopeKey) : '');
+  get(q).then(function (d) {
+    if (state.skill !== name || req !== skDriftReq) return; // navigated away, or a newer request superseded this
     var sect = $('#sk-drift-sect');
     var host = $('#sk-drift');
     if (!sect || !host) return;
-    // Only show the section when there's an actual edit to compare across.
-    if (!d || d.noHistory || d.singleVersion || !d.versions || d.versions.length < 2) return;
+    // Show the section when any install location has an edit history worth comparing.
+    var anyHistory = d && d.locations && d.locations.some(function (l) { return l.versionCount > 1; });
+    if (!d || d.noHistory || !anyHistory) return;
     host.innerHTML = driftHtml(d);
     sect.style.display = '';
+    // Wire the location chooser (only present when >1 location).
+    var locSel = host.querySelector('#sk-drift-loc');
+    if (locSel) locSel.onchange = function () { loadDrift(name, this.value); };
   }).catch(function () { /* leave the section hidden on error */ });
 }
 
@@ -615,10 +624,21 @@ function loadDrift(name) {
 // the version timeline. Correlation, never causation.
 function driftHtml(d) {
   var html = '';
-  // Drift is scoped to one install location; name it so its numbers aren't read as the
-  // cross-repo roster counts.
+  var locs = (d && d.locations) || [];
+
+  // Location chooser — same name in >1 install is >1 timeline; each option labelled version + calls.
+  if (locs.length > 1) {
+    var opts = locs.map(function (l) {
+      var meta = l.versionCount + (l.versionCount === 1 ? ' version' : ' versions') + ' · ' + num(l.calls) + (l.calls === 1 ? ' call' : ' calls');
+      return '<option value="' + esc(l.scopeKey) + '"' + (l.scopeKey === d.scopeKey ? ' selected' : '') + '>' + esc(l.label) + ' (' + meta + ')</option>';
+    }).join('');
+    html += '<div class="sk-drift-loc-row"><span class="flt-lbl">Installed in</span>' +
+      '<select id="sk-drift-loc">' + opts + '</select></div>';
+  }
+
+  // Name the location so its numbers aren't read as the cross-repo roster counts.
   html += '<div class="sk-sect-note">' + (d.repo
-    ? 'Version history for this skill in <b>' + esc(d.repo) + '</b>. A same-named skill in another repo is tracked separately.'
+    ? 'Version history for this skill in <b>' + esc(d.repo) + '</b>. A same-named skill in another repo is tracked separately' + (locs.length > 1 ? ' — switch above' : '') + '.'
     : 'Version history for this globally-installed skill (one shared body across repos).') + '</div>';
 
   var delta = d.delta;
@@ -637,6 +657,11 @@ function driftHtml(d) {
       html += '<div class="sk-sect-note">Not enough usage on both versions yet to compare rates (need ' + num(3) + '+ invocations each). The change is shown above; check back once the new version has been used more.</div>';
     }
     html += '</div>';
+  }
+
+  // Chosen location may be single-version while another has the history — point to the chooser.
+  if (d.singleVersion && locs.length > 1) {
+    html += '<div class="sk-sect-note">This install has just one version (never edited here). Switch location above to see where it was edited.</div>';
   }
 
   // Version timeline: one row per captured version, newest first, each annotated with what

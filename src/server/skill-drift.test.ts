@@ -269,6 +269,77 @@ describe('skillDrift', () => {
     expect(r.delta!.after.calls).toBe(3)
   })
 
+  it('offers every install location as a chooser entry (global + per-project), most-used first', () => {
+    // 'changelog-generator' installed + edited separately in two repos, plus a global install.
+    const psnap = (path: string, hash: string, d: number) =>
+      store.recordEnvSnapshot({ source: SOURCE, scope: 'project', scopeKey: path, category: 'skills', payload: { skills: [{ name: 'clog', body: 'b-' + hash, bodyHash: hash }], count: 1 } }, iso(d))
+    const gsnap = (hash: string, d: number) =>
+      store.recordEnvSnapshot({ source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'clog', body: 'g-' + hash, bodyHash: hash }], count: 1 } }, iso(d))
+    psnap('/work/sandbox', 's1', 30); psnap('/work/sandbox', 's2', 12) // sandbox: edited (2 versions)
+    psnap('/work/ideas', 'i1', 30); psnap('/work/ideas', 'i2', 15) // ideas: edited (2 versions)
+    gsnap('gg', 20) // global: single version
+    const mk = (id: string, repo: string | null, d: number) => {
+      db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, ?, ?, 1, 1)`).run(id, id, SOURCE, repo, iso(d))
+      db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, 0, 'clog', 'skill', 1, 0, 0, ?)`).run(id, iso(d))
+    }
+    mk('s0', 'sandbox', 10); mk('s1', 'sandbox', 8); mk('s2', 'sandbox', 6) // sandbox busiest (3)
+    mk('i0', 'ideas', 9); mk('i1', 'ideas', 7) // ideas (2)
+    mk('o0', 'otherrepo', 5) // a repo with NO project install → attributes to Global (project-first)
+
+    const r = skillDrift(store, 'clog', { nowMs: NOW })
+    const byLabel = Object.fromEntries(r.locations.map((l) => [l.label, l]))
+    // All three locations offered; global (one shared body) + the two repos.
+    expect(r.locations.map((l) => l.label).sort()).toEqual(['Global', 'ideas', 'sandbox'])
+    expect(byLabel['sandbox']!.versionCount).toBe(2)
+    expect(byLabel['ideas']!.versionCount).toBe(2)
+    expect(byLabel['sandbox']!.calls).toBe(3)
+    // Project-first attribution: Global owns ONLY the call in the un-installed repo, not the
+    // sandbox/ideas calls (those are served by their own project installs — no double-count).
+    expect(byLabel['ideas']!.calls).toBe(2)
+    expect(byLabel['Global']!.calls).toBe(1)
+    // Default resolves to the busiest location WITH history (sandbox).
+    expect(r.repo).toBe('sandbox')
+    expect(r.scopeKey).toBe('/work/sandbox')
+    expect(r.versions.map((v) => v.bodyHash)).toEqual(['s1', 's2'])
+  })
+
+  it('reads the chosen location when scopeKey is passed (each repo its own timeline)', () => {
+    const psnap = (path: string, hash: string, d: number) =>
+      store.recordEnvSnapshot({ source: SOURCE, scope: 'project', scopeKey: path, category: 'skills', payload: { skills: [{ name: 'clog', body: 'b-' + hash, bodyHash: hash }], count: 1 } }, iso(d))
+    psnap('/work/sandbox', 's1', 30); psnap('/work/sandbox', 's2', 12)
+    psnap('/work/ideas', 'i1', 30); psnap('/work/ideas', 'i2', 15)
+    const mk = (id: string, repo: string, d: number) => {
+      db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, ?, ?, 1, 1)`).run(id, id, SOURCE, repo, iso(d))
+      db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, 0, 'clog', 'skill', 1, 0, 0, ?)`).run(id, iso(d))
+    }
+    mk('s0', 'sandbox', 10); mk('s1', 'sandbox', 8); mk('s2', 'sandbox', 6) // sandbox busiest → default
+    mk('i0', 'ideas', 9)
+    // Explicitly ask for the quieter repo's timeline.
+    const r = skillDrift(store, 'clog', { nowMs: NOW, scopeKey: '/work/ideas' })
+    expect(r.repo).toBe('ideas')
+    expect(r.scopeKey).toBe('/work/ideas')
+    expect(r.versions.map((v) => v.bodyHash)).toEqual(['i1', 'i2']) // ideas' own history, not sandbox's
+  })
+
+  it('defaults to the location WITH an edit history, not merely the busiest', () => {
+    // The busiest repo never edited the skill (1 version); a quieter repo has the real history.
+    // The default must surface the edited one, else the drift section would look empty.
+    const psnap = (path: string, hash: string, d: number) =>
+      store.recordEnvSnapshot({ source: SOURCE, scope: 'project', scopeKey: path, category: 'skills', payload: { skills: [{ name: 'clog', body: 'b-' + hash, bodyHash: hash }], count: 1 } }, iso(d))
+    psnap('/work/busy', 'x1', 30); psnap('/work/busy', 'x1', 2) // busy: never edited (1 version)
+    psnap('/work/quiet', 'q1', 30); psnap('/work/quiet', 'q2', 12) // quiet: edited (2 versions)
+    const mk = (id: string, repo: string, d: number) => {
+      db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, ?, ?, 1, 1)`).run(id, id, SOURCE, repo, iso(d))
+      db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, 0, 'clog', 'skill', 1, 0, 0, ?)`).run(id, iso(d))
+    }
+    mk('b0', 'busy', 10); mk('b1', 'busy', 8); mk('b2', 'busy', 6); mk('b3', 'busy', 4) // busy: 4 calls
+    mk('q0', 'quiet', 9); mk('q1', 'quiet', 7) // quiet: 2 calls
+    const r = skillDrift(store, 'clog', { nowMs: NOW })
+    expect(r.repo).toBe('quiet') // the edited one, despite busy having more calls
+    expect(r.singleVersion).toBe(false)
+    expect(r.versions.map((v) => v.bodyHash)).toEqual(['q1', 'q2'])
+  })
+
   it('dates a version boundary to the file mtime (editedAt), not the analyze run', () => {
     // v2 was analyzed at day 10, but the file's own mtime says it was edited at day 20.
     // The boundary must be the real edit time (day 20), clamped to (prev-start, capture].
