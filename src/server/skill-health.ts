@@ -913,24 +913,18 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
 }
 
 // ---- Skill drift & version comparison (the hero feature) ------------------
-// Reconstructs a skill's edit timeline from the append-on-change snapshot history
-// and reports usage + own-call error rate on each side of each edit. Deliberately EDIT-
-// anchored, not time-window-scoped: the parent tab's time filter governs the "how
-// is it doing lately" widgets, but "did the last change help?" is answered against
-// the versions' own lifetimes, so the filter must not clip it.
-//
-// Honesty guards
-//  - correlation, not causation: we say "changed AFTER the edit", never "the edit
-//    caused it". The client frames it that way too.
-//  - version history is only as granular as the analyze cadence — edits made between
-//    two analyze runs collapse into one boundary. The client shows this caveat.
-//  - a before/after delta is only surfaced when BOTH sides clear a small sample
-//    guard; otherwise we say "not enough data yet".
+// Reconstructs a skill's edit timeline from the append-on-change snapshot history. Per version,
+// over its OWN full lifetime: what changed (diff vs. prior), usage + per-week traction, error
+// rate, LLM-judged bypass rate. Edit-anchored, not window-scoped — rates are per-invocation so
+// versions of unequal age stay comparable without clipping to a window. Correlation, not
+// causation. A comparison shows only when both versions clear MIN_DRIFT_CALLS.
 
-/** Minimum invocations on EACH side of an edit before we'll show a before/after delta. */
+/** Minimum invocations in a version's lifetime before we trust its rates in a comparison. */
 const MIN_DRIFT_CALLS = 3
-/** Cap (days) on each side of the symmetric before/after window. */
-const DRIFT_MAX_HALF_DAYS = 30
+/** Unchanged context lines to keep around each change; longer runs collapse to a gap marker. */
+const DIFF_CONTEXT = 3
+/** Above this many lines on either side, skip the O(n·m) LCS and report counts only. */
+const DIFF_MAX_LINES = 1500
 
 /** Usage facts for one version's lifetime (or one side of an edit). */
 export interface SkillVersionUsage {
@@ -939,7 +933,34 @@ export interface SkillVersionUsage {
   errorCalls: number
 }
 
-/** One captured version of a skill: its body hash + the window it was the live body. */
+/** LLM-judged activation outcomes rolled up over one version's lifetime. Null when the
+ *  version has no judged firings (only insufficient-context, or none). */
+export interface SkillVersionOutcomes {
+  /** Judged firings (used + reworked + ignored + unclear) — the bypass-rate denominator. */
+  classified: number
+  /** reworked + ignored — the agent set the skill's output aside. */
+  bypassed: number
+  /** Firings whose verdict flagged an adjacent user correction. */
+  userCorrectionAdjacent: number
+}
+
+/** One line in a body diff: context (' '), removed ('-'), added ('+'), or a collapsed
+ *  run of unchanged context ('@' — `s` holds the "N unchanged lines" label). */
+export interface DiffRow {
+  t: ' ' | '-' | '+' | '@'
+  s: string
+}
+
+/** What changed between a version and the one before it. */
+export interface SkillVersionChange {
+  /** Lines added / removed in the body (vs. the previous version). */
+  added: number
+  removed: number
+  /** The frontmatter `description` was reworded (a behavioral edit — it steers the agent). */
+  descChanged: boolean
+}
+
+/** One captured version of a skill: its identity + everything we can say over its lifetime. */
 export interface SkillVersion {
   bodyHash: string
   /** When this version first appeared in a snapshot (captured_at, ISO). */
@@ -950,19 +971,40 @@ export interface SkillVersion {
   current: boolean
   /** Usage during THIS version's own full lifetime [startIso, endIso). */
   usage: SkillVersionUsage
+  /** Invocations per week over this version's lifetime — exposure-fair traction, so a
+   *  young version isn't read as "less used" just for being new. */
+  callsPerWeek: number
+  /** LLM-judged outcomes over this version's lifetime; null when nothing was judged. */
+  outcomes: SkillVersionOutcomes | null
+  /** What changed vs. the PREVIOUS version (null for the first/oldest version). */
+  change: SkillVersionChange | null
   /** Whether this version's lifetime cleared MIN_DRIFT_CALLS (else "not enough data"). */
   enoughData: boolean
 }
 
-/** The headline before/after around the most recent edit, on symmetric capped windows. */
+/**
+ * The headline comparison: the current version against the one immediately before it, each
+ * over its OWN full lifetime. Rates (error/bypass) are exposure-independent; traction is
+ * per-week — so no time window is imposed (every invocation a version had is counted).
+ */
 export interface SkillDriftDelta {
-  /** The edit boundary (the current version's startIso). */
+  /** The edit boundary between the two versions (the current version's startIso). */
   editIso: string
-  /** Half-width actually used for each side (days), after capping. For the label. */
-  windowDays: number
-  before: SkillVersionUsage
-  after: SkillVersionUsage
-  /** True when BOTH sides cleared MIN_DRIFT_CALLS — the delta is only shown then. */
+  before: SkillVersionUsage & { outcomes: SkillVersionOutcomes | null; callsPerWeek: number }
+  after: SkillVersionUsage & { outcomes: SkillVersionOutcomes | null; callsPerWeek: number }
+  /** The full body diff of the most recent edit (previous → current), unchanged runs collapsed. */
+  diff: DiffRow[]
+  /** Exact added/removed line counts for the edit (from the full diff, so the client shows the
+   *  true "+N/−M" without recounting the possibly-collapsed rows). */
+  diffAdded: number
+  diffRemoved: number
+  /** True when the bodies were too large to diff (DIFF_MAX_LINES); counts only. */
+  diffSkipped: boolean
+  /** The frontmatter description on each side — both steer the agent, so a reword is a
+   *  behavioral edit. Shown as its own before/after when it changed (even if the body didn't). */
+  descBefore: string
+  descAfter: string
+  /** True when BOTH versions cleared MIN_DRIFT_CALLS — the rate comparison is shown only then. */
   enoughData: boolean
 }
 
@@ -974,7 +1016,7 @@ export interface SkillDriftReport {
   repo: string | null
   /** All captured versions, oldest→newest. Empty when there's no snapshot history. */
   versions: SkillVersion[]
-  /** Before/after around the most recent edit; null when <2 versions. */
+  /** Current vs. previous version around the most recent edit; null when <2 versions. */
   delta: SkillDriftDelta | null
   /** True when only one version was ever captured (never edited in our history). */
   singleVersion: boolean
@@ -1005,6 +1047,18 @@ function bodyHashOf(payload: unknown, name: string): string | null {
   return '' // present but bodyless — a stable (empty) identity
 }
 
+/** A skill entry's raw body text (for diffing versions), or '' when absent/bodyless. */
+function bodyOf(payload: unknown, name: string): string {
+  const o = skillEntry(payload, name)
+  return o && typeof o.body === 'string' ? o.body : ''
+}
+
+/** A skill entry's frontmatter description (for the reworded-description signal), or ''. */
+function descOf(payload: unknown, name: string): string {
+  const o = skillEntry(payload, name)
+  return o && typeof o.description === 'string' ? o.description : ''
+}
+
 /**
  * A skill entry's VERSION identity for drift segmentation: the body PLUS the frontmatter
  * `description` — both steer the agent, so a reworded description is a behavioral edit and
@@ -1018,6 +1072,76 @@ function versionIdOf(payload: unknown, name: string): string | null {
   const o = skillEntry(payload, name)
   const desc = o && typeof o.description === 'string' ? o.description : ''
   return desc ? `${body} ${desc}` : body
+}
+
+/**
+ * Line-level diff (LCS backtrace) of two skill bodies → rows tagged ' ' (context), '-', '+', or
+ * '@' (a collapsed run of unchanged context), plus exact added/removed counts. O(n·m) is fine for
+ * a SKILL.md; a DIFF_MAX_LINES guard skips the matrix for a pathological body (`skipped`, counts
+ * only). No row cap — collapsing keeps it compact and the client renders the whole diff.
+ */
+function diffBody(prev: string, next: string): { rows: DiffRow[]; added: number; removed: number; skipped: boolean } {
+  const A = prev ? prev.split('\n') : []
+  const B = next ? next.split('\n') : []
+  const n = A.length
+  const m = B.length
+  if (n > DIFF_MAX_LINES || m > DIFF_MAX_LINES) {
+    // Too large to LCS cheaply — report a coarse count (symmetric diff of line multisets
+    // would still be O(n), but a plain size delta is honest enough for the "too big" case).
+    return { rows: [], added: Math.max(0, m - n), removed: Math.max(0, n - m), skipped: true }
+  }
+  const dp: number[][] = []
+  for (let i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0))
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i]![j] = A[i] === B[j] ? dp[i + 1]![j + 1]! + 1 : Math.max(dp[i + 1]![j]!, dp[i]![j + 1]!)
+    }
+  }
+  // Full raw diff first (context + changes), then collapse long unchanged runs below.
+  const raw: DiffRow[] = []
+  let added = 0
+  let removed = 0
+  let i = 0
+  let j = 0
+  const emit = (t: DiffRow['t'], s: string) => {
+    if (t === '+') added++
+    else if (t === '-') removed++
+    raw.push({ t, s })
+  }
+  while (i < n && j < m) {
+    if (A[i] === B[j]) { emit(' ', A[i]!); i++; j++ }
+    else if (dp[i + 1]![j]! >= dp[i]![j + 1]!) { emit('-', A[i]!); i++ }
+    else { emit('+', B[j]!); j++ }
+  }
+  while (i < n) { emit('-', A[i]!); i++ }
+  while (j < m) { emit('+', B[j]!); j++ }
+
+  // Collapse unchanged context: keep DIFF_CONTEXT lines adjacent to any change, replace a
+  // longer interior run with a single '@' gap marker ("N unchanged lines") — git-style, so
+  // the actual edits aren't buried under a wall of untouched body. A change line = +/-.
+  const keep = new Array(raw.length).fill(false)
+  for (let k = 0; k < raw.length; k++) {
+    if (raw[k]!.t === '+' || raw[k]!.t === '-') {
+      for (let d = -DIFF_CONTEXT; d <= DIFF_CONTEXT; d++) {
+        const idx = k + d
+        if (idx >= 0 && idx < raw.length) keep[idx] = true
+      }
+    }
+  }
+  const collapsed: DiffRow[] = []
+  for (let k = 0; k < raw.length; ) {
+    if (keep[k]) { collapsed.push(raw[k]!); k++; continue }
+    let run = k
+    while (run < raw.length && !keep[run]) run++
+    const gap = run - k
+    if (gap > 0) collapsed.push({ t: '@', s: gap + ' unchanged line' + (gap === 1 ? '' : 's') })
+    k = run
+  }
+
+  // No row cap: a skill body is small (a SKILL.md), and context-collapsing already keeps the
+  // diff compact by summarising unchanged runs — so we send the whole thing, exact counts and
+  // all, rather than truncating and forcing the client to guess at "+N/−M".
+  return { rows: collapsed, added, removed, skipped: false }
 }
 
 /** Which install location a drift timeline reflects. */
@@ -1094,10 +1218,52 @@ function usageInWindow(store: Store, source: string, name: string, sinceIso: str
 }
 
 /**
- * Build the drift report for one skill: its captured version timeline (each version's
- * usage over its own lifetime) plus a before/after delta around the most recent edit,
- * on symmetric, edit-bounded, capped windows so no window straddles two versions.
+ * LLM-judged activation outcomes for one skill in [sinceIso, untilIso), scoped to source+repo
+ * AND main-thread skill calls (SKILL_CALL) so the judged population matches usageInWindow's
+ * `calls`. Joins each verdict to its tool_call to window by tool-run time. `insufficient-context`
+ * is excluded (not judged); null when nothing was judged (UI shows no rate, not a fake 0%).
  */
+function outcomesInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, repo: string | null): SkillVersionOutcomes | null {
+  const rows = store.queryAll(
+    `SELECT json_extract(j.value, '$.name') AS vname,
+            json_extract(j.value, '$.outcome') AS outcome,
+            json_extract(j.value, '$.userCorrectionAdjacent') AS correction
+     FROM annotations a
+     JOIN sessions s ON s.id = a.session_id
+     JOIN json_each(a.value) j
+     JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
+     WHERE a.key = 'skill_outcomes'
+       AND ${SKILL_CALL}
+       AND s.source = ? AND (? IS NULL OR s.repo = ?)
+       AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
+    source,
+    repo,
+    repo,
+    sinceIso,
+    untilIso,
+  ) as Array<{ vname: string | null; outcome: string | null; correction: number | null }>
+
+  let classified = 0
+  let bypassed = 0
+  let userCorrectionAdjacent = 0
+  for (const r of rows) {
+    if (!r.vname || !(r.vname === name || skillMatches(name, r.vname))) continue
+    if (r.outcome === 'insufficient-context') continue // not judged
+    classified++
+    if (r.outcome === 'reworked' || r.outcome === 'ignored') bypassed++
+    if (r.correction) userCorrectionAdjacent++
+  }
+  return classified > 0 ? { classified, bypassed, userCorrectionAdjacent } : null
+}
+
+/** Invocations normalized to a per-week rate over [startMs, endMs) — exposure-fair traction. */
+function callsPerWeek(calls: number, startMs: number, endMs: number): number {
+  const weeks = Math.max(endMs - startMs, DAY_MS) / (7 * DAY_MS)
+  return calls / weeks
+}
+
+/** Build the drift report for one skill: its version timeline plus a current-vs-previous
+ *  comparison around the most recent edit. See the section header above for the model. */
 export function skillDrift(store: Store, name: string, opts: { nowMs?: number; source?: string } = {}): SkillDriftReport {
   const nowMs = opts.nowMs ?? Date.now()
   // Drift is edit-anchored, not windowed. An explicit source (from the roster's resolved
@@ -1122,8 +1288,9 @@ export function skillDrift(store: Store, name: string, opts: { nowMs?: number; s
   // predates the prior version or postdates when we observed it is implausible → fall back
   // to capture time. This dates an edit to when it happened, safely.
   const nowIso = new Date(nowMs).toISOString()
-  // Segment on the VERSION identity (body + description); display the pure body hash.
-  const segments: Array<{ versionId: string; bodyHash: string; startIso: string }> = []
+  // Segment on the VERSION identity (body + description); display the pure body hash. Keep the
+  // body + description per segment so we can diff a version against the prior one.
+  const segments: Array<{ versionId: string; bodyHash: string; startIso: string; body: string; desc: string }> = []
   for (const row of hist) {
     const id = versionIdOf(row.payload, name)
     if (id === null) continue // skill absent from this snapshot (installed/removed later) — skip
@@ -1134,7 +1301,13 @@ export function skillDrift(store: Store, name: string, opts: { nowMs?: number; s
     const lowerExclusive = prev?.startIso // must be strictly after the previous boundary
     const startIso =
       edited && edited <= capturedIso && (!lowerExclusive || edited > lowerExclusive) ? edited : capturedIso
-    segments.push({ versionId: id, bodyHash: bodyHashOf(row.payload, name) ?? '', startIso })
+    segments.push({
+      versionId: id,
+      bodyHash: bodyHashOf(row.payload, name) ?? '',
+      startIso,
+      body: bodyOf(row.payload, name),
+      desc: descOf(row.payload, name),
+    })
   }
   if (segments.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
 
@@ -1142,12 +1315,23 @@ export function skillDrift(store: Store, name: string, opts: { nowMs?: number; s
     const next = segments[i + 1]
     const endIso = next ? next.startIso : null
     const usage = usageInWindow(store, source, name, seg.startIso, endIso ?? nowIso, loc.repo)
+    const outcomes = outcomesInWindow(store, source, name, seg.startIso, endIso ?? nowIso, loc.repo)
+    const prevSeg = segments[i - 1]
+    const change: SkillVersionChange | null = prevSeg
+      ? (() => {
+          const d = diffBody(prevSeg.body, seg.body)
+          return { added: d.added, removed: d.removed, descChanged: prevSeg.desc !== seg.desc }
+        })()
+      : null
     return {
       bodyHash: seg.bodyHash,
       startIso: seg.startIso,
       endIso,
       current: i === segments.length - 1,
       usage,
+      callsPerWeek: callsPerWeek(usage.calls, Date.parse(seg.startIso), endIso ? Date.parse(endIso) : nowMs),
+      outcomes,
+      change,
       enoughData: usage.calls >= MIN_DRIFT_CALLS,
     }
   })
@@ -1155,24 +1339,24 @@ export function skillDrift(store: Store, name: string, opts: { nowMs?: number; s
   const singleVersion = segments.length === 1
   let delta: SkillDriftDelta | null = null
   if (segments.length >= 2) {
-    // Most recent edit = boundary into the current (last) version.
-    const editIso = segments[segments.length - 1]!.startIso
-    const prevStartIso = segments[segments.length - 2]!.startIso
-    const editMs = Date.parse(editIso)
-    const prevLifeMs = editMs - Date.parse(prevStartIso) // how long the previous version was live
-    const thisLifeMs = nowMs - editMs // how long the current version has been live
-    // Symmetric + capped so a long-lived old version can't drown out a young new one.
-    const halfMs = Math.min(prevLifeMs, thisLifeMs, DRIFT_MAX_HALF_DAYS * DAY_MS)
-    const beforeSinceIso = new Date(editMs - halfMs).toISOString()
-    const afterUntilIso = new Date(editMs + halfMs).toISOString()
-    const before = usageInWindow(store, source, name, beforeSinceIso, editIso, loc.repo)
-    const after = usageInWindow(store, source, name, editIso, afterUntilIso, loc.repo)
+    // Current vs. previous version, each over its OWN full lifetime — no window. Rates make
+    // them comparable despite unequal age; the diff shows exactly what the last edit changed.
+    const prevV = versions[versions.length - 2]!
+    const curV = versions[versions.length - 1]!
+    const prevSeg = segments[segments.length - 2]!
+    const curSeg = segments[segments.length - 1]!
+    const d = diffBody(prevSeg.body, curSeg.body)
     delta = {
-      editIso,
-      windowDays: Math.max(1, Math.round(halfMs / DAY_MS)),
-      before,
-      after,
-      enoughData: before.calls >= MIN_DRIFT_CALLS && after.calls >= MIN_DRIFT_CALLS,
+      editIso: curSeg.startIso,
+      before: { ...prevV.usage, outcomes: prevV.outcomes, callsPerWeek: prevV.callsPerWeek },
+      after: { ...curV.usage, outcomes: curV.outcomes, callsPerWeek: curV.callsPerWeek },
+      diff: d.rows,
+      diffAdded: d.added,
+      diffRemoved: d.removed,
+      diffSkipped: d.skipped,
+      descBefore: prevSeg.desc,
+      descAfter: curSeg.desc,
+      enoughData: prevV.usage.calls >= MIN_DRIFT_CALLS && curV.usage.calls >= MIN_DRIFT_CALLS,
     }
   }
 

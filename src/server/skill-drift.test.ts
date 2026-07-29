@@ -57,20 +57,163 @@ describe('skillDrift', () => {
     }
   })
 
-  it('produces a before/after delta on symmetric edit-bounded windows', () => {
+  it('compares current vs previous version over full lifetimes (no window)', () => {
     seedSkillStore(store, { nowMs: NOW })
     const r = skillDrift(store, 'review', { nowMs: NOW })
     expect(r.delta).not.toBeNull()
     const d = r.delta!
     // The edit boundary is the current version's start (most recent edit = 20d ago).
     expect(d.editIso).toBe(r.versions[r.versions.length - 1]!.startIso)
-    // Both sides have usage in the seed → the delta is trustworthy.
+    // Both versions have usage in the seed → the comparison is trustworthy.
     expect(d.enoughData).toBe(true)
     expect(d.before.calls).toBeGreaterThan(0)
     expect(d.after.calls).toBeGreaterThan(0)
-    // Symmetric half-window is capped at 30d and never negative.
-    expect(d.windowDays).toBeGreaterThan(0)
-    expect(d.windowDays).toBeLessThanOrEqual(30)
+    // before/after mirror the last two versions' FULL-lifetime usage — no window clipping.
+    expect(d.before).toMatchObject(r.versions[r.versions.length - 2]!.usage)
+    expect(d.after).toMatchObject(r.versions[r.versions.length - 1]!.usage)
+    // Each side carries its per-week traction for an exposure-fair comparison.
+    expect(d.before.callsPerWeek).toBeGreaterThan(0)
+    expect(d.after.callsPerWeek).toBeGreaterThan(0)
+  })
+
+  it('diffs the last edit: reports the body diff (rows + exact counts) between previous and current', () => {
+    seedSkillStore(store, { nowMs: NOW })
+    const r = skillDrift(store, 'review', { nowMs: NOW })
+    const d = r.delta!
+    // review's body changed v2 → v3, so the diff has real add/remove rows and isn't skipped.
+    expect(d.diffSkipped).toBe(false)
+    expect(d.diff.length).toBeGreaterThan(0)
+    // The server ships EXACT counts; they equal the +/- rows here (nothing collapsed away).
+    expect(d.diffAdded).toBeGreaterThan(0)
+    expect(d.diffRemoved).toBeGreaterThan(0)
+    expect(d.diffAdded).toBe(d.diff.filter((x) => x.t === '+').length)
+    expect(d.diffRemoved).toBe(d.diff.filter((x) => x.t === '-').length)
+    // The new v3 body line is present as an added row.
+    expect(d.diff.some((x) => x.t === '+' && /cite file:line/.test(x.s))).toBe(true)
+  })
+
+  it('sends the full diff (no row cap) and keeps counts exact even for a large edit', () => {
+    // A big rewrite: 60 lines fully replaced. Every change row must be present (no truncation),
+    // and the exact counts must match the change rows — the client relies on this to show +N/−M.
+    const before = Array.from({ length: 60 }, (_, k) => `old line ${k}`).join('\n')
+    const after = Array.from({ length: 60 }, (_, k) => `new line ${k}`).join('\n')
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'huge', body: before, bodyHash: 'h1' }], count: 1 } },
+      iso(20),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'huge', body: after, bodyHash: 'h2' }], count: 1 } },
+      iso(10),
+    )
+    const d = skillDrift(store, 'huge', { nowMs: NOW }).delta!
+    expect(d.diffSkipped).toBe(false)
+    expect(d.diffAdded).toBe(60)
+    expect(d.diffRemoved).toBe(60)
+    // No cap: all 120 change rows are shipped, and the exact counts match them.
+    expect(d.diff.filter((x) => x.t === '+').length).toBe(60)
+    expect(d.diff.filter((x) => x.t === '-').length).toBe(60)
+  })
+
+  it('collapses long unchanged context into a gap marker so the change is not buried', () => {
+    // A big body where only one middle line changes. The diff must NOT dump every context
+    // line — it keeps a few lines around the edit and collapses the rest to a '@' gap.
+    const lines = (mid: string) => ['# big skill', ...Array.from({ length: 40 }, (_, k) => `line ${k}`), mid, ...Array.from({ length: 40 }, (_, k) => `tail ${k}`)].join('\n')
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'big', body: lines('ORIGINAL'), bodyHash: 'b1' }], count: 1 } },
+      iso(20),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'big', body: lines('CHANGED'), bodyHash: 'b2' }], count: 1 } },
+      iso(10),
+    )
+    const d = skillDrift(store, 'big', { nowMs: NOW }).delta!
+    // The change is present (ORIGINAL removed, CHANGED added), with real context around it.
+    expect(d.diff.some((x) => x.t === '-' && x.s === 'ORIGINAL')).toBe(true)
+    expect(d.diff.some((x) => x.t === '+' && x.s === 'CHANGED')).toBe(true)
+    // A collapsed-context marker replaces the long unchanged runs (not ~80 context rows).
+    expect(d.diff.some((x) => x.t === '@')).toBe(true)
+    const context = d.diff.filter((x) => x.t === ' ').length
+    expect(context).toBeLessThanOrEqual(2 * 3 + 2) // ~DIFF_CONTEXT lines each side of the one change
+  })
+
+  it('skips the diff for a pathologically large body (over DIFF_MAX_LINES) and reports counts only', () => {
+    // A >1500-line body is too large to LCS cheaply — we set diffSkipped, ship no rows, and
+    // report a coarse size delta rather than an exact line-change count.
+    const big = (n: number) => Array.from({ length: n }, (_, k) => `line ${k}`).join('\n')
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'mega', body: big(1600), bodyHash: 'm1' }], count: 1 } },
+      iso(20),
+    )
+    store.recordEnvSnapshot(
+      { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'mega', body: big(1650), bodyHash: 'm2' }], count: 1 } },
+      iso(10),
+    )
+    const d = skillDrift(store, 'mega', { nowMs: NOW }).delta!
+    expect(d.diffSkipped).toBe(true)
+    expect(d.diff).toEqual([]) // no rows shipped for the too-large case
+    expect(d.diffAdded).toBe(50) // coarse size delta (1650 - 1600)
+    expect(d.diffRemoved).toBe(0)
+  })
+
+  it('annotates each version with what it changed vs. the previous one', () => {
+    seedSkillStore(store, { nowMs: NOW })
+    const r = skillDrift(store, 'review', { nowMs: NOW })
+    // The oldest version has no predecessor → no change record.
+    expect(r.versions[0]!.change).toBeNull()
+    // Later versions carry a body change (added/removed lines).
+    for (let i = 1; i < r.versions.length; i++) {
+      const c = r.versions[i]!.change!
+      expect(c).not.toBeNull()
+      expect(c.added + c.removed).toBeGreaterThan(0)
+    }
+  })
+
+  it('rolls up LLM-judged outcomes per version lifetime (bypass rate, corrections)', () => {
+    seedSkillStore(store, { nowMs: NOW })
+    const r = skillDrift(store, 'review', { nowMs: NOW })
+    // The seed skews outcomes worse across eras: v1 all "used" (no bypass), the current
+    // v3 era has reworked+ignored firings and adjacent corrections.
+    const v1 = r.versions[0]!
+    const cur = r.versions[r.versions.length - 1]!
+    expect(v1.outcomes && v1.outcomes.bypassed).toBe(0) // v1 was followed every time
+    expect(cur.outcomes!.classified).toBeGreaterThan(0)
+    expect(cur.outcomes!.bypassed).toBeGreaterThan(0) // v3 got bypassed
+    expect(cur.outcomes!.userCorrectionAdjacent).toBeGreaterThan(0)
+  })
+
+  it('leaves a version’s outcomes null when nothing was judged (no verdict / only insufficient-context)', () => {
+    // A skill with two versions and real invocations, but every verdict is insufficient-context
+    // → outcomes must be null (the UI shows no bypass rate rather than a fabricated 0%).
+    const snap = (hash: string, d: number) =>
+      store.recordEnvSnapshot(
+        { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'nojudge', body: 'b-' + hash, bodyHash: hash }], count: 1 } },
+        iso(d),
+      )
+    snap('n1', 30)
+    snap('n2', 12)
+    // A run of invocations, each carrying only an insufficient-context verdict.
+    const mk = (id: string, idx: number, d: number) => {
+      if (idx === 0) db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, 'r', ?, 1, 1)`).run(id, id, SOURCE, iso(d))
+      db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, ?, 'nojudge', 'skill', 1, 0, 0, ?)`).run(id, idx, iso(d))
+      return { idx, name: 'nojudge', outcome: 'insufficient-context', userCorrectionAdjacent: false, evidence: 'x' }
+    }
+    const v = [mk('s', 0, 8), mk('s', 1, 7), mk('s', 2, 6), mk('s', 3, 5)]
+    db.prepare(`INSERT INTO annotations (session_id, processor, key, value) VALUES ('s', 'skill-outcomes', 'skill_outcomes', ?)`).run(JSON.stringify(v))
+    const r = skillDrift(store, 'nojudge', { nowMs: NOW })
+    // The current version was invoked but has no JUDGED outcome → outcomes is null.
+    const cur = r.versions[r.versions.length - 1]!
+    expect(cur.usage.calls).toBeGreaterThan(0)
+    expect(cur.outcomes).toBeNull()
+  })
+
+  it('reports exposure-fair per-week traction for each version', () => {
+    seedSkillStore(store, { nowMs: NOW })
+    const r = skillDrift(store, 'review', { nowMs: NOW })
+    for (const v of r.versions) {
+      expect(v.callsPerWeek).toBeGreaterThan(0)
+      // A version live for D days with C calls → C / (D/7) per week; sanity-bound it.
+      expect(Number.isFinite(v.callsPerWeek)).toBe(true)
+    }
   })
 
   it('collapses a lost intermediate: drifty shows only two captured versions', () => {
@@ -190,6 +333,12 @@ describe('skillDrift', () => {
     expect(r.versions.length).toBe(2) // description change → new version
     // The displayed bodyHash stays the pure body hash (both versions share it).
     expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h1'])
+    // The delta carries the description before/after so the UI can show the reword even
+    // though the body diff is empty (identical bodies).
+    const d = r.delta!
+    expect(d.descBefore).toBe('Review a diff')
+    expect(d.descAfter).toBe('Review a diff AND suggest fixes')
+    expect(d.diff.filter((x) => x.t === '+' || x.t === '-').length).toBe(0) // no body add/remove
   })
 
   it('does NOT start a new version on pure-metadata churn (version/tags), body+desc unchanged', () => {

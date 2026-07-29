@@ -387,6 +387,15 @@ function paintSkillPage(box, r) {
       '</div>';
   }
 
+  // Activation outcomes + Version drift are the key signals, so they lead (under the usage trend).
+  // Windowed; hidden unless the classifier has produced verdicts for this skill in the window.
+  if (r.calls > 0) {
+    html += '<div class="sk-page-sect" id="sk-oc-sect" style="display:none">' +
+      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each invocation: did the agent follow, rework, or bypass the skill’s output. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
+      '<div id="sk-oc"></div>' +
+      '</div>';
+  }
+
   // Skill drift & version comparison (the hero). Edit-anchored, so it ignores the time
   // filter — loaded async into its own section, which stays hidden until there's a
   // multi-version history to show (most skills have one version → no noise).
@@ -420,15 +429,6 @@ function paintSkillPage(box, r) {
 
   // Verdict-specific guidance.
   html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
-
-  // Activation outcomes — the LLM-classified "did the agent use it" signal. Windowed;
-  // hidden unless the classifier has produced verdicts for this skill in the window.
-  if (r.calls > 0) {
-    html += '<div class="sk-page-sect" id="sk-oc-sect" style="display:none">' +
-      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each firing: did the agent follow, rework, or bypass the skill’s output. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
-      '<div id="sk-oc"></div>' +
-      '</div>';
-  }
 
   // Co-occurrence — other skills that fire in the same sessions (add/compose signal).
   // Windowed like usage; hidden until we find at least one co-occurring skill.
@@ -499,6 +499,13 @@ function loadOutcomes(name) {
     if (!d || !d.classified) return; // classifier hasn't covered this skill → stay hidden
     host.innerHTML = outcomesHtml(d);
     sect.style.display = '';
+    // "Show N more" toggle for the bypassed/reworked evidence beyond the top 3.
+    var moreBtn = host.querySelector('.sk-oc-more');
+    if (moreBtn) moreBtn.onclick = function () {
+      var rest = host.querySelector('.sk-oc-rest');
+      if (rest) rest.classList.add('on');
+      this.remove();
+    };
   }).catch(function () { /* leave hidden on error */ });
 }
 
@@ -523,7 +530,7 @@ function outcomesHtml(d) {
   var html = '<div class="sk-weight ' + vClass + '">' +
     '<span class="sk-weight-v">' + esc(verdict) + '</span>' +
     '<span class="sk-weight-d">The agent bypassed or reworked its output in <b>' + num(bypassed) + ' of ' + num(total) +
-      '</b> judged firing' + (total === 1 ? '' : 's') + ' (' + bypassPct + '%).</span>' +
+      '</b> judged invocation' + (total === 1 ? '' : 's') + ' (' + bypassPct + '%).</span>' +
     '</div>';
 
   // The full breakdown, still a stacked proportion bar + legend, but secondary now.
@@ -546,20 +553,30 @@ function outcomesHtml(d) {
 
   if (d.userCorrectionAdjacent > 0) {
     html += '<div class="sk-oc-corr">⚠ A user correction landed adjacent to ' +
-      num(d.userCorrectionAdjacent) + ' of ' + num(d.classified) + ' firings.</div>';
+      num(d.userCorrectionAdjacent) + ' of ' + num(d.classified) + ' invocations.</div>';
   }
 
-  // Evidence — one row per judged firing, bypass cases first (the read model orders them
-  // that way). Full text, no truncation; the outcome tag is colour-coded.
+  // Evidence — only the actionable cases (reworked / bypassed); top 3, with a "more" toggle
+  // for the rest. Followed examples aren't actionable (the bar + legend cover that share).
   if (d.examples && d.examples.length) {
-    html += '<div class="sk-oc-examples">' + d.examples.map(function (e) {
-      var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
-      return '<div class="sk-oc-ex" style="border-left-color:' + m.color + '"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
-        '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span></div>';
-    }).join('') + '</div>';
+    var actionable = d.examples.filter(function (e) { return e.outcome === 'reworked' || e.outcome === 'ignored'; });
+    if (actionable.length) {
+      var exHtml = function (e) {
+        var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
+        return '<div class="sk-oc-ex" style="border-left-color:' + m.color + '"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
+          '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span></div>';
+      };
+      var HEAD = 3;
+      var head = actionable.slice(0, HEAD).map(exHtml).join('');
+      var rest = actionable.slice(HEAD).map(exHtml).join('');
+      html += '<div class="sk-oc-examples">' + head +
+        (rest ? '<div class="sk-oc-rest">' + rest + '</div>' +
+          '<button type="button" class="sk-oc-more" aria-expanded="false">Show ' + num(actionable.length - HEAD) + ' more</button>' : '') +
+        '</div>';
+    }
   }
 
-  html += '<div class="sk-sect-note">Judged ' + num(d.classified) + ' firing' + (d.classified === 1 ? '' : 's') + ' in this window.' +
+  html += '<div class="sk-sect-note">Judged ' + num(d.classified) + ' invocation' + (d.classified === 1 ? '' : 's') + ' in this window.' +
     (d.insufficientContext > 0 ? ' ' + num(d.insufficientContext) + ' more had too little captured context to judge and are excluded.' : '') +
     '</div>';
   return html;
@@ -594,51 +611,49 @@ function loadDrift(name) {
   }).catch(function () { /* leave the section hidden on error */ });
 }
 
-// The drift section: a before/after callout around the most recent edit (when both
-// sides have enough data), then the full version timeline. Framed as correlation —
-// "changed after the edit", never "the edit caused it".
+// The drift section: "Around the last edit" (what changed + current-vs-previous rates), then
+// the version timeline. Correlation, never causation.
 function driftHtml(d) {
   var html = '';
   // Drift is scoped to one install location; name it so its numbers aren't read as the
   // cross-repo roster counts.
   html += '<div class="sk-sect-note">' + (d.repo
-    ? 'Version history + usage for this skill in <b>' + esc(d.repo) + '</b>. A same-named skill in another repo is tracked separately.'
-    : 'Version history + usage for this globally-installed skill (one shared body across repos).') + '</div>';
+    ? 'Version history for this skill in <b>' + esc(d.repo) + '</b>. A same-named skill in another repo is tracked separately.'
+    : 'Version history for this globally-installed skill (one shared body across repos).') + '</div>';
+
   var delta = d.delta;
   if (delta) {
+    html += '<div class="sk-drift-delta">' +
+      '<div class="sk-drift-delta-h">Around the last edit · ' + esc(String(delta.editIso).slice(0, 10)) + '</div>' +
+      driftChangeHtml(delta);
     if (delta.enoughData) {
-      html += '<div class="sk-drift-delta">' +
-        '<div class="sk-drift-delta-h">Around the last edit · ' + esc(String(delta.editIso).slice(0, 10)) +
-          ' <span class="sk-drift-win">(± ' + num(delta.windowDays) + (delta.windowDays === 1 ? ' day' : ' days') + ')</span></div>' +
-        '<div class="sk-drift-cmp">' +
-          driftMetric('Own-call errors', delta.before, delta.after, 'errorCalls', true) +
-          driftMetric('Invocations', delta.before, delta.after, 'calls', false) +
+      html += '<div class="sk-drift-cmp">' +
+          driftRate('Own-call errors', delta.before, delta.after, 'errorCalls') +
+          driftRate('Bypassed by agent', delta.before, delta.after, 'bypassed') +
+          driftTraction(delta.before, delta.after) +
         '</div>' +
-        '<div class="sk-sect-note">Usage in the equal windows before and after the edit. This is <b>correlation, not causation</b> — behaviour that changed <i>after</i> the edit, not proof the edit caused it.</div>' +
-        '</div>';
+        '<div class="sk-sect-note">Each version measured over its <b>own full lifetime</b>. Rates and per-week traction make the two comparable despite different ages. This is <b>correlation, not causation</b> — behaviour that changed <i>after</i> the edit, not proof the edit caused it.</div>';
     } else {
-      html += '<div class="sk-drift-delta sk-drift-thin">' +
-        '<div class="sk-drift-delta-h">Around the last edit · ' + esc(String(delta.editIso).slice(0, 10)) + '</div>' +
-        '<div class="sk-sect-note">Not enough usage on both sides of this edit yet to compare (need ' + num(3) + '+ invocations each side). Keep using it and check back.</div>' +
-        '</div>';
+      html += '<div class="sk-sect-note">Not enough usage on both versions yet to compare rates (need ' + num(3) + '+ invocations each). The change is shown above; check back once the new version has been used more.</div>';
     }
+    html += '</div>';
   }
 
-  // Version timeline: one row per captured version, newest first, with its lifetime usage.
+  // Version timeline: one row per captured version, newest first, each annotated with what
+  // it changed, its traction, and (when judged) its outcome rate.
   var vs = d.versions.slice().reverse();
   html += '<div class="sk-vers">';
   for (var i = 0; i < vs.length; i++) {
     var v = vs[i];
     var span = String(v.startIso).slice(0, 10) + ' → ' + (v.endIso ? String(v.endIso).slice(0, 10) : 'now');
     var label = v.current ? 'current' : 'v' + (vs.length - i);
-    var usage = v.enoughData
-      ? num(v.usage.calls) + ' calls · ' + Math.round((v.usage.errorCalls / Math.max(1, v.usage.calls)) * 100) + '% errored'
-      : num(v.usage.calls) + ' calls · too few to rate';
     html += '<div class="sk-ver' + (v.current ? ' sk-ver-cur' : '') + '">' +
       '<div class="sk-ver-tag">' + esc(label) + '</div>' +
-      '<div class="sk-ver-span">' + esc(span) + '</div>' +
+      '<div class="sk-ver-main">' +
+        '<div class="sk-ver-span">' + esc(span) + changeBadge(v.change) + '</div>' +
+        '<div class="sk-ver-stats">' + verStatsHtml(v) + '</div>' +
+      '</div>' +
       '<div class="sk-ver-hash mono" title="body hash">' + esc(String(v.bodyHash).slice(0, 8) || '—') + '</div>' +
-      '<div class="sk-ver-use">' + esc(usage) + '</div>' +
       '</div>';
   }
   html += '</div>';
@@ -646,25 +661,113 @@ function driftHtml(d) {
   return html;
 }
 
-// One before→after metric cell. `lowerBetter` colours a decrease green (good) and an
-// increase red (regressed); for neutral counts (invocations) we don't colour direction.
-function driftMetric(label, before, after, key, lowerBetter) {
-  var bv = before[key] || 0, av = after[key] || 0;
-  // Error rate (per call) reads better than raw counts across uneven windows.
-  var pct = function (u) { return Math.round(((u[key] || 0) / Math.max(1, u.calls || 0)) * 100); };
-  var showRate = key === 'errorCalls';
-  var bs = showRate ? pct(before) + '%' : num(bv);
-  var as = showRate ? pct(after) + '%' : num(av);
-  var dir = '';
-  if (lowerBetter) {
-    var bp = showRate ? pct(before) : bv, ap = showRate ? pct(after) : av;
-    if (ap > bp) dir = ' sk-drift-worse';
-    else if (ap < bp) dir = ' sk-drift-better';
+// The "what changed" block: description before→after when reworded, then the body diff inline
+// (reusing the Sessions file-changes view). Summary states the +N/−M counts.
+function driftChangeHtml(delta) {
+  var html = '';
+
+  // Description reword — shown as its own before→after, since a description change alone
+  // starts a new version (it steers the agent) and wouldn't show up in the body diff.
+  if ((delta.descBefore || '') !== (delta.descAfter || '')) {
+    html += '<div class="sk-chg-block"><div class="sk-chg-lbl">Description</div>' +
+      '<div class="fc-diff">' +
+        diffRowHtml('-', delta.descBefore || '(none)') +
+        diffRowHtml('+', delta.descAfter || '(none)') +
+      '</div></div>';
   }
+
+  // Body diff summary + inline diff. Counts come from the server (exact, over the full diff);
+  // we never recount the rows — those may include collapsed '@' gaps and omit nothing anyway.
+  var add = delta.diffAdded || 0, del = delta.diffRemoved || 0;
+  var parts = [];
+  if (add) parts.push('<span class="sk-diff-add">+' + num(add) + '</span>');
+  if (del) parts.push('<span class="sk-diff-del">−' + num(del) + '</span>');
+  var summary = parts.length ? parts.join(' ') + ' lines' : (delta.diffSkipped ? 'body changed (too large to diff)' : 'body unchanged');
+
+  html += '<div class="sk-chg-block"><div class="sk-chg-lbl">Body <span class="sk-diff-sum">' + summary + '</span></div>';
+  // Only render the diff box when the body actually changed — an unchanged body would just
+  // dump the whole file as gray context (noise); the "body unchanged" summary says enough.
+  if ((add || del) && delta.diff && delta.diff.length) {
+    var rowsHtml = '';
+    for (var i = 0; i < delta.diff.length; i++) rowsHtml += diffRowHtml(delta.diff[i].t, delta.diff[i].s);
+    html += '<div class="fc-diff">' + rowsHtml + '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// One diff row in the shared file-changes style (matches sessions' rowHtml): gutter sign + line
+// text, the row background carrying the add/del highlight. A '@' row is a collapsed-context separator.
+function diffRowHtml(t, s) {
+  if (t === '@') return '<div class="dl sep">⋯ ' + esc(s == null ? '' : s) + '</div>';
+  var cls = t === '+' ? 'add' : t === '-' ? 'del' : 'ctx';
+  var gut = t === '+' ? '+' : t === '-' ? '−' : ' ';
+  return '<div class="dl ' + cls + '"><span class="dg">' + gut + '</span><span class="dt">' + esc(s == null ? '' : s) + '</span></div>';
+}
+
+// A per-invocation rate cell (before → after), lower is better. Both error and bypass rates use
+// the version's own `calls` as denominator, so the `enoughData` gate (calls >= MIN_DRIFT_CALLS)
+// covers both. A version with no outcome data at all shows '—' (a real 0% would be fabricated).
+function driftRate(label, before, after, key) {
+  var rate = function (u) {
+    if (key === 'errorCalls') return u.calls ? Math.round((u.errorCalls / u.calls) * 100) : 0;
+    // Bypass over ALL calls; null only when the classifier produced no verdict for this version.
+    var oc = u.outcomes;
+    if (!oc) return null;
+    return u.calls ? Math.round((oc.bypassed / u.calls) * 100) : 0;
+  };
+  var bp = rate(before), ap = rate(after);
+  // Bypass rate can be null (no judged outcomes on a side) — say so rather than show a fake 0%.
+  if (bp == null || ap == null) {
+    return driftCell(label, bp == null ? '—' : bp + '%', ap == null ? '—' : ap + '%', '');
+  }
+  var dir = ap > bp ? ' sk-drift-worse' : ap < bp ? ' sk-drift-better' : '';
+  return driftCell(label, bp + '%', ap + '%', dir);
+}
+
+// The traction cell: invocations per week, before → after. Higher is neutral-good (more use),
+// so we colour an increase green and a drop amber-ish via the same worse/better classes.
+function driftTraction(before, after) {
+  var fmt = function (n) { return (Math.round((n || 0) * 10) / 10) + '/wk'; };
+  var b = before.callsPerWeek || 0, a = after.callsPerWeek || 0;
+  var dir = a > b ? ' sk-drift-better' : a < b ? ' sk-drift-worse' : '';
+  return driftCell('Traction', fmt(b), fmt(a), dir);
+}
+
+function driftCell(label, bs, as, dir) {
   return '<div class="sk-drift-metric">' +
     '<div class="sk-drift-metric-l">' + esc(label) + '</div>' +
     '<div class="sk-drift-metric-v">' + esc(bs) + ' <span class="sk-drift-arrow' + dir + '">→</span> <b class="' + dir.trim() + '">' + esc(as) + '</b></div>' +
     '</div>';
+}
+
+// A compact "what this version changed" badge for a timeline row (null for the first version).
+function changeBadge(change) {
+  if (!change) return '';
+  var bits = [];
+  if (change.added) bits.push('<span class="sk-diff-add">+' + num(change.added) + '</span>');
+  if (change.removed) bits.push('<span class="sk-diff-del">−' + num(change.removed) + '</span>');
+  if (change.descChanged) bits.push('<span class="sk-chg-desc">description</span>');
+  if (!bits.length) return '';
+  return ' <span class="sk-ver-chg" title="what changed from the previous version">' + bits.join(' ') + '</span>';
+}
+
+// A version row's stats line: traction, outcome (bypass) rate, own-call error rate — each
+// omitted when there isn't enough data to state it honestly.
+function verStatsHtml(v) {
+  var bits = [];
+  bits.push(num(v.usage.calls) + ' call' + (v.usage.calls === 1 ? '' : 's'));
+  if (v.usage.calls) bits.push((Math.round((v.callsPerWeek || 0) * 10) / 10) + '/wk');
+  if (v.enoughData) {
+    bits.push(Math.round((v.usage.errorCalls / Math.max(1, v.usage.calls)) * 100) + '% errored');
+    // Bypass over ALL calls (same denominator as errored + the headline), when judged at all.
+    if (v.outcomes) {
+      bits.push(Math.round((v.outcomes.bypassed / Math.max(1, v.usage.calls)) * 100) + '% bypassed');
+    }
+  } else {
+    bits.push('too few to rate');
+  }
+  return esc(bits.join(' · '));
 }
 
 // Fetch + render the invocations list for a skill, in the current window. Each row
