@@ -64,6 +64,10 @@ describe('skillHealth', () => {
     const r = skillHealth(store, { nowMs: NOW })
     expect(r.noConfig).toBe(true)
     expect(r.rows).toEqual([])
+    // No source has skill data → we don't invent a harness name; source is '' and there's
+    // nothing to offer in the chooser. The empty state is the honest signal, not a label.
+    expect(r.source).toBe('')
+    expect(r.availableSources).toEqual([])
   })
 
   it('marks an installed-but-never-invoked skill unused, with enoughData once sessions suffice', () => {

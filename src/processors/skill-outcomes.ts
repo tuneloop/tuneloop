@@ -2,24 +2,13 @@
  * skill-outcomes — an LLM enrichment that classifies what happened AROUND each
  * skill invocation: did the agent use the skill's output, rework it, or ignore it,
  * and was there an adjacent user correction? This is the honest, observation-grounded
- * version of a "did the skill help" signal — never a fabricated counterfactual
- * (see [[correctness-over-coverage]]).
- *
- * Spend control (see docs/plans/skill-analytics-roadmap.md #4):
- *  - SMALL context per firing: we send only the few turns bracketing each skill call,
- *    never the whole transcript.
- *  - BATCH: all of a session's skill firings go in ONE call; the model returns one
- *    verdict per firing (a keyed array). This is chunking, not a drop-cap — nothing
- *    is silently skipped.
- *  - The per-session processor CACHE (runner keys on session content_hash + version +
- *    model) means unchanged sessions are never re-charged on a re-run. No delta code.
+ * version of a "did the skill help" signal — never a fabricated counterfactual.
  *
  * Honesty framing: outcomes are OBSERVATIONAL ("the agent reworked the output after"),
  * never causal ("the skill failed"). `unclear` is a first-class outcome so the model
  * can abstain instead of guessing. Persisted as ONE session annotation (key
  * 'skill_outcomes') whose value is an array keyed by the skill call's tool-call idx —
- * the annotations grain is per-session, so the idx lives inside the value (there is no
- * per-tool-call annotation table, and adding one would be a new pattern).
+ * the annotations grain is per-session, so the idx lives inside the value 
  */
 
 import { registerProcessor } from '../core/registry'
@@ -66,15 +55,6 @@ export interface SkillOutcomeVerdict {
 
 export const skillOutcomes: Processor = {
   name: 'skill-outcomes',
-  // 2: window extends to the next user turn / skill firing (was fixed ±few events) and
-  //    surfaces interrupts + tool errors, so the model judges from real friction; taxonomy
-  //    gains `insufficient-context` (distinct from genuine `unclear`). Bump re-runs the LLM.
-  // 3: evidence must be ONE complete <200-char sentence + a word-boundary clip backstop, so
-  //    snippets stop getting cut off mid-word ("…summary at t"). Bump re-runs the LLM.
-  // 4: route to the heavy (detector-tier) model — the followed/bypassed judgement is worth
-  //    the stronger model. Model change re-keys the cache, so this re-runs the LLM.
-  // 5: raise the evidence clip to 500 (UI shows evidence in full) so a complete sentence is
-  //    never truncated. Bump re-runs the LLM.
   version: 5,
   kind: 'enrichment',
   needs: { llm: true },
@@ -104,7 +84,7 @@ export const skillOutcomes: Processor = {
     const verdicts = normalizeVerdicts(data, batch)
     if (verdicts.length === 0) {
       ctx.log.warn(`skill-outcomes: empty/invalid LLM output for ${session.id}`)
-      return { selfCost } // record the spend so a re-run doesn't re-charge
+      return { selfCost } 
     }
 
     const annotations: AnnotationInput[] = [{ key: 'skill_outcomes', value: verdicts }]

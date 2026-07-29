@@ -20,8 +20,7 @@
  * snapshot in between.
  *
  * Reusable: `seedSkillStore(store, opts)` returns an EXPECTATIONS manifest that
- * unit tests assert against (deterministic when `nowMs` is fixed). A thin CLI at
- * `scripts/seed-skills.ts` wraps this to seed a throwaway sqlite for UI eyeballing.
+ * unit tests assert against (deterministic when `nowMs` is fixed).
  *
  * This lives under `src/` (not `scripts/`) so tests can import it under the Node
  * `rootDir: src` typecheck; it never ships — tsup only bundles from cli.ts/index.ts.

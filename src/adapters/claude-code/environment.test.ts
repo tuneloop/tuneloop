@@ -689,7 +689,7 @@ describe('skills reader', () => {
   it('captures a skill dir that is a symlink to a real directory', async () => {
     // A skill linked in from elsewhere: ~/.claude/skills/linked -> <external>/linked.
     // readdir reports the entry as a symlink (not a directory), so it must be
-    // stat-resolved or it would be dropped (regression: grill-with-docs on disk).
+    // stat-resolved or it would be dropped
     const external = mkdtempSync(join(tmpdir(), 'cc-skills-external-'))
     writeFile(join(external, 'linked-skill', 'SKILL.md'), '---\ndescription: Linked in\n---\nLinked body.\n')
     mkdirSync(join(home, 'skills'), { recursive: true })

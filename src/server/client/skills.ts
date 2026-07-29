@@ -1,6 +1,4 @@
-// Skill Health tab: a per-skill roster built from real sessions — trigger
-// frequency (with a sparkline), a used/dead/idle/scope verdict, and the skill's
-// own-call error rate. Clicking a row opens a
+// Skill Health tab: a per-skill roster. Clicking a row opens a
 // full per-skill DETAIL PAGE (routed at #/skills/<name>, back-button aware), which
 // shows the skill's SKILL.md description and the honest metric grid. Deliberately
 // makes NO per-skill cost claim (tokens aren't attributable to a tool call — see
@@ -8,7 +6,7 @@
 //
 // All DOM classes are `sk-`-prefixed and all handlers are wired by querying
 // WITHIN this tab's container, never a global querySelectorAll — so the Sessions
-// tab's global .facet-filter/.srow handlers can't clobber them (and vice-versa).
+// tab's global .facet-filter/.srow handlers can't clobber them (and vice-versa)
 import { state, $, esc, num, get } from './core';
 import { syncHash } from './router';
 import { filterBySkill, openDetail } from './sessions';

@@ -4,15 +4,7 @@
  * verdict (reusing the unused-capabilities policy), and the skill's own-call error
  * rate. Plus the installed SKILL.md `description` so the UI can show what each skill is.
  *
- * Deliberate NON-claims (see docs/plans/skill-health.md and [[correctness-over-coverage]]):
- *  - NO per-skill token/time cost. Tokens live per-assistant-message, never on the
- *    ToolCall; attributing cost to a skill would be fabricated. Frequency is honest;
- *    cost per skill is not.
- *  - No "friction" proxy from nearby tool errors — an unrelated error near a skill isn't
- *    friction FROM it. Whether the agent reworked/bypassed the skill's output is the
- *    LLM-classified activation-outcome signal (skill-outcomes), grounded in real evidence.
- *
- * This is a pure read over the store — analyze WRITES, serve/this only READ.
+ * This is a pure read over the store — analyze WRITES, serve/this only READ
  */
 
 import { basename } from 'node:path'
@@ -27,15 +19,6 @@ import {
   type InstalledCap,
 } from '../detectors/unused-capabilities'
 
-/**
- * The default harness when a caller doesn't name one. Every read here is now source-
- * parameterized — all four adapters normalize skills into the same tool_calls(action='skill')
- * + environment_snapshots(category='skills') shapes — but a single-agent user (only
- * claude-code data) sees exactly the old behavior. `resolveSource` picks the concrete
- * source per report; this is only the fallback when nothing else applies.
- */
-const DEFAULT_SOURCE = 'claude-code'
-
 const DAY_MS = 86_400_000
 
 // ---- Shared SQL fragments -------------------------------------------------
@@ -44,8 +27,7 @@ const DAY_MS = 86_400_000
 const SKILL_CALL = `t.action = 'skill' AND t.is_sidechain = 0`
 
 /**
- * The tool-run timestamp, normalized to UTC `Z` — the SAME normalization the shared
- * `capability_usage` view applies (see db.ts): strftime folds any stored offset to UTC
+ * The tool-run timestamp, normalized to UTC `Z`: strftime folds any stored offset to UTC
  * before we compare/min/max, so a future source storing offset timestamps can't produce
  * a wrong window boundary or a used/unused verdict that disagrees with the view. For
  * claude-code every ts is already `Z`, so this is a no-op there and a guard for any adapter
@@ -157,8 +139,7 @@ export interface SkillHealthRow {
    * Per-repo usage breakdown — the evidence behind the scope-down flag. One entry per
    * repo the skill was invoked in (plus a `repo: null` bucket for unattributed usage),
    * sorted most-used first. The sum of `calls` equals the row's `calls`. Paired with
-   * `report.totalActiveRepos`, the UI can say "used in aivue (3×), never in 6 other
-   * active repos".
+   * `report.totalActiveRepos`
    */
   perRepo: Array<{
     repo: string | null
@@ -174,16 +155,13 @@ export interface SkillHealthRow {
    * Usage status — the PRIMARY, mutually-exclusive axis. Window-scoped and factual:
    *  - used: invoked at least once in the window
    *  - unused: installed, never invoked in the window
-   * (There is no separate "too little data" status — "unused in the last 7 days" is a
-   * true statement regardless of sample size. Confidence lives in `enoughData` below,
-   * which only gates the *removal advice*, not the label.)
    */
   status: 'used' | 'unused'
   /**
    * For an UNUSED skill: whether enough sessions were observed in the window to trust
    * the absence (the detector's MIN_SESSIONS gate). true → safe to advise removal;
    * false → "unused here, but too few sessions to say it's truly dead — widen first".
-   * Always true for used skills (irrelevant there).
+   * Always true for used skills (irrelevant there)
    */
   enoughData: boolean
   /**
@@ -254,7 +232,7 @@ function loadInstalledSkills(store: Store, source: string): InstalledSkill[] {
     const snap = store.envSnapshotCurrent(source, scope, scopeKey, 'skills')
     if (!snap) return
     // parseInstalledSkills gives names; re-read the payload for descriptions so the
-    // roster can show what each skill is (payload shape: { skills: [{name, description?}] }).
+    // roster can show what each skill is (payload shape: { skills: [{name, description?}] })
     const names = new Set(parseInstalledSkills(snap.payload))
     const descByName = new Map<string, string>()
     for (const o of skillEntries(snap.payload)) {
@@ -292,8 +270,7 @@ interface InvokedDetail {
  * Per (name, repo) invocation facts (sessions, calls, own-call errors, first/last used).
  *
  * Windowed by the tool-call timestamp `t.ts` (when the skill actually ran), NOT the
- * session's start — matching the shared `capability_usage` view (see queryInvoked): a
- * long session that began before the window but invoked the skill inside it still
+ * session's start: a long session that began before the window but invoked the skill inside it still
  * counts, and its calls land in the window they happened in.
  */
 function queryInvokedDetail(store: Store, source: string, sinceIso: string, untilIso?: string): InvokedDetail[] {
@@ -386,9 +363,9 @@ function earliestSessionMs(store: Store, source: string): number | null {
 
 /**
  * Every source with skill data — a source that either INVOKED a skill (tool_calls) or has
- * a skills-category snapshot (installed inventory). Sorted, claude-code first when present
- * (the historical default), else alphabetical. This is what the client offers as the source
- * chooser; one entry → no chooser shown.
+ * a skills-category snapshot (installed inventory). Sorted alphabetically (a neutral,
+ * stable order — no harness is privileged by name). This is what the client offers as the
+ * source chooser; one entry → no chooser shown.
  */
 function availableSkillSources(store: Store): string[] {
   const rows = store.queryAll(
@@ -400,11 +377,7 @@ function availableSkillSources(store: Store): string[] {
        SELECT DISTINCT source FROM environment_snapshots WHERE category = 'skills'
      )`,
   ) as Array<{ source: string }>
-  return rows
-    .map((r) => r.source)
-    .sort((a, b) =>
-      a === DEFAULT_SOURCE ? -1 : b === DEFAULT_SOURCE ? 1 : a.localeCompare(b),
-    )
+  return rows.map((r) => r.source).sort((a, b) => a.localeCompare(b))
 }
 
 /**
@@ -412,12 +385,13 @@ function availableSkillSources(store: Store): string[] {
  * has data). Otherwise default to the source with the most skill INVOCATIONS across ALL time
  * — the harness the user works in most. Deliberately NOT window-scoped: the default source
  * stays put when the user changes the time filter (a window-scoped default would flip the
- * whole tab as you scrub dates). Deterministic tie-break: most calls, then DEFAULT_SOURCE,
- * then name. Falls back to DEFAULT_SOURCE when nothing has skill data.
+ * whole tab as you scrub dates). Deterministic tie-break on equal call counts: source name.
+ * Returns '' when NO source has skill data — the report is `noConfig` with an empty roster,
+ * so there's no harness to name; we don't invent one (the empty state is the honest signal).
  */
 function resolveSource(store: Store, available: string[], requested: string | undefined): string {
   if (requested && available.includes(requested)) return requested
-  if (available.length === 0) return DEFAULT_SOURCE
+  if (available.length === 0) return ''
   const counts = store.queryAll(
     `SELECT s.source AS source, COUNT(*) AS calls
        FROM tool_calls t JOIN sessions s ON s.id = t.session_id
@@ -428,8 +402,6 @@ function resolveSource(store: Store, available: string[], requested: string | un
   const ranked = [...available].sort((a, b) => {
     const d = (bySource.get(b) ?? 0) - (bySource.get(a) ?? 0)
     if (d !== 0) return d
-    if (a === DEFAULT_SOURCE) return -1
-    if (b === DEFAULT_SOURCE) return 1
     return a.localeCompare(b)
   })
   return ranked[0]!
@@ -689,7 +661,7 @@ export interface SkillInvocation {
   isError: boolean
 }
 
-/** Cap on the invocations list (mirrors errorOccurrences). The page notes the true
+/** Cap on the invocations list. The page notes the true
  * total from the roster row's `calls`, so we only need the capped page here. */
 const MAX_INVOCATIONS = 100
 
@@ -947,7 +919,7 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
 // is it doing lately" widgets, but "did the last change help?" is answered against
 // the versions' own lifetimes, so the filter must not clip it.
 //
-// Honesty guards (see [[correctness-over-coverage]]):
+// Honesty guards
 //  - correlation, not causation: we say "changed AFTER the edit", never "the edit
 //    caused it". The client frames it that way too.
 //  - version history is only as granular as the analyze cadence — edits made between

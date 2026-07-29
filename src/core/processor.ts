@@ -141,17 +141,12 @@ export interface Processor {
   /** Bump to invalidate cached results and force reprocessing. */
   version: number
   kind: ProcessorKind
-  /**
-   * Gates execution. `llm` skips this processor when no LLM provider is configured;
-   * `network` gates on connectivity. (Which MODEL an LLM processor runs on is a separate
-   * axis — see `model` below — exactly as detectors split `needsLlm` from `model`.)
-   */
+  /** Gates execution: `llm` skips when no provider is configured. */
   needs?: { llm?: boolean; network?: boolean }
   /**
    * Which model tier an LLM processor's calls run on:
    *  - 'default' (implied when omitted) — the cheap per-session model, right for most.
-   *  - 'heavy' — the strong model (--llm-model-heavy / TUNELOOP_LLM_MODEL_HEAVY), for the
-   *    rare enrichment where judgement quality beats per-session cost
+   *  - 'heavy' — the strong model (--llm-model-heavy / TUNELOOP_LLM_MODEL_HEAVY)
    */
   model?: 'default' | 'heavy'
   /** Names of processors that must run first (topo-sorted). */

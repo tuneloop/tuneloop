@@ -49,8 +49,7 @@ export interface RunResult {
 /** Run every applicable processor for one session, honoring deps + the cache. */
 export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   const { session, store, log, llmEnabled, llmModel, llm, sh } = opts
-  // The heavy tier falls back to the light client/model when no distinct one was wired,
-  // mirroring the detector runner's `heavyLlm ?? llm` (see detector-runner.ts clientFor).
+  // The heavy tier falls back to the light client/model when no distinct one was wired
   const heavyLlm = opts.heavyLlm ?? llm
   const heavyLlmModel = opts.heavyLlmModel ?? llmModel
   // enrich-session no longer needs the existing feature tree: it proposes features

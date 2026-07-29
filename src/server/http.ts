@@ -189,10 +189,8 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/skill-health') {
-    // Per-skill health from real sessions: usage status + flags, trend, own-call error
-    // rate. No cost claim. `days` windows the
-    // usage facts (default 30; 'all' = all-time); a `from`+`to` ISO pair overrides it
-    // with a custom range. The installed inventory is always current — only usage windows.
+    // Per-skill health from sessions: usage status + flags, trend, own-call error
+    // rate. No cost claim
     sendJson(res, 200, skillHealth(store, skillWindowFrom(url.searchParams)))
     return
   }
