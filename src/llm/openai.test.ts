@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createOpenAiClient } from './openai'
 
-const mocks = vi.hoisted(() => ({ create: vi.fn() }))
+const mocks = vi.hoisted(() => ({ create: vi.fn(), ctor: vi.fn() }))
 
 vi.mock('openai', () => ({
   default: class OpenAI {
     chat = { completions: { create: mocks.create } }
+    constructor(opts: unknown) {
+      mocks.ctor(opts)
+    }
   },
 }))
 
@@ -33,5 +36,21 @@ describe('OpenAI cache-write usage', () => {
       cacheCreate1h: 0,
       cacheRead: 500,
     })
+  })
+})
+
+describe('OpenAI client construction', () => {
+  beforeEach(() => mocks.ctor.mockReset())
+
+  it('forwards baseURL and custom default headers to the SDK', () => {
+    createOpenAiClient('unused', 'm', { baseURL: 'http://gw/v1', headers: { 'x-user-id': 'u-123' } })
+    expect(mocks.ctor).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'unused', baseURL: 'http://gw/v1', defaultHeaders: { 'x-user-id': 'u-123' } }),
+    )
+  })
+
+  it('sends no defaultHeaders when none are configured', () => {
+    createOpenAiClient('k', 'm', { baseURL: 'http://gw/v1' })
+    expect(mocks.ctor.mock.calls[0]?.[0]).not.toHaveProperty('defaultHeaders', expect.anything())
   })
 })

@@ -6,7 +6,8 @@ import type { ClientOpts, LlmClient, LlmResult, StructuredRequest } from './type
  * OpenAI / OpenAI-compatible client over the Chat Completions API — the universal
  * endpoint every compatible provider implements (OpenRouter, Groq, DeepSeek,
  * Together, Fireworks, xAI, Gemini-compat, Ollama). `baseURL` selects the
- * endpoint; `provider` is the name self-cost pricing keys on.
+ * endpoint; `headers` are sent on every request (a header-auth gateway's
+ * credentials); `provider` is the name self-cost pricing keys on.
  *
  * Structured output is one forced function call whose arguments ARE the result,
  * so the model must support tool calling. `strict` is NOT set: many compatible
@@ -23,7 +24,7 @@ import type { ClientOpts, LlmClient, LlmResult, StructuredRequest } from './type
  * sessions — prefer the default.
  */
 export function createOpenAiClient(apiKey: string, model: string, opts?: ClientOpts): LlmClient {
-  const client = new OpenAI({ apiKey, baseURL: opts?.baseURL })
+  const client = new OpenAI({ apiKey, baseURL: opts?.baseURL, defaultHeaders: opts?.headers })
   return {
     provider: opts?.provider ?? 'openai',
     model,

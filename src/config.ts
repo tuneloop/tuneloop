@@ -9,7 +9,7 @@ export interface TuneloopConfig {
   dataDir: string
   dbPath: string
   /** LLM provider for enrichment (BYO key), or null when not configured. */
-  llm: { provider: string; model: string; apiKey: string; baseURL?: string; heavyModel?: string } | null
+  llm: { provider: string; model: string; apiKey: string; baseURL?: string; heavyModel?: string; headers?: string } | null
 }
 
 /**
@@ -87,7 +87,11 @@ function resolveLlm(o?: LlmOverrides): TuneloopConfig['llm'] {
   const model = o?.model ?? process.env.TUNELOOP_LLM_MODEL ?? preset?.defaultModel ?? ''
   const heavyModel = resolveHeavyModel(o, preset, model)
   const baseURL = o?.baseURL ?? process.env.TUNELOOP_LLM_BASE_URL ?? preset?.baseURL
-  return { provider, model, apiKey, baseURL, heavyModel }
+  // Extra request headers (raw JSON) for a header-auth gateway. Carried through
+  // unparsed so resolveLlm stays total; createLlmClient validates it, so a malformed
+  // value warns and degrades to static-only rather than aborting config resolution.
+  const headers = process.env.TUNELOOP_LLM_HEADERS
+  return { provider, model, apiKey, baseURL, heavyModel, headers }
 }
 
 export function loadConfig(opts?: { dataDir?: string; db?: string; llm?: LlmOverrides }): TuneloopConfig {

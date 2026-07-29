@@ -42,6 +42,23 @@ describe('createLlmClient is the sole validator', () => {
   it('returns null when enrichment is not configured', () => {
     expect(createLlmClient(null)).toBeNull()
   })
+
+  it('builds a keyless openai-compatible-nokey client with custom headers', () => {
+    const c = createLlmClient({ provider: 'openai-compatible-nokey', model: 'm', apiKey: 'unused', baseURL: 'http://gw/v1', headers: '{"x-user-id":"u-123"}' })
+    expect(c?.provider).toBe('openai-compatible-nokey')
+  })
+
+  it('throws a message naming TUNELOOP_LLM_HEADERS when the value is not valid JSON', () => {
+    expect(() =>
+      createLlmClient({ provider: 'openai-compatible-nokey', model: 'm', apiKey: 'unused', baseURL: 'http://gw/v1', headers: 'not-json' }),
+    ).toThrow(/TUNELOOP_LLM_HEADERS/)
+  })
+
+  it('throws when a header value is not a string', () => {
+    expect(() =>
+      createLlmClient({ provider: 'openai-compatible-nokey', model: 'm', apiKey: 'unused', baseURL: 'http://gw/v1', headers: '{"x-id": 5}' }),
+    ).toThrow(/TUNELOOP_LLM_HEADERS/)
+  })
 })
 
 describe('bedrock keyless probe', () => {
