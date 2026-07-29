@@ -45,6 +45,9 @@ and adding your own enrichment is straightforward.
 
 ## Quick start
 
+Requires Node.js >= 22.19 (`npx` runs on whatever `node` your shell resolves —
+check with `node -v`).
+
 ```bash
 npx tuneloop analyze
 ```

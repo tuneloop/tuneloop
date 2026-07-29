@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Clear error on unsupported Node versions** — the CLI's `bin` entry is now a
+  dependency-free wrapper that checks the running Node against `engines` before
+  loading the bundle, so old Nodes get a one-line "requires Node.js >= 22.19.0"
+  message instead of a `TypeError: webidl.util.markAsUncloneable is not a
+  function` stack trace from deep inside undici.
+- **`engines.node` raised to `>=22.19.0`** to match the floor inherited from
+  the direct `undici` dependency; `>=22` admitted Node 22.x versions that crash
+  at startup. CI now tests the exact floor plus latest 22.x and 24.x.
+  
 ### Added
 
 - **Keyless header-auth gateways.** A new `openai-compatible-nokey` provider preset
