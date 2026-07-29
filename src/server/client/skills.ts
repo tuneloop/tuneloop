@@ -42,13 +42,20 @@ var FLAGS = {
 };
 function hasFlag(r, f) { return (r.flags || []).indexOf(f) >= 0; }
 
-// The API query fragment for the current window. Custom → from/to; else days=.
+// Display names for the harness sources (the source chooser + any source-scoped copy).
+var SOURCE_LABELS = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
+function sourceLabel(s) { return SOURCE_LABELS[s] || s; }
+
+// The API query fragment for the current window (+ source, when one is chosen). Custom →
+// from/to; else days=. An explicit source is appended so every skill endpoint reports the
+// same harness the roster resolved to.
 function skWinQuery() {
-  if (state.skillWin === 'custom' && state.skillFrom && state.skillTo) {
-    return 'from=' + encodeURIComponent(new Date(state.skillFrom).toISOString()) +
-      '&to=' + encodeURIComponent(new Date(state.skillTo + 'T23:59:59').toISOString());
-  }
-  return 'days=' + encodeURIComponent(state.skillWin === 'all' ? 'all' : String(state.skillWin));
+  var q = (state.skillWin === 'custom' && state.skillFrom && state.skillTo)
+    ? 'from=' + encodeURIComponent(new Date(state.skillFrom).toISOString()) +
+      '&to=' + encodeURIComponent(new Date(state.skillTo + 'T23:59:59').toISOString())
+    : 'days=' + encodeURIComponent(state.skillWin === 'all' ? 'all' : String(state.skillWin));
+  if (state.skillSource) q += '&source=' + encodeURIComponent(state.skillSource);
+  return q;
 }
 
 // The human window phrase for a subtitle/caption. `windowDays` is the report's echo:
@@ -68,8 +75,10 @@ function winPhrase(presetPrefix, allTime) {
 }
 
 // A signature that changes whenever the fetched data would differ — the cache key.
+// Source is part of it: switching harness must refetch (different rows entirely).
 function skWinKey() {
-  return state.skillWin === 'custom' ? 'custom:' + state.skillFrom + ':' + state.skillTo : String(state.skillWin);
+  var win = state.skillWin === 'custom' ? 'custom:' + state.skillFrom + ':' + state.skillTo : String(state.skillWin);
+  return win + '|' + (state.skillSource || '');
 }
 
 // The skills screen's URL query slice: the usage window (30d is the default, omitted).
@@ -80,6 +89,7 @@ export function getSkillParams(): Record<string, string> {
     if (state.skillTo) q.to = state.skillTo;
   } else if (state.skillWin === 'all') q.win = 'all';
   else if (state.skillWin !== 30) q.win = String(state.skillWin);
+  if (state.skillSource) q.source = state.skillSource;
   return q;
 }
 
@@ -94,6 +104,7 @@ function applySkillWin(query: Record<string, string>) {
   } else if (win === 'all') state.skillWin = 'all';
   else if (win === '7' || win === '14' || win === '90') state.skillWin = parseInt(win, 10);
   else state.skillWin = 30; // default (win=30 or absent)
+  state.skillSource = (query && query.source) || ''; // '' → server picks the default
 }
 
 // Called once from main.ts to pre-render the tab (fetch + paint). Safe to call
@@ -151,6 +162,16 @@ function setSkillWin(win) {
     paintSkills(); // reveal the date inputs; don't fetch until both are filled
     return;
   }
+  loadSkills();
+}
+
+// Switch the harness whose skills are shown. Refetches — a different source is an entirely
+// different roster. Returning to the roster first avoids stranding a detail page for a skill
+// that doesn't exist under the newly-selected source.
+function setSkillSource(source) {
+  state.skillSource = source;
+  state.skill = null; // a skill name isn't shared across harnesses; drop the open detail
+  syncHash();
   loadSkills();
 }
 
@@ -213,6 +234,19 @@ function renderSkFilters(d) {
       return '<option value="' + esc(o[0]) + '"' + (o[0] === skStatus ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
     }).join('');
 
+  // Source chooser — only when more than one harness has skill data (a single-agent user
+  // sees no extra control). The selected value is the report's RESOLVED source (d.source),
+  // not state.skillSource, since '' means "let the server pick" and we want the real one.
+  var sources = (d && d.availableSources) || [];
+  var sourceGrp = '';
+  if (sources.length > 1) {
+    var sourceOpts = sources.map(function (s) {
+      return '<option value="' + esc(s) + '"' + (s === d.source ? ' selected' : '') + '>' + esc(sourceLabel(s)) + '</option>';
+    }).join('');
+    sourceGrp = '<span class="flt-grp"><span class="flt-lbl">Agent</span>' +
+      '<select id="sk-source">' + sourceOpts + '</select></span>';
+  }
+
   bar.innerHTML =
     '<div class="flt-row">' +
       '<span class="flt-grp"><span class="flt-lbl">Time</span>' +
@@ -228,6 +262,7 @@ function renderSkFilters(d) {
     '<div class="flt-row flt-row-facets">' +
       '<span class="flt-grp"><span class="flt-lbl">Status</span>' +
         '<select id="sk-status">' + statusOpts + '</select></span>' +
+      sourceGrp +
     '</div>';
 
   // Time presets + custom-range dates.
@@ -243,6 +278,10 @@ function renderSkFilters(d) {
 
   // Status filter.
   $('#sk-status').onchange = function () { skStatus = this.value; paintSkills(); };
+
+  // Source (agent) chooser, present only when >1 source has skill data.
+  var srcSel = $('#sk-source');
+  if (srcSel) srcSel.onchange = function () { setSkillSource(this.value); };
 
   // Name search (debounced, client-side over the cached rows).
   var t;

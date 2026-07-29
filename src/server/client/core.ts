@@ -44,6 +44,9 @@ export interface ClientState {
   skillWin: number | 'all' | 'custom'
   skillFrom: string // ISO date (yyyy-mm-dd) for a custom range
   skillTo: string
+  // Which harness's skills the Skills tab shows ('' = let the server pick the default).
+  // Only meaningful when >1 source has skill data; mirrored into the URL as ?source=.
+  skillSource: string
   overview: any
   home: any // Explore (question-led) stats; null until fetched
   asked: any // the question the user clicked through from, for the grounding banner (null = none)
@@ -77,7 +80,7 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 7,

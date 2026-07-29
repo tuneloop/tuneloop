@@ -19,11 +19,12 @@ function seedSession(
   repo: string | null,
   startedDaysAgo: number,
   calls: Array<{ name: string; action: string; error?: boolean }>,
+  source = SOURCE,
 ) {
   db.prepare(
     `INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls)
      VALUES (?, ?, ?, ?, ?, 1, ?)`,
-  ).run(id, id, SOURCE, repo, iso(startedDaysAgo), calls.length)
+  ).run(id, id, source, repo, iso(startedDaysAgo), calls.length)
   calls.forEach((c, idx) => {
     db.prepare(
       `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts)
@@ -32,10 +33,14 @@ function seedSession(
   })
 }
 
-/** Record a current global-skills snapshot with the given {name, description?} entries. */
-function seedInstalledGlobal(store: Store, skills: Array<{ name: string; description?: string }>) {
+/** Record a current global-skills snapshot with the given entries (may carry kind:'command'). */
+function seedInstalledGlobal(
+  store: Store,
+  skills: Array<{ name: string; description?: string; kind?: string }>,
+  source = SOURCE,
+) {
   store.recordEnvSnapshot(
-    { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills, count: skills.length } },
+    { source, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills, count: skills.length } },
     iso(1),
   )
 }
@@ -240,6 +245,86 @@ describe('skillHealth', () => {
     // that windows, not the session's start.
     const tight = skillHealth(store, { days: 1, nowMs: NOW }).rows.find((x) => x.name === 'usedskill')
     expect(tight?.calls ?? 0).toBe(0)
+  })
+})
+
+describe('skillHealth — cross-agent (source-aware)', () => {
+  let dir: string
+  let dbN = 0
+  let store: Store
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'skill-src-'))
+  })
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  beforeEach(() => {
+    db = openDb(join(dir, `s${dbN++}.db`))
+    store = new Store(db)
+  })
+  afterEach(() => store.close())
+
+  it('reports one source at a time — a same-named skill under two agents never merges', () => {
+    // 'commit' exists in BOTH claude-code and codex. Each report must reflect exactly one
+    // source's usage, never a summed cross-agent row.
+    seedInstalledGlobal(store, [{ name: 'commit' }], 'claude-code')
+    seedInstalledGlobal(store, [{ name: 'commit' }], 'codex')
+    seedSession('cc1', 'repoA', 2, [{ name: 'commit', action: 'skill' }], 'claude-code')
+    seedSession('cc2', 'repoA', 3, [{ name: 'commit', action: 'skill' }], 'claude-code')
+    seedSession('cx1', 'repoA', 2, [{ name: 'commit', action: 'skill' }], 'codex')
+
+    const cc = skillHealth(store, { source: 'claude-code', days: 30, nowMs: NOW })
+    const cx = skillHealth(store, { source: 'codex', days: 30, nowMs: NOW })
+    expect(cc.source).toBe('claude-code')
+    expect(cx.source).toBe('codex')
+    // Each report counts only its own source's calls — 2 for claude-code, 1 for codex.
+    expect(cc.rows.find((r) => r.name === 'commit')!.calls).toBe(2)
+    expect(cx.rows.find((r) => r.name === 'commit')!.calls).toBe(1)
+    // Both sources are offered so the client can show a chooser.
+    expect(cc.availableSources).toEqual(['claude-code', 'codex'])
+  })
+
+  it('defaults to the busiest source and hides the chooser when only one has data', () => {
+    // Only claude-code has skill data → single available source, default resolves to it.
+    seedInstalledGlobal(store, [{ name: 'solo' }], 'claude-code')
+    seedSession('a', 'repoA', 2, [{ name: 'solo', action: 'skill' }], 'claude-code')
+    const r = skillHealth(store, { days: 30, nowMs: NOW })
+    expect(r.source).toBe('claude-code')
+    expect(r.availableSources).toEqual(['claude-code']) // client shows no source chooser
+  })
+
+  it('defaults to the source with the most skill invocations across agents', () => {
+    seedInstalledGlobal(store, [{ name: 'x' }], 'claude-code')
+    seedInstalledGlobal(store, [{ name: 'x' }], 'codex')
+    // codex has more invocations → it's the default when none is requested.
+    seedSession('cc', 'repoA', 2, [{ name: 'x', action: 'skill' }], 'claude-code')
+    seedSession('cx1', 'repoA', 2, [{ name: 'x', action: 'skill' }], 'codex')
+    seedSession('cx2', 'repoA', 3, [{ name: 'x', action: 'skill' }], 'codex')
+    const r = skillHealth(store, { days: 30, nowMs: NOW })
+    expect(r.source).toBe('codex')
+  })
+
+  it("never treats an OpenCode kind:'command' entry as a skill", () => {
+    // OpenCode folds slash-commands into the skills category tagged kind:'command'. They
+    // have no invocation signal, so surfacing one as a skill would be a false dead-skill row.
+    seedInstalledGlobal(store, [
+      { name: 'realskill' },
+      { name: 'deploy', kind: 'command' },
+    ], 'opencode')
+    // Enough sessions that a real unused skill WOULD be flagged, to prove the command is
+    // excluded on its own merits, not for want of data.
+    for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`o${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }], 'opencode')
+    const r = skillHealth(store, { source: 'opencode', days: 30, nowMs: NOW })
+    expect(r.rows.some((x) => x.name === 'deploy')).toBe(false) // the command is not a skill
+    expect(r.rows.some((x) => x.name === 'realskill')).toBe(true) // the real skill still shows
+  })
+
+  it('per-source denominators: active-repo count reflects only the report source', () => {
+    // claude-code has sessions in 3 repos; codex in 1. The "active repos" denominator for a
+    // codex report must be codex's, not the union across agents.
+    seedInstalledGlobal(store, [{ name: 'k' }], 'codex')
+    for (let i = 0; i < 3; i++) seedSession(`cc${i}`, `ccrepo${i}`, 2, [{ name: 'Bash', action: 'shell' }], 'claude-code')
+    seedSession('cx', 'cxrepo', 2, [{ name: 'k', action: 'skill' }], 'codex')
+    const r = skillHealth(store, { source: 'codex', days: 30, nowMs: NOW })
+    expect(r.totalActiveRepos).toBe(1) // only codex's repo, not the 3 claude-code ones
   })
 })
 

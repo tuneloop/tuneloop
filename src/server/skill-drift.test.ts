@@ -34,7 +34,7 @@ describe('skillDrift', () => {
   afterEach(() => store.close())
 
   it('reports noHistory when no skills snapshot exists', () => {
-    const r = skillDrift(store, 'whatever', NOW)
+    const r = skillDrift(store, 'whatever', { nowMs: NOW })
     expect(r.noHistory).toBe(true)
     expect(r.versions).toEqual([])
     expect(r.delta).toBeNull()
@@ -42,7 +42,7 @@ describe('skillDrift', () => {
 
   it('reconstructs review three-version timeline with per-version usage', () => {
     const exp = seedSkillStore(store, { nowMs: NOW })
-    const r = skillDrift(store, 'review', NOW)
+    const r = skillDrift(store, 'review', { nowMs: NOW })
     expect(r.noHistory).toBe(false)
     expect(r.singleVersion).toBe(false)
     // Three distinct captured versions, oldest→newest, matching the manifest hashes.
@@ -59,7 +59,7 @@ describe('skillDrift', () => {
 
   it('produces a before/after delta on symmetric edit-bounded windows', () => {
     seedSkillStore(store, { nowMs: NOW })
-    const r = skillDrift(store, 'review', NOW)
+    const r = skillDrift(store, 'review', { nowMs: NOW })
     expect(r.delta).not.toBeNull()
     const d = r.delta!
     // The edit boundary is the current version's start (most recent edit = 20d ago).
@@ -77,7 +77,7 @@ describe('skillDrift', () => {
     seedSkillStore(store, { nowMs: NOW })
     // drifty was edited between captures without an analyze in between → the middle
     // body never made it into a snapshot, so only two versions are recoverable.
-    const r = skillDrift(store, 'drifty', NOW)
+    const r = skillDrift(store, 'drifty', { nowMs: NOW })
     expect(r.versions.length).toBe(2)
   })
 
@@ -85,7 +85,7 @@ describe('skillDrift', () => {
     seedSkillStore(store, { nowMs: NOW })
     // reverter went A(60d) → B(40d) → A(20d). The final revert to A is byte-identical
     // to v1, but it's a distinct period, so we honestly show three segments.
-    const r = skillDrift(store, 'reverter', NOW)
+    const r = skillDrift(store, 'reverter', { nowMs: NOW })
     expect(r.versions.length).toBe(3)
     expect(r.versions[0]!.bodyHash).toBe(r.versions[2]!.bodyHash) // A == A
     expect(r.versions[1]!.bodyHash).not.toBe(r.versions[0]!.bodyHash) // B != A
@@ -115,7 +115,7 @@ describe('skillDrift', () => {
     mk('b0', 'beta', 20); mk('b1', 'beta', 10)
 
     // alpha is the busiest repo (6 calls vs 2) → that's the timeline drift reflects.
-    const r = skillDrift(store, 'commit', NOW)
+    const r = skillDrift(store, 'commit', { nowMs: NOW })
     expect(r.repo).toBe('alpha')
     expect(r.singleVersion).toBe(false)
     expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h2'])
@@ -138,7 +138,7 @@ describe('skillDrift', () => {
       { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'mt', body: 'v2', bodyHash: 'h2', editedAt: editedV2 }], count: 1 } },
       iso(10), // analyzed 10 days AFTER the real edit
     )
-    const r = skillDrift(store, 'mt', NOW)
+    const r = skillDrift(store, 'mt', { nowMs: NOW })
     expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h2'])
     expect(r.versions[1]!.startIso).toBe(editedV2) // mtime wins over the day-10 capture
     expect(r.delta!.editIso).toBe(editedV2)
@@ -156,7 +156,7 @@ describe('skillDrift', () => {
       { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'cl', body: 'v2', bodyHash: 'h2', editedAt: iso(2) }], count: 1 } }, // mtime AFTER capture
       capturedV2,
     )
-    const r = skillDrift(store, 'cl', NOW)
+    const r = skillDrift(store, 'cl', { nowMs: NOW })
     expect(r.versions[1]!.startIso).toBe(capturedV2) // implausible mtime rejected
   })
 
@@ -171,7 +171,7 @@ describe('skillDrift', () => {
       { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'touch', body: 'same', bodyHash: 'h1', editedAt: iso(5) }], count: 1 } }, // mtime moved, body identical
       iso(1),
     )
-    const r = skillDrift(store, 'touch', NOW)
+    const r = skillDrift(store, 'touch', { nowMs: NOW })
     expect(r.versions.length).toBe(1)
     expect(r.singleVersion).toBe(true)
   })
@@ -186,7 +186,7 @@ describe('skillDrift', () => {
       { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'desc', body: 'same body', bodyHash: 'h1', description: 'Review a diff AND suggest fixes' }], count: 1 } },
       iso(10),
     )
-    const r = skillDrift(store, 'desc', NOW)
+    const r = skillDrift(store, 'desc', { nowMs: NOW })
     expect(r.versions.length).toBe(2) // description change → new version
     // The displayed bodyHash stays the pure body hash (both versions share it).
     expect(r.versions.map((v) => v.bodyHash)).toEqual(['h1', 'h1'])
@@ -203,7 +203,7 @@ describe('skillDrift', () => {
       { source: SOURCE, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'meta', body: 'b', bodyHash: 'h1', description: 'Do a thing', version: '1.1' }], count: 1 } },
       iso(10),
     )
-    const r = skillDrift(store, 'meta', NOW)
+    const r = skillDrift(store, 'meta', { nowMs: NOW })
     expect(r.versions.length).toBe(1) // version-string bump is not a behavioral edit
   })
 
@@ -224,9 +224,45 @@ describe('skillDrift', () => {
     }
     mk('b0', 18); mk('b1', 16); mk('b2', 14); mk('b3', 12)
     mk('a0', 8)
-    const r = skillDrift(store, 'thin', NOW)
+    const r = skillDrift(store, 'thin', { nowMs: NOW })
     expect(r.delta).not.toBeNull()
     expect(r.delta!.after.calls).toBe(1)
     expect(r.delta!.enoughData).toBe(false) // after side below MIN_DRIFT_CALLS
+  })
+
+  it('keeps a same-named skill drift timeline separate per source (never cross-agent)', () => {
+    // 'edit' has a two-version history under claude-code but only a single version under
+    // codex. Each source's timeline must be read on its own — never merged into a phantom
+    // cross-agent edit history.
+    const snap = (source: string, hash: string, daysAgo: number) =>
+      store.recordEnvSnapshot(
+        { source, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'edit', body: 'b-' + hash, bodyHash: hash }], count: 1 } },
+        iso(daysAgo),
+      )
+    snap('claude-code', 'cc1', 30)
+    snap('claude-code', 'cc2', 15) // claude-code edited it once → two versions
+    snap('codex', 'cx1', 30)
+    snap('codex', 'cx1', 1) // codex never changed it → one version
+
+    const cc = skillDrift(store, 'edit', { nowMs: NOW, source: 'claude-code' })
+    const cx = skillDrift(store, 'edit', { nowMs: NOW, source: 'codex' })
+    expect(cc.versions.map((v) => v.bodyHash)).toEqual(['cc1', 'cc2'])
+    expect(cx.versions.map((v) => v.bodyHash)).toEqual(['cx1'])
+    expect(cx.singleVersion).toBe(true)
+  })
+
+  it("ignores an OpenCode kind:'command' entry when building a drift timeline", () => {
+    // A command sharing a name with nothing real must never spawn a version history.
+    store.recordEnvSnapshot(
+      { source: 'opencode', scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'deploy', body: 'v1', bodyHash: 'h1', kind: 'command' }], count: 1 } },
+      iso(20),
+    )
+    store.recordEnvSnapshot(
+      { source: 'opencode', scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills: [{ name: 'deploy', body: 'v2', bodyHash: 'h2', kind: 'command' }], count: 1 } },
+      iso(10),
+    )
+    const r = skillDrift(store, 'deploy', { nowMs: NOW, source: 'opencode' })
+    expect(r.noHistory).toBe(true) // the command is invisible to drift
+    expect(r.versions).toEqual([])
   })
 })

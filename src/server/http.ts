@@ -216,7 +216,7 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       sendJson(res, 400, { error: 'name required' })
       return
     }
-    sendJson(res, 200, skillDrift(store, name))
+    sendJson(res, 200, skillDrift(store, name, { source: url.searchParams.get('source') ?? undefined }))
     return
   }
   if (path === '/api/skill-cooccurrence') {
@@ -653,11 +653,12 @@ function windowFromDays(daysRaw: string | null): { from?: string; to?: string } 
 }
 
 // The Skills tab window from query params: `days` (number | 'all', default 30) or a
-// `from`+`to` ISO custom range that overrides it. Shape matches SkillHealthWindow.
-function skillWindowFrom(params: URLSearchParams): { days: number | null; from?: string; to?: string } {
+// `from`+`to` ISO custom range that overrides it, plus an optional `source` (which harness's
+// skills to report; absent → the read model picks the default). Shape matches SkillHealthWindow.
+function skillWindowFrom(params: URLSearchParams): { days: number | null; from?: string; to?: string; source?: string } {
   const daysRaw = params.get('days')
   const days = daysRaw === 'all' ? null : Number.isFinite(parseInt(daysRaw ?? '', 10)) ? parseInt(daysRaw!, 10) : 30
-  return { days, from: params.get('from') ?? undefined, to: params.get('to') ?? undefined }
+  return { days, from: params.get('from') ?? undefined, to: params.get('to') ?? undefined, source: params.get('source') ?? undefined }
 }
 
 // The dashboard SPA is built by tsup into dist/client (app.js + index.html +

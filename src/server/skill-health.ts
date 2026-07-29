@@ -27,8 +27,14 @@ import {
   type InstalledCap,
 } from '../detectors/unused-capabilities'
 
-/** The harness this reads: skill grammar + config layout are Claude-Code-specific (matches unused-capabilities). */
-const SOURCE = 'claude-code'
+/**
+ * The default harness when a caller doesn't name one. Every read here is now source-
+ * parameterized — all four adapters normalize skills into the same tool_calls(action='skill')
+ * + environment_snapshots(category='skills') shapes — but a single-agent user (only
+ * claude-code data) sees exactly the old behavior. `resolveSource` picks the concrete
+ * source per report; this is only the fallback when nothing else applies.
+ */
+const DEFAULT_SOURCE = 'claude-code'
 
 const DAY_MS = 86_400_000
 
@@ -42,8 +48,8 @@ const SKILL_CALL = `t.action = 'skill' AND t.is_sidechain = 0`
  * `capability_usage` view applies (see db.ts): strftime folds any stored offset to UTC
  * before we compare/min/max, so a future source storing offset timestamps can't produce
  * a wrong window boundary or a used/unused verdict that disagrees with the view. For
- * claude-code (the only SOURCE today) every ts is already `Z`, so this is a no-op now
- * and a guard later. Always used through `t` (join alias) — matches every query here.
+ * claude-code every ts is already `Z`, so this is a no-op there and a guard for any adapter
+ * that stores an offset. Always used through `t` (join alias) — matches every query here.
  */
 const TS_NORM = `strftime('%Y-%m-%dT%H:%M:%SZ', t.ts)`
 
@@ -56,6 +62,25 @@ const NAME_MATCH = `(t.name = ? OR t.name LIKE ?)`
 /** The bound values for one NAME_MATCH placeholder pair. */
 function nameParams(name: string): [string, string] {
   return [name, '%:' + name]
+}
+
+/**
+ * The real SKILL entries in a `skills`-category snapshot payload — excluding OpenCode's
+ * `kind: 'command'` rows. OpenCode folds user slash-commands into the same category; they
+ * have no tool-call invocation signal, so treating one as a skill would surface it as a
+ * dead/unregistered skill and build a phantom drift timeline for it. `parseInstalledSkills`
+ * already drops them for name extraction; every DIRECT payload read here (descriptions,
+ * drift body/mtime/version identity) must apply the same filter or the two disagree.
+ */
+function skillEntries(payload: unknown): Array<Record<string, unknown>> {
+  const skills = (payload as { skills?: unknown } | null)?.skills
+  if (!Array.isArray(skills)) return []
+  const out: Array<Record<string, unknown>> = []
+  for (const s of skills) {
+    const o = s as Record<string, unknown> | null
+    if (o && o.kind !== 'command') out.push(o)
+  }
+  return out
 }
 
 /** One trend bucket on the shared x-axis: its start (ms) and a human date label. */
@@ -186,9 +211,21 @@ export interface SkillHealthWindow {
   to?: string
   /** Evaluation "now" (ms). Defaults to Date.now(). */
   nowMs?: number
+  /**
+   * Which harness's skills to report. One report = one source (every denominator — active
+   * repos, session counts, the classify session population — is source-scoped, so mixing
+   * sources would compute cross-agent nonsense). Absent → `resolveSource` picks the source
+   * with the most in-window skill activity, so a single-agent user never sees a chooser.
+   */
+  source?: string
 }
 
 export interface SkillHealthReport {
+  /** The harness this report reflects (the resolved source — see resolveSource). */
+  source: string
+  /** Every source with skill data (invoked or installed), sorted. The client shows a source
+   *  chooser only when there's more than one — a single-agent user sees no extra UI. */
+  availableSources: string[]
   /** The window length in days, or null when all-time (UI shows "all time"). */
   windowDays: number | null
   /** Distinct repos with any session in the window — the denominator for "used in X of
@@ -210,22 +247,18 @@ export interface SkillHealthReport {
 }
 
 /** Load installed skills (with descriptions) from the current config snapshots. */
-function loadInstalledSkills(store: Store): InstalledSkill[] {
+function loadInstalledSkills(store: Store, source: string): InstalledSkill[] {
   const out: InstalledSkill[] = []
 
   const readOne = (scope: 'global' | 'project', scopeKey: string, repo?: string) => {
-    const snap = store.envSnapshotCurrent(SOURCE, scope, scopeKey, 'skills')
+    const snap = store.envSnapshotCurrent(source, scope, scopeKey, 'skills')
     if (!snap) return
     // parseInstalledSkills gives names; re-read the payload for descriptions so the
     // roster can show what each skill is (payload shape: { skills: [{name, description?}] }).
     const names = new Set(parseInstalledSkills(snap.payload))
     const descByName = new Map<string, string>()
-    const skills = (snap.payload as { skills?: unknown })?.skills
-    if (Array.isArray(skills)) {
-      for (const s of skills) {
-        const o = s as Record<string, unknown> | null
-        if (o && typeof o.name === 'string' && typeof o.description === 'string') descByName.set(o.name, o.description)
-      }
+    for (const o of skillEntries(snap.payload)) {
+      if (typeof o.name === 'string' && typeof o.description === 'string') descByName.set(o.name, o.description)
     }
     for (const name of names) out.push({ name, scope, repo, description: descByName.get(name) })
   }
@@ -235,7 +268,7 @@ function loadInstalledSkills(store: Store): InstalledSkill[] {
   const projectKeys = (
     store.queryAll(
       `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
-      SOURCE,
+      source,
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
   const { byRepo } = mapScopeKeysToRepos(projectKeys)
@@ -263,7 +296,7 @@ interface InvokedDetail {
  * long session that began before the window but invoked the skill inside it still
  * counts, and its calls land in the window they happened in.
  */
-function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): InvokedDetail[] {
+function queryInvokedDetail(store: Store, source: string, sinceIso: string, untilIso?: string): InvokedDetail[] {
   return store.queryAll(
     `SELECT t.name AS name,
             s.repo AS repo,
@@ -276,7 +309,7 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
      WHERE ${SKILL_CALL}
        AND s.source = ? AND ${IN_WINDOW}
      GROUP BY t.name, s.repo`,
-    SOURCE,
+    source,
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
@@ -289,13 +322,13 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
  * a real date range for the axis + tooltip. A ts is placed in the last bucket whose
  * startMs <= ts (buckets are contiguous and sorted).
  */
-function querySpark(store: Store, sinceIso: string, buckets: SparkBucket[], untilIso?: string): Map<string, number[]> {
+function querySpark(store: Store, source: string, sinceIso: string, buckets: SparkBucket[], untilIso?: string): Map<string, number[]> {
   const rows = store.queryAll(
     `SELECT t.name AS name, ${TS_NORM} AS ts
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE ${SKILL_CALL}
        AND s.source = ? AND ${IN_WINDOW} AND t.ts IS NOT NULL`,
-    SOURCE,
+    source,
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
@@ -326,11 +359,11 @@ function querySpark(store: Store, sinceIso: string, buckets: SparkBucket[], unti
  * facts by the same session population the detector does. Invocation FACTS date by t.ts;
  * the session POPULATION dates by started_at — the two clocks are intentional.
  */
-function loadSessionCounts(store: Store, sinceIso: string, untilIso?: string): Map<string, number> {
+function loadSessionCounts(store: Store, source: string, sinceIso: string, untilIso?: string): Map<string, number> {
   const rows = store.queryAll(
     `SELECT repo, COUNT(*) AS n FROM sessions
      WHERE source = ? AND started_at >= ? AND (? IS NULL OR started_at < ?) AND repo IS NOT NULL GROUP BY repo`,
-    SOURCE,
+    source,
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
@@ -342,13 +375,64 @@ function loadSessionCounts(store: Store, sinceIso: string, untilIso?: string): M
  * The earliest session start for this source, as ms — the natural lower bound for
  * the all-time window's sparkline span. Null when there are no sessions.
  */
-function earliestSessionMs(store: Store): number | null {
+function earliestSessionMs(store: Store, source: string): number | null {
   const row = store.queryOne(
     `SELECT MIN(started_at) AS earliest FROM sessions WHERE source = ?`,
-    SOURCE,
+    source,
   ) as { earliest: string | null } | undefined
   const t = row?.earliest ? Date.parse(row.earliest) : NaN
   return Number.isNaN(t) ? null : t
+}
+
+/**
+ * Every source with skill data — a source that either INVOKED a skill (tool_calls) or has
+ * a skills-category snapshot (installed inventory). Sorted, claude-code first when present
+ * (the historical default), else alphabetical. This is what the client offers as the source
+ * chooser; one entry → no chooser shown.
+ */
+function availableSkillSources(store: Store): string[] {
+  const rows = store.queryAll(
+    `SELECT DISTINCT source FROM (
+       SELECT DISTINCT s.source AS source
+         FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+        WHERE ${SKILL_CALL}
+       UNION
+       SELECT DISTINCT source FROM environment_snapshots WHERE category = 'skills'
+     )`,
+  ) as Array<{ source: string }>
+  return rows
+    .map((r) => r.source)
+    .sort((a, b) =>
+      a === DEFAULT_SOURCE ? -1 : b === DEFAULT_SOURCE ? 1 : a.localeCompare(b),
+    )
+}
+
+/**
+ * Pick the concrete source a report reflects. An explicit `requested` source wins (when it
+ * has data). Otherwise default to the source with the most skill INVOCATIONS across ALL time
+ * — the harness the user works in most. Deliberately NOT window-scoped: the default source
+ * stays put when the user changes the time filter (a window-scoped default would flip the
+ * whole tab as you scrub dates). Deterministic tie-break: most calls, then DEFAULT_SOURCE,
+ * then name. Falls back to DEFAULT_SOURCE when nothing has skill data.
+ */
+function resolveSource(store: Store, available: string[], requested: string | undefined): string {
+  if (requested && available.includes(requested)) return requested
+  if (available.length === 0) return DEFAULT_SOURCE
+  const counts = store.queryAll(
+    `SELECT s.source AS source, COUNT(*) AS calls
+       FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+      WHERE ${SKILL_CALL}
+      GROUP BY s.source`,
+  ) as Array<{ source: string; calls: number }>
+  const bySource = new Map(counts.map((r) => [r.source, r.calls]))
+  const ranked = [...available].sort((a, b) => {
+    const d = (bySource.get(b) ?? 0) - (bySource.get(a) ?? 0)
+    if (d !== 0) return d
+    if (a === DEFAULT_SOURCE) return -1
+    if (b === DEFAULT_SOURCE) return 1
+    return a.localeCompare(b)
+  })
+  return ranked[0]!
 }
 
 interface ResolvedWindow {
@@ -369,7 +453,7 @@ interface ResolvedWindow {
  * all-time we anchor the span at the earliest session (falling back to WINDOW_DAYS when
  * the store is empty) so the sparkline still covers the real data range.
  */
-function resolveWindow(store: Store, win: SkillHealthWindow): ResolvedWindow {
+function resolveWindow(store: Store, source: string, win: SkillHealthWindow): ResolvedWindow {
   const nowMs = win.nowMs ?? Date.now()
   // Custom range takes precedence when both bounds are valid dates.
   if (win.from && win.to) {
@@ -386,7 +470,7 @@ function resolveWindow(store: Store, win: SkillHealthWindow): ResolvedWindow {
     }
   }
   if (win.days === null) {
-    const earliest = earliestSessionMs(store)
+    const earliest = earliestSessionMs(store, source)
     const sinceMs = earliest ?? nowMs - WINDOW_DAYS * 86_400_000
     // Guard against a zero/negative span if the only session is "now".
     const spanMs = Math.max(nowMs - sinceMs, 86_400_000)
@@ -417,17 +501,22 @@ function resolveWindow(store: Store, win: SkillHealthWindow): ResolvedWindow {
  * removal (enough sessions to trust the absence) vs. suggest widening the window.
  */
 export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHealthReport {
-  const { sinceIso, untilIso, sinceMs, spanMs, windowDays } = resolveWindow(store, win)
+  // One report = one source: resolve it up front and thread it through every read, so all
+  // denominators (active repos, session counts, the classify population) stay coherent.
+  const availableSources = availableSkillSources(store)
+  const source = resolveSource(store, availableSources, win.source)
+
+  const { sinceIso, untilIso, sinceMs, spanMs, windowDays } = resolveWindow(store, source, win)
   const sparkBuckets = buildSparkBuckets(sinceMs, sinceMs + spanMs)
 
-  const installed = loadInstalledSkills(store)
-  const invokedDetail = queryInvokedDetail(store, sinceIso, untilIso)
-  const spark = querySpark(store, sinceIso, sparkBuckets, untilIso)
-  const sessionCounts = loadSessionCounts(store, sinceIso, untilIso)
+  const installed = loadInstalledSkills(store, source)
+  const invokedDetail = queryInvokedDetail(store, source, sinceIso, untilIso)
+  const spark = querySpark(store, source, sinceIso, sparkBuckets, untilIso)
+  const sessionCounts = loadSessionCounts(store, source, sinceIso, untilIso)
 
   // Reuse the detector's classify to get remove(=dead)/scope verdicts, skill-side only.
   const installedCaps: InstalledCap[] = installed.map((s) => ({ kind: 'skill', name: s.name, scope: s.scope, repo: s.repo }))
-  const invokedCaps = queryInvoked(store, sinceIso, SOURCE, untilIso).filter((c) => c.kind === 'skill')
+  const invokedCaps = queryInvoked(store, sinceIso, source, untilIso).filter((c) => c.kind === 'skill')
   const classified = classify(installedCaps, invokedCaps, sessionCounts)
   // Verdict + scope targets per installed skill name (a name can be classified once per install entry;
   // keep the strongest signal: scope target if any, else remove).
@@ -566,6 +655,8 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   const activeRepos = new Set(sessionCounts.keys())
   for (const iv of invokedDetail) if (iv.repo) activeRepos.add(iv.repo)
   return {
+    source,
+    availableSources,
     windowDays,
     totalActiveRepos: activeRepos.size,
     totalInstalled: rows.filter((r) => r.installed).length,
@@ -611,7 +702,8 @@ const MAX_INVOCATIONS = 100
  * Main-thread only, matching the roster's counts. Capped at MAX_INVOCATIONS.
  */
 export function skillInvocations(store: Store, name: string, win: SkillHealthWindow = {}): SkillInvocation[] {
-  const { sinceIso, untilIso } = resolveWindow(store, win)
+  const source = resolveSource(store, availableSkillSources(store), win.source)
+  const { sinceIso, untilIso } = resolveWindow(store, source, win)
   const title = `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='title'), NULLIF(s.title, ''), NULLIF(s.first_prompt, ''))`
   const rows = store.queryAll(
     `SELECT t.session_id AS sessionId, ${title} AS title, t.idx AS idx, s.repo AS repo,
@@ -623,7 +715,7 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
      ORDER BY ts DESC, t.idx ASC
      LIMIT ?`,
     ...nameParams(name), // exact + plugin-namespaced (<plugin>:<name>)
-    SOURCE,
+    source,
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
@@ -677,8 +769,11 @@ export interface SkillCoOccurrenceReport {
  * idx to give a light ordering signal. Main-thread only, matching the roster's counts.
  */
 export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWindow = {}): SkillCoOccurrenceReport {
-  const { sinceIso, untilIso } = resolveWindow(store, win)
-  // Sessions this skill ran in, plus the earliest idx it fired at (for ordering).
+  const source = resolveSource(store, availableSkillSources(store), win.source)
+  const { sinceIso, untilIso } = resolveWindow(store, source, win)
+  // Sessions this skill ran in, plus the earliest idx it fired at (for ordering). The
+  // OTHER-skills query below is scoped implicitly — it reads only these session ids, which
+  // are already this source's — so it needs no source filter of its own.
   const own = store.queryAll(
     `SELECT t.session_id AS sid, MIN(t.idx) AS firstIdx
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
@@ -687,7 +782,7 @@ export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWi
        AND s.source = ? AND ${IN_WINDOW}
      GROUP BY t.session_id`,
     ...nameParams(name),
-    SOURCE,
+    source,
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
@@ -785,7 +880,8 @@ export interface SkillOutcomeStats {
  * exists for the skill (a skill with only insufficient-context firings shows nothing).
  */
 export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWindow = {}): SkillOutcomeStats | null {
-  const { sinceIso, untilIso } = resolveWindow(store, win)
+  const source = resolveSource(store, availableSkillSources(store), win.source)
+  const { sinceIso, untilIso } = resolveWindow(store, source, win)
   const rows = store.queryAll(
     `SELECT json_extract(j.value, '$.name') AS vname,
             json_extract(j.value, '$.outcome') AS outcome,
@@ -798,7 +894,7 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
      WHERE a.key = 'skill_outcomes'
        AND s.source = ? AND ${IN_WINDOW}
      ORDER BY ${TS_NORM} DESC`,
-    SOURCE,
+    source,
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
@@ -916,22 +1012,14 @@ export interface SkillDriftReport {
 
 /** Read a skill entry's file mtime (`editedAt`, ISO) from a snapshot payload, or null. */
 function editedAtOf(payload: unknown, name: string): string | null {
-  const skills = (payload as { skills?: unknown } | null)?.skills
-  if (!Array.isArray(skills)) return null
-  for (const s of skills) {
-    const o = s as Record<string, unknown> | null
-    if (o && o.name === name && typeof o.editedAt === 'string') return o.editedAt
-  }
-  return null
+  const o = skillEntry(payload, name)
+  return o && typeof o.editedAt === 'string' ? o.editedAt : null
 }
 
-/** Locate the skill entry named `name` in a skills-category snapshot payload, or null. */
+/** Locate the real skill entry named `name` in a skills-category payload (commands excluded), or null. */
 function skillEntry(payload: unknown, name: string): Record<string, unknown> | null {
-  const skills = (payload as { skills?: unknown } | null)?.skills
-  if (!Array.isArray(skills)) return null
-  for (const s of skills) {
-    const o = s as Record<string, unknown> | null
-    if (o && o.name === name) return o
+  for (const o of skillEntries(payload)) {
+    if (o.name === name) return o
   }
   return null
 }
@@ -974,9 +1062,9 @@ interface DriftScope {
  * are never merged. A project skill is judged in its busiest repo; a global skill (one
  * shared body) uses the global timeline. Null when no snapshot mentions the skill.
  */
-function resolveDriftScope(store: Store, name: string): DriftScope | null {
+function resolveDriftScope(store: Store, source: string, name: string): DriftScope | null {
   const hasName = (scope: 'global' | 'project', scopeKey: string): boolean =>
-    store.envSnapshotHistory(SOURCE, scope, scopeKey, 'skills').some((r) => bodyHashOf(r.payload, name) !== null)
+    store.envSnapshotHistory(source, scope, scopeKey, 'skills').some((r) => bodyHashOf(r.payload, name) !== null)
 
   // Project scopes ranked by usage, so a project skill is judged in its busiest repo.
   const usedRepos = store.queryAll(
@@ -986,12 +1074,12 @@ function resolveDriftScope(store: Store, name: string): DriftScope | null {
         AND s.source = ? AND s.repo IS NOT NULL
       GROUP BY s.repo ORDER BY calls DESC, s.repo`,
     ...nameParams(name),
-    SOURCE,
+    source,
   ) as Array<{ repo: string; calls: number }>
   const projectKeys = (
     store.queryAll(
       `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
-      SOURCE,
+      source,
     ) as Array<{ scope_key: string }>
   ).map((r) => r.scope_key)
   const { byRepo } = mapScopeKeysToRepos(projectKeys)
@@ -1010,7 +1098,7 @@ function resolveDriftScope(store: Store, name: string): DriftScope | null {
 
 /** Usage facts for one skill in [sinceIso, untilIso) — reused for versions + delta sides.
  *  `repo` scopes a project skill to match its version timeline; null (global) counts cross-repo. */
-function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: string, repo: string | null): SkillVersionUsage {
+function usageInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, repo: string | null): SkillVersionUsage {
   const row = store.queryOne(
     `SELECT COUNT(*) AS calls,
             COUNT(DISTINCT t.session_id) AS sessions,
@@ -1020,7 +1108,7 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
        AND ${NAME_MATCH}
        AND s.source = ? AND (? IS NULL OR s.repo = ?) AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
     ...nameParams(name),
-    SOURCE,
+    source,
     repo,
     repo,
     sinceIso,
@@ -1038,12 +1126,17 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
  * usage over its own lifetime) plus a before/after delta around the most recent edit,
  * on symmetric, edit-bounded, capped windows so no window straddles two versions.
  */
-export function skillDrift(store: Store, name: string, nowMs: number = Date.now()): SkillDriftReport {
+export function skillDrift(store: Store, name: string, opts: { nowMs?: number; source?: string } = {}): SkillDriftReport {
+  const nowMs = opts.nowMs ?? Date.now()
+  // Drift is edit-anchored, not windowed. An explicit source (from the roster's resolved
+  // choice) wins; else default to the source with the most skill activity (resolveSource is
+  // all-time by design, which is exactly right here).
+  const source = resolveSource(store, availableSkillSources(store), opts.source)
   // Resolve the ONE install location this timeline reflects — versions AND usage both
   // come from it, so the same name in two repos never merges into a phantom timeline.
-  const loc = resolveDriftScope(store, name)
+  const loc = resolveDriftScope(store, source, name)
   if (!loc) return { name, repo: null, versions: [], delta: null, singleVersion: false, noHistory: true }
-  const hist = store.envSnapshotHistory(SOURCE, loc.scope, loc.scopeKey, 'skills')
+  const hist = store.envSnapshotHistory(source, loc.scope, loc.scopeKey, 'skills')
   if (hist.length === 0) return { name, repo: loc.repo, versions: [], delta: null, singleVersion: false, noHistory: true }
 
   // Collapse consecutive same-hash snapshots into version segments. A run of rows with
@@ -1076,7 +1169,7 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
   const versions: SkillVersion[] = segments.map((seg, i) => {
     const next = segments[i + 1]
     const endIso = next ? next.startIso : null
-    const usage = usageInWindow(store, name, seg.startIso, endIso ?? nowIso, loc.repo)
+    const usage = usageInWindow(store, source, name, seg.startIso, endIso ?? nowIso, loc.repo)
     return {
       bodyHash: seg.bodyHash,
       startIso: seg.startIso,
@@ -1100,8 +1193,8 @@ export function skillDrift(store: Store, name: string, nowMs: number = Date.now(
     const halfMs = Math.min(prevLifeMs, thisLifeMs, DRIFT_MAX_HALF_DAYS * DAY_MS)
     const beforeSinceIso = new Date(editMs - halfMs).toISOString()
     const afterUntilIso = new Date(editMs + halfMs).toISOString()
-    const before = usageInWindow(store, name, beforeSinceIso, editIso, loc.repo)
-    const after = usageInWindow(store, name, editIso, afterUntilIso, loc.repo)
+    const before = usageInWindow(store, source, name, beforeSinceIso, editIso, loc.repo)
+    const after = usageInWindow(store, source, name, editIso, afterUntilIso, loc.repo)
     delta = {
       editIso,
       windowDays: Math.max(1, Math.round(halfMs / DAY_MS)),
