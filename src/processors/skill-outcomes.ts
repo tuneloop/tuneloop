@@ -77,7 +77,8 @@ export const skillOutcomes: Processor = {
   //    never truncated. Bump re-runs the LLM.
   version: 5,
   kind: 'enrichment',
-  needs: { heavyLlm: true },
+  needs: { llm: true },
+  model: 'heavy',
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
     const { llm, session } = ctx
     if (!llm) return {}

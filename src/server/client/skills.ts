@@ -51,6 +51,22 @@ function skWinQuery() {
   return 'days=' + encodeURIComponent(state.skillWin === 'all' ? 'all' : String(state.skillWin));
 }
 
+// The human window phrase for a subtitle/caption. `windowDays` is the report's echo:
+// null = all-time, -1 = a custom from/to range (show the dates, per resolveWindow's
+// sentinel), else the preset day count. `presetPrefix` leads the preset/custom form
+// ("in the last "/"over the last "); `allTime` is the standalone all-time phrase.
+function winPhrase(presetPrefix, allTime) {
+  var wd = skReport && skReport.windowDays;
+  if (wd == null) return allTime;
+  if (wd < 0) {
+    // Custom range: the day count is a sentinel, so show the actual dates instead — a
+    // self-contained phrase, since "in the last 2026-01-01 → …" doesn't read.
+    if (state.skillFrom && state.skillTo) return 'from ' + state.skillFrom + ' to ' + state.skillTo;
+    return 'over a custom range';
+  }
+  return presetPrefix + num(wd) + (wd === 1 ? ' day' : ' days');
+}
+
 // A signature that changes whenever the fetched data would differ — the cache key.
 function skWinKey() {
   return state.skillWin === 'custom' ? 'custom:' + state.skillFrom + ':' + state.skillTo : String(state.skillWin);
@@ -316,7 +332,7 @@ function paintSkillPage(box, r) {
   else html += '<div class="sk-desc sk-desc-none">No description in SKILL.md frontmatter.</div>';
 
   // Headline metrics as full-size stat tiles (matches the product's KPI tiles).
-  var winSub = skReport.windowDays == null ? 'over all time' : 'in the last ' + num(skReport.windowDays) + ' days';
+  var winSub = winPhrase('in the last ', 'over all time');
   html += '<div class="sk-page-tiles">' +
     pageTile(num(r.calls), 'Invocations', winSub) +
     pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
@@ -330,7 +346,7 @@ function paintSkillPage(box, r) {
       '<div class="sk-sect-h">Usage trend</div>' +
       '<div class="sk-trend" id="sk-trend">' + trendChart(r.spark, skReport.sparkBuckets) + '</div>' +
       '<div class="sk-sect-note">Invocations per ' + trendGranLabel(skReport.sparkBuckets) + ', ' +
-        (skReport.windowDays == null ? 'across your full history' : 'over the last ' + num(skReport.windowDays) + ' days') + '. Hover a bar for its exact count.</div>' +
+        winPhrase('over the last ', 'across your full history') + '. Hover a bar for its exact count.</div>' +
       '</div>';
   }
 

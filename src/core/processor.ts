@@ -142,15 +142,18 @@ export interface Processor {
   version: number
   kind: ProcessorKind
   /**
-   * Gates + tiers execution. `llm`/`heavyLlm` both skip when no provider is configured;
-   * `heavyLlm` additionally routes this processor to the strong model instead of the cheap
-   * per-session one — for the rare enrichment where judgement quality matters more than the
-   * per-session cost. It is the processor-side mirror of a detector's `model: 'heavy'` (see
-   * Detector.model / detector-runner clientFor): same opt-in + `heavyLlm ?? llm` fallback,
-   * expressed through the `needs` object processors already use for gating. `network` gates
-   * on connectivity.
+   * Gates execution. `llm` skips this processor when no LLM provider is configured;
+   * `network` gates on connectivity. (Which MODEL an LLM processor runs on is a separate
+   * axis — see `model` below — exactly as detectors split `needsLlm` from `model`.)
    */
-  needs?: { llm?: boolean; heavyLlm?: boolean; network?: boolean }
+  needs?: { llm?: boolean; network?: boolean }
+  /**
+   * Which model tier an LLM processor's calls run on:
+   *  - 'default' (implied when omitted) — the cheap per-session model, right for most.
+   *  - 'heavy' — the strong model (--llm-model-heavy / TUNELOOP_LLM_MODEL_HEAVY), for the
+   *    rare enrichment where judgement quality beats per-session cost
+   */
+  model?: 'default' | 'heavy'
   /** Names of processors that must run first (topo-sorted). */
   requires?: string[]
   /** Facets this processor contributes to the dashboard registry. */

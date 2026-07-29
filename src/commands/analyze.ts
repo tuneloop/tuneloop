@@ -292,7 +292,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     let anyMiss = false
     for (const p of ordered) {
       if (p.needs?.llm && !llmEnabled) continue
-      const model = p.needs?.llm ? llmModel : null
+      // Mirror runProcessors' cache key exactly: a heavy-tier processor keys on the heavy
+      // model, else it'd read as a permanent miss here (and mis-count the work total).
+      const model = p.needs?.llm ? (p.model === 'heavy' ? heavyLlm?.model ?? null : llmModel) : null
       const cached = store.processorRun(session.id, p.name)
       if (!cached || cached.version !== p.version || cached.inputHash !== inputHash || cached.model !== model) {
         anyMiss = true

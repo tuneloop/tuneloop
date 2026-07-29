@@ -32,6 +32,32 @@ const SOURCE = 'claude-code'
 
 const DAY_MS = 86_400_000
 
+// ---- Shared SQL fragments -------------------------------------------------
+
+/** A main-thread skill invocation (the roster's unit; excludes subagent replays). */
+const SKILL_CALL = `t.action = 'skill' AND t.is_sidechain = 0`
+
+/**
+ * The tool-run timestamp, normalized to UTC `Z` — the SAME normalization the shared
+ * `capability_usage` view applies (see db.ts): strftime folds any stored offset to UTC
+ * before we compare/min/max, so a future source storing offset timestamps can't produce
+ * a wrong window boundary or a used/unused verdict that disagrees with the view. For
+ * claude-code (the only SOURCE today) every ts is already `Z`, so this is a no-op now
+ * and a guard later. Always used through `t` (join alias) — matches every query here.
+ */
+const TS_NORM = `strftime('%Y-%m-%dT%H:%M:%SZ', t.ts)`
+
+/** The half-open tool-run window `[since, until)`; `until` NULL → open-ended (presets). Params: since, until, until. */
+const IN_WINDOW = `${TS_NORM} >= ? AND (? IS NULL OR ${TS_NORM} < ?)`
+
+/** Match a skill by its installed name OR a plugin-namespaced `<plugin>:<name>`. Params: name, '%:'+name. */
+const NAME_MATCH = `(t.name = ? OR t.name LIKE ?)`
+
+/** The bound values for one NAME_MATCH placeholder pair. */
+function nameParams(name: string): [string, string] {
+  return [name, '%:' + name]
+}
+
 /** One trend bucket on the shared x-axis: its start (ms) and a human date label. */
 export interface SparkBucket {
   startMs: number
@@ -244,11 +270,11 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
             COUNT(DISTINCT t.session_id) AS sessions,
             COUNT(*) AS calls,
             SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls,
-            MIN(t.ts) AS firstUsedAt,
-            MAX(t.ts) AS lastUsedAt
+            MIN(${TS_NORM}) AS firstUsedAt,
+            MAX(${TS_NORM}) AS lastUsedAt
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
+     WHERE ${SKILL_CALL}
+       AND s.source = ? AND ${IN_WINDOW}
      GROUP BY t.name, s.repo`,
     SOURCE,
     sinceIso,
@@ -265,10 +291,10 @@ function queryInvokedDetail(store: Store, sinceIso: string, untilIso?: string): 
  */
 function querySpark(store: Store, sinceIso: string, buckets: SparkBucket[], untilIso?: string): Map<string, number[]> {
   const rows = store.queryAll(
-    `SELECT t.name AS name, t.ts AS ts
+    `SELECT t.name AS name, ${TS_NORM} AS ts
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?) AND t.ts IS NOT NULL`,
+     WHERE ${SKILL_CALL}
+       AND s.source = ? AND ${IN_WINDOW} AND t.ts IS NOT NULL`,
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -415,6 +441,11 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   // Fold invocation detail per skill NAME (summing across repos), matching installed names
   // via skillMatches (plugin-namespaced invocations reconcile to their installed entry).
   const rowsByName = new Map<string, SkillHealthRow>()
+  // The raw invoked names that reconcile to each row (a plugin skill invoked as
+  // `<plugin>:<name>` folds onto its installed `<name>` row). The sparkline is summed
+  // from these AFTER the fold, so a namespaced-only invocation still charts its trend
+  // instead of showing a flat baseline (the spark map is keyed by raw name).
+  const rawNamesByRow = new Map<string, Set<string>>()
   const ensureRow = (name: string, inst?: InstalledSkill): SkillHealthRow => {
     let row = rowsByName.get(name)
     if (!row) {
@@ -431,7 +462,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         perRepo: [],
         firstUsedAt: null,
         lastUsedAt: null,
-        spark: spark.get(name) ?? new Array(sparkBuckets.length).fill(0),
+        spark: new Array(sparkBuckets.length).fill(0),
         status: 'unused',
         enoughData: false,
         flags: [],
@@ -458,6 +489,11 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     const match = installed.find((s) => skillMatches(s.name, iv.name))
     const rowName = match ? match.name : iv.name
     const row = ensureRow(rowName, match)
+    // Remember the RAW invoked name so its sparkline (keyed by raw name) folds onto this
+    // row below — installed name != invoked name for plugin-namespaced skills.
+    let rawNames = rawNamesByRow.get(rowName)
+    if (!rawNames) rawNamesByRow.set(rowName, (rawNames = new Set()))
+    rawNames.add(iv.name)
     row.sessions += iv.sessions
     row.calls += iv.calls
     row.errorCalls += iv.errorCalls
@@ -475,8 +511,20 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     if (iv.repo) row.usedRepos.push(iv.repo)
     row.firstUsedAt = minIso(row.firstUsedAt, iv.firstUsedAt)
     row.lastUsedAt = maxIso(row.lastUsedAt, iv.lastUsedAt)
-    // An unregistered invocation carries its own spark under its raw name; fold it in.
-    if (!match && row.spark.every((n) => n === 0)) row.spark = spark.get(iv.name) ?? row.spark
+  }
+
+  // Fold each row's sparkline from every raw invoked name that reconciled to it. The spark
+  // map is keyed by RAW name, so summing here (after the fold) charts a plugin-namespaced
+  // skill's trend on its installed-name row — a namespaced-only skill no longer flatlines.
+  // Bucket totals sum across all raw names for the row (dedup is by name, not by call).
+  for (const [rowName, rawNames] of rawNamesByRow) {
+    const row = rowsByName.get(rowName)
+    if (!row) continue
+    for (const raw of rawNames) {
+      const arr = spark.get(raw)
+      if (!arr) continue
+      for (let i = 0; i < row.spark.length; i++) row.spark[i]! += arr[i] ?? 0
+    }
   }
 
   // Assign the status axis + refinement flags (orthogonal — a used skill can still
@@ -510,9 +558,16 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
 
   const rows = [...rowsByName.values()].sort(rankRows)
   const has = (r: SkillHealthRow, f: 'scope-down' | 'not-in-config') => r.flags.indexOf(f) >= 0
+  // The "used in N of M repos" denominator. Sessions window by started_at while skill usage
+  // windows by tool-run time (two intentional clocks), so a session that STARTED before the
+  // window but INVOKED a skill inside it would otherwise land in the numerator (usedRepos)
+  // yet be absent from the denominator — yielding N > M. Union the two so M is always a true
+  // superset of every repo any row was used in.
+  const activeRepos = new Set(sessionCounts.keys())
+  for (const iv of invokedDetail) if (iv.repo) activeRepos.add(iv.repo)
   return {
     windowDays,
-    totalActiveRepos: sessionCounts.size,
+    totalActiveRepos: activeRepos.size,
     totalInstalled: rows.filter((r) => r.installed).length,
     totalUsed: rows.filter((r) => r.status === 'used').length,
     totalUnused: rows.filter((r) => r.status === 'unused').length,
@@ -560,15 +615,14 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
   const title = `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='title'), NULLIF(s.title, ''), NULLIF(s.first_prompt, ''))`
   const rows = store.queryAll(
     `SELECT t.session_id AS sessionId, ${title} AS title, t.idx AS idx, s.repo AS repo,
-            t.ts AS ts, t.is_error AS isError
+            ${TS_NORM} AS ts, t.is_error AS isError
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
-     ORDER BY t.ts DESC, t.idx ASC
+     WHERE ${SKILL_CALL}
+       AND ${NAME_MATCH}
+       AND s.source = ? AND ${IN_WINDOW}
+     ORDER BY ts DESC, t.idx ASC
      LIMIT ?`,
-    name,
-    '%:' + name, // plugin-namespaced form (<plugin>:<name>)
+    ...nameParams(name), // exact + plugin-namespaced (<plugin>:<name>)
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -593,6 +647,9 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
 // reported as a light "leads to" PATTERN, never a dependency claim.
 
 const MAX_COOCCUR = 20
+
+/** Max session ids bound into one `IN (...)` — well under SQLite's ~32k parameter cap. */
+const ID_CHUNK = 500
 
 /** One co-occurring skill: how many of THIS skill's sessions it also appears in. */
 export interface SkillCoOccurrence {
@@ -625,12 +682,11 @@ export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWi
   const own = store.queryAll(
     `SELECT t.session_id AS sid, MIN(t.idx) AS firstIdx
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
+     WHERE ${SKILL_CALL}
+       AND ${NAME_MATCH}
+       AND s.source = ? AND ${IN_WINDOW}
      GROUP BY t.session_id`,
-    name,
-    '%:' + name,
+    ...nameParams(name),
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -643,14 +699,23 @@ export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWi
   const sids = own.map((o) => o.sid)
 
   // Every skill call in those sessions (so we can bucket the OTHER skills per session).
-  const placeholders = sids.map(() => '?').join(',')
-  const others = store.queryAll(
-    `SELECT t.session_id AS sid, t.name AS name, MIN(t.idx) AS firstIdx
-     FROM tool_calls t
-     WHERE t.action = 'skill' AND t.is_sidechain = 0 AND t.session_id IN (${placeholders})
-     GROUP BY t.session_id, t.name`,
-    ...sids,
-  ) as Array<{ sid: string; name: string; firstIdx: number }>
+  // Chunk the id list: `IN (...)` binds one host parameter per session, and SQLite caps
+  // parameters (~32k), so a skill invoked across very many sessions would otherwise throw.
+  // Chunking keeps the query exact (no cap on results), just split across statements.
+  const others: Array<{ sid: string; name: string; firstIdx: number }> = []
+  for (let i = 0; i < sids.length; i += ID_CHUNK) {
+    const chunk = sids.slice(i, i + ID_CHUNK)
+    const placeholders = chunk.map(() => '?').join(',')
+    others.push(
+      ...(store.queryAll(
+        `SELECT t.session_id AS sid, t.name AS name, MIN(t.idx) AS firstIdx
+         FROM tool_calls t
+         WHERE ${SKILL_CALL} AND t.session_id IN (${placeholders})
+         GROUP BY t.session_id, t.name`,
+        ...chunk,
+      ) as Array<{ sid: string; name: string; firstIdx: number }>),
+    )
+  }
 
   // Fold per other-skill: count co-sessions + how often it preceded this skill.
   const agg = new Map<string, { sessions: number; preceded: number }>()
@@ -731,8 +796,8 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
      JOIN json_each(a.value) j
      JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
      WHERE a.key = 'skill_outcomes'
-       AND s.source = ? AND t.ts >= ? AND (? IS NULL OR t.ts < ?)
-     ORDER BY t.ts DESC`,
+       AND s.source = ? AND ${IN_WINDOW}
+     ORDER BY ${TS_NORM} DESC`,
     SOURCE,
     sinceIso,
     untilIso ?? null,
@@ -917,11 +982,10 @@ function resolveDriftScope(store: Store, name: string): DriftScope | null {
   const usedRepos = store.queryAll(
     `SELECT s.repo AS repo, COUNT(*) AS calls
        FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-      WHERE t.action = 'skill' AND t.is_sidechain = 0 AND (t.name = ? OR t.name LIKE ?)
+      WHERE ${SKILL_CALL} AND ${NAME_MATCH}
         AND s.source = ? AND s.repo IS NOT NULL
       GROUP BY s.repo ORDER BY calls DESC, s.repo`,
-    name,
-    '%:' + name,
+    ...nameParams(name),
     SOURCE,
   ) as Array<{ repo: string; calls: number }>
   const projectKeys = (
@@ -952,11 +1016,10 @@ function usageInWindow(store: Store, name: string, sinceIso: string, untilIso: s
             COUNT(DISTINCT t.session_id) AS sessions,
             SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE t.action = 'skill' AND t.is_sidechain = 0
-       AND (t.name = ? OR t.name LIKE ?)
-       AND s.source = ? AND (? IS NULL OR s.repo = ?) AND t.ts >= ? AND t.ts < ?`,
-    name,
-    '%:' + name,
+     WHERE ${SKILL_CALL}
+       AND ${NAME_MATCH}
+       AND s.source = ? AND (? IS NULL OR s.repo = ?) AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
+    ...nameParams(name),
     SOURCE,
     repo,
     repo,

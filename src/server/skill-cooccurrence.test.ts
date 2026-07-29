@@ -74,6 +74,28 @@ describe('skillCoOccurrence', () => {
     expect(r.items.some((i) => i.name === 'plug:helper')).toBe(false)
   })
 
+  it('handles a skill used across more sessions than the IN(...) chunk size', () => {
+    // Regression: the OTHER-skills query binds one host parameter per session, and SQLite
+    // caps parameters (~32k), so a skill run in very many sessions would throw. The id list
+    // is chunked; correctness must hold across the boundary (600 > the 500 chunk size).
+    const N = 600
+    const insSession = db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, 'r', ?, 1, 2)`)
+    const insCall = db.prepare(`INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts) VALUES (?, ?, ?, 'skill', 1, 0, 0, ?)`)
+    const seed = db.transaction(() => {
+      for (let i = 0; i < N; i++) {
+        const id = `m${i}`
+        insSession.run(id, id, SOURCE, iso(3))
+        insCall.run(id, 0, 'review', iso(3))
+        insCall.run(id, 1, 'helper', iso(3))
+      }
+    })
+    seed()
+    const r = skillCoOccurrence(store, 'review', { days: 30, nowMs: NOW })
+    expect(r.totalSessions).toBe(N)
+    const helper = r.items.find((i) => i.name === 'helper')!
+    expect(helper.sessions).toBe(N) // every session's co-occurrence counted, no chunk lost
+  })
+
   it('reports the ordering signal when another skill fires first', () => {
     const mk = (id: string, daysAgo: number, calls: string[]) => {
       db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES (?, ?, ?, 'r', ?, 1, ?)`).run(id, id, SOURCE, iso(daysAgo), calls.length)

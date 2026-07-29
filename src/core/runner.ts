@@ -36,7 +36,7 @@ export interface RunOptions {
   llmModel: string | null
   llm: LlmClient | null
   /** The strong (detector-tier) client + model, for processors that opt in via
-   *  `needs.heavyLlm`. Defaults to the light client when no distinct heavy tier is set. */
+   *  `model: 'heavy'`. Defaults to the light client when no distinct heavy tier is set. */
   heavyLlm?: LlmClient | null
   heavyLlmModel?: string | null
   sh: ProcessorContext['sh']
@@ -73,13 +73,12 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   let costUsd = 0
 
   for (const p of orderProcessors(opts.processors)) {
-    const wantsLlm = p.needs?.llm || p.needs?.heavyLlm
-    if (wantsLlm && !llmEnabled) continue
-    // A heavyLlm processor runs on the strong client + is cache-keyed by its model, so a
-    // tier switch correctly re-runs. Non-LLM processors key on null (model-independent).
-    const heavy = !!p.needs?.heavyLlm
+    if (p.needs?.llm && !llmEnabled) continue
+    // A `model: 'heavy'` processor runs on the strong client + is cache-keyed by its model,
+    // so a tier switch correctly re-runs. Non-LLM processors key on null (model-independent).
+    const heavy = p.model === 'heavy'
     ctx.llm = heavy ? heavyLlm : llm
-    const model = wantsLlm ? (heavy ? heavyLlmModel : llmModel) : null
+    const model = p.needs?.llm ? (heavy ? heavyLlmModel : llmModel) : null
 
     // Re-read block attributions fresh so enrich-session sees blocks that
     // outcomes-git persisted earlier in this same loop. Without this, the

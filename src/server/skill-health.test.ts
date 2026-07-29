@@ -157,6 +157,68 @@ describe('skillHealth', () => {
     expect(all.rows.find((x) => x.name === 'usedskill')!.calls).toBe(1)
   })
 
+  it('echoes windowDays=-1 for a custom from/to range (the client renders the dates)', () => {
+    // The sentinel the client keys on: -1 means "custom range — show the dates, not N days"
+    // (fixing the old "in the last -1 days" copy). Pin the contract the client fix relies on.
+    seedInstalledGlobal(store, [{ name: 'usedskill' }])
+    const r = skillHealth(store, { from: iso(14), to: iso(0), nowMs: NOW })
+    expect(r.windowDays).toBe(-1)
+  })
+
+  it('charts a plugin-namespaced skill on its installed-name sparkline', () => {
+    // Regression: the spark map is keyed by the RAW invoked name, but the row keys by the
+    // INSTALLED name. A namespaced-only skill (frontend-design:frontend-design) must still
+    // sum its trend onto its installed `frontend-design` row, not flatline at zero.
+    seedInstalledGlobal(store, [{ name: 'frontend-design' }])
+    seedSession('a', 'repoA', 3, [{ name: 'frontend-design:frontend-design', action: 'skill' }])
+    seedSession('b', 'repoA', 2, [{ name: 'frontend-design:frontend-design', action: 'skill' }])
+    const row = skillHealth(store, { nowMs: NOW }).rows.find((x) => x.name === 'frontend-design')!
+    expect(row.calls).toBe(2)
+    // The sparkline must account for every call — its buckets sum to the call count.
+    expect(row.spark.reduce((a, b) => a + b, 0)).toBe(2)
+  })
+
+  it('never reports usage in more repos than are active (denominator is a superset)', () => {
+    // Regression: usage windows by tool-run time while the active-repo denominator windowed
+    // by started_at, so a session that STARTED before the window but INVOKED the skill inside
+    // it counted in usedRepos yet was absent from totalActiveRepos → "used in 1 of 0 repos".
+    seedInstalledGlobal(store, [{ name: 'usedskill' }])
+    db.prepare(
+      `INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls)
+       VALUES ('straddle', 'straddle', ?, 'lonelyrepo', ?, 1, 1)`,
+    ).run(SOURCE, iso(40)) // started outside the 30d window
+    db.prepare(
+      `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts)
+       VALUES ('straddle', 0, 'usedskill', 'skill', 1, 0, 0, ?)`,
+    ).run(iso(2)) // but invoked inside it
+    const r = skillHealth(store, { days: 30, nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'usedskill')!
+    // The repo it was used in is in the active-repo denominator, so N ≤ M holds.
+    expect(row.usedRepos).toContain('lonelyrepo')
+    expect(r.totalActiveRepos).toBeGreaterThanOrEqual(row.usedRepos.length)
+  })
+
+  it('normalizes non-Z (offset) timestamps so windowing matches the capability_usage view', () => {
+    // Regression: direct reads compared t.ts lexicographically against Z-normalized bounds.
+    // An offset ts sorts wrong as a raw string ('2026-…T05:30:00+05:30' > a Z bound of the
+    // SAME instant), so it could be windowed on the wrong side. strftime folds the offset to
+    // UTC before comparing. Here the same 2-days-ago instant is written as +05:30 wall time.
+    seedInstalledGlobal(store, [{ name: 'offsetskill' }])
+    const instantMs = NOW - 2 * 86_400_000
+    const local = new Date(instantMs + 5.5 * 3_600_000).toISOString() // shift wall clock +5:30
+    const offsetTs = local.replace('Z', '+05:30') // same instant, expressed in +05:30
+    db.prepare(`INSERT INTO sessions (id, session_id, source, repo, started_at, n_turns, n_tool_calls) VALUES ('o', 'o', ?, 'r', ?, 1, 1)`).run(SOURCE, iso(2))
+    db.prepare(
+      `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts)
+       VALUES ('o', 0, 'offsetskill', 'skill', 1, 0, 0, ?)`,
+    ).run(offsetTs)
+    const row = skillHealth(store, { days: 30, nowMs: NOW }).rows.find((x) => x.name === 'offsetskill')!
+    expect(row.calls).toBe(1) // counted in-window despite the offset format
+    // firstUsedAt/lastUsedAt come back Z-normalized (the view's contract), not the raw offset.
+    expect(row.lastUsedAt).toMatch(/Z$/)
+    expect(row.lastUsedAt).not.toContain('+05:30')
+  })
+
   it('windows usage by tool-run time, not session start (a straddling session counts)', () => {
     seedInstalledGlobal(store, [{ name: 'usedskill' }])
     // A long session that STARTED 40 days ago (outside the 30d window) but invoked the
