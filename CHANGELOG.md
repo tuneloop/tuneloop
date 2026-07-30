@@ -7,17 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.6.0] - 2026-07-30
 
-- **Clear error on unsupported Node versions** — the CLI's `bin` entry is now a
-  dependency-free wrapper that checks the running Node against `engines` before
-  loading the bundle, so old Nodes get a one-line "requires Node.js >= 22.19.0"
-  message instead of a `TypeError: webidl.util.markAsUncloneable is not a
-  function` stack trace from deep inside undici.
-- **`engines.node` raised to `>=22.19.0`** to match the floor inherited from
-  the direct `undici` dependency; `>=22` admitted Node 22.x versions that crash
-  at startup. CI now tests the exact floor plus latest 22.x and 24.x.
-  
 ### Added
 
 - **Keyless header-auth gateways.** A new `openai-compatible-nokey` provider preset
@@ -27,7 +18,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TUNELOOP_LLM_HEADERS` (attached to every request). Selecting the preset is the
   keyless opt-in, so a forgotten key on the keyed `openai-compatible` variant still
   fails safe. A malformed `TUNELOOP_LLM_HEADERS` warns and leaves enrichment off
-  rather than sending unauthenticated requests.
+  rather than sending unauthenticated requests. ([#110])
+- **Sortable feature list and paginated sessions.** The Features tab (Artifacts >
+  Features) gets column sorting like the PR table — Feature, Last session, Sessions,
+  Cost — reordering sibling groups only so the hierarchy is preserved. The sessions
+  list is no longer silently capped at 200 rows: it gets server-side sorting (Session,
+  Date, Cost, Complexity) and a 50-per-page pager, with the pager total always
+  agreeing with the page rows. Sort and page round-trip through the URL. ([#109])
+- **Dashboard opens on a 14-day window and the PR lens.** The default KPI window is now
+  14 days (was 7), and Cost-per-artifact opens on the PR lens, falling back to Features
+  only when the window has merged no PRs but does have features. ([#109])
+
+### Changed
+
+- **Feature cost breakdown reflects in-flight work and windowed spend.** The feature
+  treemap no longer filters to shipped features — in-flight features always count — and
+  the window now scopes the *spend* shown rather than only which features appear. It
+  therefore agrees with the cost-per-shipped-feature KPI it sits under, and no longer
+  renders permanently empty for stores with no shipped features. ([#109])
+- **Table headers in product green.** The Features grid header and the PR/Sessions table
+  headers switch from muted grey to the product emerald; every other table keeps the
+  muted style. ([#109])
+
+### Fixed
+
+- **Clear error on unsupported Node versions** — the CLI's `bin` entry is now a
+  dependency-free wrapper that checks the running Node against `engines` before
+  loading the bundle, so old Nodes get a one-line "requires Node.js >= 22.19.0"
+  message instead of a `TypeError: webidl.util.markAsUncloneable is not a
+  function` stack trace from deep inside undici. ([#108])
+- **`engines.node` raised to `>=22.19.0`** to match the floor inherited from
+  the direct `undici` dependency; `>=22` admitted Node 22.x versions that crash
+  at startup. CI now enforces `engine-strict` on install and tests the exact floor
+  plus latest 22.x and 24.x. ([#108])
+- Dashboard detail views follow late state changes: an open Cost-by-Artifact detail
+  re-renders when the async KPI fallback flips the lens; deep links to
+  `#/artifacts/feature` seed the correct per-kind default sort; and the sessions list
+  normalizes the URL when it snaps a stale page, so a reload does not repeat the snap.
+  ([#109])
 
 ## [0.5.0] - 2026-07-28
 
@@ -141,7 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
-[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.5.0
 [0.4.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.1
 [0.4.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.0
@@ -150,6 +179,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#110]: https://github.com/tuneloop/tuneloop/pull/110
+[#109]: https://github.com/tuneloop/tuneloop/pull/109
+[#108]: https://github.com/tuneloop/tuneloop/pull/108
 [#105]: https://github.com/tuneloop/tuneloop/pull/105
 [#103]: https://github.com/tuneloop/tuneloop/pull/103
 [#85]: https://github.com/tuneloop/tuneloop/pull/85
