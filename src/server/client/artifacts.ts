@@ -27,8 +27,9 @@ export function renderArtKindSeg() {
 }
 
 // Each kind's default column sort: PRs by creation time, features by recency
-// (last session) — both newest-first.
-function defaultArtSort(kind) { return kind === 'pr' ? 'created' : 'last'; }
+// (last session) — both newest-first. Exported so main.ts seeds the same
+// default on initial deep-link restore.
+export function defaultArtSort(kind) { return kind === 'pr' ? 'created' : 'last'; }
 
 // Switch the Artifacts sub-tab (Features | PRs) from the segment buttons, and
 // mirror it into the URL. Switching kind resets the table's search/sort (each kind

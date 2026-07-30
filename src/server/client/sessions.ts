@@ -442,13 +442,20 @@ export function renderSessions(d) {
   var total = (d && d.total) || 0;
   var st = state.sessTable;
   // A stale page (filters narrowed, or a hand-mangled URL) past the end: snap to
-  // the last real page and refetch. `start < total` after the snap, so this can't loop.
+  // the last real page, normalize the URL (so reload doesn't repeat the snap),
+  // and refetch. `start < total` after the snap, so this can't loop.
   if (!rows.length && total > 0 && st.page > 0) {
     st.page = Math.max(0, Math.ceil(total / SESS_PAGE) - 1);
+    syncHash({ replace: true });
     loadSessions();
     return;
   }
-  if (!rows.length) { $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>'; return; }
+  if (!rows.length) {
+    // Empty result: a leftover page in the URL is meaningless — normalize it away.
+    if (st.page > 0) { st.page = 0; syncHash({ replace: true }); }
+    $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>';
+    return;
+  }
   var head = '<tr>' + SESS_COLS.map(function (c) {
     if (!c[0]) return '<th>' + c[1] + '</th>';
     var arrow = c[0] === st.sort ? (st.dir === 'asc' ? ' &#9652;' : ' &#9662;') : '';

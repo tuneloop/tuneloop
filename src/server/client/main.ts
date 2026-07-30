@@ -13,7 +13,7 @@ import { renderInsights, reopenInsight, clearCellSelection } from './insights'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose } from './sessions'
-import { renderArtKindSeg, loadArtifacts } from './artifacts'
+import { renderArtKindSeg, loadArtifacts, defaultArtSort } from './artifacts'
 
 function init() {
   // Attach Back/Forward + hash-edit listeners and read where the URL says to land.
@@ -46,7 +46,7 @@ function init() {
     // Restore the artifacts table's search/sort only when we're landing there
     // (the query params are scoped to the active view).
     if (route.view === 'artifacts') {
-      state.art = { q: route.query.q || '', sort: route.query.sort || 'created', dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
+      state.art = { q: route.query.q || '', sort: route.query.sort || defaultArtSort(route.artKind), dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
     }
     renderArtKindSeg();
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail
