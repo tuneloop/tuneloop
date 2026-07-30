@@ -415,11 +415,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/feature-costs') {
-    // Hierarchical cost-per-feature for the cost-artifact section's breakdown
-    // charts (icicle / treemap): every feature — shipped or in-flight — with its
-    // own (direct) cost and the subtree rollup over parent_artifact_id. `days`
-    // scopes shipped features to the window; un-shipped ones always count
-    // (per-feature cost stays all-time); `complexity` scopes by bucket.
+    // Hierarchical feature spend for the cost-artifact section's breakdown
+    // charts (icicle / treemap): each feature's own (direct) cost within the
+    // `days` window plus the subtree rollup over parent_artifact_id. The window
+    // scopes the spend (sessions started in it), not the feature set — features
+    // with window spend appear, shipped or not, with their ancestors kept for
+    // hierarchy; `complexity` scopes by bucket.
     const { from, to } = windowFromDays(url.searchParams.get('days'))
     sendJson(res, 200, { nodes: store.featureCostTree(url.searchParams.get('complexity') || undefined, from, to) })
     return

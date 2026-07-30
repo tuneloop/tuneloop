@@ -23,7 +23,7 @@ export function renderCostArtifact() {
   var shipVerb = pr ? 'merged' : 'shipped';
   var win = esc(caWinLabel());
   var tmTitle = pr ? 'PR cost breakdown' : 'Feature cost breakdown';
-  var tmSub = esc(caWinLabel()) + (pr ? ' &middot; total spend per merged PR' : ' &middot; total spend per feature &amp; sub-features, shipped or in-flight');
+  var tmSub = esc(caWinLabel()) + (pr ? ' &middot; total spend per merged PR' : ' &middot; spend attributed to each feature &amp; its sub-features in this window');
   $('#metric-detail').innerHTML =
     '<div class="ca-controls" id="ca-controls"></div>' +
     // 1. Cost breakdown treemap (feature or PR, per the top-level toggle).
@@ -123,13 +123,14 @@ export function renderCaControls() {
 }
 
 // Treemap nodes scope to the top-level window and the complexity filter — both
-// applied server-side — while each tile stays sized by the artifact's all-time
-// build cost. PRs are merged-only (completed in the window), decomposing the
-// cost-per-merged-PR KPI; features include in-flight (un-shipped) work alongside
-// features shipped in the window, so the breakdown shows where spend is going
-// before anything ships. Cached per (kind, complexity, window); a change to either
-// invalidates both kinds' caches (caTreeKey). Features come hierarchical from
-// /api/feature-costs; PRs are a flat set from /api/artifacts.
+// applied server-side. The two kinds window differently: PRs are merged-only
+// (completed in the window), each tile sized by the PR's all-time build cost,
+// decomposing the cost-per-merged-PR KPI; features are sized by spend WITHIN the
+// window (sessions started in it), shipped or not, so the breakdown shows where
+// this window's feature work went — deliberately not a decomposition of the
+// cost-per-shipped-feature KPI. Cached per (kind, complexity, window); a change
+// to either invalidates both kinds' caches (caTreeKey). Features come
+// hierarchical from /api/feature-costs; PRs are a flat set from /api/artifacts.
 var caFeatNodes: any[] | null = null;
 var caPrNodes: any[] | null = null;
 var caTreeKey = '';
@@ -172,7 +173,7 @@ function renderTreemap() {
       ? 'No ' + (pr ? 'PRs' : 'features') + ' match this complexity filter — widen the Complexity selection above.'
       : state.days !== 'all'
         ? (pr ? 'No PRs merged in this window — widen the window above.'
-              : 'No features in this window — widen the window above.')
+              : 'No feature spend in this window — widen the window above.')
         : 'No ' + (pr ? 'merged PR' : 'feature') + ' costs yet — ' +
           (pr ? 'merge a PR with linked sessions' : 'link sessions to a feature in the Features tab') + '.';
     el.innerHTML = '<div class="empty">' + emptyMsg + '</div>';

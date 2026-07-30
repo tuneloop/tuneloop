@@ -843,34 +843,56 @@ describe('featureCostTree', () => {
       "INSERT INTO artifacts (id, kind, repo, source, title, completed_at, parent_artifact_id, producer) VALUES (?, 'feature', 'o/r', 'derived', ?, ?, ?, 'enrich-session')",
     ).run(id, id, completedAt, parent)
   }
+  // One session (started at `startedAt`) with a single block costing `cost`,
+  // block-linked to `featId` — the minimal shape the attribution query walks.
+  function spend(db: Db, sid: string, startedAt: string, featId: string, cost: number) {
+    db.prepare('INSERT INTO sessions (id, session_id, source, provider, started_at) VALUES (?,?,?,?,?)')
+      .run(sid, sid, 'claude-code', 'anthropic', startedAt)
+    db.prepare('INSERT INTO usage_facts (session_id, idx, cost_usd) VALUES (?,0,?)').run(sid, cost)
+    db.prepare("INSERT INTO blocks (session_id, idx, start_seq, end_seq, boundary_kind, producer) VALUES (?,0,0,0,'x','p')").run(sid)
+    db.prepare("INSERT INTO block_usage (session_id, usage_idx, block_idx, producer) VALUES (?,0,0,'p')").run(sid)
+    db.prepare("INSERT INTO block_artifacts (session_id, block_idx, artifact_id, role, source, producer) VALUES (?,0,?,'contributed','x','p')").run(sid, featId)
+  }
 
-  // The breakdown shows where spend is going, including in-flight work: a window
-  // bounds SHIPPED features to those shipped inside it, while un-shipped features
-  // (no completed_at) always count — unlike the PR treemap, which stays merged-only.
-  it('includes un-shipped features; a window drops only features shipped outside it', () => {
+  // The window scopes the SPEND (sessions started in it), not the feature set:
+  // a feature appears iff it has spend in the window — shipped-ness is irrelevant
+  // in both directions (unlike the PR treemap, which stays merged-in-window).
+  it('windows the spend, not the feature set', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
-    feat(db, 'f-inflight', null)
-    feat(db, 'f-shipped-in', '2026-06-15T00:00:00Z')
-    feat(db, 'f-shipped-before', '2026-01-05T00:00:00Z')
+    feat(db, 'f-shipped-old', '2026-01-05T00:00:00Z') // shipped long before the window
+    feat(db, 'f-inflight-idle', null) // in-flight, but no activity in the window
+    spend(db, 's1', '2026-06-10T00:00:00Z', 'f-shipped-old', 5) // in window
+    spend(db, 's2', '2026-05-10T00:00:00Z', 'f-shipped-old', 2) // before window
+    spend(db, 's3', '2026-05-20T00:00:00Z', 'f-inflight-idle', 3) // before window
 
     const windowed = store.featureCostTree(undefined, '2026-06-01T00:00:00Z', '2026-07-01T00:00:00Z')
-    expect(windowed.map((n) => n.id).sort()).toEqual(['f-inflight', 'f-shipped-in'])
+    expect(windowed.map((n) => n.id)).toEqual(['f-shipped-old'])
+    expect(windowed[0]!.ownCost).toBe(5) // only the in-window session's spend
 
-    // No window = every feature, shipped or not.
-    const all = store.featureCostTree()
-    expect(all.map((n) => n.id).sort()).toEqual(['f-inflight', 'f-shipped-before', 'f-shipped-in'])
+    // No window = all-time spend; both features have some. (Order is not part
+    // of the contract — the client lays out by cost.)
+    const all = new Map(store.featureCostTree().map((n) => [n.id, n.ownCost]))
+    expect(all).toEqual(new Map([['f-shipped-old', 7], ['f-inflight-idle', 3]]))
   })
 
-  it('re-roots an un-shipped child whose shipped parent falls outside the window', () => {
+  it('keeps the ancestors of active features so the hierarchy stays intact', () => {
     const db = openDb(':memory:')
     const store = new Store(db)
-    feat(db, 'f-old-parent', '2026-01-05T00:00:00Z')
-    feat(db, 'f-live-child', null, 'f-old-parent')
+    feat(db, 'f-epic', null)
+    feat(db, 'f-a', null, 'f-epic')
+    feat(db, 'f-b', null, 'f-epic')
+    feat(db, 'f-other', null) // no window spend anywhere in its subtree
+    spend(db, 's1', '2026-05-01T00:00:00Z', 'f-epic', 10) // epic's own work, before the window
+    spend(db, 's2', '2026-06-10T00:00:00Z', 'f-a', 4)
+    spend(db, 's3', '2026-06-20T00:00:00Z', 'f-b', 2)
 
     const windowed = store.featureCostTree(undefined, '2026-06-01T00:00:00Z', '2026-07-01T00:00:00Z')
-    expect(windowed.map((n) => n.id)).toEqual(['f-live-child'])
-    expect(windowed[0]!.parentId).toBeNull() // parent filtered out → child becomes a root
+    expect(windowed.map((n) => n.id).sort()).toEqual(['f-a', 'f-b', 'f-epic'])
+    const epic = windowed.find((n) => n.id === 'f-epic')!
+    expect(epic.ownCost).toBe(0) // its direct work was outside the window
+    expect(epic.subtreeCost).toBe(6) // …but it contains this window's child spend
+    expect(windowed.find((n) => n.id === 'f-a')!.parentId).toBe('f-epic') // not re-rooted
   })
 })
 

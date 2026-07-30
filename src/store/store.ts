@@ -2502,15 +2502,20 @@ export class Store {
   }
 
   /**
-   * Per-feature cost rolled up over the feature hierarchy, for the hierarchical
-   * cost-breakdown charts. `ownCost` is the spend attributed DIRECTLY to a feature
-   * (the same block-attributed-with-whole-session-fallback cost as the artifactList
-   * column); `subtreeCost` adds every descendant's own cost, so a parent epic
-   * reflects the total invested beneath it (subtreeCost − Σ children.subtreeCost =
-   * ownCost). All-time, not windowed: total investment per feature, matching the
-   * artifactList cost semantics. Cycle-safe + memoized, mirroring featureLastSession.
-   * parentId is normalized to null when it doesn't point at another feature, so the
-   * client can treat such rows as roots.
+   * Per-feature spend in the window, rolled up over the feature hierarchy, for the
+   * hierarchical cost-breakdown charts. `ownCost` is the spend attributed DIRECTLY
+   * to a feature — block-attributed like the artifactList cost column, but bounded
+   * to sessions STARTED in [from,to] (the same window basis as the headline KPIs);
+   * `subtreeCost` adds every descendant's own cost, so a parent epic reflects the
+   * total spent beneath it this window (subtreeCost − Σ children.subtreeCost =
+   * ownCost). The window scopes the SPEND, not the feature set: a feature appears
+   * iff it (or a descendant) has spend in the window, shipped or not — so the
+   * breakdown answers "where did feature work go this window", deliberately NOT a
+   * decomposition of the cost-per-shipped-feature KPI. Ancestors of active
+   * features are kept (ownCost 0) so the hierarchy stays intact. No window =
+   * all-time spend. Cycle-safe + memoized, mirroring featureLastSession. parentId
+   * is normalized to null when the parent isn't in the result, so the client can
+   * treat such rows as roots.
    */
   featureCostTree(complexity?: string, from?: string, to?: string): Array<{
     id: string
@@ -2525,46 +2530,58 @@ export class Store {
     // surviving descendants — see the parentId/children normalization below.
     const cxNodes = complexityWhere(complexity, 'artifacts', 'feature')
     const cxCost = complexityWhere(complexity, 'a', 'feature')
-    // EVERY feature, shipped or not — the breakdown shows where spend is going,
-    // including in-flight work (unlike the cost-per-shipped-feature KPI and the PR
-    // treemap, which stay merged/shipped-only). A window bounds shipped features to
-    // those shipped in [from,to]; un-shipped features are still accruing, so they
-    // always count. Per-feature cost stays all-time (the window picks which features
-    // count, not which spend). No window = every feature.
     const win = from && to
-    const rangeNodes = win ? 'AND (completed_at IS NULL OR (completed_at >= ? AND completed_at < ?))' : ''
-    const rangeCost = win ? 'AND (a.completed_at IS NULL OR (a.completed_at >= ? AND a.completed_at < ?))' : ''
+    const winJoin = win ? 'JOIN sessions s ON s.id = ba.session_id AND s.started_at >= ? AND s.started_at < ?' : ''
     const winParams = win ? [from, to] : []
+    // All complexity-eligible features; which of them actually appear is decided
+    // below by windowed spend.
     const rows = this.db
       .prepare(
         `SELECT id, title, parent_artifact_id AS parentId
-         FROM artifacts WHERE kind = 'feature' ${cxNodes} ${rangeNodes}`,
+         FROM artifacts WHERE kind = 'feature' ${cxNodes}`,
       )
-      .all(...winParams) as Array<{ id: string; title: string | null; parentId: string | null }>
+      .all() as Array<{ id: string; title: string | null; parentId: string | null }>
     if (!rows.length) return []
     // Own (direct) cost per feature — identical attribution to artifactList's cost
     // column: purely block-attributed (a feature with no block links contributes zero;
-    // DISTINCT so a shared usage row counts once).
+    // DISTINCT so a shared usage row counts once), bounded to the window's sessions.
     const costRows = this.db
       .prepare(
         `SELECT a.id AS id, COALESCE((
            SELECT SUM(cost_usd) FROM (
              SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
              FROM block_artifacts ba
+             ${winJoin}
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
              WHERE ba.artifact_id = a.id
            )
          ), 0) AS ownCost
-         FROM artifacts a WHERE a.kind = 'feature' ${cxCost} ${rangeCost}`,
+         FROM artifacts a WHERE a.kind = 'feature' ${cxCost}`,
       )
       .all(...winParams) as Array<{ id: string; ownCost: number }>
     const own = new Map<string, number>()
     for (const r of costRows) own.set(r.id, r.ownCost || 0)
 
+    // Keep features with spend in the window, plus their ancestor chain (through
+    // complexity-eligible parents only — a filtered-out parent re-roots its child,
+    // same as before). The walk is cycle-safe via the `keep` set itself.
+    const byId = new Map<string, { id: string; title: string | null; parentId: string | null }>()
+    for (const r of rows) byId.set(r.id, r)
+    const keep = new Set<string>()
+    for (const r of rows) {
+      if (!(own.get(r.id)! > 0)) continue
+      let cur: typeof r | undefined = r
+      while (cur && !keep.has(cur.id)) {
+        keep.add(cur.id)
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined
+      }
+    }
+    if (!keep.size) return []
+
     const children = new Map<string, string[]>()
     for (const r of rows) {
-      if (!r.parentId || !own.has(r.parentId)) continue
+      if (!keep.has(r.id) || !r.parentId || !keep.has(r.parentId)) continue
       const arr = children.get(r.parentId)
       if (arr) arr.push(r.id)
       else children.set(r.parentId, [r.id])
@@ -2583,13 +2600,15 @@ export class Store {
       memo.set(id, sum)
       return sum
     }
-    return rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      parentId: r.parentId && own.has(r.parentId) ? r.parentId : null,
-      ownCost: own.get(r.id) ?? 0,
-      subtreeCost: subtreeCost(r.id),
-    }))
+    return rows
+      .filter((r) => keep.has(r.id))
+      .map((r) => ({
+        id: r.id,
+        title: r.title,
+        parentId: r.parentId && keep.has(r.parentId) ? r.parentId : null,
+        ownCost: own.get(r.id) ?? 0,
+        subtreeCost: subtreeCost(r.id),
+      }))
   }
 
   /**
