@@ -16,6 +16,8 @@ skills/*-workspace/
 
 # Claude Code local (machine-specific) settings; shared .claude/settings.json is fine to commit
 .claude/settings.local.json
+# Claude Code worktree scratch (machine-specific); shared .claude/skills is fine to commit
+.claude/worktrees/
 
 # Local secrets / env
 .env
