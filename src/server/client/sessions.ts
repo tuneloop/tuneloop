@@ -189,14 +189,26 @@ export function getSessionParams(): Record<string, string> {
   if (f.outcomes && f.outcomes.length) q.outcomes = f.outcomes.join(',');
   var facets = f.facets || {};
   Object.keys(facets).forEach(function (k) { if (facets[k]) q['f.' + k] = facets[k]; });
+  var tbl = state.sessTable;
+  if (tbl.sort !== 'started') q.sort = tbl.sort;
+  if (tbl.dir === 'asc') q.dir = 'asc';
+  if (tbl.page > 0) q.page = String(tbl.page + 1); // 1-based in the URL
   return q;
 }
+
+// One-shot page carried across the applyFilters that a URL restore triggers
+// (interactive filter changes always reset to page 1; see applyFilters).
+var restorePage = 0;
 
 // Restore the sessions filter from URL query params, then rebuild the bar (which
 // reflects the state into the controls and reloads the list). Inverse of
 // getSessionParams; unknown/absent params fall back to defaults.
 export function applySessionParams(query: Record<string, string>) {
   state.view = 'sessions';
+  var sort = ['started', 'cost', 'title', 'complexity'].indexOf(query.sort) >= 0 ? query.sort : 'started';
+  var page = Math.max(0, (parseInt(query.page, 10) || 0) - 1); // URL is 1-based
+  state.sessTable = { sort: sort, dir: query.dir === 'asc' ? 'asc' : 'desc', page: page };
+  restorePage = page;
   if (query.from || query.to) state.sessTime = { preset: 'custom', from: query.from || '', to: query.to || '' };
   else if (query.win === 'all') state.sessTime = { preset: 'all', from: '', to: '' };
   else if (query.win === '7' || query.win === '14' || query.win === '90') state.sessTime = { preset: parseInt(query.win, 10) as 7 | 14 | 90, from: '', to: '' };
@@ -412,13 +424,43 @@ export function applyFilters() {
   };
   updateMoreCount();
   renderActiveChips();
+  // A filter change re-scopes the list, so restart at page 1 — except the one
+  // applyFilters that a URL restore triggers, which carries the URL's page.
+  state.sessTable.page = restorePage;
+  restorePage = 0;
   loadSessions();
   syncHash({ replace: true }); // mirror the filter into the URL, in place (no history spam)
 }
 
-export function renderSessions(rows) {
-  if (!rows || !rows.length) { $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>'; return; }
-  var head = '<tr><th>Session</th><th>Date</th><th>Cost</th><th>Outcomes</th><th>Complexity</th><th>Work type</th></tr>';
+// Sessions-table columns: [sortKey (null = not sortable), label]. Outcomes and
+// Work type are multi-value per session, so there is no meaningful column order.
+var SESS_COLS = [['title', 'Session'], ['started', 'Date'], ['cost', 'Cost'], [null, 'Outcomes'], ['complexity', 'Complexity'], [null, 'Work type']];
+var SESS_PAGE = 50;
+
+export function renderSessions(d) {
+  var rows = (d && d.rows) || [];
+  var total = (d && d.total) || 0;
+  var st = state.sessTable;
+  // A stale page (filters narrowed, or a hand-mangled URL) past the end: snap to
+  // the last real page, normalize the URL (so reload doesn't repeat the snap),
+  // and refetch. `start < total` after the snap, so this can't loop.
+  if (!rows.length && total > 0 && st.page > 0) {
+    st.page = Math.max(0, Math.ceil(total / SESS_PAGE) - 1);
+    syncHash({ replace: true });
+    loadSessions();
+    return;
+  }
+  if (!rows.length) {
+    // Empty result: a leftover page in the URL is meaningless — normalize it away.
+    if (st.page > 0) { st.page = 0; syncHash({ replace: true }); }
+    $('#sessions').innerHTML = '<div class="empty">No sessions match.</div>';
+    return;
+  }
+  var head = '<tr>' + SESS_COLS.map(function (c) {
+    if (!c[0]) return '<th>' + c[1] + '</th>';
+    var arrow = c[0] === st.sort ? (st.dir === 'asc' ? ' &#9652;' : ' &#9662;') : '';
+    return '<th class="sess-th" data-sort="' + c[0] + '">' + c[1] + arrow + '</th>';
+  }).join('') + '</tr>';
   var body = rows.map(function (r) {
     // Outcomes in the canonical order (pr_merged first … session_success last).
     var outs = (r.outcomes || []).slice().sort(function (a, b) { return outcomeRank(a) - outcomeRank(b); });
@@ -430,7 +472,31 @@ export function renderSessions(rows) {
       '<td>' + esc(r.complexity || '—') + '</td>' +
       '<td class="cell-tags">' + tagCell(r.useCase) + '</td></tr>';
   }).join('');
-  $('#sessions').innerHTML = '<table>' + head + body + '</table>';
+  var start = st.page * SESS_PAGE;
+  var pager = total > SESS_PAGE
+    ? '<div class="pager">' +
+        '<button class="btn pg-prev" type="button"' + (st.page === 0 ? ' disabled' : '') + '>&lsaquo; Prev</button>' +
+        '<span class="pg-info">' + num(start + 1) + '&ndash;' + num(Math.min(start + rows.length, total)) + ' of ' + num(total) + '</span>' +
+        '<button class="btn pg-next" type="button"' + (start + rows.length >= total ? ' disabled' : '') + '>Next &rsaquo;</button>' +
+      '</div>'
+    : '';
+  $('#sessions').innerHTML = '<table>' + head + body + '</table>' + pager;
+  // Column sort: toggle direction on the active column; a new column starts
+  // ascending for title, descending for the rest (recency/size reads best desc).
+  Array.prototype.forEach.call(document.querySelectorAll('#sessions .sess-th'), function (th) {
+    th.onclick = function () {
+      var col = th.getAttribute('data-sort');
+      if (st.sort === col) st.dir = st.dir === 'asc' ? 'desc' : 'asc';
+      else { st.sort = col; st.dir = col === 'title' ? 'asc' : 'desc'; }
+      st.page = 0;
+      syncHash({ replace: true });
+      loadSessions();
+    };
+  });
+  var pgPrev = document.querySelector('#sessions .pg-prev') as any;
+  var pgNext = document.querySelector('#sessions .pg-next') as any;
+  if (pgPrev) pgPrev.onclick = function () { st.page = Math.max(0, st.page - 1); syncHash({ replace: true }); loadSessions(); };
+  if (pgNext) pgNext.onclick = function () { st.page++; syncHash({ replace: true }); loadSessions(); };
   Array.prototype.forEach.call(document.querySelectorAll('.srow'), function (tr) {
     tr.onclick = function () {
       var f = state.filters || {};
@@ -2008,5 +2074,10 @@ export function loadSessions() {
   if (f.from) qs.push('from=' + encodeURIComponent(f.from));
   if (f.to) qs.push('to=' + encodeURIComponent(f.to));
   if (f.outcomes && f.outcomes.length) qs.push('outcome_types=' + encodeURIComponent(f.outcomes.join(',')));
+  var st = state.sessTable;
+  if (st.sort !== 'started') qs.push('sort=' + encodeURIComponent(st.sort));
+  if (st.dir === 'asc') qs.push('dir=asc');
+  qs.push('limit=' + SESS_PAGE);
+  if (st.page > 0) qs.push('offset=' + st.page * SESS_PAGE);
   get('/api/sessions' + (qs.length ? '?' + qs.join('&') : '')).then(renderSessions);
 }

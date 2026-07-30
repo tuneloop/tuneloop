@@ -26,6 +26,11 @@ export function renderArtKindSeg() {
   });
 }
 
+// Each kind's default column sort: PRs by creation time, features by recency
+// (last session) — both newest-first. Exported so main.ts seeds the same
+// default on initial deep-link restore.
+export function defaultArtSort(kind) { return kind === 'pr' ? 'created' : 'last'; }
+
 // Switch the Artifacts sub-tab (Features | PRs) from the segment buttons, and
 // mirror it into the URL. Switching kind resets the table's search/sort (each kind
 // gets a fresh list). No-op when already on that kind.
@@ -33,7 +38,7 @@ export function setArtKind(kind) {
   state.view = 'artifacts';
   if (state.artKind === kind) { syncHash(); return; }
   state.artKind = kind;
-  state.art = { q: '', sort: 'created', dir: 'desc' };
+  state.art = { q: '', sort: defaultArtSort(kind), dir: 'desc' };
   renderArtKindSeg();
   loadArtifacts();
   syncHash();
@@ -41,15 +46,13 @@ export function setArtKind(kind) {
 
 // ---- URL <-> artifacts-list bridge (used by the router) ----------------------
 
-// The current artifacts-table state as URL query params: free-text search (q) and,
-// for the PR table, the column sort. Defaults (created/desc) are omitted.
+// The current artifacts-table state as URL query params: free-text search (q)
+// and the column sort. Defaults (the kind's default column, desc) are omitted.
 export function getArtifactParams(): Record<string, string> {
   var q: Record<string, string> = {};
   if (state.art.q) q.q = state.art.q;
-  if (state.artKind === 'pr') {
-    if (state.art.sort && state.art.sort !== 'created') q.sort = state.art.sort;
-    if (state.art.dir === 'asc') q.dir = 'asc';
-  }
+  if (state.art.sort && state.art.sort !== defaultArtSort(state.artKind)) q.sort = state.art.sort;
+  if (state.art.dir === 'asc') q.dir = 'asc';
   return q;
 }
 
@@ -60,7 +63,7 @@ export function applyArtifactParams(kind, query) {
   state.artKind = kind === 'pr' || kind === 'feature' ? kind : 'feature';
   state.art = {
     q: query.q || '',
-    sort: query.sort || 'created',
+    sort: query.sort || defaultArtSort(state.artKind),
     dir: query.dir === 'asc' ? 'asc' : 'desc',
   };
   renderArtKindSeg();
@@ -161,14 +164,29 @@ function renderPrTable() {
   });
 }
 
+// Feature-list columns: [sortKey (null = not sortable), label, numeric header?].
+// Sorting reorders SIBLING groups only — the hierarchy is preserved, a parent
+// still renders before its children (see flattenFeatures).
+var FEAT_COLS = [['title', 'Feature', 0], [null, 'Repos', 0], ['last', 'Last session', 0], ['sessions', 'Sessions', 1], ['cost', 'Cost', 1]];
+
+// Rows held in module state so a header-sort click re-renders without a refetch
+// (mirrors prRows above).
+var featRows = [];
+
 function renderFeatureManager(rows) {
+  featRows = rows;
   var html = '';
   if (!rows.length) {
     html += '<div class="empty">No features yet. Add one below, or enrich sessions to propose features.</div>';
   } else {
+    var headCells = FEAT_COLS.map(function (c) {
+      var cls = (c[2] ? 'fh-num' : '') + (c[0] ? ' feat-th' : '');
+      var arrow = c[0] && c[0] === state.art.sort ? (state.art.dir === 'asc' ? ' &#9652;' : ' &#9662;') : '';
+      return '<span class="' + cls.trim() + '"' + (c[0] ? ' data-sort="' + c[0] + '"' : '') + '>' + c[1] + arrow + '</span>';
+    }).join('');
     html += '<input id="feat-search" class="feat-search" type="search" placeholder="Search features…" autocomplete="off" />';
     html += '<div class="feat-list">' +
-      '<div class="feat-head"><span>Feature</span><span>Repos</span><span>Last session</span><span class="fh-num">Sessions</span><span class="fh-num">Cost</span><span></span></div>';
+      '<div class="feat-head">' + headCells + '<span></span></div>';
     flattenFeatures(rows).forEach(function (e) {
       var r = e.node, indent = e.depth * 22;
       var twig = e.depth ? '<span class="feat-twig">&#8627;</span> ' : '';
@@ -265,18 +283,31 @@ function descendantsOf(rows, id) {
   return out;
 }
 
+// Sort key for a feature column (the sibling comparator in flattenFeatures).
+function featVal(r, col) {
+  if (col === 'title') return (r.title || '').toLowerCase();
+  if (col === 'sessions') return r.sessions || 0;
+  if (col === 'cost') return r.costUsd || 0;
+  return r.lastSessionAt || ''; // 'last' (the default)
+}
+
 function flattenFeatures(rows) {
-  // Most-recent-activity first: order roots and each sibling group by last session
-  // time descending (undated sorts last). Hierarchy is preserved — a parent still
-  // renders before its children; only the order among siblings changes.
-  function recency(a, b) { return String(b.lastSessionAt || '').localeCompare(String(a.lastSessionAt || '')); }
+  // Order roots and each sibling group by the picked column (default: last
+  // session time descending — most recent activity first). Hierarchy is
+  // preserved — a parent still renders before its children; only the order
+  // among siblings changes.
+  var col = state.art.sort, dir = state.art.dir === 'asc' ? 1 : -1;
+  function bySortCol(a, b) {
+    var x = featVal(a, col), y = featVal(b, col);
+    return x < y ? -dir : x > y ? dir : 0;
+  }
   var byId = {}; rows.forEach(function (r) { byId[r.id] = r; });
   var children = {};
   rows.forEach(function (r) {
     var p = r.parentId && byId[r.parentId] ? r.parentId : '';
     (children[p] = children[p] || []).push(r);
   });
-  Object.keys(children).forEach(function (k) { children[k].sort(recency); });
+  Object.keys(children).forEach(function (k) { children[k].sort(bySortCol); });
   var out = [], visited = {};
   (function walk(key, depth) {
     (children[key] || []).forEach(function (r) {
@@ -285,12 +316,25 @@ function flattenFeatures(rows) {
       walk(r.id, depth + 1);
     });
   })('', 0);
-  rows.slice().sort(recency).forEach(function (r) { if (!visited[r.id]) { visited[r.id] = true; out.push({ node: r, depth: 0 }); } });
+  rows.slice().sort(bySortCol).forEach(function (r) { if (!visited[r.id]) { visited[r.id] = true; out.push({ node: r, depth: 0 }); } });
   return out;
 }
 
 function wireFeatureManager() {
   function each(sel, fn) { Array.prototype.forEach.call(document.querySelectorAll(sel), fn); }
+
+  // Column sort: toggle direction on the active column; a new column starts
+  // ascending for the name, descending for the numeric/date ones. Re-renders
+  // from the held rows (no refetch); the search filter re-applies below.
+  each('#artifacts .feat-th', function (th) {
+    th.onclick = function () {
+      var col = th.getAttribute('data-sort');
+      if (state.art.sort === col) state.art.dir = state.art.dir === 'asc' ? 'desc' : 'asc';
+      else { state.art.sort = col; state.art.dir = col === 'title' ? 'asc' : 'desc'; }
+      syncHash({ replace: true });
+      renderFeatureManager(featRows);
+    };
+  });
 
   // Add-feature: a collapsed button that expands into the full form on click.
   var nfToggle = $('#nf-toggle'), nfForm = $('#nf-form'), nfTitle = $('#nf-title');

@@ -2004,8 +2004,11 @@ export class Store {
     return this.db.prepare(sql).all(...params) as ErrorOccurrence[]
   }
 
-  /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
-  sessionList(f: SessionFilter): SessionListItem[] {
+  /**
+   * WHERE + params for a session filter, shared by sessionList and sessionCount
+   * so the page rows and the pager total always agree.
+   */
+  private sessionWhere(f: SessionFilter): { where: string; params: unknown[] } {
     const scalar = (key: string) =>
       `(SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='${key}')`
     const clauses: string[] = []
@@ -2065,8 +2068,37 @@ export class Store {
       )
       params.push(...outcomeTypes)
     }
-    const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''
+    return { where: clauses.length ? 'WHERE ' + clauses.join(' AND ') : '', params }
+  }
+
+  /** Total sessions matching a filter — the denominator for sessionList's pager. */
+  sessionCount(f: SessionFilter): number {
+    const { where, params } = this.sessionWhere(f)
+    const r = this.db.prepare(`SELECT COUNT(*) AS n FROM sessions s ${where}`).get(...params) as { n: number }
+    return r.n
+  }
+
+  /** Filtered session list. Filter VALUES are bound params; keys are hardcoded. */
+  sessionList(f: SessionFilter): SessionListItem[] {
+    const scalar = (key: string) =>
+      `(SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='${key}')`
+    const { where, params } = this.sessionWhere(f)
     const limit = Math.min(Math.max(1, f.limit ?? 200), 1000)
+    const offset = Math.max(0, f.offset ?? 0)
+
+    // ORDER BY: a whitelist keyed by the API's `sort` param — every expression is
+    // a constant here, user input only SELECTS one. Complexity sorts by its
+    // ordinal, with untagged sessions below every tagged one. Non-`started` sorts
+    // tiebreak on recency so equal values keep a stable, newest-first order.
+    const sortExprs: Record<string, string> = {
+      started: 's.started_at',
+      cost: 'COALESCE(s.cost_usd, 0)',
+      title: `COALESCE(${titleExpr('s')}, '(untitled)') COLLATE NOCASE`,
+      complexity: `CASE ${scalar('complexity')} WHEN 'trivial' THEN 1 WHEN 'routine' THEN 2 WHEN 'substantial' THEN 3 WHEN 'open-ended' THEN 4 ELSE 0 END`,
+    }
+    const sortExpr = sortExprs[f.sort ?? ''] ?? sortExprs.started
+    const dir = f.dir === 'asc' ? 'ASC' : 'DESC'
+    const tiebreak = sortExpr === sortExprs.started ? '' : ', s.started_at DESC'
 
     const rows = this.db
       .prepare(
@@ -2076,7 +2108,7 @@ export class Store {
                 (SELECT json_group_array(v) FROM (SELECT DISTINCT json_extract(value,'$') AS v FROM block_annotations WHERE session_id=s.id AND key='use_case' ORDER BY v)) AS useCaseJson,
                 ${scalar('intent_summary')} AS intent,
                 (SELECT json_group_array(t) FROM (SELECT DISTINCT type AS t FROM outcomes WHERE session_id=s.id ORDER BY t)) AS outcomesJson
-         FROM sessions s ${where} ORDER BY s.started_at DESC LIMIT ${limit}`,
+         FROM sessions s ${where} ORDER BY ${sortExpr} ${dir}${tiebreak} LIMIT ${limit} OFFSET ${offset}`,
       )
       .all(...params) as Array<Record<string, any>>
 
@@ -2470,15 +2502,20 @@ export class Store {
   }
 
   /**
-   * Per-feature cost rolled up over the feature hierarchy, for the hierarchical
-   * cost-breakdown charts. `ownCost` is the spend attributed DIRECTLY to a feature
-   * (the same block-attributed-with-whole-session-fallback cost as the artifactList
-   * column); `subtreeCost` adds every descendant's own cost, so a parent epic
-   * reflects the total invested beneath it (subtreeCost − Σ children.subtreeCost =
-   * ownCost). All-time, not windowed: total investment per feature, matching the
-   * artifactList cost semantics. Cycle-safe + memoized, mirroring featureLastSession.
-   * parentId is normalized to null when it doesn't point at another feature, so the
-   * client can treat such rows as roots.
+   * Per-feature spend in the window, rolled up over the feature hierarchy, for the
+   * hierarchical cost-breakdown charts. `ownCost` is the spend attributed DIRECTLY
+   * to a feature — block-attributed like the artifactList cost column, but bounded
+   * to sessions STARTED in [from,to] (the same window basis as the headline KPIs);
+   * `subtreeCost` adds every descendant's own cost, so a parent epic reflects the
+   * total spent beneath it this window (subtreeCost − Σ children.subtreeCost =
+   * ownCost). The window scopes the SPEND, not the feature set: a feature appears
+   * iff it (or a descendant) has spend in the window, shipped or not — so the
+   * breakdown answers "where did feature work go this window", deliberately NOT a
+   * decomposition of the cost-per-shipped-feature KPI. Ancestors of active
+   * features are kept (ownCost 0) so the hierarchy stays intact. No window =
+   * all-time spend. Cycle-safe + memoized, mirroring featureLastSession. parentId
+   * is normalized to null when the parent isn't in the result, so the client can
+   * treat such rows as roots.
    */
   featureCostTree(complexity?: string, from?: string, to?: string): Array<{
     id: string
@@ -2493,45 +2530,58 @@ export class Store {
     // surviving descendants — see the parentId/children normalization below.
     const cxNodes = complexityWhere(complexity, 'artifacts', 'feature')
     const cxCost = complexityWhere(complexity, 'a', 'feature')
-    // Only SHIPPED features (completed_at set) — the treemap decomposes the
-    // cost-per-shipped-feature KPI, so un-shipped features are excluded (matching
-    // costPerArtifact). A window further bounds it to features shipped in [from,to];
-    // per-feature cost stays all-time (the window picks which features count, not
-    // which spend). No window = all shipped features.
     const win = from && to
-    const rangeNodes = win ? 'AND completed_at >= ? AND completed_at < ?' : ''
-    const rangeCost = win ? 'AND a.completed_at >= ? AND a.completed_at < ?' : ''
+    const winJoin = win ? 'JOIN sessions s ON s.id = ba.session_id AND s.started_at >= ? AND s.started_at < ?' : ''
     const winParams = win ? [from, to] : []
+    // All complexity-eligible features; which of them actually appear is decided
+    // below by windowed spend.
     const rows = this.db
       .prepare(
         `SELECT id, title, parent_artifact_id AS parentId
-         FROM artifacts WHERE kind = 'feature' AND completed_at IS NOT NULL ${cxNodes} ${rangeNodes}`,
+         FROM artifacts WHERE kind = 'feature' ${cxNodes}`,
       )
-      .all(...winParams) as Array<{ id: string; title: string | null; parentId: string | null }>
+      .all() as Array<{ id: string; title: string | null; parentId: string | null }>
     if (!rows.length) return []
     // Own (direct) cost per feature — identical attribution to artifactList's cost
     // column: purely block-attributed (a feature with no block links contributes zero;
-    // DISTINCT so a shared usage row counts once).
+    // DISTINCT so a shared usage row counts once), bounded to the window's sessions.
     const costRows = this.db
       .prepare(
         `SELECT a.id AS id, COALESCE((
            SELECT SUM(cost_usd) FROM (
              SELECT DISTINCT u.session_id, u.idx AS uidx, u.cost_usd
              FROM block_artifacts ba
+             ${winJoin}
              JOIN block_usage bu ON bu.session_id = ba.session_id AND bu.block_idx = ba.block_idx
              JOIN usage_facts u ON u.session_id = bu.session_id AND u.idx = bu.usage_idx
              WHERE ba.artifact_id = a.id
            )
          ), 0) AS ownCost
-         FROM artifacts a WHERE a.kind = 'feature' AND a.completed_at IS NOT NULL ${cxCost} ${rangeCost}`,
+         FROM artifacts a WHERE a.kind = 'feature' ${cxCost}`,
       )
       .all(...winParams) as Array<{ id: string; ownCost: number }>
     const own = new Map<string, number>()
     for (const r of costRows) own.set(r.id, r.ownCost || 0)
 
+    // Keep features with spend in the window, plus their ancestor chain (through
+    // complexity-eligible parents only — a filtered-out parent re-roots its child,
+    // same as before). The walk is cycle-safe via the `keep` set itself.
+    const byId = new Map<string, { id: string; title: string | null; parentId: string | null }>()
+    for (const r of rows) byId.set(r.id, r)
+    const keep = new Set<string>()
+    for (const r of rows) {
+      if (!(own.get(r.id)! > 0)) continue
+      let cur: typeof r | undefined = r
+      while (cur && !keep.has(cur.id)) {
+        keep.add(cur.id)
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined
+      }
+    }
+    if (!keep.size) return []
+
     const children = new Map<string, string[]>()
     for (const r of rows) {
-      if (!r.parentId || !own.has(r.parentId)) continue
+      if (!keep.has(r.id) || !r.parentId || !keep.has(r.parentId)) continue
       const arr = children.get(r.parentId)
       if (arr) arr.push(r.id)
       else children.set(r.parentId, [r.id])
@@ -2550,13 +2600,15 @@ export class Store {
       memo.set(id, sum)
       return sum
     }
-    return rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      parentId: r.parentId && own.has(r.parentId) ? r.parentId : null,
-      ownCost: own.get(r.id) ?? 0,
-      subtreeCost: subtreeCost(r.id),
-    }))
+    return rows
+      .filter((r) => keep.has(r.id))
+      .map((r) => ({
+        id: r.id,
+        title: r.title,
+        parentId: r.parentId && keep.has(r.parentId) ? r.parentId : null,
+        ownCost: own.get(r.id) ?? 0,
+        subtreeCost: subtreeCost(r.id),
+      }))
   }
 
   /**
@@ -4181,6 +4233,11 @@ export interface SessionFilter {
   /** Match sessions that produced ANY of these outcome types (OR). */
   outcomeTypes?: string[]
   limit?: number
+  /** Sort column: started (default) | cost | title | complexity. Unknown values fall back to started. */
+  sort?: string
+  dir?: 'asc' | 'desc'
+  /** Row index of the first returned row (pagination; default 0). */
+  offset?: number
 }
 
 export interface SessionListItem {

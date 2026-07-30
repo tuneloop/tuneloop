@@ -83,11 +83,19 @@ export function paintKpis() {
   var cur = k.current || {}, prev = k.previous || {};
   var cpf = cur.costPerFeature || {}, ppf = prev.costPerFeature || {};
   var cpr = cur.costPerPr || {}, ppr = prev.costPerPr || {};
-  var defaultKind = (cpf.count === 0 && (cpr.count || 0) > 0) ? 'pr' : 'feature';
+  // PR is the default lens; fall back to Feature only when the window has no
+  // merged PRs but does have features.
+  var defaultKind = (cpr.count === 0 && (cpf.count || 0) > 0) ? 'feature' : 'pr';
   state.ca.defaultKind = defaultKind;
   // The tile mirrors the kind the user picked in the detail; until then, the
   // smart default. Keep state.ca.kind synced so the detail opens on it too.
-  if (!state.ca.userPicked) state.ca.kind = defaultKind;
+  // This arrives async: if it flips the lens under an already-open Cost-by-
+  // Artifact detail, rerender the detail so its controls and pending chart
+  // loads follow the new kind instead of painting stale PR/feature data.
+  if (!state.ca.userPicked && state.ca.kind !== defaultKind) {
+    state.ca.kind = defaultKind;
+    if (state.metric === 'cost_artifact') renderCostArtifact();
+  }
   var caData = state.ca.kind === 'pr'
     ? { cur: cpr, prev: ppr, label: 'per merged PR', noun: 'PR', nounPl: 'PRs', verb: 'merged' }
     : { cur: cpf, prev: ppf, label: 'per shipped feature', noun: 'feature', nounPl: 'features', verb: 'shipped' };

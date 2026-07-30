@@ -415,10 +415,12 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     return
   }
   if (path === '/api/feature-costs') {
-    // Hierarchical cost-per-feature for the cost-artifact section's breakdown
-    // charts (icicle / treemap): every feature with its own (direct) cost and the
-    // subtree rollup over parent_artifact_id. `days` scopes to features SHIPPED in
-    // the window (per-feature cost stays all-time); `complexity` scopes by bucket.
+    // Hierarchical feature spend for the cost-artifact section's breakdown
+    // charts (icicle / treemap): each feature's own (direct) cost within the
+    // `days` window plus the subtree rollup over parent_artifact_id. The window
+    // scopes the spend (sessions started in it), not the feature set — features
+    // with window spend appear, shipped or not, with their ancestors kept for
+    // hierarchy; `complexity` scopes by bucket.
     const { from, to } = windowFromDays(url.searchParams.get('days'))
     sendJson(res, 200, { nodes: store.featureCostTree(url.searchParams.get('complexity') || undefined, from, to) })
     return
@@ -513,28 +515,30 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   if (path === '/api/sessions') {
     const q = url.searchParams
     const limit = q.get('limit')
+    const offset = q.get('offset')
     // Any non-reserved query param is treated as a facet filter; sessionList
     // validates keys against the registry and ignores unknown ones.
-    const reserved = new Set(['q', 'artifact', 'artifact_kind', 'from', 'to', 'outcome_types', 'limit'])
+    const reserved = new Set(['q', 'artifact', 'artifact_kind', 'from', 'to', 'outcome_types', 'limit', 'sort', 'dir', 'offset'])
     const facets: Record<string, string> = {}
     for (const [k, v] of q.entries()) {
       if (!reserved.has(k) && v) facets[k] = v
     }
     const outcomeTypesRaw = q.get('outcome_types')
-    sendJson(
-      res,
-      200,
-      store.sessionList({
-        facets,
-        q: q.get('q') ?? undefined,
-        artifact: q.get('artifact') ?? undefined,
-        artifactKind: q.get('artifact_kind') ?? undefined,
-        from: q.get('from') ?? undefined,
-        to: q.get('to') ?? undefined,
-        outcomeTypes: outcomeTypesRaw ? outcomeTypesRaw.split(',').filter(Boolean) : undefined,
-        limit: limit ? parseInt(limit, 10) : undefined,
-      }),
-    )
+    const filter = {
+      facets,
+      q: q.get('q') ?? undefined,
+      artifact: q.get('artifact') ?? undefined,
+      artifactKind: q.get('artifact_kind') ?? undefined,
+      from: q.get('from') ?? undefined,
+      to: q.get('to') ?? undefined,
+      outcomeTypes: outcomeTypesRaw ? outcomeTypesRaw.split(',').filter(Boolean) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      sort: q.get('sort') ?? undefined,
+      dir: q.get('dir') === 'asc' ? ('asc' as const) : q.get('dir') === 'desc' ? ('desc' as const) : undefined,
+      offset: offset ? parseInt(offset, 10) : undefined,
+    }
+    // `total` counts the whole filtered set (not the page), for the client pager.
+    sendJson(res, 200, { rows: store.sessionList(filter), total: store.sessionCount(filter) })
     return
   }
   if (path === '/api/session') {
