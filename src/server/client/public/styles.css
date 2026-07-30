@@ -778,10 +778,25 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 /* Filter toolbar reuses the Sessions .filters / .flt-* / .seg tokens verbatim; the
    status <select> just needs the shared filter-select styling (matched by .filters select). */
 
-.sk-roster { display: flex; flex-direction: column; gap: 8px; }
-.sk-row { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-.sk-row-head { display: flex; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; }
-.sk-row-head:hover { background: #faf8f2; }
+/* Overview strip — inventory totals under the heading, each a one-click status filter.
+   Divider between stats (not boxed), so it reads as a summary line, not another toolbar. */
+.sk-overview { display: flex; flex-wrap: wrap; gap: 0; margin: 2px 0 16px; }
+.sk-stat { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; cursor: pointer;
+  border: 0; background: transparent; font: inherit; text-align: left;
+  padding: 4px 20px; border-left: 1px solid var(--line); }
+.sk-stat:first-child { padding-left: 0; border-left: 0; }
+.sk-stat-v { font-family: ui-monospace, Menlo, monospace; font-size: 22px; color: var(--muted); line-height: 1.1; }
+.sk-stat-l { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sk-stat:hover .sk-stat-v { color: var(--ink); }
+.sk-stat.on .sk-stat-v { color: var(--emerald); }
+.sk-stat.on .sk-stat-l { color: var(--ink); }
+
+/* Roster lives inside the .sk-panel, so rows are hairline-separated (not standalone
+   cards) — matches the list treatment on Sessions/Recommendations/Artifacts. */
+.sk-roster { display: flex; flex-direction: column; margin-top: 4px; border-top: 1px solid var(--line); }
+.sk-row { border-bottom: 1px solid var(--line); }
+.sk-row-head { display: flex; align-items: center; gap: 14px; padding: 13px 4px; cursor: pointer; }
+.sk-row-head:hover { background: #fbf8f1; }
 .sk-dot { flex: none; width: 9px; height: 9px; border-radius: 999px; }
 .sk-name { flex: none; font-weight: 600; font-size: 14px; color: var(--ink); font-family: ui-monospace, Menlo, monospace; }
 .sk-flags { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; }
@@ -805,15 +820,19 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-page-name { margin: 0; font-size: 24px; font-family: ui-monospace, Menlo, monospace; color: var(--ink); word-break: break-all; }
 .sk-verdict-lg { min-width: 0; font-size: 12px; }
 .sk-page-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 18px 0 8px; }
-.sk-page-sect { margin-top: 26px; }
+/* Each detail section is its own bordered paper card (shares the .panel idiom used on
+   other tabs), so the page reads as discrete, labelled sections rather than one scroll. */
+.sk-card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 16px; }
+.sk-card:first-of-type { margin-top: 22px; }
 .sk-sect-h { font-family: Georgia, serif; font-size: 16px; color: var(--ink); margin-bottom: 10px; }
 .sk-info { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 10px; font-weight: 600; cursor: default; vertical-align: middle; }
 .sk-sect-note { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 8px; }
 .sk-sect-note-block { max-width: 820px; }
 .sk-sect-note-block b { color: var(--ink); font-weight: 600; }
 
-/* Usage-trend bar chart. */
-.sk-trend { position: relative; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; max-width: 900px; }
+/* Usage-trend bar chart. Sits inside a .sk-card, so it draws no border/background of
+   its own (the card provides both) — just the plotting area. */
+.sk-trend { position: relative; max-width: 900px; }
 .sk-trend-ax { font-family: ui-monospace, Menlo, monospace; font-size: 11px; fill: var(--muted); }
 .sk-trend-hit { cursor: default; }
 /* Bars sit above the hit zones in the SVG; let pointer events fall through to the
@@ -848,9 +867,15 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-repo-n { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); white-space: nowrap; text-align: right; }
 
 /* Version drift (the hero) — location chooser + "around the last edit" callout + timeline. */
-.sk-drift-loc-row { display: inline-flex; align-items: center; gap: 8px; margin: 2px 0 4px; }
-.sk-drift-loc-row select { font-size: 12.5px; }
-.sk-drift-delta { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-top: 10px; max-width: 720px; background: var(--paper); }
+.sk-drift-loc-row { display: inline-flex; align-items: center; gap: 8px; margin: 2px 0 10px; }
+/* Match the shared filter-select styling (this select lives outside .filters, so it
+   wouldn't inherit it otherwise) — bordered, rounded, paper-filled, not a raw native box. */
+.sk-drift-loc-row select { border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px;
+  font-size: 12.5px; background: var(--paper); color: var(--ink); }
+.sk-drift-loc-row select:hover { border-color: #d4cdbd; }
+/* "Around the last edit" callout — sits inside the Version drift card, so it uses a
+   subtle track tint (not another bordered box) to read as a nested sub-section. */
+.sk-drift-delta { border-radius: 10px; padding: 14px 16px; margin-top: 10px; max-width: 720px; background: var(--track); }
 .sk-drift-delta-h { font-size: 13px; color: var(--ink); font-weight: 600; margin-bottom: 12px; }
 .sk-drift-cmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 4px; margin-top: 14px; }
 .sk-drift-metric-l { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
@@ -889,13 +914,15 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-ver-stats { font-size: 12px; color: var(--muted); margin-top: 3px; }
 .sk-ver-hash { font-size: 11px; color: var(--gray); text-align: right; }
 
-/* Activation outcomes — "pulls its weight" headline, then a stacked bar + evidence. */
-.sk-weight { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 8px; border-left: 3px solid var(--muted); background: var(--track); max-width: 720px; }
-.sk-weight-v { font-size: 13px; font-weight: 600; color: var(--ink); }
-.sk-weight-d { font-size: 12.5px; color: var(--muted); }
-.sk-w-ok { border-left-color: var(--emerald); }
-.sk-w-warn { border-left-color: var(--amber); }
-.sk-w-bad { border-left-color: var(--red); }
+/* Activation outcomes — "pulls its weight" headline, then a stacked bar + evidence.
+   No filled box: a status-coloured dot leads a bold verdict + plain description line. */
+.sk-weight { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; max-width: 760px; }
+.sk-weight-v { font-size: 14px; font-weight: 600; color: var(--ink); position: relative; padding-left: 16px; }
+.sk-weight-v::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 9px; height: 9px; border-radius: 999px; background: var(--muted); }
+.sk-weight-d { font-size: 13px; color: var(--muted); }
+.sk-w-ok .sk-weight-v::before { background: var(--emerald); }
+.sk-w-warn .sk-weight-v::before { background: var(--amber); }
+.sk-w-bad .sk-weight-v::before { background: var(--red); }
 .sk-oc-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--track); margin-top: 14px; max-width: 720px; }
 .sk-oc-seg { display: block; height: 100%; }
 .sk-oc-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
@@ -903,14 +930,13 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-oc-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
 .sk-oc-legn { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 .sk-oc-corr { margin-top: 12px; font-size: 12.5px; color: var(--red); }
-.sk-oc-examples { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; max-width: 820px; }
-/* One evidence card per judged firing: a coloured outcome pill + the full sentence,
-   wrapping cleanly. A left border tints the card to the outcome for quick scanning. */
-.sk-oc-ex { display: flex; gap: 12px; align-items: flex-start; font-size: 13px; line-height: 1.5;
-  padding: 9px 12px; background: var(--track); border-radius: 8px; border-left: 3px solid var(--line); }
+.sk-oc-examples { margin-top: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 820px; }
+/* One evidence row per judged firing: a coloured outcome tag + the full sentence,
+   wrapping cleanly. No filled box — the tag colour alone carries the outcome. */
+.sk-oc-ex { display: flex; gap: 14px; align-items: flex-start; font-size: 13.5px; line-height: 1.55; }
 .sk-oc-ex-tag { flex: none; width: 72px; font-size: 10px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: .04em; padding-top: 1px; }
-.sk-oc-ex-txt { color: var(--ink); }
+  letter-spacing: .04em; padding-top: 2px; }
+.sk-oc-ex-txt { color: var(--muted); }
 /* Collapsed overflow evidence (beyond the top 3) + its reveal toggle. */
 .sk-oc-rest { display: none; flex-direction: column; gap: 8px; }
 .sk-oc-rest.on { display: flex; }
@@ -936,8 +962,10 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .sk-fact-v { font-size: 14px; color: var(--ink); margin-top: 3px; }
 .sk-tag { display: inline-block; font-size: 9px; background: var(--track); color: var(--muted); border-radius: 4px;
   padding: 1px 5px; letter-spacing: .04em; vertical-align: middle; }
-.sk-advice { font-size: 13px; line-height: 1.5; color: var(--muted); background: #faf8f2;
-  border-left: 3px solid var(--line); border-radius: 0 6px 6px 0; padding: 12px 16px; margin-top: 26px; max-width: 820px; }
+/* One-line takeaway under the tiles. A thin status-coloured rule (colour set inline),
+   no filled box — the sentence carries the weight, not a highlight. */
+.sk-advice { font-size: 13.5px; line-height: 1.5; color: var(--ink);
+  border-left: 3px solid var(--line); padding: 2px 0 2px 14px; margin: 16px 0 4px; max-width: 820px; }
 .sk-actions { margin-top: 18px; }
 .sk-view-sessions { font-size: 14px; color: var(--emerald); cursor: pointer; text-decoration: none; }
 .sk-view-sessions:hover { text-decoration: underline; }

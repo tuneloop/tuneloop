@@ -204,13 +204,46 @@ function paintSkills() {
 }
 
 function paintRoster(box, d) {
+  // Matches the other tabs: one white panel wraps the whole tab (heading, overview,
+  // filters, and the hairline-separated roster) — see Sessions/Recommendations/Artifacts.
   box.innerHTML =
-    '<div class="panel-head"><h2>Skill Health</h2></div>' +
-    '<div class="filters sk-filters" id="sk-filters"></div>' +
-    '<div class="sk-roster" id="sk-roster"></div>';
+    '<div class="panel sk-panel">' +
+      '<div class="panel-head"><h2>Skill Health</h2></div>' +
+      '<div class="sk-overview" id="sk-overview"></div>' +
+      '<div class="filters sk-filters" id="sk-filters"></div>' +
+      '<div class="sk-roster" id="sk-roster"></div>' +
+    '</div>';
 
+  renderSkOverview(d);
   renderSkFilters(d);
   renderSkRoster(d.rows || []);
+}
+
+// Summary strip under the heading: the window's inventory totals, each a one-click
+// status filter (kept in sync with the Status dropdown via the shared skStatus). The
+// active stat — the filter currently applied — is highlighted. "Not in config" only
+// appears when there is at least one, since it's an exceptional state, not a baseline.
+function renderSkOverview(d) {
+  var bar = $('#sk-overview');
+  if (!bar) return;
+  var stats = [
+    { k: 'all', v: d.totalInstalled, l: 'Installed', tip: 'Skills present in a config snapshot in this window.' },
+    { k: '', v: d.totalUsed, l: 'Used', tip: STATUS.used.tip },
+    { k: 'unused', v: d.totalUnused, l: 'Unused', tip: STATUS.unused.tip },
+    { k: 'scope-down', v: d.totalScopeDown, l: 'Scope down', tip: FLAGS['scope-down'].tip }
+  ];
+  if (d.totalNotInConfig > 0) stats.push({ k: 'not-in-config', v: d.totalNotInConfig, l: 'Not in config', tip: FLAGS['not-in-config'].tip });
+
+  bar.innerHTML = stats.map(function (s) {
+    return '<button type="button" class="sk-stat' + (s.k === skStatus ? ' on' : '') + '" data-k="' + esc(s.k) + '" title="' + esc(s.tip) + '">' +
+      '<span class="sk-stat-v">' + num(s.v || 0) + '</span>' +
+      '<span class="sk-stat-l">' + esc(s.l) + '</span>' +
+      '</button>';
+  }).join('');
+
+  Array.prototype.forEach.call(bar.querySelectorAll('.sk-stat'), function (el) {
+    el.onclick = function () { skStatus = this.getAttribute('data-k'); paintSkills(); };
+  });
 }
 
 // Filter toolbar — mirrors the Sessions bar (same .filters / .flt-* / .seg tokens and
@@ -245,6 +278,8 @@ function renderSkFilters(d) {
       '<select id="sk-source">' + sourceOpts + '</select></span>';
   }
 
+  // Single row — Skills has only four controls (Time, search, Status, Agent), so they
+  // fit on one line and wrap gracefully on narrow viewports (flt-row already wraps).
   bar.innerHTML =
     '<div class="flt-row">' +
       '<span class="flt-grp"><span class="flt-lbl">Time</span>' +
@@ -256,8 +291,6 @@ function renderSkFilters(d) {
         '</span>' +
       '</span>' +
       '<input id="sk-search" class="flt-search" placeholder="search skill name" value="' + esc(skSearch) + '" />' +
-    '</div>' +
-    '<div class="flt-row flt-row-facets">' +
       '<span class="flt-grp"><span class="flt-lbl">Status</span>' +
         '<select id="sk-status">' + statusOpts + '</select></span>' +
       sourceGrp +
@@ -376,10 +409,15 @@ function paintSkillPage(box, r) {
     pageTile(r.calls > 0 ? errRate + '%' : '—', 'Own-call error rate', r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls errored' : 'no calls to measure') +
     '</div>';
 
+  // One-line actionable takeaway, high up. A thin status-coloured rule, not a filled box.
+  html += '<div class="sk-advice" style="border-left-color:' + s.color + '">' + esc(advice(r)) + '</div>';
+
+  // --- Signals (lead the page): Usage trend → Activation outcomes → Version drift. ---
+
   // Usage trend — a labeled bar chart (count axis + real calendar date ticks + a JS
   // hover tooltip). Only meaningful when it was actually used.
   if (r.calls > 0) {
-    html += '<div class="sk-page-sect">' +
+    html += '<div class="sk-card">' +
       '<div class="sk-sect-h">Usage trend</div>' +
       '<div class="sk-trend" id="sk-trend">' + trendChart(r.spark, skReport.sparkBuckets) + '</div>' +
       '<div class="sk-sect-note">Invocations per ' + trendGranLabel(skReport.sparkBuckets) + ', ' +
@@ -387,35 +425,48 @@ function paintSkillPage(box, r) {
       '</div>';
   }
 
-  // Activation outcomes + Version drift are the key signals, so they lead (under the usage trend).
-  // Windowed; hidden unless the classifier has produced verdicts for this skill in the window.
+  // Activation outcomes — windowed; hidden unless the classifier has produced verdicts
+  // for this skill in the window.
   if (r.calls > 0) {
-    html += '<div class="sk-page-sect" id="sk-oc-sect" style="display:none">' +
+    html += '<div class="sk-card" id="sk-oc-sect" style="display:none">' +
       sectHead('Activation outcomes', 'A cheap LLM read of the turns around each invocation: did the agent follow, rework, or bypass the skill’s output. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
       '<div id="sk-oc"></div>' +
       '</div>';
   }
 
-  // Skill drift & version comparison (the hero). Edit-anchored, so it ignores the time
-  // filter — loaded async into its own section, which stays hidden until there's a
-  // multi-version history to show (most skills have one version → no noise).
-  html += '<div class="sk-page-sect" id="sk-drift-sect" style="display:none">' +
+  // Skill drift & version comparison. Edit-anchored, so it ignores the time filter —
+  // loaded async, stays hidden until there's a multi-version history to show (most skills
+  // have one version → no noise).
+  html += '<div class="sk-card" id="sk-drift-sect" style="display:none">' +
     '<div class="sk-sect-h">Version drift</div>' +
     '<div id="sk-drift"></div>' +
     '</div>';
 
+  // --- Reach: where it fires + what it composes with. ---
+
   // Per-repo usage breakdown — the evidence behind a scope-down flag. Shows where the
   // skill actually fires, so "used in only these repos" is self-evident, not on faith.
   if (r.calls > 0 && r.perRepo && r.perRepo.length) {
-    html += '<div class="sk-page-sect">' +
+    html += '<div class="sk-card">' +
       '<div class="sk-sect-h">Where it\'s used</div>' +
       repoBreakdown(r) +
       '<div class="sk-sect-note">' + repoBreakdownNote(r) + '</div>' +
       '</div>';
   }
 
+  // Co-occurrence — other skills that fire in the same sessions (add/compose signal).
+  // Windowed like usage; hidden until we find at least one co-occurring skill.
+  if (r.calls > 0) {
+    html += '<div class="sk-card" id="sk-cooc-sect" style="display:none">' +
+      sectHead('Frequently used with', 'Share = the fraction of this skill’s sessions that also ran the other skill. “often first” marks skills that tended to fire before it — a pattern to eyeball, not a dependency. A high share is a candidate to compose into one workflow.') +
+      '<div id="sk-cooc"></div>' +
+      '</div>';
+  }
+
+  // --- Reference: the facts, then every invocation. ---
+
   // Facts grid: install/usage locations + timeline.
-  html += '<div class="sk-page-sect">' +
+  html += '<div class="sk-card">' +
     '<div class="sk-sect-h">Details</div>' +
     '<div class="sk-facts">';
   html += fact('Install scope', r.installed ? (r.scope === 'global' ? 'Global' : 'Project') : 'Not installed (seen running)');
@@ -427,21 +478,9 @@ function paintSkillPage(box, r) {
   }
   html += '</div></div>';
 
-  // Verdict-specific guidance.
-  html += '<div class="sk-advice">' + esc(advice(r)) + '</div>';
-
-  // Co-occurrence — other skills that fire in the same sessions (add/compose signal).
-  // Windowed like usage; hidden until we find at least one co-occurring skill.
-  if (r.calls > 0) {
-    html += '<div class="sk-page-sect" id="sk-cooc-sect" style="display:none">' +
-      sectHead('Frequently used with', 'Share = the fraction of this skill’s sessions that also ran the other skill. “often first” marks skills that tended to fire before it — a pattern to eyeball, not a dependency. A high share is a candidate to compose into one workflow.') +
-      '<div id="sk-cooc"></div>' +
-      '</div>';
-  }
-
   // Invocations list — every call, each opening the session scrolled to that call.
   if (r.calls > 0) {
-    html += '<div class="sk-page-sect">' +
+    html += '<div class="sk-card">' +
       '<div class="sk-sect-h">Invocations</div>' +
       '<div class="sk-sect-note">Each row opens the session and scrolls to where the skill was invoked.' +
         (r.calls > 100 ? ' Showing the 100 most recent of ' + num(r.calls) + '.' : '') + '</div>' +
@@ -563,7 +602,7 @@ function outcomesHtml(d) {
     if (actionable.length) {
       var exHtml = function (e) {
         var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
-        return '<div class="sk-oc-ex" style="border-left-color:' + m.color + '"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
+        return '<div class="sk-oc-ex"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
           '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span></div>';
       };
       var HEAD = 3;
