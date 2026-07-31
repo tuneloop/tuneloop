@@ -90,6 +90,7 @@ Handy flags:
 
 - `--no-serve` — build the store and exit, no dashboard
 - `--port <n>` — serve on a different port
+- `--address <host>` — bind a specific interface (default `127.0.0.1`; e.g. `0.0.0.0` to sit behind a reverse proxy). The dashboard is unauthenticated and serves your session transcripts, so only expose it on networks you trust
 - `--config <path>` — a JSON file selecting which processors/detectors run (see below)
 - `npx tuneloop serve` — open the dashboard over an already-analyzed store, without re-analyzing
 

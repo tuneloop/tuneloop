@@ -21,6 +21,20 @@ export interface ServeOptions {
   db?: string
   port?: number
   open?: boolean
+  address?: string
+}
+
+export function isLoopback(host: string): boolean {
+  return host === 'localhost' || host === '::1' || host.startsWith('127.')
+}
+
+export function dashboardUrl(host: string, port: number): string {
+  // Wildcard binds aren't routable in a browser; loopback reads better as
+  // localhost. Everything else is a real interface address worth showing.
+  if (host === '0.0.0.0' || host === '::' || host === '127.0.0.1' || host === 'localhost') {
+    return `http://localhost:${port}`
+  }
+  return host.includes(':') ? `http://[${host}]:${port}` : `http://${host}:${port}`
 }
 
 /** Serve the dashboard over an already-analyzed store. Reads only; Ctrl+C stops. */
@@ -36,11 +50,13 @@ export async function serve(opts: ServeOptions): Promise<void> {
   const db = openDb(config.dbPath)
   const store = new Store(db)
   const port = opts.port ?? 4319
-  const url = `http://localhost:${port}`
+  const address = opts.address ?? '127.0.0.1'
+  const url = dashboardUrl(address, port)
   const server = createDashboardServer(store, config.dbPath, makeSh())
 
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') log.error(`port ${port} is in use — try --port <n>`)
+    else if (err.code === 'EADDRNOTAVAIL') log.error(`cannot bind to ${address} — not an address of this machine`)
     else log.error(err.message)
     process.exitCode = 1
   })
@@ -51,11 +67,15 @@ export async function serve(opts: ServeOptions): Promise<void> {
   // --no-open (or a non-TTY stdin) serves headless with no prompt.
   const interactive = opts.open !== false && Boolean(process.stdin.isTTY)
 
-  // Bind to loopback only. The dashboard serves session transcripts (which can
-  // contain proprietary code and secrets) over an unauthenticated API; without an
-  // explicit host Node binds 0.0.0.0, exposing it to the whole LAN. tuneloop is a
-  // local single-developer tool, so 127.0.0.1 is the correct surface.
-  server.listen(port, '127.0.0.1', () => {
+  // Bind to loopback by default. The dashboard serves session transcripts (which
+  // can contain proprietary code and secrets) over an unauthenticated API; without
+  // an explicit host Node binds 0.0.0.0, exposing it to the whole LAN. tuneloop is
+  // a local single-developer tool, so 127.0.0.1 is the correct default surface;
+  // --address is an explicit opt-in (e.g. for a reverse proxy) and gets a warning.
+  if (!isLoopback(address)) {
+    log.warn(`binding to ${address} — the dashboard is unauthenticated and serves session transcripts; anyone who can reach this address can read them`)
+  }
+  server.listen(port, address, () => {
     const hint = interactive ? 'Enter to open in your browser · Ctrl+C to stop' : 'Ctrl+C to stop'
     process.stdout.write(`\n  tuneloop dashboard  ${url}\n  store: ${config.dbPath}\n  ${hint}\n\n`)
   })
