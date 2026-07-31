@@ -36,9 +36,21 @@ var STATUS = {
 // Flag presentation (refinements shown as chips on a used skill).
 var FLAGS = {
   'scope-down': { label: 'Scope down', color: 'var(--amber)', tip: 'Global, but used in only a few repos — candidate to move into just those.' },
-  'not-in-config': { label: 'Not in config', color: '#3b6ea5', tip: 'Seen running, but not in any current config snapshot (removed/relocated since it ran, or a CLI-bundled skill we can\'t see on disk).' }
+  'not-in-config': { label: 'Not in config', color: '#3b6ea5', tip: 'Seen running, but not in any current config snapshot (removed/relocated since it ran, or a CLI-bundled skill we can\'t see on disk).' },
+  'often-bypassed': { label: 'Often bypassed', color: 'var(--red)', tip: 'The agent bypassed or reworked this skill\'s output in at least half of its judged invocations.' }
 };
 function hasFlag(r, f) { return (r.flags || []).indexOf(f) >= 0; }
+
+// The chip tooltip for one flag on one row — often-bypassed gets the row's actual
+// judged/bypassed counts instead of the generic phrasing, so the pill carries its evidence.
+function flagTip(r, f) {
+  var fl = FLAGS[f];
+  if (f === 'often-bypassed' && r.judgedCalls) {
+    return 'The agent bypassed or reworked its output in ' + num(r.bypassedCalls || 0) + ' of ' +
+      num(r.judgedCalls) + ' judged invocations. See Activation outcomes on the detail page for the evidence.';
+  }
+  return fl.tip;
+}
 
 // Display names for the harness sources (the source chooser + any source-scoped copy).
 var SOURCE_LABELS = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
@@ -233,6 +245,8 @@ function renderSkOverview(d) {
     { k: 'scope-down', v: d.totalScopeDown, l: 'Scope down', tip: FLAGS['scope-down'].tip }
   ];
   if (d.totalNotInConfig > 0) stats.push({ k: 'not-in-config', v: d.totalNotInConfig, l: 'Not in config', tip: FLAGS['not-in-config'].tip });
+  // Like not-in-config: an exceptional state, shown only when at least one skill carries it.
+  if (d.totalOftenBypassed > 0) stats.push({ k: 'often-bypassed', v: d.totalOftenBypassed, l: 'Often bypassed', tip: FLAGS['often-bypassed'].tip });
 
   bar.innerHTML = stats.map(function (s) {
     return '<button type="button" class="sk-stat' + (s.k === skStatus ? ' on' : '') + '" data-k="' + esc(s.k) + '" title="' + esc(s.tip) + '">' +
@@ -260,7 +274,7 @@ function renderSkFilters(d) {
   }).join('');
 
   var statusOpts = [['', 'Used (default)'], ['all', 'All statuses'], ['unused', 'Unused'],
-    ['scope-down', 'Scope down'], ['not-in-config', 'Not in config']]
+    ['scope-down', 'Scope down'], ['not-in-config', 'Not in config'], ['often-bypassed', 'Often bypassed']]
     .map(function (o) {
       return '<option value="' + esc(o[0]) + '"' + (o[0] === skStatus ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
     }).join('');
@@ -327,7 +341,7 @@ function renderSkFilters(d) {
 function filterRows(rows) {
   var out = rows;
   if (skStatus === '') out = out.filter(function (r) { return r.status === 'used'; });
-  else if (skStatus === 'scope-down' || skStatus === 'not-in-config') out = out.filter(function (r) { return hasFlag(r, skStatus); });
+  else if (skStatus === 'scope-down' || skStatus === 'not-in-config' || skStatus === 'often-bypassed') out = out.filter(function (r) { return hasFlag(r, skStatus); });
   else if (skStatus !== 'all') out = out.filter(function (r) { return r.status === skStatus; });
   if (skSearch) {
     var q = skSearch.toLowerCase();
@@ -357,10 +371,10 @@ function renderSkRoster(rows) {
 
 function skRow(r) {
   var s = STATUS[r.status] || STATUS.unused;
-  // Flag chips (scope-down / not-in-config) shown after the status label.
+  // Flag chips (scope-down / not-in-config / often-bypassed) shown after the status label.
   var chips = (r.flags || []).map(function (f) {
     var fl = FLAGS[f];
-    return fl ? '<span class="sk-flag" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(fl.tip) + '">' + esc(fl.label) + '</span>' : '';
+    return fl ? '<span class="sk-flag" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(flagTip(r, f)) + '">' + esc(fl.label) + '</span>' : '';
   }).join('');
   return '<div class="sk-row">' +
     '<div class="sk-row-head" data-name="' + esc(r.name) + '" title="' + esc(s.tip) + '">' +
@@ -382,7 +396,7 @@ function paintSkillPage(box, r) {
   var errRate = r.calls > 0 ? Math.round((r.errorCalls / r.calls) * 100) : 0;
   var chips = (r.flags || []).map(function (f) {
     var fl = FLAGS[f];
-    return fl ? '<span class="sk-flag sk-flag-lg" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(fl.tip) + '">' + esc(fl.label) + '</span>' : '';
+    return fl ? '<span class="sk-flag sk-flag-lg" style="color:' + fl.color + ';border-color:' + fl.color + '" title="' + esc(flagTip(r, f)) + '">' + esc(fl.label) + '</span>' : '';
   }).join('');
 
   var html = '';
@@ -545,6 +559,12 @@ function loadOutcomes(name) {
       if (rest) rest.classList.add('on');
       this.remove();
     };
+    // Each linked example opens the session transcript at the judged tool call.
+    Array.prototype.forEach.call(host.querySelectorAll('.sk-oc-ex[data-session]'), function (el) {
+      el.onclick = function () {
+        openDetail(this.getAttribute('data-session'), { toolTarget: parseInt(this.getAttribute('data-idx'), 10) });
+      };
+    });
   }).catch(function () { /* leave hidden on error */ });
 }
 
@@ -602,8 +622,16 @@ function outcomesHtml(d) {
     if (actionable.length) {
       var exHtml = function (e) {
         var m = OUTCOME_META[e.outcome] || OUTCOME_META.unclear;
-        return '<div class="sk-oc-ex"><span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
-          '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span></div>';
+        // Clickable when the verdict carries its firing's location — opens the session
+        // transcript scrolled to that tool call, same affordance as the invocations list.
+        var linked = e.sessionId != null && e.idx != null;
+        var tag = linked ? 'button type="button"' : 'div';
+        return '<' + tag + ' class="sk-oc-ex"' +
+          (linked ? ' data-session="' + esc(e.sessionId) + '" data-idx="' + esc(String(e.idx)) + '"' : '') + '>' +
+          '<span class="sk-oc-ex-tag" style="color:' + m.color + '">' + esc(m.label) + '</span>' +
+          '<span class="sk-oc-ex-txt">' + esc(e.evidence) + '</span>' +
+          (linked ? '<span class="sk-oc-ex-go">open ↗</span>' : '') +
+          '</' + (linked ? 'button' : 'div') + '>';
       };
       var HEAD = 3;
       var head = actionable.slice(0, HEAD).map(exHtml).join('');

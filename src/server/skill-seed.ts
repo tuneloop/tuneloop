@@ -85,6 +85,9 @@ export interface SeedExpectations {
   browseAbsentRepos: string[]
   /** review's seeded activation-outcome distribution (30d window) + correction count. */
   reviewOutcomes: { classified: number; used: number; reworked: number; ignored: number; userCorrectionAdjacent: number }
+  /** The skill seeded past BOTH often-bypassed gates (judged floor + bypass share), with
+   *  its 30d judged/bypassed counts. review is the deliberate near-miss (9 judged, 44%). */
+  oftenBypassed: { name: string; judged: number; bypassed: number }
 }
 
 interface SeedOptions {
@@ -182,6 +185,7 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     { name: 'frontend-design', body: '# frontend-design\nDesign UI.\n', description: 'design' },
     { name: 'drifty', body: drifty, description: 'a drifting skill' },
     { name: 'reverter', body: reverter, description: 'flip-flops' },
+    { name: 'flaky-helper', body: '# flaky-helper\nSuggest a fix for the failing test.\n', description: 'suggest test fixes' },
   ]
   const captures: CaptureState[] = [
     { dayAgo: 60, skills: base(reviewV1, driftV1, revertA) },
@@ -254,6 +258,13 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
   // ghostskill + grill-with-docs: invoked, never in any config snapshot → not-in-config.
   for (let i = 0; i < 2; i++) insertSession('aivue', 6 - i, [{ skill: 'ghostskill' }])
 
+  // flaky-helper: fires regularly but the agent mostly bypasses its output — past BOTH
+  // often-bypassed gates (7 judged ≥ floor; 5 bypassed = 71% ≥ share). review stays the
+  // near-miss (9 judged, 44%) proving the share threshold, and the roster's judged-floor
+  // gate is proven by unit tests on skillHealth itself.
+  const flakyOutcomes: Array<'used' | 'reworked' | 'ignored'> = ['ignored', 'ignored', 'reworked', 'ignored', 'used', 'used', 'reworked']
+  flakyOutcomes.forEach((o, i) => insertSession('aivue', 9 - i, [{ skill: 'flaky-helper', outcome: o }]))
+
   // deadskill: installed, never invoked, but plenty of sessions exist → unused + enoughData.
   // (Already have >MIN_SESSIONS aivue sessions above.)
 
@@ -263,7 +274,7 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
 
   return {
     nowMs,
-    used: ['review', 'browse', 'lint-fix', 'frontend-design', 'grill-with-docs', 'ghostskill'],
+    used: ['review', 'browse', 'lint-fix', 'frontend-design', 'grill-with-docs', 'ghostskill', 'flaky-helper'],
     unused: ['deadskill', 'drifty', 'reverter'],
     scopeDown: [
       { name: 'review', repos: ['aivue'] },
@@ -283,5 +294,6 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     // 30d window: v2 era contributes 3 'used' (days 28-30), v3 era contributes
     // 2 used + 2 reworked + 2 ignored (days 10-15), with 2 adjacent corrections.
     reviewOutcomes: { classified: 9, used: 5, reworked: 2, ignored: 2, userCorrectionAdjacent: 2 },
+    oftenBypassed: { name: 'flaky-helper', judged: 7, bypassed: 5 },
   }
 }

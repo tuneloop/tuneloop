@@ -103,6 +103,21 @@ describe('synthetic skill seed', () => {
     expect(stats.examples.length).toBeGreaterThan(0)
   })
 
+  it('flags the seeded often-bypassed skill in the roster — and not the near-miss', () => {
+    const exp = seedSkillStore(store, { nowMs: NOW })
+    const r = skillHealth(store, { days: 30, nowMs: NOW })
+    const byName = new Map(r.rows.map((x) => [x.name, x]))
+
+    const flaky = byName.get(exp.oftenBypassed.name)!
+    expect(flaky.flags).toContain('often-bypassed')
+    expect(flaky.judgedCalls).toBe(exp.oftenBypassed.judged)
+    expect(flaky.bypassedCalls).toBe(exp.oftenBypassed.bypassed)
+
+    // review's 9 judged / 4 bypassed (44%) sits under the share threshold — no pill.
+    expect(byName.get('review')!.flags).not.toContain('often-bypassed')
+    expect(r.totalOftenBypassed).toBe(1)
+  })
+
   it('returns null outcome stats for a skill with no classifier verdicts', () => {
     seedSkillStore(store, { nowMs: NOW })
     // browse was seeded without outcomes → the classifier surface should abstain.

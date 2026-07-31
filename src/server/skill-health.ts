@@ -170,10 +170,18 @@ export interface SkillHealthRow {
    *  - scope-down: global but invoked in only a few repos — candidate to scope down
    *  - not-in-config: invoked but absent from every current config snapshot (a skill
    *    removed/relocated since it ran, or a CLI-bundled skill we can't see on disk)
+   *  - often-bypassed: the LLM-judged outcomes say the agent bypassed or reworked its
+   *    output in ≥OFTEN_BYPASSED_SHARE of judged firings. Gated on MIN_OUTCOME_JUDGED
+   *    judged firings so a 1-of-2 fluke never earns a roster verdict.
    */
-  flags: Array<'scope-down' | 'not-in-config'>
+  flags: Array<'scope-down' | 'not-in-config' | 'often-bypassed'>
   /** For the 'scope-down' flag: the repos it's actually used in. */
   scopeToRepos?: string[]
+  /** LLM-judged outcome counts in the window (absent when nothing was judged). Judged
+   *  excludes insufficient-context; bypassed = reworked + ignored — the same definitions
+   *  as skillOutcomeStats, so the roster flag and the detail panel always agree. */
+  judgedCalls?: number
+  bypassedCalls?: number
 }
 
 /**
@@ -216,6 +224,7 @@ export interface SkillHealthReport {
   /** Flag counts (subsets of `used`, so they overlap totalUsed — not a partition). */
   totalScopeDown: number
   totalNotInConfig: number
+  totalOftenBypassed: number
   rows: SkillHealthRow[]
   /** True when no config snapshot has been captured — the installed side is unknown. */
   noConfig: boolean
@@ -588,6 +597,10 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     }
   }
 
+  // LLM-judged activation outcomes, rolled up once for the whole roster (raw verdict
+  // names; reconciled per row below, like the invocation fold).
+  const outcomeRollup = queryOutcomeRollup(store, source, sinceIso, untilIso)
+
   // Assign the status axis + refinement flags (orthogonal — a used skill can still
   // carry a scope-down / not-in-config hint).
   for (const row of rowsByName.values()) {
@@ -606,6 +619,21 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         row.scopeToRepos = v.scopeToRepos
         row.flags.push('scope-down')
       }
+      // Outcome verdict pill, behind two gates: enough judged firings to trust the rate,
+      // and a bypass share at the detail panel's "Often bypassed" threshold.
+      let judged = 0
+      let bypassed = 0
+      for (const [vname, c] of outcomeRollup) {
+        if (vname === row.name || skillMatches(row.name, vname)) {
+          judged += c.judged
+          bypassed += c.bypassed
+        }
+      }
+      if (judged > 0) {
+        row.judgedCalls = judged
+        row.bypassedCalls = bypassed
+        if (judged >= MIN_OUTCOME_JUDGED && bypassed / judged >= OFTEN_BYPASSED_SHARE) row.flags.push('often-bypassed')
+      }
     } else {
       // Installed, never invoked in the window → unused (a true, window-scoped fact).
       // `enoughData` marks whether we've seen enough sessions to *advise removal*:
@@ -618,7 +646,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   }
 
   const rows = [...rowsByName.values()].sort(rankRows)
-  const has = (r: SkillHealthRow, f: 'scope-down' | 'not-in-config') => r.flags.indexOf(f) >= 0
+  const has = (r: SkillHealthRow, f: SkillHealthRow['flags'][number]) => r.flags.indexOf(f) >= 0
   // The "used in N of M repos" denominator. Sessions window by started_at while skill usage
   // windows by tool-run time (two intentional clocks), so a session that STARTED before the
   // window but INVOKED a skill inside it would otherwise land in the numerator (usedRepos)
@@ -636,6 +664,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     totalUnused: rows.filter((r) => r.status === 'unused').length,
     totalScopeDown: rows.filter((r) => has(r, 'scope-down')).length,
     totalNotInConfig: rows.filter((r) => has(r, 'not-in-config')).length,
+    totalOftenBypassed: rows.filter((r) => has(r, 'often-bypassed')).length,
     rows,
     noConfig: installed.length === 0,
     sparkBuckets,
@@ -834,8 +863,52 @@ export interface SkillOutcomeStats {
    *  honest footnote, never mixed into the distribution. */
   insufficientContext: number
   /** One evidence snippet per judged firing (observational), bypass cases first since those
-   *  are the actionable ones, then the rest newest-first. Not capped — the UI shows them all. */
-  examples: Array<{ outcome: string; evidence: string }>
+   *  are the actionable ones, then the rest newest-first. Not capped — the UI shows them all.
+   *  sessionId + idx locate the firing's tool call so the UI can open the transcript there. */
+  examples: Array<{ outcome: string; evidence: string; sessionId: string; idx: number }>
+}
+
+/** Minimum judged firings before the roster trusts a bypass rate enough to show a pill —
+ *  1 bypassed of 2 judged is 50% noise, not a verdict (same spirit as MIN_DRIFT_CALLS). */
+const MIN_OUTCOME_JUDGED = 5
+/** Bypassed share (reworked+ignored / judged) at which the roster flags 'often-bypassed' —
+ *  the same threshold as the detail panel's "Often bypassed" headline, so the pill in the
+ *  list is literally the verdict the click-through shows. */
+const OFTEN_BYPASSED_SHARE = 0.5
+
+/**
+ * Window-scoped rollup of outcome verdicts for EVERY skill at once (the roster's read;
+ * skillOutcomeStats serves the single-skill detail). Same window clock and judged/bypassed
+ * definitions as skillOutcomeStats. Keyed by the verdict's RAW skill name — the caller
+ * reconciles plugin-namespaced names to roster rows via skillMatches.
+ */
+function queryOutcomeRollup(store: Store, source: string, sinceIso: string, untilIso?: string): Map<string, { judged: number; bypassed: number }> {
+  const rows = store.queryAll(
+    `SELECT json_extract(j.value, '$.name') AS vname,
+            json_extract(j.value, '$.outcome') AS outcome,
+            COUNT(*) AS n
+     FROM annotations a
+     JOIN sessions s ON s.id = a.session_id
+     JOIN json_each(a.value) j
+     JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
+     WHERE a.key = 'skill_outcomes'
+       AND s.source = ? AND ${IN_WINDOW}
+     GROUP BY vname, outcome`,
+    source,
+    sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
+  ) as Array<{ vname: string | null; outcome: string | null; n: number }>
+
+  const out = new Map<string, { judged: number; bypassed: number }>()
+  for (const r of rows) {
+    if (!r.vname || r.outcome === 'insufficient-context') continue // unjudgeable ≠ judged
+    const cur = out.get(r.vname) ?? { judged: 0, bypassed: 0 }
+    cur.judged += r.n
+    if (r.outcome === 'reworked' || r.outcome === 'ignored') cur.bypassed += r.n
+    out.set(r.vname, cur)
+  }
+  return out
 }
 
 /**
@@ -858,7 +931,9 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
     `SELECT json_extract(j.value, '$.name') AS vname,
             json_extract(j.value, '$.outcome') AS outcome,
             json_extract(j.value, '$.userCorrectionAdjacent') AS correction,
-            json_extract(j.value, '$.evidence') AS evidence
+            json_extract(j.value, '$.evidence') AS evidence,
+            a.session_id AS sessionId,
+            t.idx AS idx
      FROM annotations a
      JOIN sessions s ON s.id = a.session_id
      JOIN json_each(a.value) j
@@ -870,7 +945,7 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
     sinceIso,
     untilIso ?? null,
     untilIso ?? null,
-  ) as Array<{ vname: string | null; outcome: string | null; correction: number | null; evidence: string | null }>
+  ) as Array<{ vname: string | null; outcome: string | null; correction: number | null; evidence: string | null; sessionId: string; idx: number }>
 
   const stats: SkillOutcomeStats = {
     name,
@@ -885,8 +960,8 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
     examples: [],
   }
   // Collect bypass examples first (the actionable ones), then fill from the rest.
-  const bypassEx: Array<{ outcome: string; evidence: string }> = []
-  const otherEx: Array<{ outcome: string; evidence: string }> = []
+  const bypassEx: SkillOutcomeStats['examples'] = []
+  const otherEx: SkillOutcomeStats['examples'] = []
   for (const r of rows) {
     // Match the verdict's skill name to the requested skill (incl. plugin-namespaced).
     if (!r.vname || !(r.vname === name || skillMatches(name, r.vname))) continue
@@ -903,7 +978,7 @@ export function skillOutcomeStats(store: Store, name: string, win: SkillHealthWi
     }
     if (r.correction) stats.userCorrectionAdjacent++
     if (r.evidence) {
-      const ex = { outcome: r.outcome ?? 'unclear', evidence: r.evidence }
+      const ex = { outcome: r.outcome ?? 'unclear', evidence: r.evidence, sessionId: r.sessionId, idx: r.idx }
       ;(r.outcome === 'reworked' || r.outcome === 'ignored' ? bypassEx : otherEx).push(ex)
     }
   }

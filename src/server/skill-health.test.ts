@@ -330,6 +330,54 @@ describe('skillHealth — cross-agent (source-aware)', () => {
     const r = skillHealth(store, { source: 'codex', days: 30, nowMs: NOW })
     expect(r.totalActiveRepos).toBe(1) // only codex's repo, not the 3 claude-code ones
   })
+
+  /** Seed a session whose skill firings each carry an outcome verdict annotation. */
+  function seedJudgedSession(id: string, skill: string, outcomes: string[]) {
+    seedSession(id, 'repoA', 2, outcomes.map(() => ({ name: skill, action: 'skill' })))
+    const v = outcomes.map((outcome, idx) => ({ idx, name: skill, outcome, userCorrectionAdjacent: false, evidence: 'e' }))
+    db.prepare(`INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'skill-outcomes', 'skill_outcomes', ?)`).run(id, JSON.stringify(v))
+  }
+
+  it('flags often-bypassed once enough judged firings are mostly bypassed', () => {
+    seedInstalledGlobal(store, [{ name: 'meh' }])
+    // 6 judged, 4 bypassed (ignored/reworked) = 67% — over both the floor and the share.
+    seedJudgedSession('j1', 'meh', ['ignored', 'reworked', 'ignored', 'used', 'used', 'ignored'])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'meh')!
+    expect(row.flags).toContain('often-bypassed')
+    expect(row.judgedCalls).toBe(6)
+    expect(row.bypassedCalls).toBe(4)
+    expect(r.totalOftenBypassed).toBe(1)
+  })
+
+  it('withholds often-bypassed below the judged floor, even at a 100% bypass share', () => {
+    seedInstalledGlobal(store, [{ name: 'few' }])
+    // 4 judged (< floor), all bypassed — too little evidence to put a verdict in the roster.
+    seedJudgedSession('j2', 'few', ['ignored', 'ignored', 'ignored', 'ignored'])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'few')!
+    expect(row.flags).not.toContain('often-bypassed')
+    expect(row.judgedCalls).toBe(4) // the counts still surface for the detail page
+  })
+
+  it('withholds often-bypassed below the bypass-share threshold', () => {
+    seedInstalledGlobal(store, [{ name: 'fine' }])
+    // 6 judged, 2 bypassed = 33% < 50%.
+    seedJudgedSession('j3', 'fine', ['ignored', 'reworked', 'used', 'used', 'used', 'used'])
+    const r = skillHealth(store, { nowMs: NOW })
+    expect(r.rows.find((x) => x.name === 'fine')!.flags).not.toContain('often-bypassed')
+    expect(r.totalOftenBypassed).toBe(0)
+  })
+
+  it('insufficient-context firings do not count toward the judged floor', () => {
+    seedInstalledGlobal(store, [{ name: 'thin' }])
+    // 4 judged + 2 unjudgeable: still under the floor — insufficient-context is not evidence.
+    seedJudgedSession('j4', 'thin', ['ignored', 'ignored', 'ignored', 'ignored', 'insufficient-context', 'insufficient-context'])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'thin')!
+    expect(row.flags).not.toContain('often-bypassed')
+    expect(row.judgedCalls).toBe(4)
+  })
 })
 
 describe('skillOutcomeStats', () => {
@@ -375,6 +423,9 @@ describe('skillOutcomeStats', () => {
     expect(o.userCorrectionAdjacent).toBe(1)
     // Bypass examples (reworked/ignored) are ordered ahead of the followed one.
     expect(['reworked', 'ignored']).toContain(o.examples[0]!.outcome)
+    // Each example locates its firing so the UI can open the transcript there.
+    expect(o.examples[0]!.sessionId).toBe('s')
+    expect([1, 2]).toContain(o.examples[0]!.idx) // the reworked/ignored firings
   })
 
   it('returns null when a skill has only insufficient-context firings', () => {
