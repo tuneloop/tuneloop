@@ -1883,17 +1883,19 @@ export function filterByErrorCategory(category) {
   setTimePreset(state.days === 'all' ? 'all' : state.days);
 }
 
-// Drill-in from the Skills tab: jump to the Sessions list filtered to one skill,
-// over the same window. The skill facet is a session-level predicate ("sessions
-// that used skill X"); its filter control is the standard facet-filter select.
+// Drill-in from the Skills tab: jump to the Sessions list filtered to one skill.
+// The skill facet is a session-level predicate ("sessions that used skill X");
+// its filter control is the standard facet-filter select.
 export function filterBySkill(skill) {
   setView('sessions');
   buildFilters();
   Array.prototype.forEach.call(document.querySelectorAll('.facet-filter[data-key="skill"]'), function (s) {
     s.value = skill || '';
   });
-  applyFilters();
-  setTimePreset(state.days === 'all' ? 'all' : state.days);
+  // Drilling into one skill defaults to its FULL history (all-time), matching
+  // filterByArtifact — the invocation list the user came from may span far more
+  // than the sessions window, and a narrower default can land on an empty list.
+  setTimePreset('all');
 }
 
 export function closeDrawer() {

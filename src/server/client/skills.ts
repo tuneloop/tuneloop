@@ -616,7 +616,10 @@ function outcomesHtml(d) {
   }
 
   html += '<div class="sk-sect-note">Judged ' + num(d.classified) + ' invocation' + (d.classified === 1 ? '' : 's') + ' in this window.' +
-    (d.insufficientContext > 0 ? ' ' + num(d.insufficientContext) + ' more had too little captured context to judge and are excluded.' : '') +
+    (d.insufficientContext > 0
+      ? ' ' + num(d.insufficientContext) + ' more had too little captured context to judge and ' +
+        (d.insufficientContext === 1 ? 'was' : 'were') + ' excluded.'
+      : '') +
     '</div>';
   return html;
 }
