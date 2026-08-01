@@ -25,6 +25,23 @@ import type { InsightRow } from './types'
  */
 const EVIDENCE_CAP = 500
 
+/**
+ * Facet-registry producer / annotations processor for user-authored tag fields.
+ * Facets owned by this producer are the writable ones (createUserFacet /
+ * setUserTag / deleteUserFacet), and their annotation reads are scoped to
+ * processor = USER_PRODUCER so pipeline annotations under the same key can
+ * never mix into user values.
+ */
+const USER_PRODUCER = 'user'
+
+/** A registry row: the spec plus who registered it ('user' marks editable fields). */
+export type RegisteredFacet = FacetSpec & { producer?: string }
+
+/** `AND <alias>processor = 'user'` when the facet is user-owned, else ''. */
+function userProcScope(f: RegisteredFacet, alias: string): string {
+  return f.producer === USER_PRODUCER ? ` AND ${alias}processor = '${USER_PRODUCER}'` : ''
+}
+
 export interface Dist {
   value: string
   count: number
@@ -1741,12 +1758,12 @@ export class Store {
   }
 
   /** The facet registry — drives dist cards, filters, and (later) breakdowns. */
-  facetList(): Array<FacetSpec & { producer?: string }> {
+  facetList(): RegisteredFacet[] {
     const rows = this.db.prepare('SELECT * FROM facets ORDER BY key').all() as Array<Record<string, any>>
     return rows.map(rowToFacet)
   }
 
-  facet(key: string): FacetSpec | undefined {
+  facet(key: string): RegisteredFacet | undefined {
     const row = this.db.prepare('SELECT * FROM facets WHERE key = ?').get(key) as Record<string, any> | undefined
     return row ? rowToFacet(row) : undefined
   }
@@ -1770,11 +1787,12 @@ export class Store {
         : `SELECT s.${col} AS value, COUNT(*) AS count
            FROM sessions s WHERE s.${col} IS NOT NULL GROUP BY s.${col} ORDER BY count DESC`
     } else if (f.source === 'annotation') {
+      const proc = userProcScope(f, 'a.')
       sql = f.multi
         ? `SELECT je.value AS value, COUNT(*) AS count
-           FROM annotations a, json_each(a.value) je WHERE a.key = ? GROUP BY je.value ORDER BY count DESC`
+           FROM annotations a, json_each(a.value) je WHERE a.key = ?${proc} GROUP BY je.value ORDER BY count DESC`
         : `SELECT json_extract(a.value,'$') AS value, COUNT(*) AS count
-           FROM annotations a WHERE a.key = ? GROUP BY value ORDER BY count DESC`
+           FROM annotations a WHERE a.key = ?${proc} GROUP BY value ORDER BY count DESC`
       params.push(f.key)
     } else if (f.source === 'block') {
       // sessions that have a block labeled value (single label per block)
@@ -1796,7 +1814,7 @@ export class Store {
    * One compiler, reused by session filters today and cohort splits later. Column
    * identifiers and `base` are registry-defined (trusted); the value is a bound param.
    */
-  private facetPredicate(f: FacetSpec, value: string | string[]): { sql: string; params: unknown[] } {
+  private facetPredicate(f: RegisteredFacet, value: string | string[]): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
     const vals = (Array.isArray(value) ? value : [value]).filter((v) => v != null && v !== '')
     if (vals.length === 0) return { sql: '1=1', params: [] } // empty selection ⇒ no constraint
@@ -1810,15 +1828,16 @@ export class Store {
         : { sql: cmp(`s.${col}`), params: vals }
     }
     if (f.source === 'annotation') {
+      const proc = userProcScope(f, 'a.')
       return f.multi
         ? {
             sql: `EXISTS (SELECT 1 FROM annotations a, json_each(a.value) je
-                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp('je.value')})`,
+                  WHERE a.session_id = s.id AND a.key = ?${proc} AND ${cmp('je.value')})`,
             params: [f.key, ...vals],
           }
         : {
             sql: `EXISTS (SELECT 1 FROM annotations a
-                  WHERE a.session_id = s.id AND a.key = ? AND ${cmp("json_extract(a.value,'$')")})`,
+                  WHERE a.session_id = s.id AND a.key = ?${proc} AND ${cmp("json_extract(a.value,'$')")})`,
             params: [f.key, ...vals],
           }
     }
@@ -1844,7 +1863,7 @@ export class Store {
    * success-rate breakdown; empty set → NULL. Mirrors facetPredicate's source
    * switch (identifiers/base are registry-defined and trusted, values are data).
    */
-  private comboExpr(f: FacetSpec): { sql: string; params: unknown[] } {
+  private comboExpr(f: RegisteredFacet): { sql: string; params: unknown[] } {
     const col = f.column ?? f.key
     const cat = (valExpr: string, from: string, where: string, params: unknown[]) => ({
       sql: `(SELECT group_concat(v, ', ') FROM
@@ -1858,9 +1877,10 @@ export class Store {
         : { sql: `s.${col}`, params: [] }
     }
     if (f.source === 'annotation') {
+      const proc = userProcScope(f, 'a.')
       return f.multi
-        ? cat('je.value', 'annotations a, json_each(a.value) je', 'a.session_id = s.id AND a.key = ?', [f.key])
-        : { sql: `(SELECT json_extract(a.value,'$') FROM annotations a WHERE a.session_id = s.id AND a.key = ? LIMIT 1)`, params: [f.key] }
+        ? cat('je.value', 'annotations a, json_each(a.value) je', `a.session_id = s.id AND a.key = ?${proc}`, [f.key])
+        : { sql: `(SELECT json_extract(a.value,'$') FROM annotations a WHERE a.session_id = s.id AND a.key = ?${proc} LIMIT 1)`, params: [f.key] }
     }
     if (f.source === 'block') {
       return cat(`json_extract(ba.value,'$')`, 'block_annotations ba', 'ba.session_id = s.id AND ba.key = ?', [f.key])
@@ -2266,7 +2286,7 @@ export class Store {
   }
 
   /** Resolve one facet's value(s) for a session, branching on (source, multi) like facetPredicate. */
-  private facetValueFor(f: FacetSpec, id: string): string | string[] | null {
+  private facetValueFor(f: RegisteredFacet, id: string): string | string[] | null {
     const col = f.column ?? f.key
     if (f.source === 'session') {
       if (f.multi) {
@@ -2279,9 +2299,9 @@ export class Store {
       return row?.v == null || row.v === '' ? null : String(row.v)
     }
     if (f.source === 'annotation') {
-      const row = this.db.prepare('SELECT value FROM annotations WHERE session_id = ? AND key = ?').get(id, f.key) as
-        | { value: string }
-        | undefined
+      const row = this.db
+        .prepare(`SELECT value FROM annotations WHERE session_id = ? AND key = ?${userProcScope(f, '')}`)
+        .get(id, f.key) as { value: string } | undefined
       const parsed = row ? safeJson<unknown>(row.value, null) : null
       if (f.multi) return Array.isArray(parsed) ? parsed.map(String) : []
       return parsed == null || parsed === '' ? null : String(parsed)
@@ -2914,10 +2934,17 @@ export class Store {
     // /api/sessions treats every non-reserved param as a facet filter.
     if (RESERVED_SESSION_PARAMS.includes(key)) return { error: `"${key}" is a reserved name` }
     if (this.facet(key)) return { error: `a facet named "${key}" already exists` }
+    // Unregistered pipeline annotations (title, intent_summary, …) share the key
+    // namespace too: user reads are processor-scoped so values could never mix,
+    // but a same-named field would still shadow confusingly — refuse it.
+    const taken = this.db
+      .prepare('SELECT 1 FROM annotations WHERE key = ? AND processor <> ? LIMIT 1')
+      .get(key, USER_PRODUCER)
+    if (taken) return { error: `"${key}" is already used by the analysis pipeline` }
     const facet: FacetSpec = { key, label: label?.trim() || display, type: 'string', source: 'annotation', roles: ['chart', 'filter', 'detail'] }
     this.db
       .prepare('INSERT INTO facets (key, label, type, source, col, base, multi, roles, producer) VALUES (?,?,?,?,?,?,?,?,?)')
-      .run(facet.key, facet.label, facet.type, facet.source, null, null, 0, JSON.stringify(facet.roles), 'user')
+      .run(facet.key, facet.label, facet.type, facet.source, null, null, 0, JSON.stringify(facet.roles), USER_PRODUCER)
     return { facet }
   }
 
@@ -2928,31 +2955,31 @@ export class Store {
    * key that isn't a user-owned facet (intrinsic/processor facets are read-only).
    */
   setUserTag(filter: SessionFilter, key: string, value: string | null): { updated: number } | null {
-    const owned = this.db.prepare("SELECT 1 FROM facets WHERE key = ? AND producer = 'user'").get(key)
+    const owned = this.db.prepare('SELECT 1 FROM facets WHERE key = ? AND producer = ?').get(key, USER_PRODUCER)
     if (!owned) return null
     const { where, params } = this.sessionWhere(filter)
     if (value == null) {
       const r = this.db
-        .prepare(`DELETE FROM annotations WHERE processor = 'user' AND key = ? AND session_id IN (SELECT s.id FROM sessions s ${where})`)
-        .run(key, ...params)
+        .prepare(`DELETE FROM annotations WHERE processor = ? AND key = ? AND session_id IN (SELECT s.id FROM sessions s ${where})`)
+        .run(USER_PRODUCER, key, ...params)
       return { updated: r.changes }
     }
     const r = this.db
       .prepare(
         `INSERT OR REPLACE INTO annotations (session_id, processor, key, value)
-         SELECT s.id, 'user', ?, ? FROM sessions s ${where}`,
+         SELECT s.id, ?, ?, ? FROM sessions s ${where}`,
       )
-      .run(key, JSON.stringify(value), ...params)
+      .run(USER_PRODUCER, key, JSON.stringify(value), ...params)
     return { updated: r.changes }
   }
 
   /** Remove a user-defined facet and every tag value stored under it. */
   deleteUserFacet(key: string): boolean {
-    const owned = this.db.prepare("SELECT 1 FROM facets WHERE key = ? AND producer = 'user'").get(key)
+    const owned = this.db.prepare('SELECT 1 FROM facets WHERE key = ? AND producer = ?').get(key, USER_PRODUCER)
     if (!owned) return false
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM facets WHERE key = ?').run(key)
-      this.db.prepare("DELETE FROM annotations WHERE processor = 'user' AND key = ?").run(key)
+      this.db.prepare('DELETE FROM annotations WHERE processor = ? AND key = ?').run(USER_PRODUCER, key)
     })()
     return true
   }
@@ -4555,7 +4582,7 @@ function aggExpr(m: MeasureSpec): string {
  * is the MEASURE's grain (alias s/u/t) — needed to bridge a block facet up from the
  * measure's own anchor (usage_facts / tool_calls) through the block membership tables.
  */
-function facetGroupExpr(f: FacetSpec, anchorGrain: Grain): { join: string; expr: string; where?: string } {
+function facetGroupExpr(f: RegisteredFacet, anchorGrain: Grain): { join: string; expr: string; where?: string } {
   const col = f.column ?? f.key
   if (f.source === 'session') {
     return f.multi
@@ -4563,13 +4590,14 @@ function facetGroupExpr(f: FacetSpec, anchorGrain: Grain): { join: string; expr:
       : { join: '', expr: `s.${col}` }
   }
   if (f.source === 'annotation') {
+    const proc = userProcScope(f, 'fa.')
     return f.multi
       ? {
-          join: `JOIN annotations fa ON fa.session_id = s.id AND fa.key = '${f.key}' JOIN json_each(fa.value) fje`,
+          join: `JOIN annotations fa ON fa.session_id = s.id AND fa.key = '${f.key}'${proc} JOIN json_each(fa.value) fje`,
           expr: 'fje.value',
         }
       : {
-          join: `JOIN annotations fa ON fa.session_id = s.id AND fa.key = '${f.key}'`,
+          join: `JOIN annotations fa ON fa.session_id = s.id AND fa.key = '${f.key}'${proc}`,
           expr: `json_extract(fa.value,'$')`,
         }
   }

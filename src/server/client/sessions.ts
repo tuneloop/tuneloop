@@ -32,24 +32,19 @@ document.addEventListener('mousedown', function (e) {
   if (btn) btn.classList.remove('on');
 });
 
-// Close the outcome multi-select popover on an outside click (same pattern as
-// the transcript outline above): one module-level listener over live elements.
-document.addEventListener('mousedown', function (e) {
-  var menu = document.getElementById('f-outcome-menu');
-  if (!menu || !menu.classList.contains('on')) return;
-  var wrap = document.getElementById('f-outcome-wrap');
-  if (wrap && wrap.contains(e.target as Node)) return;
-  menu.classList.remove('on');
-});
-
-// Same outside-click close for the bulk-tag popover.
-document.addEventListener('mousedown', function (e) {
-  var menu = document.getElementById('f-tag-menu');
-  if (!menu || !menu.classList.contains('on')) return;
-  var wrap = document.getElementById('f-tag-wrap');
-  if (wrap && wrap.contains(e.target as Node)) return;
-  menu.classList.remove('on');
-});
+// Close a filter-bar popover on an outside click (same pattern as the transcript
+// outline above): one module-level listener over live elements per menu.
+function closeOnOutsideClick(menuId, wrapId) {
+  document.addEventListener('mousedown', function (e) {
+    var menu = document.getElementById(menuId);
+    if (!menu || !menu.classList.contains('on')) return;
+    var wrap = document.getElementById(wrapId);
+    if (wrap && wrap.contains(e.target as Node)) return;
+    menu.classList.remove('on');
+  });
+}
+closeOnOutsideClick('f-outcome-menu', 'f-outcome-wrap'); // outcome multi-select
+closeOnOutsideClick('f-tag-menu', 'f-tag-wrap'); // bulk-tag popover
 
 var TIME_PRESETS = [
   { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
@@ -327,6 +322,12 @@ function tagFilterBody() {
 // One-shot note re-shown after the refresh that follows an apply/delete.
 var tagNotice = '';
 
+// Notifies other views (the open KPI detail) that the facet registry changed,
+// so their filter/breakdown selectors rebuild. Registered by main.ts to avoid
+// a sessions↔kpis import cycle (same decoupling pattern as onBackToInsight).
+var onFacetsChanged: (() => void) | null = null;
+export function setOnFacetsChanged(fn: () => void) { onFacetsChanged = fn; }
+
 // Registry + dists changed (field created/deleted, values written): re-fetch,
 // rebuild the bar (the field appears as a filter with no extra wiring), and
 // re-open the menu so the success note is visible.
@@ -335,32 +336,60 @@ function refreshTagUi() {
     buildFilters();
     buildTagMenu();
     $('#f-tag-menu').classList.add('on');
+    if (onFacetsChanged) onFacetsChanged();
+  });
+}
+
+// Create a user field from a display name; resolves to the server-slugged key.
+function createUserField(name) {
+  return post('/api/user-facets', { key: name }).then(function (r) {
+    if (r && r.error) throw r.error;
+    return r.facet.key;
   });
 }
 
 function buildTagMenu() {
   var menu = $('#f-tag-menu');
+  // Snapshot the filter at open time: the count shown and the set written must
+  // come from the SAME filter, even if a reload lands while the menu is open.
+  var filterSnap = tagFilterBody();
   var fOpts = '<option value="">field…</option>';
   userFacets().forEach(function (f) { fOpts += '<option value="' + esc(f.key) + '">' + esc(f.label || f.key) + '</option>'; });
   fOpts += '<option value="__new__">+ new field</option>';
-  var n = state.sessTotal || 0;
   menu.innerHTML =
     '<div class="tag-row"><select id="tag-field">' + fOpts + '</select></div>' +
     '<div class="tag-row" id="tag-field-new-row" hidden><input id="tag-field-new" placeholder="new field name" /></div>' +
     '<div class="tag-row" id="tag-value-row" hidden><select id="tag-value"></select></div>' +
     '<div class="tag-row" id="tag-value-new-row" hidden><input id="tag-value-new" placeholder="value" /></div>' +
-    '<div class="tag-row"><button class="btn" id="tag-apply" type="button">Apply to ' + num(n) + ' session' + (n === 1 ? '' : 's') + '</button></div>' +
+    '<div class="tag-row"><button class="btn" id="tag-apply" type="button">Apply…</button></div>' +
     '<div class="tag-row"><button class="tag-del" id="tag-delete" type="button" hidden>Delete field…</button></div>' +
     '<div class="tag-msg" id="tag-msg">' + esc(tagNotice) + '</div>';
   tagNotice = '';
 
-  var fieldSel = $('#tag-field'), valSel = $('#tag-value');
+  var fieldSel = $('#tag-field'), valSel = $('#tag-value'), delBtn = $('#tag-delete'), applyBtn = $('#tag-apply');
+
+  // Count the snapshot server-side (state.sessTotal may lag an in-flight reload).
+  var qs = Object.keys(filterSnap).map(function (k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(filterSnap[k]);
+  });
+  get('/api/sessions?limit=1' + (qs.length ? '&' + qs.join('&') : '')).then(function (d) {
+    var n = (d && d.total) || 0;
+    if (applyBtn.isConnected) applyBtn.textContent = 'Apply to ' + num(n) + ' session' + (n === 1 ? '' : 's');
+  });
+
+  // Field delete: arm on first click, act on the second — no browser dialogs.
+  // Arming is field-bound: switching fields disarms, so a click armed on field A
+  // can never delete field B.
+  var armed = false;
+  function disarmDelete() { armed = false; delBtn.textContent = 'Delete field…'; }
+
   fieldSel.onchange = function () {
     var isNew = fieldSel.value === '__new__';
     $('#tag-field-new-row').hidden = !isNew;
     $('#tag-value-row').hidden = isNew || !fieldSel.value;
     $('#tag-value-new-row').hidden = !isNew;
-    $('#tag-delete').hidden = isNew || !fieldSel.value;
+    delBtn.hidden = isNew || !fieldSel.value;
+    disarmDelete();
     if (!isNew && fieldSel.value) {
       var vOpts = '<option value="">value…</option>';
       (state.dist[fieldSel.value] || []).forEach(function (r) {
@@ -378,10 +407,8 @@ function buildTagMenu() {
     if (valSel.value === '__new__') $('#tag-value-new').focus();
   };
 
-  // Field delete: arm on first click, act on the second — no browser dialogs.
-  var armed = false;
-  $('#tag-delete').onclick = function () {
-    if (!armed) { armed = true; this.textContent = 'Really delete this field and its values everywhere?'; return; }
+  delBtn.onclick = function () {
+    if (!armed) { armed = true; delBtn.textContent = 'Really delete "' + fieldSel.value + '" and its values everywhere?'; return; }
     var key = fieldSel.value;
     post('/api/user-facets/delete', { key: key }).then(function (r) {
       tagNotice = r && r.ok ? 'Deleted field "' + key + '"' : 'Delete failed';
@@ -389,7 +416,7 @@ function buildTagMenu() {
     });
   };
 
-  $('#tag-apply').onclick = function () {
+  applyBtn.onclick = function () {
     var msg = $('#tag-msg');
     var isNewField = fieldSel.value === '__new__';
     var clear = !isNewField && valSel.value === '__clear__';
@@ -399,13 +426,10 @@ function buildTagMenu() {
     if (!fieldSel.value) { msg.textContent = 'Pick a field.'; return; }
     if (!clear && !value) { msg.textContent = 'Pick or type a value.'; return; }
     var ready = isNewField
-      ? post('/api/user-facets', { key: ($('#tag-field-new').value || '').trim() }).then(function (r) {
-          if (r && r.error) throw r.error;
-          return r.facet.key;
-        })
+      ? createUserField(($('#tag-field-new').value || '').trim())
       : Promise.resolve(fieldSel.value);
     ready.then(function (key) {
-      return post('/api/sessions/tag', { key: key, value: value, filter: tagFilterBody() }).then(function (r) {
+      return post('/api/sessions/tag', { key: key, value: value, filter: filterSnap }).then(function (r) {
         if (r && r.error) throw r.error;
         tagNotice = (clear ? 'Cleared ' : 'Tagged ') + num(r.updated) + ' session' + (r.updated === 1 ? '' : 's');
         refreshTagUi();
@@ -1582,7 +1606,10 @@ export function openDetail(id, focus?: any) {
     function saveUserTag(key, value) {
       post('/api/sessions/tag', { key: key, value: value, filter: { ids: [id] } }).then(function (r) {
         if (r && r.error) return;
-        loadFacets().then(function () { openDetail(id, focus); });
+        loadFacets().then(function () {
+          openDetail(id, focus);
+          if (onFacetsChanged) onFacetsChanged();
+        });
       });
     }
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .tag-edit'), function (s) {
@@ -1620,10 +1647,9 @@ export function openDetail(id, focus?: any) {
       var val = ($('#tag-addf-val').value || '').trim();
       var msg = $('#tag-addf-msg');
       if (!name || !val) { msg.textContent = 'field and value required'; return; }
-      post('/api/user-facets', { key: name }).then(function (r) {
-        if (r && r.error) { msg.textContent = r.error; return; }
-        saveUserTag(r.facet.key, val);
-      });
+      createUserField(name)
+        .then(function (key) { saveUserTag(key, val); })
+        .catch(function (e) { msg.textContent = String(e); });
     };
 
     Array.prototype.forEach.call(document.querySelectorAll('#drawerBody .link-add-btn'), function (btn) {

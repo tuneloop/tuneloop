@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Custom session tags.** Sessions can now be labeled with user-defined key:value
   fields (e.g. `agent: issue_solver`), and each field becomes a first-class facet —
-  it shows up in session filters, distribution cards, metric filters, and break-down
-  selectors like any built-in dimension. Tag in bulk from the sessions tab: narrow
+  it shows up in session filters, metric filters, and break-down selectors like any
+  built-in dimension. Tag in bulk from the sessions tab: narrow
   the list with the existing filters, then "Tag" applies a field/value to every
   matching session (the button states the count before writing). One-off corrections
   live in the session drawer, where each user field is inline-editable and "+ field"

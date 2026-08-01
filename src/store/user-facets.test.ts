@@ -147,6 +147,30 @@ describe('setUserTag', () => {
   })
 })
 
+describe('collision with pipeline annotations', () => {
+  it('rejects a field name already used as a processor annotation key', () => {
+    const { db, store } = make()
+    seed(db, 's1')
+    db.prepare("INSERT INTO annotations (session_id, processor, key, value) VALUES ('s1','enrich-session','title','\"x\"')").run()
+    expect(store.createUserFacet('title')).toHaveProperty('error')
+  })
+
+  it('user facet reads ignore processor rows that later appear under the same key', () => {
+    const { db, store } = make()
+    seed(db, 's1')
+    seed(db, 's2')
+    store.createUserFacet('agent')
+    store.setUserTag({ ids: ['s1'] }, 'agent', 'solver')
+    // a processor introduced after the field was created starts writing the same key
+    db.prepare("INSERT INTO annotations (session_id, processor, key, value) VALUES ('s2','enrich-session','agent','\"other\"')").run()
+    expect(store.facetDistribution('agent')).toEqual([{ value: 'solver', count: 1 }])
+    expect(store.sessionCount({ facets: { agent: 'other' } })).toBe(0)
+    expect(store.sessionCount({ facets: { agent: 'solver' } })).toBe(1)
+    const fv = store.facetValues('s2').filter((v) => v.key === 'agent')[0]
+    expect(fv?.value).toBeNull()
+  })
+})
+
 describe('facet registry exposure', () => {
   it('facetList and facetValues expose the producer, so the client can tell user fields apart', () => {
     const { db, store } = make()
