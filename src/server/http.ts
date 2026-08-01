@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import type { Bucket, Store } from '../store/store'
+import { RESERVED_SESSION_PARAMS, type Bucket, type SessionFilter, type Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
 
@@ -16,13 +16,47 @@ const TOP_RECOMMENDATIONS = 7
  * JSON API + dashboard SPA over the analyzed store. Reads are queries at request
  * time; POST endpoints write user judgment only — curation (features +
  * session↔artifact links, stamped user-authored so `analyze` never clobbers
- * them) and insight lifecycle (dismiss / fix-issued). Deriving facts from
- * transcripts stays in the `analyze` path.
+ * them), user tag fields (user-facets / sessions/tag), and insight lifecycle
+ * (dismiss / fix-issued). Deriving facts from transcripts stays in the
+ * `analyze` path.
  */
 export function createDashboardServer(store: Store, dbPath: string, sh?: ShFn): Server {
   return createServer((req, res) => {
     route(req, res, store, dbPath, sh ?? null).catch((err) => sendJson(res, 500, { error: (err as Error).message }))
   })
+}
+
+/**
+ * A SessionFilter from flat request params (query string or POST body alike).
+ * Any non-reserved key is a facet filter; sessionWhere validates keys against
+ * the registry and ignores unknown ones. Shared by the session list and the
+ * bulk-tag endpoint so "tag all N matching" scopes exactly like the list.
+ */
+function sessionFilterFrom(params: Record<string, unknown>): SessionFilter {
+  const reserved = new Set(RESERVED_SESSION_PARAMS)
+  const facets: Record<string, string> = {}
+  for (const [k, v] of Object.entries(params)) {
+    if (!reserved.has(k) && typeof v === 'string' && v) facets[k] = v
+  }
+  const str = (k: string) => (typeof params[k] === 'string' && params[k] ? (params[k] as string) : undefined)
+  const outcomeTypesRaw = str('outcome_types')
+  // ids: an array in a POST body, comma-separated in a query string.
+  const idsRaw = params.ids
+  const ids = Array.isArray(idsRaw)
+    ? idsRaw.map(String).filter(Boolean)
+    : typeof idsRaw === 'string' && idsRaw
+      ? idsRaw.split(',').filter(Boolean)
+      : undefined
+  return {
+    facets,
+    ids,
+    q: str('q'),
+    artifact: str('artifact'),
+    artifactKind: str('artifact_kind'),
+    from: str('from'),
+    to: str('to'),
+    outcomeTypes: outcomeTypesRaw ? outcomeTypesRaw.split(',').filter(Boolean) : undefined,
+  }
 }
 
 async function route(req: IncomingMessage, res: ServerResponse, store: Store, dbPath: string, sh: ShFn | null): Promise<void> {
@@ -135,6 +169,33 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       // Copying a fix marks it issued. Always 200: re-copying after the state
       // moved on (fix_issued/adopted) is normal, not an error.
       sendJson(res, 200, { ok: store.transitionInsight(id, 'fix_issued') })
+      return
+    }
+    if (path === '/api/user-facets') {
+      const created = store.createUserFacet(String(body.key ?? ''), body.label != null ? String(body.label) : undefined)
+      sendJson(res, 'error' in created ? 400 : 200, created)
+      return
+    }
+    if (path === '/api/user-facets/delete') {
+      const ok = store.deleteUserFacet(String(body.key ?? ''))
+      sendJson(res, ok ? 200 : 404, { ok })
+      return
+    }
+    if (path === '/api/sessions/tag') {
+      const key = String(body.key ?? '')
+      if (!key) {
+        sendJson(res, 400, { error: 'key required' })
+        return
+      }
+      const filter = sessionFilterFrom(body.filter && typeof body.filter === 'object' ? body.filter : {})
+      // Empty string means "clear", same as null — the popover's "— (clear)" option.
+      const value = body.value == null || body.value === '' ? null : String(body.value)
+      const result = store.setUserTag(filter, key, value)
+      if (!result) {
+        sendJson(res, 400, { error: `not a user-defined field: ${key}` })
+        return
+      }
+      sendJson(res, 200, result)
       return
     }
     sendJson(res, 404, { error: 'not found' })
@@ -516,22 +577,8 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const q = url.searchParams
     const limit = q.get('limit')
     const offset = q.get('offset')
-    // Any non-reserved query param is treated as a facet filter; sessionList
-    // validates keys against the registry and ignores unknown ones.
-    const reserved = new Set(['q', 'artifact', 'artifact_kind', 'from', 'to', 'outcome_types', 'limit', 'sort', 'dir', 'offset'])
-    const facets: Record<string, string> = {}
-    for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) facets[k] = v
-    }
-    const outcomeTypesRaw = q.get('outcome_types')
     const filter = {
-      facets,
-      q: q.get('q') ?? undefined,
-      artifact: q.get('artifact') ?? undefined,
-      artifactKind: q.get('artifact_kind') ?? undefined,
-      from: q.get('from') ?? undefined,
-      to: q.get('to') ?? undefined,
-      outcomeTypes: outcomeTypesRaw ? outcomeTypesRaw.split(',').filter(Boolean) : undefined,
+      ...sessionFilterFrom(Object.fromEntries(q.entries())),
       limit: limit ? parseInt(limit, 10) : undefined,
       sort: q.get('sort') ?? undefined,
       dir: q.get('dir') === 'asc' ? ('asc' as const) : q.get('dir') === 'desc' ? ('desc' as const) : undefined,

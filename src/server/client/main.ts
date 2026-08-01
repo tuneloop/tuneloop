@@ -12,7 +12,7 @@ import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from '.
 import { renderInsights, reopenInsight, clearCellSelection } from './insights'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
-import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose } from './sessions'
+import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose, setOnFacetsChanged } from './sessions'
 import { renderArtKindSeg, loadArtifacts, defaultArtSort } from './artifacts'
 
 function init() {
@@ -27,6 +27,9 @@ function init() {
   setBackToInsight(reopenInsight);
   // Clear the selected insight cell when the drawer closes.
   setOnDrawerClose(clearCellSelection);
+  // Tagging can create/delete user fields: re-render the open KPI detail so its
+  // filter + breakdown selectors pick up the registry change.
+  setOnFacetsChanged(renderOpenMetric);
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     // Manual tab nav drops any question-grounding banner.
     b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); };
