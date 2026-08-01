@@ -88,7 +88,7 @@ export interface SeedExpectations {
   /** review's seeded activation-outcome distribution (30d window) + correction count. */
   reviewOutcomes: { classified: number; used: number; reworked: number; ignored: number; userCorrectionAdjacent: number }
   /** The skill seeded past BOTH often-bypassed gates (judged floor + bypass share), with
-   *  its 30d judged/bypassed counts. review is the deliberate near-miss (9 judged, 44%). */
+   *  its 30d judged/bypassed counts. review is the deliberate near-miss (11 judged, ~45%). */
   oftenBypassed: { name: string; judged: number; bypassed: number }
   /** The skill with seeded subagent (sidechain) firings + how many (30d window). */
   subagentUsage: { name: string; calls: number }
@@ -248,8 +248,10 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     insertSession('aivue', 12 - i, [{ skill: 'review' }, { skill: 'grill-with-docs' }, { skill: 'lint-fix' }])
 
   // review also fires inside subagents: counts as usage (with a subagent split + list tag)
-  // but carries no outcome verdict — subagent firings are never judged.
-  for (let i = 0; i < 2; i++) insertSession('aivue', 4 - i, [{ skill: 'review', sidechain: true }])
+  // AND carries outcome verdicts — the processor judges subagent firings within their own
+  // thread. One followed, one reworked, keeping review's bypass share a near-miss (5/11).
+  insertSession('aivue', 4, [{ skill: 'review', sidechain: true, outcome: 'used' }])
+  insertSession('aivue', 3, [{ skill: 'review', sidechain: true, outcome: 'reworked' }])
 
   // browse: global but used ONLY in aivue, while 6 other repos are active → scope-down.
   for (let i = 0; i < 3; i++) insertSession('aivue', 10 - i, [{ skill: 'browse' }])
@@ -300,8 +302,9 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     ],
     browseAbsentRepos,
     // 30d window: v2 era contributes 3 'used' (days 28-30), v3 era contributes
-    // 2 used + 2 reworked + 2 ignored (days 10-15), with 2 adjacent corrections.
-    reviewOutcomes: { classified: 9, used: 5, reworked: 2, ignored: 2, userCorrectionAdjacent: 2 },
+    // 2 used + 2 reworked + 2 ignored (days 10-15) with 2 adjacent corrections, and the
+    // two subagent firings (days 3-4) add 1 used + 1 reworked.
+    reviewOutcomes: { classified: 11, used: 6, reworked: 3, ignored: 2, userCorrectionAdjacent: 2 },
     oftenBypassed: { name: 'flaky-helper', judged: 7, bypassed: 5 },
     subagentUsage: { name: 'review', calls: 2 },
   }

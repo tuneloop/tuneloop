@@ -25,11 +25,10 @@ const DAY_MS = 86_400_000
 
 /** Any skill invocation — main-thread or inside a subagent. Usage facts (counts, trend,
  *  invocation lists, per-repo) count both: skills deliberately wired into subagents are
- *  real usage, and excluding them made subagent-only skills look removable. */
+ *  real usage, and excluding them made subagent-only skills look removable. Outcome facts
+ *  need no extra filter — verdicts exist only where the outcomes processor could build an
+ *  honest window (main thread + identifiable subagent threads). */
 const SKILL_CALL = `t.action = 'skill'`
-/** A MAIN-THREAD skill invocation — the outcome-judged population. The skill-outcomes
- *  processor judges only main-thread firings, so outcome facts filter to match. */
-const MAIN_SKILL_CALL = `${SKILL_CALL} AND t.is_sidechain = 0`
 
 /**
  * The tool-run timestamp, normalized to UTC `Z`: strftime folds any stored offset to UTC
@@ -136,8 +135,8 @@ export interface SkillHealthRow {
   sessions: number
   /** Total invocations in the window — main-thread AND subagent firings. */
   calls: number
-  /** The subagent (sidechain) share of `calls`. Counted as real usage — but never judged
-   *  for activation outcomes, so the outcomes panel's denominators exclude these. */
+  /** The subagent (sidechain) share of `calls`. Counted as real usage; judged for
+   *  activation outcomes too when the firing's subagent thread is identifiable. */
   subagentCalls: number
   /** Invocations whose own tool call errored. */
   errorCalls: number
@@ -1398,11 +1397,10 @@ function usageInWindow(store: Store, source: string, name: string, sinceIso: str
 
 /**
  * LLM-judged activation outcomes for one skill in [sinceIso, untilIso), scoped to the same
- * RepoScope as usageInWindow but restricted to MAIN-THREAD calls (MAIN_SKILL_CALL) — the only
- * population the outcomes processor judges, so the judged count can trail usage's `calls`
- * when subagents also fired the skill. Joins each verdict to its tool_call to window by
- * tool-run time. `insufficient-context` is excluded (not judged); null when nothing was
- * judged (no fake 0%).
+ * RepoScope as usageInWindow. Joins each verdict to its tool_call to window by tool-run
+ * time; the judged population is whatever the outcomes processor produced verdicts for
+ * (main-thread + identifiable subagent firings), so no sidechain filter is applied here.
+ * `insufficient-context` is excluded (not judged); null when nothing was judged (no fake 0%).
  */
 function outcomesInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, scope: RepoScope): SkillVersionOutcomes | null {
   const c = repoClause(scope)
@@ -1415,7 +1413,7 @@ function outcomesInWindow(store: Store, source: string, name: string, sinceIso: 
      JOIN json_each(a.value) j
      JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
      WHERE a.key = 'skill_outcomes'
-       AND ${MAIN_SKILL_CALL}
+       AND ${SKILL_CALL}
        AND s.source = ? AND ${c.sql}
        AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
     source,

@@ -8,7 +8,12 @@
  * never causal ("the skill failed"). `unclear` is a first-class outcome so the model
  * can abstain instead of guessing. Persisted as ONE session annotation (key
  * 'skill_outcomes') whose value is an array keyed by the skill call's tool-call idx —
- * the annotations grain is per-session, so the idx lives inside the value 
+ * the annotations grain is per-session, so the idx lives inside the value.
+ *
+ * Covers main-thread firings AND subagent (sidechain) firings whose events carry an
+ * agentId: each firing's window is built inside its OWN thread, so parallel threads never
+ * contaminate the evidence. Subagent windows have no user turns after the firing — the
+ * verdict rests on the agent's behavior, and the thread ending is a closed episode.
  */
 
 import { registerProcessor } from '../core/registry'
@@ -55,7 +60,7 @@ export interface SkillOutcomeVerdict {
 
 export const skillOutcomes: Processor = {
   name: 'skill-outcomes',
-  version: 5,
+  version: 6,
   kind: 'enrichment',
   needs: { llm: true },
   model: 'heavy',
@@ -63,7 +68,8 @@ export const skillOutcomes: Processor = {
     const { llm, session } = ctx
     if (!llm) return {}
 
-    // Skill firings on the MAIN thread only (matches the roster's counts).
+    // Skill firings from the main thread AND identifiable subagent threads; each is
+    // windowed inside its own thread (see collectFirings).
     const firings = collectFirings(session)
     if (firings.length === 0) return {}
     if (firings.length > MAX_FIRINGS) {
@@ -94,41 +100,73 @@ export const skillOutcomes: Processor = {
 
 registerProcessor(skillOutcomes)
 
-/** A skill firing plus the coordinate we build its context window around. */
+/** A skill firing plus the thread-scoped coordinate we build its context window around. */
 interface Firing {
   idx: number
   name: string
-  /** Index of the firing's assistant event in session.events (for windowing). */
+  /** The firing's thread: the main-thread events, or one subagent's (same agentId) events.
+   *  Windowing runs INSIDE this list, so parallel threads never bleed into the evidence. */
+  thread: Event[]
+  /** Index of the firing's assistant event within `thread` (-1 = unlocatable). */
   eventIdx: number
+  /** Set when the firing happened inside a subagent thread (used to label the prompt). */
+  agentId?: string
   seq?: number
 }
 
 /**
- * Locate each main-thread skill tool call and the assistant event it fired in.
- * session.toolCalls index IS the persisted tool_calls.idx; we match the tool_use id
- * to its containing assistant message to get the transcript coordinate for windowing.
+ * Locate each skill tool call and the assistant event it fired in, with a thread-scoped
+ * coordinate: main-thread firings window over the main thread; a subagent's firings window
+ * over that subagent's own events (matched by agentId). A sidechain firing whose events
+ * carry no agentId has no reconstructable thread — skipped rather than judged against
+ * interleaved noise. session.toolCalls index IS the persisted tool_calls.idx.
  */
 function collectFirings(session: Session): Firing[] {
-  // Map tool_use id → the index of the assistant event that emitted it.
-  const eventIdxById = new Map<string, number>()
-  session.events.forEach((ev, i) => {
-    if (ev.kind !== 'assistant' || ev.isSidechain) return
-    for (const b of ev.blocks) if (b.type === 'tool_use') eventIdxById.set(b.id, i)
-  })
+  // Partition events into threads ('main' + one per agentId) and map each tool_use id to
+  // its thread coordinate. A sidechain event with no agentId belongs to no judgeable thread.
+  const threads = new Map<string, Event[]>()
+  const posById = new Map<string, { key: string; pos: number }>()
+  for (const ev of session.events) {
+    const key = ev.isSidechain ? ev.agentId ?? null : 'main'
+    if (key == null) continue
+    let list = threads.get(key)
+    if (!list) threads.set(key, (list = []))
+    const pos = list.length
+    list.push(ev)
+    if (ev.kind === 'assistant') {
+      for (const b of ev.blocks) if (b.type === 'tool_use') posById.set(b.id, { key, pos })
+    }
+  }
   const out: Firing[] = []
   session.toolCalls.forEach((tc: ToolCall, idx: number) => {
-    if (tc.action !== 'skill' || tc.isSidechain) return
-    const eventIdx = eventIdxById.get(tc.id)
-    out.push({ idx, name: tc.name, eventIdx: eventIdx ?? -1, seq: eventIdx != null ? session.events[eventIdx]?.seq : undefined })
+    if (tc.action !== 'skill') return
+    // A sidechain firing must resolve to a real subagent thread (agentId); one whose events
+    // lack identity — or claim main-thread, contradicting the call — has no honest window.
+    const at = posById.get(tc.id)
+    if (!at || (tc.isSidechain && at.key === 'main')) {
+      // Main-thread firing we can't locate → judged with '(context unavailable)' as before;
+      // an unidentifiable sidechain firing is skipped.
+      if (!tc.isSidechain) out.push({ idx, name: tc.name, thread: [], eventIdx: -1 })
+      return
+    }
+    const ev = threads.get(at.key)![at.pos]!
+    out.push({
+      idx,
+      name: tc.name,
+      thread: threads.get(at.key)!,
+      eventIdx: at.pos,
+      agentId: at.key === 'main' ? undefined : at.key,
+      seq: ev.seq,
+    })
   })
   return out
 }
 
 /** Compact text for one event — role-tagged, truncated, reminders stripped. Surfaces
  *  friction inline: an Esc-interrupt user turn and an errored tool call are the raw
- *  signals the model needs to tell "followed" from "reworked/bypassed". */
+ *  signals the model needs to tell "followed" from "reworked/bypassed". Only ever fed
+ *  events from ONE thread (the firing's), so no cross-thread filtering happens here. */
 function eventText(ev: Event): string | null {
-  if (ev.isSidechain) return null
   if (ev.kind === 'user') {
     const raw = stripReminders(ev.text).trim()
     if (/^\[Request interrupted/i.test(raw)) return 'USER: [interrupted the agent]'
@@ -157,45 +195,50 @@ function clip(s: string): string {
 /** True if this event is a substantive user turn — the natural end of "what the agent did
  *  with the skill before the user spoke again". An Esc-interrupt is NOT a boundary: it's
  *  mid-action friction, and the re-steer that follows is part of the same episode, so the
- *  window extends through it to the next real turn (the interrupt still renders inline). */
+ *  window extends through it to the next real turn (the interrupt still renders inline).
+ *  In a subagent thread real user turns don't occur after a firing (the "user" role there
+ *  is tool results), so its windows run to the next firing, the cap, or the thread's end. */
 function isTurnBoundary(ev: Event): boolean {
-  if (ev.kind !== 'user' || ev.isSidechain) return false
+  if (ev.kind !== 'user') return false
   if (/^\[Request interrupted/i.test(stripReminders(ev.text))) return false
   return isRealUserEvent(ev)
 }
 
-/** True if the assistant event at `i` emits a skill tool_use other than this firing. */
-function firesAnotherSkill(session: Session, i: number, self: number): boolean {
+/** True if the thread event at `i` emits a skill tool_use other than this firing. */
+function firesAnotherSkill(thread: Event[], i: number, self: number): boolean {
   if (i === self) return false
-  const ev = session.events[i]
-  if (!ev || ev.kind !== 'assistant' || ev.isSidechain) return false
+  const ev = thread[i]
+  if (!ev || ev.kind !== 'assistant') return false
   return ev.blocks.some((b) => b.type === 'tool_use' && b.name === 'Skill')
 }
 
 /**
- * The window around a firing: a little leading context, then everything the agent did
- * with the skill up to the NEXT user turn or NEXT skill firing (whichever comes first),
- * capped at MAX_CONTEXT_AFTER. Returns the rendered lines plus whether the after-side was
- * cut by the cap while the session still ran on — the signal that our view (not the
- * outcome) was the limiter, so the model should answer `insufficient-context`.
+ * The window around a firing, built INSIDE its thread: a little leading context, then
+ * everything the agent did with the skill up to the NEXT user turn or NEXT skill firing
+ * (whichever comes first), capped at MAX_CONTEXT_AFTER. Returns the rendered lines plus
+ * whether the after-side was cut by the cap while the thread still ran on — the signal
+ * that our view (not the outcome) was the limiter, so the model should answer
+ * `insufficient-context`. A thread that simply ENDS closes the window cleanly: for a
+ * subagent that's the episode finishing, not a cut-off view.
  */
-function windowFor(session: Session, f: Firing): { text: string; truncated: boolean } {
+function windowFor(f: Firing): { text: string; truncated: boolean } {
+  const events = f.thread
   if (f.eventIdx < 0) return { text: '(context unavailable)', truncated: true }
   const lo = Math.max(0, f.eventIdx - CONTEXT_BEFORE)
   // Extend forward to the boundary: next user turn or next skill firing, capped.
-  const capHi = Math.min(session.events.length - 1, f.eventIdx + MAX_CONTEXT_AFTER)
+  const capHi = Math.min(events.length - 1, f.eventIdx + MAX_CONTEXT_AFTER)
   let hi = capHi
   for (let i = f.eventIdx + 1; i <= capHi; i++) {
-    if (isTurnBoundary(session.events[i]!) || firesAnotherSkill(session, i, f.eventIdx)) {
+    if (isTurnBoundary(events[i]!) || firesAnotherSkill(events, i, f.eventIdx)) {
       hi = i // include the boundary line itself (the user's next words are evidence)
       break
     }
   }
-  // Truncated = we hit the cap with more session after it AND no boundary closed the window.
-  const truncated = hi === capHi && capHi < session.events.length - 1
+  // Truncated = we hit the cap with more thread after it AND no boundary closed the window.
+  const truncated = hi === capHi && capHi < events.length - 1
   const lines: string[] = []
   for (let i = lo; i <= hi; i++) {
-    const ev = session.events[i]
+    const ev = events[i]
     if (!ev) continue
     const marker = i === f.eventIdx ? ' «— the ' + f.name + ' skill fired here' : ''
     const txt = eventText(ev)
@@ -216,6 +259,7 @@ function buildPrompt(session: Session, firings: Firing[]): { system: string; use
     '- insufficient-context: the shown window doesn’t contain enough to tell (e.g. it ends right after the',
     '  firing). Use this — NOT `unclear` — when the limit is how much you were shown.',
     'Flag userCorrectionAdjacent=true when a USER turn corrects, re-steers, or interrupts right around the firing.',
+    'A firing marked "inside a subagent thread" has no USER turns after it — judge purely from the agent\'s behavior.',
     'Be OBSERVATIONAL: describe what happened ("the agent re-ran the diff manually"), never assert the skill caused it.',
     'evidence: ONE complete, self-contained sentence under 200 characters — a finished thought, not a fragment cut off mid-way.',
     'Return exactly one verdict per firing, echoing its idx.',
@@ -223,9 +267,10 @@ function buildPrompt(session: Session, firings: Firing[]): { system: string; use
 
   const blocks = firings
     .map((f) => {
-      const w = windowFor(session, f)
+      const w = windowFor(f)
       const note = w.truncated ? '\n(window truncated here — the session continued past what is shown)' : ''
-      return `--- firing idx=${f.idx} (skill: ${f.name}) ---\n${w.text}${note}`
+      const where = f.agentId ? ', inside a subagent thread' : ''
+      return `--- firing idx=${f.idx} (skill: ${f.name}${where}) ---\n${w.text}${note}`
     })
     .join('\n\n')
   const user = [

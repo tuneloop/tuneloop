@@ -113,20 +113,22 @@ describe('synthetic skill seed', () => {
     expect(flaky.judgedCalls).toBe(exp.oftenBypassed.judged)
     expect(flaky.bypassedCalls).toBe(exp.oftenBypassed.bypassed)
 
-    // review's 9 judged / 4 bypassed (44%) sits under the share threshold — no pill.
+    // review's 11 judged / 5 bypassed (~45%) sits under the share threshold — no pill.
     expect(byName.get('review')!.flags).not.toContain('often-bypassed')
     expect(r.totalOftenBypassed).toBe(1)
   })
 
-  it('counts seeded subagent firings in usage without adding judged outcomes', () => {
+  it('counts seeded subagent firings in usage AND in the judged outcome distribution', () => {
     const exp = seedSkillStore(store, { nowMs: NOW })
     const r = skillHealth(store, { days: 30, nowMs: NOW })
     const row = r.rows.find((x) => x.name === exp.subagentUsage.name)!
     expect(row.subagentCalls).toBe(exp.subagentUsage.calls)
     expect(row.calls).toBeGreaterThan(exp.subagentUsage.calls) // subagent share, not the whole
-    // The judged distribution is untouched — subagent firings carry no verdicts.
+    // The manifest's judged counts include the subagent firings' verdicts.
     const stats = skillOutcomeStats(store, exp.subagentUsage.name, { days: 30, nowMs: NOW })!
     expect(stats.classified).toBe(exp.reviewOutcomes.classified)
+    expect(stats.used).toBe(exp.reviewOutcomes.used)
+    expect(stats.reworked).toBe(exp.reviewOutcomes.reworked)
   })
 
   it('returns null outcome stats for a skill with no classifier verdicts', () => {

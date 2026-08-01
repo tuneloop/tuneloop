@@ -444,7 +444,7 @@ function paintSkillPage(box, r) {
   // for this skill in the window.
   if (r.calls > 0) {
     html += '<div class="sk-card" id="sk-oc-sect" style="display:none">' +
-      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each invocation: did the agent follow, rework, or bypass the skill’s output. Derived from main-thread invocations only — subagent invocations count toward usage but are not judged. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
+      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each invocation — including subagent invocations, judged within their own thread: did the agent follow, rework, or bypass the skill’s output. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
       '<div id="sk-oc"></div>' +
       '</div>';
   }

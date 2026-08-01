@@ -14,14 +14,18 @@ import type { LlmClient, StructuredRequest } from '../llm/types'
 
 const log = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
 
-/** Build a session interleaving user turns, assistant text, and skill/other tool calls. */
-function buildSession(steps: Array<{ user?: string; assistant?: string; skill?: string; tool?: string }>): Session {
+/** Build a session interleaving user turns, assistant text, and skill/other tool calls.
+ *  A step with `agent` is a sidechain event in that subagent's thread (its tool call is
+ *  sidechain too); main-thread steps carry a seq, sidechain steps don't (as in real data). */
+function buildSession(steps: Array<{ user?: string; assistant?: string; skill?: string; tool?: string; agent?: string }>): Session {
   const events: Event[] = []
   const toolCalls: ToolCall[] = []
   let seq = 0
   for (const step of steps) {
+    const side = step.agent != null
+    const base = side ? { isSidechain: true, agentId: step.agent } : { isSidechain: false, seq: seq++ }
     if (step.user != null) {
-      events.push({ kind: 'user', text: step.user, blocks: [], isSidechain: false, seq: seq++ })
+      events.push({ kind: 'user', text: step.user, blocks: [], ...base })
     } else {
       const blocks: Array<{ type: 'text'; text: string } | { type: 'tool_use'; id: string; name: string; input: unknown }> = []
       if (step.assistant) blocks.push({ type: 'text', text: step.assistant })
@@ -31,7 +35,7 @@ function buildSession(steps: Array<{ user?: string; assistant?: string; skill?: 
         id = `t${toolCalls.length}`
         blocks.push({ type: 'tool_use', id, name, input: {} })
       }
-      events.push({ kind: 'assistant', blocks, usage: emptyUsage(), isSidechain: false, seq: seq++ })
+      events.push({ kind: 'assistant', blocks, usage: emptyUsage(), ...base })
       if (name) {
         toolCalls.push({
           id,
@@ -40,7 +44,7 @@ function buildSession(steps: Array<{ user?: string; assistant?: string; skill?: 
           input: {},
           target: {},
           result: { ok: true, isError: false },
-          isSidechain: false,
+          isSidechain: side,
         })
       }
     }
@@ -163,13 +167,53 @@ describe('skill-outcomes', () => {
     expect(r).toEqual({})
   })
 
-  it('skips sidechain skill calls', async () => {
+  it('skips a sidechain firing with no thread identity (agentId missing)', async () => {
+    // The tool call is sidechain but its containing event has no agentId — we can't
+    // reconstruct its thread, so it must be skipped, not judged against interleaved noise.
     const s = buildSession([{ assistant: 'a', skill: 'review' }])
     s.toolCalls[0]!.isSidechain = true
     const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: '' }])
     const r = await skillOutcomes.run(ctx(s, llm))
     expect(r.annotations).toBeUndefined()
     expect(llm.calls.length).toBe(0)
+  })
+
+  it('judges a subagent firing within its own thread, excluding other threads', async () => {
+    const s = buildSession([
+      { user: 'main: run the task' },
+      { assistant: 'spawning a subagent' },
+      { assistant: 'sub reasoning before', agent: 'a1' },
+      { assistant: 'running review', skill: 'review', agent: 'a1' }, // toolCalls[0], sidechain
+      { assistant: 'MAIN thread interleaved noise' },
+      { assistant: 'sub applies the review output', agent: 'a1' },
+      { assistant: 'OTHER subagent noise', agent: 'a2' },
+      { assistant: 'sub finishes and reports', agent: 'a1' },
+    ])
+    const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: 'applied it' }])
+    const r = await skillOutcomes.run(ctx(s, llm))
+    expect(llm.calls.length).toBe(1)
+    const sent = llm.calls[0]!.user
+    expect(sent).toContain('the review skill fired here')
+    expect(sent).toContain('inside a subagent thread') // the firing is labelled for the model
+    expect(sent).toContain('sub applies the review output') // its own thread, after the firing
+    expect(sent).toContain('sub reasoning before') // leading context from the same thread
+    expect(sent).not.toContain('MAIN thread interleaved noise') // other threads excluded
+    expect(sent).not.toContain('OTHER subagent noise')
+    const verdicts = r.annotations?.find((a) => a.key === 'skill_outcomes')?.value as SkillOutcomeVerdict[]
+    expect(verdicts[0]).toMatchObject({ idx: 0, name: 'review', outcome: 'used' })
+  })
+
+  it('a subagent thread ending closes the window — no truncation note', async () => {
+    const s = buildSession([
+      { assistant: 'sub work', skill: 'review', agent: 'a1' },
+      { assistant: 'sub done', agent: 'a1' }, // thread ends here; the session continues
+      ...Array.from({ length: 20 }, (_, i) => ({ assistant: `main continues ${i}` })),
+    ])
+    const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: '' }])
+    await skillOutcomes.run(ctx(s, llm))
+    const sent = llm.calls[0]!.user
+    // The subagent finished — a genuinely closed episode, not a cut-off view.
+    expect(sent).not.toContain('window truncated here')
   })
 
   it('accepts insufficient-context as a distinct outcome (kept out of the noise later)', async () => {
