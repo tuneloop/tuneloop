@@ -673,7 +673,13 @@ export class Store {
       const keep = specs.map((f) => f.key)
       const notIn = keep.length ? ` AND key NOT IN (${keep.map(() => '?').join(',')})` : ''
       this.db.prepare(`DELETE FROM facets WHERE producer = ?${notIn}`).run(producer, ...keep)
+      // A user-defined field owns its key: a processor that later declares the
+      // same key must not REPLACE it away (the user's tags would be orphaned).
+      const userOwned = new Set(
+        (this.db.prepare('SELECT key FROM facets WHERE producer = ?').all(USER_PRODUCER) as Array<{ key: string }>).map((r) => r.key),
+      )
       for (const f of specs) {
+        if (userOwned.has(f.key)) continue
         ins.run(
           f.key,
           f.label ?? f.key,
@@ -2930,9 +2936,9 @@ export class Store {
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '')
     if (!key || key.length > 64) return { error: 'field name must contain letters or digits (max 64 chars)' }
-    // Session-API query params with fixed meanings can never become facet keys —
-    // /api/sessions treats every non-reserved param as a facet filter.
-    if (RESERVED_SESSION_PARAMS.includes(key)) return { error: `"${key}" is a reserved name` }
+    // Params with fixed API meanings and unscoped pipeline annotation keys can
+    // never become facet keys — see RESERVED_FACET_KEYS.
+    if (RESERVED_FACET_KEYS.has(key)) return { error: `"${key}" is a reserved name` }
     if (this.facet(key)) return { error: `a facet named "${key}" already exists` }
     // Unregistered pipeline annotations (title, intent_summary, …) share the key
     // namespace too: user reads are processor-scoped so values could never mix,
@@ -4328,6 +4334,19 @@ export interface TimePoint {
  */
 export const RESERVED_SESSION_PARAMS = ['q', 'artifact', 'artifact_kind', 'from', 'to', 'outcome_types', 'limit', 'sort', 'dir', 'offset', 'ids']
 
+/**
+ * Names a user facet key may never take, beyond registered facets and existing
+ * annotation keys (both checked against live data in createUserFacet): the
+ * session-list params, the metric endpoints' control params (which would
+ * swallow a same-named filter), and the pipeline annotation keys that display/
+ * search code reads without processor scoping (titleExpr, sessionWhere's q).
+ */
+export const RESERVED_FACET_KEYS = new Set([
+  ...RESERVED_SESSION_PARAMS,
+  'by', 'bucket', 'outcomes', 'measure', 'view', 'tool_name',
+  'title', 'intent_summary', 'decisions',
+])
+
 export interface SessionFilter {
   /** facetKey -> value; compiled to predicates via the facet registry. */
   facets?: Record<string, string>
@@ -4535,7 +4554,7 @@ function safeJson<T>(s: unknown, fallback: T): T {
   }
 }
 
-function rowToFacet(r: Record<string, any>): FacetSpec & { producer?: string } {
+function rowToFacet(r: Record<string, any>): RegisteredFacet {
   return {
     key: r.key,
     label: r.label ?? undefined,

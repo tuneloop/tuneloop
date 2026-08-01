@@ -368,7 +368,7 @@ function buildTagMenu() {
 
   var fieldSel = $('#tag-field'), valSel = $('#tag-value'), delBtn = $('#tag-delete'), applyBtn = $('#tag-apply');
 
-  // Count the snapshot server-side (state.sessTotal may lag an in-flight reload).
+  // Count the snapshot server-side (the list's own total may lag an in-flight reload).
   var qs = Object.keys(filterSnap).map(function (k) {
     return encodeURIComponent(k) + '=' + encodeURIComponent(filterSnap[k]);
   });
@@ -605,7 +605,6 @@ var SESS_PAGE = 50;
 export function renderSessions(d) {
   var rows = (d && d.rows) || [];
   var total = (d && d.total) || 0;
-  state.sessTotal = total; // "Apply to N sessions" reads this
   var st = state.sessTable;
   // A stale page (filters narrowed, or a hand-mangled URL) past the end: snap to
   // the last real page, normalize the URL (so reload doesn't repeat the snap),

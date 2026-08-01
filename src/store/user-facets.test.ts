@@ -50,6 +50,20 @@ describe('createUserFacet', () => {
     expect(store.createUserFacet('q')).toHaveProperty('error')
   })
 
+  it('rejects metric control param names', () => {
+    const { store } = make()
+    expect(store.createUserFacet('by')).toHaveProperty('error')
+    expect(store.createUserFacet('bucket')).toHaveProperty('error')
+    expect(store.createUserFacet('outcomes')).toHaveProperty('error')
+  })
+
+  it('rejects pipeline annotation keys even on a fresh store with no annotation rows', () => {
+    const { store } = make()
+    expect(store.createUserFacet('title')).toHaveProperty('error')
+    expect(store.createUserFacet('intent_summary')).toHaveProperty('error')
+    expect(store.createUserFacet('decisions')).toHaveProperty('error')
+  })
+
   it('adding a second user facet keeps the first (no per-producer sweep)', () => {
     const { store } = make()
     store.createUserFacet('agent')
@@ -66,6 +80,15 @@ describe('createUserFacet', () => {
       { key: 'use_case', type: 'string', source: 'block', roles: ['chart', 'filter'] },
     ])
     expect(store.facet('agent')).toBeDefined()
+  })
+
+  it('a later processor facet under the same key cannot replace a user field', () => {
+    const { store } = make()
+    store.createUserFacet('agent')
+    store.registerFacets('enrich-session', [
+      { key: 'agent', type: 'string', source: 'annotation', roles: ['chart', 'filter'] },
+    ])
+    expect(store.facet('agent')?.producer).toBe('user')
   })
 })
 
