@@ -36,6 +36,7 @@ program
   .option('--config <path>', 'JSON config selecting which processors/detectors run (default: all — see config.json)')
   .option('--limit <n>', 'process at most N sessions (handy for a cheap enrichment test)', (v) => parseInt(v, 10))
   .option('--port <n>', 'dashboard port when serving (default 4319)', (v) => parseInt(v, 10))
+  .option('--address <host>', 'dashboard bind address when serving (default 127.0.0.1; e.g. 0.0.0.0 for a reverse proxy — the dashboard is unauthenticated)')
   .option('--llm-provider <name>', 'enrichment provider preset (anthropic, openai, bedrock, openrouter, groq, deepseek, gemini, ollama, …); overrides env')
   .option('--llm-model <id>', 'enrichment model id; overrides env')
   .option('--llm-model-heavy <id>', "stronger model for the detector pass (same provider); default: the provider's strong sibling, else --llm-model")
@@ -51,6 +52,7 @@ program
         config?: string
         limit?: number
         port?: number
+        address?: string
         serve?: boolean
         verbose?: boolean
         llmProvider?: string
@@ -74,7 +76,7 @@ program
       // Serve the dashboard by default and print its URL (press Enter to open a
       // browser tab); --no-serve opts out.
       if (options.serve !== false) {
-        await serve({ db: options.db, port: options.port })
+        await serve({ db: options.db, port: options.port, address: options.address })
       }
     },
   )
@@ -84,9 +86,10 @@ program
   .description('Serve the local dashboard over the analyzed store.')
   .option('--db <path>', 'path to the tuneloop SQLite store')
   .option('--port <n>', 'port to listen on (default 4319)', (v) => parseInt(v, 10))
+  .option('--address <host>', 'address to bind (default 127.0.0.1; e.g. 0.0.0.0 for a reverse proxy — the dashboard is unauthenticated)')
   .option('--no-open', 'serve headless; do not prompt to open the browser')
-  .action(async (options: { db?: string; port?: number; open?: boolean }) => {
-    await serve({ db: options.db, port: options.port, open: options.open })
+  .action(async (options: { db?: string; port?: number; address?: string; open?: boolean }) => {
+    await serve({ db: options.db, port: options.port, address: options.address, open: options.open })
   })
 
 program

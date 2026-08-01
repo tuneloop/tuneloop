@@ -1,6 +1,7 @@
 import type { TuneloopConfig } from '../config'
 import { createAnthropicClient } from './anthropic'
 import { createBedrockClient } from './bedrock'
+import { parseLlmHeaders } from './headers'
 import { tuneHttpForConcurrentLlm } from './http-transport'
 import { createOpenAiClient } from './openai'
 import { PROVIDERS } from './providers'
@@ -27,6 +28,9 @@ export function createLlmClient(llm: TuneloopConfig['llm']): LlmClient | null {
     throw new Error(`provider "${llm.provider}" needs a base URL — set TUNELOOP_LLM_BASE_URL or --llm-base-url`)
   }
   const opts: ClientOpts = { provider: llm.provider, baseURL: llm.baseURL }
+  // Header-auth gateways carry credentials here; a malformed value throws (caught by
+  // analyze → warns and degrades) instead of silently going out unauthenticated.
+  if (llm.headers) opts.headers = parseLlmHeaders(llm.headers)
   // withTracing is a no-op unless LANGFUSE_* env keys are set (personal debug aid)
   switch (preset.shape) {
     case 'anthropic':

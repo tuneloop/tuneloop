@@ -6,7 +6,7 @@
 //   #/skills[/<name>]               the skill roster, or one skill's detail page
 //   #/dashboard/<metric>            e.g. #/dashboard/cost_artifact
 //   #/artifacts/<kind>[?q=&sort=&dir=]
-//   #/sessions[?win=&q=&outcomes=&artifact=&artifactKind=&f.<facet>=…]
+//   #/sessions[?win=&q=&outcomes=&artifact=&artifactKind=&sort=&dir=&page=&f.<facet>=…]
 //   ...any of the above + ?session=<id>   (the open detail drawer, orthogonal)
 //
 // The path picks the screen; the query string carries that screen's filtered-list

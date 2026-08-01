@@ -10,7 +10,7 @@ export default defineConfig([
     // server + CLI (Node)
     entry: ['src/cli.ts', 'src/index.ts'],
     format: ['esm'],
-    target: 'node20',
+    target: 'node22',
     clean: false,
     dts: true,
     sourcemap: true,

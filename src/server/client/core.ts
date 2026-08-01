@@ -72,9 +72,13 @@ export interface ClientState {
   ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
-  // Artifacts tab list controls (PRs/Features table): free-text search + the PR
+  // Sessions-list column sort + pager page (0-based). Sorting and paging are
+  // server-side (the list is capped per request); both round-trip through the URL.
+  sessTable: { sort: string; dir: string; page: number }
+  // Artifacts tab list controls (Features/PRs table): free-text search + the
   // table's column sort. Mirrored into the URL so a filtered/sorted table is a
-  // shareable, reload-survivable link. Reset when switching kind (feature ↔ pr).
+  // shareable, reload-survivable link. Reset when switching kind (feature ↔ pr);
+  // the sort default is per-kind ('created' for PRs, 'last' for features).
   art: { q: string; sort: string; dir: string }
 }
 
@@ -83,17 +87,18 @@ export var state: ClientState = {
   artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
-  days: 7,
+  days: 14,
   // bucket '' = auto-derive from the window (bucketForWindow); a manual pick
   // overrides until the window changes. Uniform across every expansion.
   sr: { outcomes: ['session_success'], bucket: '', by: '', filters: {} },
-  ca: { kind: 'feature', defaultKind: 'feature', userPicked: false, bucket: '', complexity: '' },
+  ca: { kind: 'pr', defaultKind: 'pr', userPicked: false, bucket: '', complexity: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' },
-  art: { q: '', sort: 'created', dir: 'desc' }
+  sessTable: { sort: 'started', dir: 'desc', page: 0 },
+  art: { q: '', sort: 'last', dir: 'desc' } // artKind starts on 'feature', whose default sort is recency
 };
 
 // The success-rate detail controls persist across reloads: the user's "what

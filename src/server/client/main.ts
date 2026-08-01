@@ -13,8 +13,8 @@ import { renderInsights, reopenInsight, clearCellSelection } from './insights'
 import { renderSkills } from './skills'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
-import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose } from './sessions'
-import { renderArtKindSeg, loadArtifacts } from './artifacts'
+import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose, setOnFacetsChanged } from './sessions'
+import { renderArtKindSeg, loadArtifacts, defaultArtSort } from './artifacts'
 
 function init() {
   // Attach Back/Forward + hash-edit listeners and read where the URL says to land.
@@ -28,6 +28,9 @@ function init() {
   setBackToInsight(reopenInsight);
   // Clear the selected insight cell when the drawer closes.
   setOnDrawerClose(clearCellSelection);
+  // Tagging can create/delete user fields: re-render the open KPI detail so its
+  // filter + breakdown selectors pick up the registry change.
+  setOnFacetsChanged(renderOpenMetric);
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {
     // Manual tab nav drops any question-grounding banner.
     b.onclick = function () { clearAsked(); setView(b.getAttribute('data-view')); };
@@ -48,7 +51,7 @@ function init() {
     // Restore the artifacts table's search/sort only when we're landing there
     // (the query params are scoped to the active view).
     if (route.view === 'artifacts') {
-      state.art = { q: route.query.q || '', sort: route.query.sort || 'created', dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
+      state.art = { q: route.query.q || '', sort: route.query.sort || defaultArtSort(route.artKind), dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
     }
     if (route.view === 'skills') {
       var q = route.query;

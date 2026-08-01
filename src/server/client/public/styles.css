@@ -180,7 +180,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
    containers — resolve identical column edges and the labels sit over the data. */
 .feat-head, .feat-row { display: grid; grid-template-columns: minmax(0,1fr) 120px 104px 72px 84px 240px; align-items: center; gap: 12px; padding: 8px 12px; }
 .feat-head { position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 1px solid var(--line); }
-.feat-head span { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.feat-head span { color: var(--emerald); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .feat-row { border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .feat-row:last-child { border-bottom: none; }
 .feat-name { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: nowrap; overflow: hidden; }
@@ -192,9 +192,16 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .feat-search { width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--paper); color: var(--ink); margin-bottom: 10px; }
 .feat-search:focus { outline: none; border-color: var(--emerald); }
 .fh-num, .feat-num { text-align: right; }
-/* Sortable PR table headers. */
-.pr-th { cursor: pointer; user-select: none; white-space: nowrap; }
-.pr-th:hover { color: var(--ink); }
+/* Sortable table headers (PR table, feature list, sessions table). */
+.pr-th, .feat-th, .sess-th { cursor: pointer; user-select: none; white-space: nowrap; }
+.pr-th:hover, .feat-head span.feat-th:hover, .sess-th:hover { color: var(--ink); }
+/* Header rows of the three artifact/session tables carry the product green
+   (.feat-head span above does the same for the features grid). */
+#pr-table-wrap th, #sessions th { color: var(--emerald); }
+/* Sessions pager — below the table, matching the .btn idiom. */
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 10px 2px; }
+.pager .btn[disabled] { opacity: .45; cursor: default; pointer-events: none; }
+.pg-info { font-size: 12px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
 .feat-num { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .feat-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 .ship-btn { border-color: var(--emerald); color: var(--emerald); background: transparent; white-space: nowrap; }
@@ -977,3 +984,17 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 .sk-actions { margin-top: 18px; }
 .sk-view-sessions { font-size: 14px; color: var(--emerald); cursor: pointer; text-decoration: none; }
 .sk-view-sessions:hover { text-decoration: underline; }
+
+/* Bulk-tag popover (filter bar) + user-field editors (drawer summary). */
+.tag-menu { min-width: 250px; }
+.tag-row { display: flex; align-items: center; gap: 6px; padding: 4px; }
+.tag-row[hidden] { display: none; } /* the flex rule would otherwise defeat `hidden` */
+.tag-row select, .tag-row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 5px 8px; font-size: 13px; }
+.tag-msg { padding: 2px 6px; font-size: 12px; color: var(--muted); min-height: 16px; }
+.tag-del { border: 0; background: none; color: #a04b3c; font-size: 12px; cursor: pointer; padding: 2px 4px; text-align: left; }
+.tag-del:hover { text-decoration: underline; }
+.tag-edit, .tag-edit-new { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 2px 6px; font-size: 12px; max-width: 220px; }
+.tag-addf { margin: -8px 0 14px; }
+.tag-addf-btn { border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 4px; font-size: 12px; cursor: pointer; padding: 2px 8px; }
+.tag-addf-btn:hover { background: #dfe9e0; }
+.tag-addf input { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 3px 8px; font-size: 12px; width: 130px; margin-right: 6px; }

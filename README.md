@@ -45,6 +45,9 @@ and adding your own enrichment is straightforward.
 
 ## Quick start
 
+Requires Node.js >= 22.19 (`npx` runs on whatever `node` your shell resolves —
+check with `node -v`).
+
 ```bash
 npx tuneloop analyze
 ```
@@ -87,6 +90,7 @@ Handy flags:
 
 - `--no-serve` — build the store and exit, no dashboard
 - `--port <n>` — serve on a different port
+- `--address <host>` — bind a specific interface (default `127.0.0.1`; e.g. `0.0.0.0` to sit behind a reverse proxy). The dashboard is unauthenticated and serves your session transcripts, so only expose it on networks you trust
 - `--config <path>` — a JSON file selecting which processors/detectors run (see below)
 - `npx tuneloop serve` — open the dashboard over an already-analyzed store, without re-analyzing
 
@@ -257,6 +261,7 @@ are native; everything else speaks the OpenAI-compatible API.
 | `together` / `fireworks` / `xai` | `TOGETHER_API_KEY` / `FIREWORKS_API_KEY` / `XAI_API_KEY` | |
 | `ollama` | _(none)_ | local; `http://localhost:11434` |
 | `openai-compatible` | `TUNELOOP_LLM_API_KEY` | any other host; set `TUNELOOP_LLM_BASE_URL` |
+| `openai-compatible-nokey` | _(none)_ | keyless gateway; set `TUNELOOP_LLM_BASE_URL`, auth via `TUNELOOP_LLM_HEADERS` |
 
 ```bash
 # A hosted provider — name it, never type a URL:
@@ -275,12 +280,21 @@ TUNELOOP_LLM_PROVIDER=bedrock AWS_BEARER_TOKEN_BEDROCK=... AWS_REGION=us-east-1 
 # Any other OpenAI-compatible host:
 TUNELOOP_LLM_PROVIDER=openai-compatible TUNELOOP_LLM_BASE_URL=https://host/v1 \
 TUNELOOP_LLM_API_KEY=… npx tuneloop analyze --llm-model my-model
+
+# An intranet / self-hosted gateway with no API key, authenticated by headers
+# (e.g. a LiteLLM proxy or an internal gateway):
+TUNELOOP_LLM_PROVIDER=openai-compatible-nokey TUNELOOP_LLM_BASE_URL=https://gateway.internal/v1 \
+TUNELOOP_LLM_HEADERS='{"x-user-id":"u-123","x-team":"platform"}' \
+  npx tuneloop analyze --llm-model my-model
 ```
 
 Enrichment is one structured **tool call** per session, so use a
 tool-call-capable model (all the hosted defaults qualify). Flags override the env
 for one run; the API key is never a flag — set it in the env or paste it at the
-interactive prompt. It's inexpensive: analyzing ~100 sessions runs about **$6**
+interactive prompt. For a gateway that authenticates by request headers instead of
+a key, use `openai-compatible-nokey` and pass the headers as a JSON object in
+`TUNELOOP_LLM_HEADERS` (applied to every request; a malformed value warns and
+enrichment stays off rather than sending unauthenticated requests). It's inexpensive: analyzing ~100 sessions runs about **$6**
 with the default pairing — a cheap model (e.g. Claude Haiku) for the per-session
 enrichment and a Sonnet-class heavy model for the cross-session recommendation
 detectors. This cost shows up as **Analysis spend** in the summary,
