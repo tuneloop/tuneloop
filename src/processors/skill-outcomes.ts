@@ -107,19 +107,26 @@ interface Firing {
   /** The firing's thread: the main-thread events, or one subagent's (same agentId) events.
    *  Windowing runs INSIDE this list, so parallel threads never bleed into the evidence. */
   thread: Event[]
-  /** Index of the firing's assistant event within `thread` (-1 = unlocatable). */
+  /** Index of the firing's anchor event within `thread` (-1 = unlocatable). */
   eventIdx: number
+  /** Thread positions holding OTHER skill firings — the next-skill window boundary. Derived
+   *  from the collected firings themselves, so it covers synthesized calls and non-Claude
+   *  block names (OpenCode's lowercase `skill`) that block-name matching would miss. */
+  firingPos: Set<number>
   /** Set when the firing happened inside a subagent thread (used to label the prompt). */
   agentId?: string
   seq?: number
 }
 
 /**
- * Locate each skill tool call and the assistant event it fired in, with a thread-scoped
- * coordinate: main-thread firings window over the main thread; a subagent's firings window
- * over that subagent's own events (matched by agentId). A sidechain firing whose events
- * carry no agentId has no reconstructable thread — skipped rather than judged against
- * interleaved noise. session.toolCalls index IS the persisted tool_calls.idx.
+ * Locate each skill tool call and its anchor event, with a thread-scoped coordinate:
+ * main-thread firings window over the main thread; a subagent's firings window over that
+ * subagent's own events (matched by agentId). Block-backed calls anchor on the assistant
+ * event that emitted the tool_use; synthesized calls (explicit /skill-style invocations,
+ * recorded as messages with no tool_use block) anchor on the nearest same-thread event by
+ * timestamp — the same fallback core/blocks.ts uses for block attribution. A sidechain
+ * firing with no resolvable thread is skipped rather than judged against interleaved
+ * noise. session.toolCalls index IS the persisted tool_calls.idx.
  */
 function collectFirings(session: Session): Firing[] {
   // Partition events into threads ('main' + one per agentId) and map each tool_use id to
@@ -137,28 +144,64 @@ function collectFirings(session: Session): Firing[] {
       for (const b of ev.blocks) if (b.type === 'tool_use') posById.set(b.id, { key, pos })
     }
   }
-  const out: Firing[] = []
+
+  // Anchor one call: its tool_use block's event, else nearest same-thread event by ts.
+  const locate = (tc: ToolCall): { key: string; pos: number } | undefined => {
+    const at = posById.get(tc.id)
+    // A sidechain call anchored on a main-thread event is contradictory data — fall through
+    // to the ts fallback (which only considers sidechain threads) rather than trust it.
+    if (at && !(tc.isSidechain && at.key === 'main')) return at
+    const t = tc.ts ? Date.parse(tc.ts) : NaN
+    if (Number.isNaN(t)) return undefined
+    let best: { key: string; pos: number } | undefined
+    let bestD = Infinity
+    for (const [key, list] of threads) {
+      if (tc.isSidechain ? key === 'main' : key !== 'main') continue
+      list.forEach((ev, pos) => {
+        const evT = ev.ts ? Date.parse(ev.ts) : NaN
+        if (Number.isNaN(evT)) return
+        const d = Math.abs(evT - t)
+        if (d < bestD) { bestD = d; best = { key, pos } }
+      })
+    }
+    return best
+  }
+
+  const located: Array<{ idx: number; name: string; key: string | null; pos: number; sidechain: boolean }> = []
   session.toolCalls.forEach((tc: ToolCall, idx: number) => {
     if (tc.action !== 'skill') return
-    // A sidechain firing must resolve to a real subagent thread (agentId); one whose events
-    // lack identity — or claim main-thread, contradicting the call — has no honest window.
-    const at = posById.get(tc.id)
-    if (!at || (tc.isSidechain && at.key === 'main')) {
-      // Main-thread firing we can't locate → judged with '(context unavailable)' as before;
-      // an unidentifiable sidechain firing is skipped.
-      if (!tc.isSidechain) out.push({ idx, name: tc.name, thread: [], eventIdx: -1 })
-      return
-    }
-    const ev = threads.get(at.key)![at.pos]!
-    out.push({
-      idx,
-      name: tc.name,
-      thread: threads.get(at.key)!,
-      eventIdx: at.pos,
-      agentId: at.key === 'main' ? undefined : at.key,
-      seq: ev.seq,
-    })
+    const at = locate(tc)
+    located.push({ idx, name: tc.name, key: at?.key ?? null, pos: at?.pos ?? -1, sidechain: tc.isSidechain })
   })
+
+  // Per-thread positions that host a skill firing — each firing's next-skill boundary set.
+  const firingPosByThread = new Map<string, Set<number>>()
+  for (const l of located) {
+    if (l.key == null) continue
+    let set = firingPosByThread.get(l.key)
+    if (!set) firingPosByThread.set(l.key, (set = new Set()))
+    set.add(l.pos)
+  }
+
+  const out: Firing[] = []
+  for (const l of located) {
+    if (l.key == null) {
+      // Main-thread firing we can't locate → judged with '(context unavailable)' as before;
+      // an unlocatable sidechain firing is skipped (no honest window can be built).
+      if (!l.sidechain) out.push({ idx: l.idx, name: l.name, thread: [], eventIdx: -1, firingPos: new Set() })
+      continue
+    }
+    const thread = threads.get(l.key)!
+    out.push({
+      idx: l.idx,
+      name: l.name,
+      thread,
+      eventIdx: l.pos,
+      firingPos: firingPosByThread.get(l.key)!,
+      agentId: l.key === 'main' ? undefined : l.key,
+      seq: thread[l.pos]?.seq,
+    })
+  }
   return out
 }
 
@@ -204,13 +247,6 @@ function isTurnBoundary(ev: Event): boolean {
   return isRealUserEvent(ev)
 }
 
-/** True if the thread event at `i` emits a skill tool_use other than this firing. */
-function firesAnotherSkill(thread: Event[], i: number, self: number): boolean {
-  if (i === self) return false
-  const ev = thread[i]
-  if (!ev || ev.kind !== 'assistant') return false
-  return ev.blocks.some((b) => b.type === 'tool_use' && b.name === 'Skill')
-}
 
 /**
  * The window around a firing, built INSIDE its thread: a little leading context, then
@@ -229,7 +265,7 @@ function windowFor(f: Firing): { text: string; truncated: boolean } {
   const capHi = Math.min(events.length - 1, f.eventIdx + MAX_CONTEXT_AFTER)
   let hi = capHi
   for (let i = f.eventIdx + 1; i <= capHi; i++) {
-    if (isTurnBoundary(events[i]!) || firesAnotherSkill(events, i, f.eventIdx)) {
+    if (isTurnBoundary(events[i]!) || f.firingPos.has(i)) {
       hi = i // include the boundary line itself (the user's next words are evidence)
       break
     }

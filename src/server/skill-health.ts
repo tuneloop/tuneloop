@@ -12,6 +12,7 @@ import type { Store } from '../store/store'
 import {
   classify,
   mapScopeKeysToRepos,
+  MIN_REMOVAL_TENURE_DAYS,
   parseInstalledSkills,
   queryInvoked,
   skillMatches,
@@ -165,10 +166,11 @@ export interface SkillHealthRow {
    */
   status: 'used' | 'unused'
   /**
-   * For an UNUSED skill: whether enough sessions were observed in the window to trust
-   * the absence (the detector's MIN_SESSIONS gate). true → safe to advise removal;
-   * false → "unused here, but too few sessions to say it's truly dead — widen first".
-   * Always true for used skills (irrelevant there)
+   * For an UNUSED skill: whether the absence is trustworthy enough to advise removal —
+   * the detector's MIN_SESSIONS gate (enough sessions observed) AND its removal-tenure
+   * gate (installed since before MIN_REMOVAL_TENURE_DAYS ago; a newer install can't have
+   * appeared in older sessions). true → safe to advise removal; false → "unused here,
+   * but not enough evidence to call it dead". Always true for used skills (irrelevant there)
    */
   enoughData: boolean
   /**
@@ -268,6 +270,31 @@ function loadInstalledSkills(store: Store, source: string): InstalledSkill[] {
   const { byRepo } = mapScopeKeysToRepos(projectKeys)
   for (const [repo, scopeKey] of byRepo) readOne('project', scopeKey, repo)
 
+  return out
+}
+
+/**
+ * Skill names already installed at the removal-tenure cutoff (any location) — the same
+ * gate the unused-capabilities detector applies: a skill observed installed only more
+ * recently can't have appeared in the older sessions its absence is judged against, so
+ * "never used" would be a false positive and removal advice must be withheld.
+ */
+function loadRemovalEligible(store: Store, source: string, cutoffIso: string): Set<string> {
+  const out = new Set<string>()
+  const readOne = (scope: 'global' | 'project', scopeKey: string) => {
+    const asOf = store.envSnapshotAsOf(source, scope, scopeKey, 'skills', cutoffIso)
+    if (!asOf.row) return
+    for (const name of parseInstalledSkills(asOf.row.payload)) out.add(name)
+  }
+  readOne('global', '_global')
+  const projectKeys = (
+    store.queryAll(
+      `SELECT DISTINCT scope_key FROM environment_snapshots WHERE source = ? AND scope = 'project'`,
+      source,
+    ) as Array<{ scope_key: string }>
+  ).map((r) => r.scope_key)
+  const { byRepo } = mapScopeKeysToRepos(projectKeys)
+  for (const [, scopeKey] of byRepo) readOne('project', scopeKey)
   return out
 }
 
@@ -613,6 +640,11 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   // names; reconciled per row below, like the invocation fold).
   const outcomeRollup = queryOutcomeRollup(store, source, sinceIso, untilIso)
 
+  // Removal-tenure gate (the detector's MIN_REMOVAL_TENURE_DAYS, applied the same way):
+  // a 'remove' verdict is only trustworthy for a skill installed since before the cutoff.
+  const tenureCutoffIso = new Date((win.nowMs ?? Date.now()) - MIN_REMOVAL_TENURE_DAYS * DAY_MS).toISOString()
+  const removalEligible = loadRemovalEligible(store, source, tenureCutoffIso)
+
   // Assign the status axis + refinement flags (orthogonal — a used skill can still
   // carry a scope-down / not-in-config hint).
   for (const row of rowsByName.values()) {
@@ -648,12 +680,13 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
       }
     } else {
       // Installed, never invoked in the window → unused (a true, window-scoped fact).
-      // `enoughData` marks whether we've seen enough sessions to *advise removal*:
-      // classify emits 'remove' only past MIN_SESSIONS, so it's our confidence gate.
-      // (An uninstalled row with no calls can't occur — a row exists only from an
-      // install entry or an invocation, and no-calls means it came from install.)
+      // `enoughData` marks whether we can *advise removal*: classify emits 'remove' only
+      // past MIN_SESSIONS, and the tenure gate additionally requires the skill to have
+      // been installed since before the cutoff (a newer install can't have appeared in
+      // the older sessions its absence is judged against). (An uninstalled row with no
+      // calls can't occur — a row exists only from an install entry or an invocation.)
       row.status = 'unused'
-      row.enoughData = v?.verdict === 'remove'
+      row.enoughData = v?.verdict === 'remove' && removalEligible.has(row.name)
     }
   }
 

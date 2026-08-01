@@ -197,7 +197,10 @@ function paintSkills() {
   if (!box || !skReport) return;
   var d = skReport;
 
-  if (d.noConfig) {
+  // The empty state only when there is truly nothing to show: with no config captured the
+  // roster can still hold invocation-only rows (skills seen running → not-in-config), and
+  // hiding those would suppress real usage.
+  if (d.noConfig && !(d.rows && d.rows.length)) {
     box.innerHTML =
       '<div class="metric-head"><h2>Skill Health</h2></div>' +
       '<div class="sk-empty">No skill config captured yet. Run <code>tuneloop analyze</code> so the installed-skill inventory is read from your <code>SKILL.md</code> files.</div>';
@@ -674,7 +677,11 @@ var skDriftReq = 0;
 // with history). Shown when ANY location has a multi-version history — the chooser reaches it.
 function loadDrift(name, scopeKey?) {
   var req = ++skDriftReq;
-  var q = '/api/skill-drift?name=' + encodeURIComponent(name) + (scopeKey ? '&scopeKey=' + encodeURIComponent(scopeKey) : '');
+  // Drift ignores the time window but NOT the harness: without the source, the endpoint
+  // resolves to the busiest harness and can show another agent's version history.
+  var q = '/api/skill-drift?name=' + encodeURIComponent(name) +
+    (scopeKey ? '&scopeKey=' + encodeURIComponent(scopeKey) : '') +
+    (state.skillSource ? '&source=' + encodeURIComponent(state.skillSource) : '');
   get(q).then(function (d) {
     if (state.skill !== name || req !== skDriftReq) return; // navigated away, or a newer request superseded this
     var sect = $('#sk-drift-sect');

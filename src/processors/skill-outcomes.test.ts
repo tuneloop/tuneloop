@@ -243,6 +243,70 @@ describe('skill-outcomes', () => {
     expect(sent).toContain('do it manually')
   })
 
+  it('anchors a synthetic (message-recorded) firing by timestamp', async () => {
+    // Explicit invocations (/skill, $skill, /skill:name) synthesize a tool call with NO
+    // matching tool_use block — the window must anchor on the nearest same-thread event by ts.
+    const s = buildSession([
+      { user: 'run the helper' },
+      { assistant: 'expanding the skill body' },
+      { assistant: 'agent applies the skill steps' },
+      { user: 'great, next task' },
+    ])
+    s.events.forEach((ev, i) => { ev.ts = `2026-07-01T00:0${i}:00Z` })
+    s.toolCalls.push({
+      id: 'skill-0', name: 'helper', action: 'skill', input: {}, target: {},
+      result: { ok: true, isError: false }, isSidechain: false, ts: '2026-07-01T00:01:00Z',
+    })
+    const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: '' }])
+    await skillOutcomes.run(ctx(s, llm))
+    const sent = llm.calls[0]!.user
+    expect(sent).toContain('the helper skill fired here')
+    expect(sent).toContain('agent applies the skill steps') // real context, not the fallback
+    expect(sent).not.toContain('(context unavailable)')
+  })
+
+  it('bounds a window at the next skill firing even without a Claude-style Skill block', async () => {
+    // OpenCode's real skill calls use a lowercase block name, and Codex/Pi synthetics have
+    // no block at all — the boundary must come from the collected firings, not block names.
+    const s = buildSession([
+      { user: 'go' },
+      { assistant: 'first', skill: 'alpha' }, // toolCalls[0]
+      { assistant: 'between work' },
+      { assistant: 'second', skill: 'beta' }, // toolCalls[1] — bounds alpha's window
+      { assistant: 'after the second skill' },
+    ])
+    const llm = stubLlm([
+      { idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: '' },
+      { idx: 1, outcome: 'used', userCorrectionAdjacent: false, evidence: '' },
+    ])
+    await skillOutcomes.run(ctx(s, llm))
+    const alphaBlock = llm.calls[0]!.user.split('--- firing idx=1')[0]!
+    expect(alphaBlock).toContain('[calls beta]') // the boundary line itself is included
+    expect(alphaBlock).not.toContain('after the second skill') // but nothing past it
+  })
+
+  it('anchors a sidechain synthetic firing in its subagent thread by timestamp', async () => {
+    // Codex subagent threads record explicit invocations as synthetics too — they must be
+    // judged (in-thread), not dropped for lacking a tool_use block.
+    const s = buildSession([
+      { user: 'main thread ask' },
+      { assistant: 'sub working', agent: 'a1' },
+      { assistant: 'sub applies the skill output', agent: 'a1' },
+    ])
+    s.events.forEach((ev, i) => { ev.ts = `2026-07-01T00:0${i}:00Z` })
+    s.toolCalls.push({
+      id: 'skill-0', name: 'helper', action: 'skill', input: {}, target: {},
+      result: { ok: true, isError: false }, isSidechain: true, ts: '2026-07-01T00:01:00Z',
+    })
+    const llm = stubLlm([{ idx: 0, outcome: 'used', userCorrectionAdjacent: false, evidence: '' }])
+    await skillOutcomes.run(ctx(s, llm))
+    expect(llm.calls.length).toBe(1) // judged, not skipped
+    const sent = llm.calls[0]!.user
+    expect(sent).toContain('inside a subagent thread')
+    expect(sent).toContain('sub applies the skill output')
+    expect(sent).not.toContain('main thread ask') // anchored in the sidechain thread
+  })
+
   it('clips over-long evidence at a word boundary, never mid-word', async () => {
     const s = buildSession([{ assistant: 'a', skill: 'review' }])
     // A ~700-char run of "wordN" tokens — past the 500-char backstop budget.

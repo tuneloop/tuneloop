@@ -33,15 +33,17 @@ function seedSession(
   })
 }
 
-/** Record a current global-skills snapshot with the given entries (may carry kind:'command'). */
+/** Record a global-skills snapshot with the given entries (may carry kind:'command').
+ *  `daysAgo` sets the capture time — removal advice needs tenure past the 10-day gate. */
 function seedInstalledGlobal(
   store: Store,
   skills: Array<{ name: string; description?: string; kind?: string }>,
   source = SOURCE,
+  daysAgo = 1,
 ) {
   store.recordEnvSnapshot(
     { source, scope: 'global', scopeKey: '_global', category: 'skills', payload: { skills, count: skills.length } },
-    iso(1),
+    iso(daysAgo),
   )
 }
 
@@ -71,7 +73,8 @@ describe('skillHealth', () => {
   })
 
   it('marks an installed-but-never-invoked skill unused, with enoughData once sessions suffice', () => {
-    seedInstalledGlobal(store, [{ name: 'deadskill', description: 'does nothing lately' }])
+    // Installed 15 days ago — past the removal-tenure gate, so the absence is trustworthy.
+    seedInstalledGlobal(store, [{ name: 'deadskill', description: 'does nothing lately' }], SOURCE, 15)
     // Enough total sessions to trust the absence (all in one repo, no skill calls).
     for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`s${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
     const r = skillHealth(store, { nowMs: NOW })
@@ -81,6 +84,17 @@ describe('skillHealth', () => {
     expect(row.flags).toEqual([])
     expect(row.description).toBe('does nothing lately')
     expect(r.totalUnused).toBe(1)
+  })
+
+  it('withholds removal advice for a freshly installed skill (tenure gate)', () => {
+    // Snapshot only 1 day old: older in-window sessions predate the install, so "never
+    // used" would be a false positive — mirror the detector's MIN_REMOVAL_TENURE_DAYS gate.
+    seedInstalledGlobal(store, [{ name: 'newskill' }])
+    for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`s${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'newskill')!
+    expect(row.status).toBe('unused') // the window-scoped fact is unchanged
+    expect(row.enoughData).toBe(false) // but removal advice is withheld
   })
 
   it('marks an unused skill as unused with enoughData=false when there is too little to judge', () => {
