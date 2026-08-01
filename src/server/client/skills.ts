@@ -382,7 +382,7 @@ function skRow(r) {
       '<span class="sk-name">' + esc(r.name) + '</span>' +
       '<span class="sk-flags">' + chips + '</span>' +
       '<span class="sk-spark">' + sparkline(r.spark) + '</span>' +
-      '<span class="sk-metric"><span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">calls</span></span>' +
+      '<span class="sk-metric"' + (r.subagentCalls > 0 ? ' title="' + esc(num(r.subagentCalls) + ' of ' + num(r.calls) + ' via subagents') + '"' : '') + '><span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">calls</span></span>' +
       '<span class="sk-metric"><span class="sk-mv">' + num(r.sessions) + '</span><span class="sk-ml">sessions</span></span>' +
       '<span class="sk-caret">›</span>' +
     '</div>' +
@@ -417,8 +417,9 @@ function paintSkillPage(box, r) {
 
   // Headline metrics as full-size stat tiles (matches the product's KPI tiles).
   var winSub = winPhrase('in the last ', 'over all time');
+  var callsSub = r.subagentCalls > 0 ? winSub + ' · ' + num(r.subagentCalls) + ' via subagents' : winSub;
   html += '<div class="sk-page-tiles">' +
-    pageTile(num(r.calls), 'Invocations', winSub) +
+    pageTile(num(r.calls), 'Invocations', callsSub) +
     pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
     pageTile(r.calls > 0 ? errRate + '%' : '—', 'Own-call error rate', r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls errored' : 'no calls to measure') +
     '</div>';
@@ -443,7 +444,7 @@ function paintSkillPage(box, r) {
   // for this skill in the window.
   if (r.calls > 0) {
     html += '<div class="sk-card" id="sk-oc-sect" style="display:none">' +
-      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each invocation: did the agent follow, rework, or bypass the skill’s output. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
+      sectHead('Activation outcomes', 'A cheap LLM read of the turns around each invocation: did the agent follow, rework, or bypass the skill’s output. Derived from main-thread invocations only — subagent invocations count toward usage but are not judged. Observational — what happened after the skill ran, not a verdict that it succeeded or failed, and never a cost.') +
       '<div id="sk-oc"></div>' +
       '</div>';
   }
@@ -892,6 +893,7 @@ function loadInvocations(name) {
 function invocationRow(o) {
   var when = o.ts ? String(o.ts).slice(0, 10) : '—';
   var tags = '';
+  if (o.sidechain) tags += '<span class="sk-inv-tag sk-inv-sub" title="Fired inside a subagent, not the main conversation.">subagent</span>';
   if (o.isError) tags += '<span class="sk-inv-tag sk-inv-err">errored</span>';
   return '<button class="sk-inv" data-session="' + esc(o.sessionId) + '" data-idx="' + esc(String(o.idx)) + '">' +
     '<span class="sk-inv-title">' + esc(o.title || o.sessionId) + '</span>' +

@@ -23,8 +23,13 @@ const DAY_MS = 86_400_000
 
 // ---- Shared SQL fragments -------------------------------------------------
 
-/** A main-thread skill invocation (the roster's unit; excludes subagent replays). */
-const SKILL_CALL = `t.action = 'skill' AND t.is_sidechain = 0`
+/** Any skill invocation — main-thread or inside a subagent. Usage facts (counts, trend,
+ *  invocation lists, per-repo) count both: skills deliberately wired into subagents are
+ *  real usage, and excluding them made subagent-only skills look removable. */
+const SKILL_CALL = `t.action = 'skill'`
+/** A MAIN-THREAD skill invocation — the outcome-judged population. The skill-outcomes
+ *  processor judges only main-thread firings, so outcome facts filter to match. */
+const MAIN_SKILL_CALL = `${SKILL_CALL} AND t.is_sidechain = 0`
 
 /**
  * The tool-run timestamp, normalized to UTC `Z`: strftime folds any stored offset to UTC
@@ -129,8 +134,11 @@ export interface SkillHealthRow {
   installed: boolean
   /** Distinct sessions it was invoked in, in the window. */
   sessions: number
-  /** Total invocations in the window. */
+  /** Total invocations in the window — main-thread AND subagent firings. */
   calls: number
+  /** The subagent (sidechain) share of `calls`. Counted as real usage — but never judged
+   *  for activation outcomes, so the outcomes panel's denominators exclude these. */
+  subagentCalls: number
   /** Invocations whose own tool call errored. */
   errorCalls: number
   /** Repos it was actually invoked in (excludes the null-repo bucket). */
@@ -264,12 +272,14 @@ function loadInstalledSkills(store: Store, source: string): InstalledSkill[] {
   return out
 }
 
-/** One invoked-skill row with timeline + own-call error facts (main-thread, in-window). */
+/** One invoked-skill row with timeline + own-call error facts (in-window; `calls` counts
+ *  main-thread AND subagent firings, `subagentCalls` is the subagent share of that). */
 interface InvokedDetail {
   name: string
   repo: string | null
   sessions: number
   calls: number
+  subagentCalls: number
   errorCalls: number
   firstUsedAt: string | null
   lastUsedAt: string | null
@@ -288,6 +298,7 @@ function queryInvokedDetail(store: Store, source: string, sinceIso: string, unti
             s.repo AS repo,
             COUNT(DISTINCT t.session_id) AS sessions,
             COUNT(*) AS calls,
+            SUM(t.is_sidechain) AS subagentCalls,
             SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls,
             MIN(${TS_NORM}) AS firstUsedAt,
             MAX(${TS_NORM}) AS lastUsedAt
@@ -527,6 +538,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
         installed: !!inst,
         sessions: 0,
         calls: 0,
+        subagentCalls: 0,
         errorCalls: 0,
         usedRepos: [],
         perRepo: [],
@@ -566,6 +578,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
     rawNames.add(iv.name)
     row.sessions += iv.sessions
     row.calls += iv.calls
+    row.subagentCalls += iv.subagentCalls
     row.errorCalls += iv.errorCalls
     // Keep the per-repo grain instead of only summing it away — the scope-down evidence.
     // A skill can reconcile from multiple raw names (plugin-namespaced) into one row, so
@@ -688,6 +701,8 @@ export interface SkillInvocation {
   ts: string | null
   /** True when its own tool call errored. */
   isError: boolean
+  /** True when the firing happened inside a subagent (sidechain) rather than the main thread. */
+  sidechain: boolean
 }
 
 /** Cap on the invocations list. The page notes the true
@@ -700,7 +715,8 @@ const MAX_INVOCATIONS = 100
  * so the client can open the session drawer scrolled to that exact call (txtool-<idx>).
  * Matches the invoked name exactly OR as a plugin-namespaced `<plugin>:<name>` (same
  * reconciliation as skillMatches), so a namespaced invocation still lists under its skill.
- * Main-thread only, matching the roster's counts. Capped at MAX_INVOCATIONS.
+ * Includes subagent firings (flagged `sidechain`), matching the roster's counts.
+ * Capped at MAX_INVOCATIONS.
  */
 export function skillInvocations(store: Store, name: string, win: SkillHealthWindow = {}): SkillInvocation[] {
   const source = resolveSource(store, availableSkillSources(store), win.source)
@@ -708,7 +724,7 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
   const title = `COALESCE((SELECT json_extract(value,'$') FROM annotations WHERE session_id=s.id AND key='title'), NULLIF(s.title, ''), NULLIF(s.first_prompt, ''))`
   const rows = store.queryAll(
     `SELECT t.session_id AS sessionId, ${title} AS title, t.idx AS idx, s.repo AS repo,
-            ${TS_NORM} AS ts, t.is_error AS isError
+            ${TS_NORM} AS ts, t.is_error AS isError, t.is_sidechain AS sidechain
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE ${SKILL_CALL}
        AND ${NAME_MATCH}
@@ -721,7 +737,7 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
     untilIso ?? null,
     untilIso ?? null,
     MAX_INVOCATIONS,
-  ) as Array<{ sessionId: string; title: string | null; idx: number; repo: string | null; ts: string | null; isError: number }>
+  ) as Array<{ sessionId: string; title: string | null; idx: number; repo: string | null; ts: string | null; isError: number; sidechain: number }>
 
   return rows.map((r) => ({
     sessionId: r.sessionId,
@@ -730,6 +746,7 @@ export function skillInvocations(store: Store, name: string, win: SkillHealthWin
     repo: r.repo,
     ts: r.ts,
     isError: r.isError === 1,
+    sidechain: r.sidechain === 1,
   }))
 }
 
@@ -747,7 +764,7 @@ const ID_CHUNK = 500
 /** One co-occurring skill: how many of THIS skill's sessions it also appears in. */
 export interface SkillCoOccurrence {
   name: string
-  /** Sessions where both this skill and `name` were invoked (main-thread, in window). */
+  /** Sessions where both this skill and `name` were invoked (in window, incl. subagent firings). */
   sessions: number
   /** Fraction of this skill's sessions that also had `name` (0..1). */
   share: number
@@ -767,7 +784,7 @@ export interface SkillCoOccurrenceReport {
  * Co-occurrence for one skill in the window. We resolve the skill's own invocations
  * (matching plugin-namespaced forms), collect the sessions it ran in, then count the
  * other distinct skills in those same sessions. `precededSessions` compares first-call
- * idx to give a light ordering signal. Main-thread only, matching the roster's counts.
+ * idx to give a light ordering signal. Counts subagent firings too, matching the roster.
  */
 export function skillCoOccurrence(store: Store, name: string, win: SkillHealthWindow = {}): SkillCoOccurrenceReport {
   const source = resolveSource(store, availableSkillSources(store), win.source)
@@ -1381,9 +1398,11 @@ function usageInWindow(store: Store, source: string, name: string, sinceIso: str
 
 /**
  * LLM-judged activation outcomes for one skill in [sinceIso, untilIso), scoped to the same
- * RepoScope + main-thread skill calls (SKILL_CALL) as usageInWindow so the judged population
- * matches its `calls`. Joins each verdict to its tool_call to window by tool-run time.
- * `insufficient-context` is excluded (not judged); null when nothing was judged (no fake 0%).
+ * RepoScope as usageInWindow but restricted to MAIN-THREAD calls (MAIN_SKILL_CALL) — the only
+ * population the outcomes processor judges, so the judged count can trail usage's `calls`
+ * when subagents also fired the skill. Joins each verdict to its tool_call to window by
+ * tool-run time. `insufficient-context` is excluded (not judged); null when nothing was
+ * judged (no fake 0%).
  */
 function outcomesInWindow(store: Store, source: string, name: string, sinceIso: string, untilIso: string, scope: RepoScope): SkillVersionOutcomes | null {
   const c = repoClause(scope)
@@ -1396,7 +1415,7 @@ function outcomesInWindow(store: Store, source: string, name: string, sinceIso: 
      JOIN json_each(a.value) j
      JOIN tool_calls t ON t.session_id = a.session_id AND t.idx = json_extract(j.value, '$.idx')
      WHERE a.key = 'skill_outcomes'
-       AND ${SKILL_CALL}
+       AND ${MAIN_SKILL_CALL}
        AND s.source = ? AND ${c.sql}
        AND ${TS_NORM} >= ? AND ${TS_NORM} < ?`,
     source,

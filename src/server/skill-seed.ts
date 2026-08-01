@@ -52,6 +52,8 @@ interface Invocation {
   raw?: string
   /** The skill's OWN tool call errored (drives errorCalls / the version-timeline error rate). */
   error?: boolean
+  /** Fired inside a subagent (sidechain) — counts as usage but is never outcome-judged. */
+  sidechain?: boolean
   /** A pre-classified activation outcome, stand-in for the LLM classifier's verdict
    *  (so the read model + UI can be exercised without a real LLM). */
   outcome?: 'used' | 'reworked' | 'ignored' | 'unclear'
@@ -88,6 +90,8 @@ export interface SeedExpectations {
   /** The skill seeded past BOTH often-bypassed gates (judged floor + bypass share), with
    *  its 30d judged/bypassed counts. review is the deliberate near-miss (9 judged, 44%). */
   oftenBypassed: { name: string; judged: number; bypassed: number }
+  /** The skill with seeded subagent (sidechain) firings + how many (30d window). */
+  subagentUsage: { name: string; calls: number }
 }
 
 interface SeedOptions {
@@ -107,12 +111,12 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
   let sid = 0
   const insertSession = (repo: string | null, dayAgo: number, invocations: Invocation[]): string => {
     const id = `syn-${sid++}`
-    const calls: Array<{ name: string; action: string; error: boolean }> = []
+    const calls: Array<{ name: string; action: string; error: boolean; sidechain: boolean }> = []
     // Verdicts stand in for the skill-outcomes processor's output, keyed by tool_call idx.
     const verdicts: Array<{ idx: number; name: string; outcome: string; userCorrectionAdjacent: boolean; evidence: string }> = []
     for (const inv of invocations) {
       const idx = calls.length
-      calls.push({ name: inv.raw ?? inv.skill, action: 'skill', error: !!inv.error })
+      calls.push({ name: inv.raw ?? inv.skill, action: 'skill', error: !!inv.error, sidechain: !!inv.sidechain })
       if (inv.outcome) {
         verdicts.push({
           idx,
@@ -130,8 +134,8 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     calls.forEach((c, idx) => {
       db.prepare(
         `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
-      ).run(id, idx, c.name, c.action, c.error ? 0 : 1, c.error ? 1 : 0, iso(dayAgo))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, idx, c.name, c.action, c.error ? 0 : 1, c.error ? 1 : 0, c.sidechain ? 1 : 0, iso(dayAgo))
     })
     if (verdicts.length) {
       db.prepare(
@@ -243,6 +247,10 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
   for (let i = 0; i < 4; i++)
     insertSession('aivue', 12 - i, [{ skill: 'review' }, { skill: 'grill-with-docs' }, { skill: 'lint-fix' }])
 
+  // review also fires inside subagents: counts as usage (with a subagent split + list tag)
+  // but carries no outcome verdict — subagent firings are never judged.
+  for (let i = 0; i < 2; i++) insertSession('aivue', 4 - i, [{ skill: 'review', sidechain: true }])
+
   // browse: global but used ONLY in aivue, while 6 other repos are active → scope-down.
   for (let i = 0; i < 3; i++) insertSession('aivue', 10 - i, [{ skill: 'browse' }])
   const browseAbsentRepos = ['api', 'infra', 'docs-site', 'mobile', 'cli-tools', 'playground']
@@ -295,5 +303,6 @@ export function seedSkillStore(store: Store, opts: SeedOptions): SeedExpectation
     // 2 used + 2 reworked + 2 ignored (days 10-15), with 2 adjacent corrections.
     reviewOutcomes: { classified: 9, used: 5, reworked: 2, ignored: 2, userCorrectionAdjacent: 2 },
     oftenBypassed: { name: 'flaky-helper', judged: 7, bypassed: 5 },
+    subagentUsage: { name: 'review', calls: 2 },
   }
 }

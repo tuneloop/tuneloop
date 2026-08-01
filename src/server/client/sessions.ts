@@ -1834,11 +1834,15 @@ export function openDetail(id, focus?: any) {
     activeReveal = revealErrorTarget;
     if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
 
-    // Reveal a specific tool call by idx (skill-invocation drill-in). Skill calls are
-    // main-thread, so switch to the main scope + transcript tab, then revealTool.
+    // Reveal a specific tool call by idx (skill-invocation drill-in). The call may live
+    // in a subagent's scope pane (all panes are mounted, just hidden), so resolve which
+    // pane owns the anchor and switch there before revealing — same idea as revealErrorTarget.
     if (focus && focus.toolTarget != null && hasTx) {
       showTab('transcript');
-      if (activeScope !== 'main') switchScope('main');
+      var ttEl = document.getElementById('txtool-' + focus.toolTarget);
+      var ttPane = ttEl && ttEl.closest ? ttEl.closest('.tx-scope-pane') : null;
+      var ttScope = (ttPane && ttPane.getAttribute('data-scope')) || 'main';
+      if (activeScope !== ttScope) switchScope(ttScope);
       requestAnimationFrame(function () { revealTool(focus.toolTarget); });
     }
 

@@ -118,6 +118,17 @@ describe('synthetic skill seed', () => {
     expect(r.totalOftenBypassed).toBe(1)
   })
 
+  it('counts seeded subagent firings in usage without adding judged outcomes', () => {
+    const exp = seedSkillStore(store, { nowMs: NOW })
+    const r = skillHealth(store, { days: 30, nowMs: NOW })
+    const row = r.rows.find((x) => x.name === exp.subagentUsage.name)!
+    expect(row.subagentCalls).toBe(exp.subagentUsage.calls)
+    expect(row.calls).toBeGreaterThan(exp.subagentUsage.calls) // subagent share, not the whole
+    // The judged distribution is untouched — subagent firings carry no verdicts.
+    const stats = skillOutcomeStats(store, exp.subagentUsage.name, { days: 30, nowMs: NOW })!
+    expect(stats.classified).toBe(exp.reviewOutcomes.classified)
+  })
+
   it('returns null outcome stats for a skill with no classifier verdicts', () => {
     seedSkillStore(store, { nowMs: NOW })
     // browse was seeded without outcomes → the classifier surface should abstain.

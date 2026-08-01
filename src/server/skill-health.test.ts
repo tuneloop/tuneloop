@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest'
 import { openDb } from '../store/db'
 import { Store } from '../store/store'
-import { skillHealth, skillOutcomeStats } from './skill-health'
+import { skillHealth, skillInvocations, skillOutcomeStats } from './skill-health'
 import { MIN_SESSIONS } from '../detectors/unused-capabilities'
 
 const SOURCE = 'claude-code'
@@ -13,12 +13,12 @@ const iso = (daysAgo: number) => new Date(NOW - daysAgo * 86_400_000).toISOStrin
 
 let db: ReturnType<typeof openDb>
 
-/** Insert a session with a run of skill/tool calls. calls: [{name, action, error?}] in idx order. */
+/** Insert a session with a run of skill/tool calls. calls: [{name, action, error?, sidechain?}] in idx order. */
 function seedSession(
   id: string,
   repo: string | null,
   startedDaysAgo: number,
-  calls: Array<{ name: string; action: string; error?: boolean }>,
+  calls: Array<{ name: string; action: string; error?: boolean; sidechain?: boolean }>,
   source = SOURCE,
 ) {
   db.prepare(
@@ -28,8 +28,8 @@ function seedSession(
   calls.forEach((c, idx) => {
     db.prepare(
       `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, is_sidechain, ts)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?)`,
-    ).run(id, idx, c.name, c.action, c.error ? 0 : 1, c.error ? 1 : 0, iso(startedDaysAgo))
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(id, idx, c.name, c.action, c.error ? 0 : 1, c.error ? 1 : 0, c.sidechain ? 1 : 0, iso(startedDaysAgo))
   })
 }
 
@@ -329,6 +329,42 @@ describe('skillHealth — cross-agent (source-aware)', () => {
     seedSession('cx', 'cxrepo', 2, [{ name: 'k', action: 'skill' }], 'codex')
     const r = skillHealth(store, { source: 'codex', days: 30, nowMs: NOW })
     expect(r.totalActiveRepos).toBe(1) // only codex's repo, not the 3 claude-code ones
+  })
+
+  it('counts subagent (sidechain) invocations in usage, with a subagentCalls split', () => {
+    seedInstalledGlobal(store, [{ name: 'subskill' }])
+    seedSession('m1', 'repoA', 2, [
+      { name: 'subskill', action: 'skill' },
+      { name: 'subskill', action: 'skill', sidechain: true },
+    ])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'subskill')!
+    expect(row.calls).toBe(2) // overall count includes the subagent firing
+    expect(row.subagentCalls).toBe(1)
+    expect(row.status).toBe('used')
+  })
+
+  it('a skill invoked only by subagents reads as used, not removable', () => {
+    seedInstalledGlobal(store, [{ name: 'agent-only' }])
+    // Plenty of sessions, so an actually-dead skill WOULD be flagged removable.
+    for (let i = 0; i < MIN_SESSIONS; i++) seedSession(`s${i}`, 'repoA', 2, [{ name: 'Bash', action: 'shell' }])
+    seedSession('sub', 'repoA', 2, [{ name: 'agent-only', action: 'skill', sidechain: true }])
+    const r = skillHealth(store, { nowMs: NOW })
+    const row = r.rows.find((x) => x.name === 'agent-only')!
+    expect(row.status).toBe('used')
+    expect(row.calls).toBe(1)
+    expect(row.subagentCalls).toBe(1)
+  })
+
+  it('the invocations list includes subagent firings, flagged sidechain', () => {
+    seedInstalledGlobal(store, [{ name: 'subskill' }])
+    seedSession('m1', 'repoA', 2, [
+      { name: 'subskill', action: 'skill' },
+      { name: 'subskill', action: 'skill', sidechain: true },
+    ])
+    const list = skillInvocations(store, 'subskill', { days: 30, nowMs: NOW })
+    expect(list.length).toBe(2)
+    expect(list.map((i) => i.sidechain).sort()).toEqual([false, true])
   })
 
   /** Seed a session whose skill firings each carry an outcome verdict annotation. */
