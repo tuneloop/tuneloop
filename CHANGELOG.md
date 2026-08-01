@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-31
+
 ### Added
 
+- **Skill Health tab.** A new dashboard tab reporting on the skills your agent
+  harness has installed: a per-skill roster with a used/unused verdict, invocation
+  count and trend sparkline, own-call error rate, scope-down and not-in-config
+  flags, and the SKILL.md description; a version-drift timeline (append-on-change
+  snapshot diffing, scoped per skill and repo) with a before/after usage delta
+  around each edit; and skill co-occurrence and activation outcomes. It is a pure
+  read model over existing session data — no new aggregate tables — and works
+  across all four adapters (claude-code, codex, opencode, pi). Each report covers
+  one source, resolved to the busiest harness by real usage. ([#112])
+- **`--address` flag for interface binding.** `tuneloop serve` (and `tuneloop
+  analyze`) accept `--address <host>` to bind the dashboard to a specific
+  interface, e.g. `0.0.0.0` so a reverse proxy can forward to it. The default is
+  unchanged (`127.0.0.1`, loopback only), and binding a non-loopback address
+  prints a warning — the dashboard is unauthenticated, so exposure should be a
+  deliberate choice with auth/TLS handled at the proxy layer. The printed URL
+  adapts to the bind, and `EADDRNOTAVAIL` gets a clear "not an address of this
+  machine" error. ([#116])
 - **Custom session tags.** Sessions can now be labeled with user-defined key:value
   fields (e.g. `agent: issue_solver`), and each field becomes a first-class facet —
   it shows up in session filters, metric filters, and break-down selectors like any
@@ -182,7 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
-[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.5.0
 [0.4.1]: https://github.com/tuneloop/tuneloop/releases/tag/v0.4.1
@@ -193,6 +213,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
 [#117]: https://github.com/tuneloop/tuneloop/pull/117
+[#116]: https://github.com/tuneloop/tuneloop/pull/116
+[#112]: https://github.com/tuneloop/tuneloop/pull/112
 [#110]: https://github.com/tuneloop/tuneloop/pull/110
 [#109]: https://github.com/tuneloop/tuneloop/pull/109
 [#108]: https://github.com/tuneloop/tuneloop/pull/108
