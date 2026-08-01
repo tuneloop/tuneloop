@@ -1741,7 +1741,7 @@ export class Store {
   }
 
   /** The facet registry — drives dist cards, filters, and (later) breakdowns. */
-  facetList(): FacetSpec[] {
+  facetList(): Array<FacetSpec & { producer?: string }> {
     const rows = this.db.prepare('SELECT * FROM facets ORDER BY key').all() as Array<Record<string, any>>
     return rows.map(rowToFacet)
   }
@@ -2024,6 +2024,11 @@ export class Store {
       clauses.push(p.sql)
       params.push(...p.params)
     }
+    const ids = (f.ids ?? []).filter(Boolean)
+    if (ids.length) {
+      clauses.push(`s.id IN (${ids.map(() => '?').join(',')})`)
+      params.push(...ids)
+    }
     if (f.q) {
       // Search title + intent + the decisions list (matched against its raw JSON
       // text, which is enough to surface a decision by any word it contains).
@@ -2251,7 +2256,13 @@ export class Store {
     const facets = (this.db.prepare('SELECT * FROM facets ORDER BY rowid').all() as Array<Record<string, any>>)
       .map(rowToFacet)
       .filter((f) => (f.roles ?? []).includes('detail'))
-    return facets.map((f) => ({ key: f.key, label: f.label ?? f.key, type: f.type, value: this.facetValueFor(f, id) }))
+    return facets.map((f) => ({
+      key: f.key,
+      label: f.label ?? f.key,
+      type: f.type,
+      value: this.facetValueFor(f, id),
+      producer: f.producer,
+    }))
   }
 
   /** Resolve one facet's value(s) for a session, branching on (source, multi) like facetPredicate. */
@@ -2879,6 +2890,71 @@ export class Store {
       )
       .run()
     return r.changes
+  }
+
+  // ---- user tag facets (dashboard writes, issue #106) ------------------------
+
+  /**
+   * Define a user tag field: a session-grain annotation facet owned by producer
+   * 'user'. Values live in `annotations` under processor 'user', so the whole
+   * facet pipeline (distribution, filters, breakdowns) reads them with no new
+   * query shapes, analyze-time processor wipes never touch them, and
+   * registerFacets' per-producer sync never sweeps the registry row. Inserted
+   * directly (not via registerFacets) because that method syncs a producer's
+   * full set — registering one field through it would delete the others.
+   */
+  createUserFacet(name: string, label?: string): { facet: FacetSpec } | { error: string } {
+    const display = String(name ?? '').trim()
+    const key = display
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+    if (!key || key.length > 64) return { error: 'field name must contain letters or digits (max 64 chars)' }
+    // Session-API query params with fixed meanings can never become facet keys —
+    // /api/sessions treats every non-reserved param as a facet filter.
+    if (RESERVED_SESSION_PARAMS.includes(key)) return { error: `"${key}" is a reserved name` }
+    if (this.facet(key)) return { error: `a facet named "${key}" already exists` }
+    const facet: FacetSpec = { key, label: label?.trim() || display, type: 'string', source: 'annotation', roles: ['chart', 'filter', 'detail'] }
+    this.db
+      .prepare('INSERT INTO facets (key, label, type, source, col, base, multi, roles, producer) VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(facet.key, facet.label, facet.type, facet.source, null, null, 0, JSON.stringify(facet.roles), 'user')
+    return { facet }
+  }
+
+  /**
+   * Set (or clear, with value null) a user tag on every session matching the
+   * filter — the same filter the session list compiles, so "tag all N matching"
+   * and the list the user is looking at can never disagree. Returns null for a
+   * key that isn't a user-owned facet (intrinsic/processor facets are read-only).
+   */
+  setUserTag(filter: SessionFilter, key: string, value: string | null): { updated: number } | null {
+    const owned = this.db.prepare("SELECT 1 FROM facets WHERE key = ? AND producer = 'user'").get(key)
+    if (!owned) return null
+    const { where, params } = this.sessionWhere(filter)
+    if (value == null) {
+      const r = this.db
+        .prepare(`DELETE FROM annotations WHERE processor = 'user' AND key = ? AND session_id IN (SELECT s.id FROM sessions s ${where})`)
+        .run(key, ...params)
+      return { updated: r.changes }
+    }
+    const r = this.db
+      .prepare(
+        `INSERT OR REPLACE INTO annotations (session_id, processor, key, value)
+         SELECT s.id, 'user', ?, ? FROM sessions s ${where}`,
+      )
+      .run(key, JSON.stringify(value), ...params)
+    return { updated: r.changes }
+  }
+
+  /** Remove a user-defined facet and every tag value stored under it. */
+  deleteUserFacet(key: string): boolean {
+    const owned = this.db.prepare("SELECT 1 FROM facets WHERE key = ? AND producer = 'user'").get(key)
+    if (!owned) return false
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM facets WHERE key = ?').run(key)
+      this.db.prepare("DELETE FROM annotations WHERE processor = 'user' AND key = ?").run(key)
+    })()
+    return true
   }
 
   // ---- session-link management (dashboard writes) ----------------------------
@@ -4219,9 +4295,17 @@ export interface TimePoint {
   shipped: number
 }
 
+/**
+ * /api/sessions query params with fixed meanings. Every OTHER param is treated
+ * as a facet filter, so these names are barred from becoming user facet keys.
+ */
+export const RESERVED_SESSION_PARAMS = ['q', 'artifact', 'artifact_kind', 'from', 'to', 'outcome_types', 'limit', 'sort', 'dir', 'offset', 'ids']
+
 export interface SessionFilter {
   /** facetKey -> value; compiled to predicates via the facet registry. */
   facets?: Record<string, string>
+  /** Restrict to exactly these session ids (single-session tag writes; hand-picked sets later). */
+  ids?: string[]
   q?: string
   /** Match sessions linked to an artifact whose path/PR/url/repo/feature-title matches. */
   artifact?: string
@@ -4323,6 +4407,8 @@ export interface FacetValue {
   type: FacetType
   /** scalar, list (multi / child-grain facets), or null when the session has none. */
   value: string | string[] | null
+  /** Registry producer — 'user' marks a user-defined field the drawer may edit. */
+  producer?: string
 }
 
 export interface SessionDetail {
@@ -4422,7 +4508,7 @@ function safeJson<T>(s: unknown, fallback: T): T {
   }
 }
 
-function rowToFacet(r: Record<string, any>): FacetSpec {
+function rowToFacet(r: Record<string, any>): FacetSpec & { producer?: string } {
   return {
     key: r.key,
     label: r.label ?? undefined,
@@ -4432,6 +4518,8 @@ function rowToFacet(r: Record<string, any>): FacetSpec {
     base: r.base ?? undefined,
     multi: !!r.multi,
     roles: safeJson(r.roles, [] as FacetSpec['roles']),
+    // Surfaced so the dashboard can tell user-defined fields (editable) apart.
+    producer: r.producer ?? undefined,
   }
 }
 

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Custom session tags.** Sessions can now be labeled with user-defined key:value
+  fields (e.g. `agent: issue_solver`), and each field becomes a first-class facet —
+  it shows up in session filters, distribution cards, metric filters, and break-down
+  selectors like any built-in dimension. Tag in bulk from the sessions tab: narrow
+  the list with the existing filters, then "Tag" applies a field/value to every
+  matching session (the button states the count before writing). One-off corrections
+  live in the session drawer, where each user field is inline-editable and "+ field"
+  defines a new one. Values are single-valued per field, overwritten on re-tag, and
+  clearable/deletable from the same controls; they persist through re-analysis and
+  need no schema migration. ([#106])
+
 ## [0.6.0] - 2026-07-30
 
 ### Added
@@ -179,6 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#106]: https://github.com/tuneloop/tuneloop/issues/106
 [#110]: https://github.com/tuneloop/tuneloop/pull/110
 [#109]: https://github.com/tuneloop/tuneloop/pull/109
 [#108]: https://github.com/tuneloop/tuneloop/pull/108

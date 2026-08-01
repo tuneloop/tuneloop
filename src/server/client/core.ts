@@ -59,6 +59,7 @@ export interface ClientState {
   ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
+  sessTotal: number // total sessions matching the current filter (drives "Apply to N sessions")
   // Sessions-list column sort + pager page (0-based). Sorting and paging are
   // server-side (the list is capped per request); both round-trip through the URL.
   sessTable: { sort: string; dir: string; page: number }
@@ -84,6 +85,7 @@ export var state: ClientState = {
   ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' },
+  sessTotal: 0,
   sessTable: { sort: 'started', dir: 'desc', page: 0 },
   art: { q: '', sort: 'last', dir: 'desc' } // artKind starts on 'feature', whose default sort is recency
 };

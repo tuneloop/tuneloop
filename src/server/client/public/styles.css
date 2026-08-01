@@ -772,3 +772,16 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .drawer-back { flex: none; border: 1px solid var(--line); background: var(--paper); border-radius: 8px;
   padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; margin-right: 4px; }
 .drawer-back:hover { border-color: var(--emerald); color: var(--emerald); }
+
+/* Bulk-tag popover (filter bar) + user-field editors (drawer summary). */
+.tag-menu { min-width: 250px; }
+.tag-row { display: flex; align-items: center; gap: 6px; padding: 4px; }
+.tag-row select, .tag-row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 5px 8px; font-size: 13px; }
+.tag-msg { padding: 2px 6px; font-size: 12px; color: var(--muted); min-height: 16px; }
+.tag-del { border: 0; background: none; color: #a04b3c; font-size: 12px; cursor: pointer; padding: 2px 4px; text-align: left; }
+.tag-del:hover { text-decoration: underline; }
+.tag-edit, .tag-edit-new { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 2px 6px; font-size: 12px; max-width: 220px; }
+.tag-addf { margin: -8px 0 14px; }
+.tag-addf-btn { border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 4px; font-size: 12px; cursor: pointer; padding: 2px 8px; }
+.tag-addf-btn:hover { background: #dfe9e0; }
+.tag-addf input { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 3px 8px; font-size: 12px; width: 130px; margin-right: 6px; }
