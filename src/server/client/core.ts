@@ -29,11 +29,24 @@ export interface SessTime {
 export interface ClientState {
   // The top-level tab the app is showing. Mirrored into the URL hash by the
   // router; setView() keeps it in step with the DOM.
-  view: 'highlights' | 'insights' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
   // The session whose detail drawer is open (null = drawer closed). Mirrored into
   // the URL as `?session=<id>` so a session is shareable / reload-survivable.
   open: string | null
   artKind: string
+  // The skill whose detail page is open on the Skills tab (null = the roster).
+  // Mirrored into the URL as #/skills/<name> so a skill page is shareable.
+  skill: string | null
+  // Skills-tab usage window in days (7|14|30|90), 'all', or 'custom' (uses
+  // skillFrom/skillTo). Windows the invocation side only (the installed inventory is
+  // always current). Mirrored into the URL as ?win= (+ ?from=&to= for custom) so a
+  // windowed roster is shareable. Default 30.
+  skillWin: number | 'all' | 'custom'
+  skillFrom: string // ISO date (yyyy-mm-dd) for a custom range
+  skillTo: string
+  // Which harness's skills the Skills tab shows ('' = let the server pick the default).
+  // Only meaningful when >1 source has skill data; mirrored into the URL as ?source=.
+  skillSource: string
   overview: any
   home: any // Explore (question-led) stats; null until fetched
   asked: any // the question the user clicked through from, for the grounding banner (null = none)
@@ -71,7 +84,7 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 14,

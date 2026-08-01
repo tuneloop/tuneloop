@@ -1200,7 +1200,11 @@ export function openDetail(id, focus?: any) {
           '<div class="tx-error-h">⚠ ' + esc(tl.name) + '</div>' +
           '<div class="tx-error-b">' + esc(tl.error) + '</div></div>';
       }
-      return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '">' +
+      // Every tool call with a known idx gets a stable anchor (txtool-<idx>), so a
+      // deep-link can scroll to ANY tool call — not just failed ones (which also carry
+      // the txerr-<idx> error panel above). Used by the skill-invocations drill-in.
+      var toolId = tl.idx != null ? ' id="txtool-' + tl.idx + '"' : '';
+      return '<div class="tool-block' + (tl.ok ? '' : ' err') + (agent ? ' agent' : '') + '"' + toolId + '>' +
         row + body + errPanel + '</div>';
     }
 
@@ -1795,6 +1799,21 @@ export function openDetail(id, focus?: any) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       flashOnSettle(el);
     }
+    // Reveal ANY tool call by its idx (txtool-<idx>) — used by the skill-invocations
+    // drill-in, which scrolls to a skill's tool block whether or not it errored. Same
+    // collapsed-group reveal + scroll + flash as revealErr.
+    function revealTool(idx) {
+      var el = document.getElementById('txtool-' + idx);
+      if (!el) return;
+      var rest = el.closest && el.closest('.tool-rest');
+      if (rest && !rest.classList.contains('on')) {
+        rest.classList.add('on');
+        var mb = rest.nextElementSibling as any;
+        if (mb && mb.classList.contains('tool-more')) mb.style.display = 'none';
+      }
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      flashOnSettle(el);
+    }
     var errIdx = -1;
     function gotoErr(next) {
       if (!errIds.length) return;
@@ -2108,6 +2127,18 @@ export function openDetail(id, focus?: any) {
     activeReveal = revealErrorTarget;
     if (focus && focus.errTarget != null) revealErrorTarget(focus.errTarget);
 
+    // Reveal a specific tool call by idx (skill-invocation drill-in). The call may live
+    // in a subagent's scope pane (all panes are mounted, just hidden), so resolve which
+    // pane owns the anchor and switch there before revealing — same idea as revealErrorTarget.
+    if (focus && focus.toolTarget != null && hasTx) {
+      showTab('transcript');
+      var ttEl = document.getElementById('txtool-' + focus.toolTarget);
+      var ttPane = ttEl && ttEl.closest ? ttEl.closest('.tx-scope-pane') : null;
+      var ttScope = (ttPane && ttPane.getAttribute('data-scope')) || 'main';
+      if (activeScope !== ttScope) switchScope(ttScope);
+      requestAnimationFrame(function () { revealTool(focus.toolTarget); });
+    }
+
     // Land on a specific user turn by its main-thread seq (insight evidence links
     // pass the occurrence's turn_seq pointer). Degrades to a normal open when the
     // seq isn't in the transcript (pruned blob, synthetic turn).
@@ -2147,6 +2178,21 @@ export function filterByErrorCategory(category) {
     s.value = category || '';
   });
   setTimePreset(state.days === 'all' ? 'all' : state.days);
+}
+
+// Drill-in from the Skills tab: jump to the Sessions list filtered to one skill.
+// The skill facet is a session-level predicate ("sessions that used skill X");
+// its filter control is the standard facet-filter select.
+export function filterBySkill(skill) {
+  setView('sessions');
+  buildFilters();
+  Array.prototype.forEach.call(document.querySelectorAll('.facet-filter[data-key="skill"]'), function (s) {
+    s.value = skill || '';
+  });
+  // Drilling into one skill defaults to its FULL history (all-time), matching
+  // filterByArtifact — the invocation list the user came from may span far more
+  // than the sessions window, and a narrower default can land on an empty list.
+  setTimePreset('all');
 }
 
 export function closeDrawer() {
@@ -2279,7 +2325,7 @@ function linkAcSelect(inp: HTMLInputElement, menu: HTMLElement, sessionId: strin
 }
 
 export function setView(name) {
-  ['highlights', 'insights', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
+  ['highlights', 'insights', 'skills', 'dashboard', 'artifacts', 'sessions'].forEach(function (v) {
     document.getElementById('view-' + v).classList.toggle('on', v === name);
   });
   Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (b) {

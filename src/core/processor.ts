@@ -143,6 +143,12 @@ export interface Processor {
   kind: ProcessorKind
   /** Gates execution: `llm` skips when no provider is configured. */
   needs?: { llm?: boolean; network?: boolean }
+  /**
+   * Which model tier an LLM processor's calls run on:
+   *  - 'default' (implied when omitted) — the cheap per-session model, right for most.
+   *  - 'heavy' — the strong model (--llm-model-heavy / TUNELOOP_LLM_MODEL_HEAVY)
+   */
+  model?: 'default' | 'heavy'
   /** Names of processors that must run first (topo-sorted). */
   requires?: string[]
   /** Facets this processor contributes to the dashboard registry. */

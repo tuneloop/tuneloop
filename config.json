@@ -6,6 +6,7 @@
     "outcomes-git": { "enabled": true },
     "pr-content-match": { "enabled": true },
     "enrich-session": { "enabled": true },
+    "skill-outcomes": { "enabled": true },
     "steering": { "enabled": true }
   },
   "detectors": {

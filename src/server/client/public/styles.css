@@ -773,6 +773,218 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
   padding: 4px 10px; cursor: pointer; color: var(--muted); font-size: 12px; margin-right: 4px; }
 .drawer-back:hover { border-color: var(--emerald); color: var(--emerald); }
 
+/* ---- Skill Health tab (all classes sk-prefixed; see skills.ts) ------------- */
+.sk-empty { color: var(--muted); font-size: 14px; padding: 24px 0; max-width: 620px; line-height: 1.5; }
+
+/* Stat tiles — used only on the per-skill detail page (roster has no tiles). */
+.sk-tile { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.sk-tile-v { font-size: 26px; font-family: ui-monospace, Menlo, monospace; color: var(--ink); line-height: 1; }
+.sk-tile-l { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 8px; }
+.sk-tile-s { font-size: 11px; color: var(--gray); margin-top: 2px; }
+
+/* Filter toolbar reuses the Sessions .filters / .flt-* / .seg tokens verbatim; the
+   status <select> just needs the shared filter-select styling (matched by .filters select). */
+
+/* Overview strip — inventory totals under the heading, each a one-click status filter.
+   Divider between stats (not boxed), so it reads as a summary line, not another toolbar. */
+.sk-overview { display: flex; flex-wrap: wrap; gap: 0; margin: 2px 0 16px; }
+.sk-stat { display: flex; flex-direction: column; gap: 2px; align-items: flex-start; cursor: pointer;
+  border: 0; background: transparent; font: inherit; text-align: left;
+  padding: 4px 20px; border-left: 1px solid var(--line); }
+.sk-stat:first-child { padding-left: 0; border-left: 0; }
+.sk-stat-v { font-family: ui-monospace, Menlo, monospace; font-size: 22px; color: var(--muted); line-height: 1.1; }
+.sk-stat-l { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.sk-stat:hover .sk-stat-v { color: var(--ink); }
+.sk-stat.on .sk-stat-v { color: var(--emerald); }
+.sk-stat.on .sk-stat-l { color: var(--ink); }
+
+/* Roster lives inside the .sk-panel, so rows are hairline-separated (not standalone
+   cards) — matches the list treatment on Sessions/Recommendations/Artifacts. */
+.sk-roster { display: flex; flex-direction: column; margin-top: 4px; border-top: 1px solid var(--line); }
+.sk-row { border-bottom: 1px solid var(--line); }
+.sk-row-head { display: flex; align-items: center; gap: 14px; padding: 13px 4px; cursor: pointer; }
+.sk-row-head:hover { background: #fbf8f1; }
+.sk-dot { flex: none; width: 9px; height: 9px; border-radius: 999px; }
+.sk-name { flex: none; font-weight: 600; font-size: 14px; color: var(--ink); font-family: ui-monospace, Menlo, monospace; }
+.sk-flags { flex: 1 1 auto; display: flex; align-items: center; gap: 6px; }
+.sk-flag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border: 1px solid; border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.sk-flag-lg { font-size: 11px; padding: 2px 10px; }
+.sk-verdict { flex: none; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; min-width: 96px; }
+.sk-spark { flex: none; display: inline-flex; align-items: flex-end; }
+.sk-spark-svg { display: block; }
+.sk-metric { flex: none; display: flex; flex-direction: column; align-items: flex-end; min-width: 58px; }
+.sk-mv { font-family: ui-monospace, Menlo, monospace; font-size: 14px; color: var(--ink); }
+.sk-ml { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.sk-caret { flex: none; color: var(--muted); width: 14px; text-align: center; font-size: 18px; }
+
+/* ---- Per-skill detail page ---- */
+.sk-page-head { margin: 4px 0 14px; }
+.sk-back { border: 1px solid var(--line); background: var(--paper); color: var(--muted); border-radius: 8px;
+  padding: 5px 12px; font-family: Georgia, serif; font-size: 13px; cursor: pointer; }
+.sk-back:hover { border-color: var(--emerald); color: var(--emerald); }
+.sk-page-title { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.sk-dot-lg { width: 12px; height: 12px; }
+.sk-page-name { margin: 0; font-size: 24px; font-family: ui-monospace, Menlo, monospace; color: var(--ink); word-break: break-all; }
+.sk-verdict-lg { min-width: 0; font-size: 12px; }
+.sk-page-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin: 18px 0 8px; }
+/* Each detail section is its own bordered paper card (shares the .panel idiom used on
+   other tabs), so the page reads as discrete, labelled sections rather than one scroll. */
+.sk-card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 16px; }
+.sk-card:first-of-type { margin-top: 22px; }
+.sk-sect-h { font-family: Georgia, serif; font-size: 16px; color: var(--ink); margin-bottom: 10px; }
+.sk-info { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 999px; border: 1px solid var(--muted); color: var(--muted); font-family: ui-sans-serif, system-ui, sans-serif; font-size: 10px; font-weight: 600; cursor: default; vertical-align: middle; }
+.sk-sect-note { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 8px; }
+.sk-sect-note-block { max-width: 820px; }
+.sk-sect-note-block b { color: var(--ink); font-weight: 600; }
+
+/* Usage-trend bar chart. Sits inside a .sk-card, so it draws no border/background of
+   its own (the card provides both) — just the plotting area. */
+.sk-trend { position: relative; max-width: 900px; }
+.sk-trend-ax { font-family: ui-monospace, Menlo, monospace; font-size: 11px; fill: var(--muted); }
+.sk-trend-hit { cursor: default; }
+/* Bars sit above the hit zones in the SVG; let pointer events fall through to the
+   full-height hit zone so hovering anywhere in a bucket column shows its tooltip. */
+.sk-trend-bar { pointer-events: none; transition: opacity .1s; }
+.sk-trend-hit:hover + .sk-trend-bar { opacity: .78; }
+/* Floating tooltip (positioned in JS at the cursor). */
+.sk-trend-tip { position: absolute; z-index: 20; pointer-events: none; background: var(--ink); color: #f3efe6;
+  font-size: 12px; line-height: 1.4; padding: 6px 9px; border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.25); white-space: nowrap; }
+.sk-trend-tip b { font-weight: 600; }
+
+/* Invocations list — clickable rows that deep-link into the session transcript. */
+.sk-invocations { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-width: 900px; }
+.sk-inv { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 9px 12px; font: inherit; }
+.sk-inv:hover { border-color: var(--emerald); background: #faf8f2; }
+.sk-inv-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-size: 13.5px; }
+.sk-inv-tags { flex: none; display: flex; gap: 5px; }
+.sk-inv-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border-radius: 999px; padding: 1px 7px; }
+.sk-inv-err { color: var(--red); border: 1px solid var(--red); }
+.sk-inv-sub { color: var(--muted); border: 1px solid var(--line); }
+.sk-inv-repo { flex: none; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-inv-date { flex: none; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--gray); }
+.sk-inv-go { flex: none; font-size: 11px; color: var(--emerald); white-space: nowrap; }
+
+.sk-repos { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; max-width: 720px; }
+.sk-repo { display: grid; grid-template-columns: 160px 1fr auto; align-items: center; gap: 12px; }
+.sk-repo-name { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-repo-null .sk-repo-name { color: var(--gray); font-style: italic; }
+.sk-repo-track { height: 10px; background: var(--track); border-radius: 999px; overflow: hidden; }
+.sk-repo-bar { height: 100%; border-radius: 999px; min-width: 2px; }
+.sk-repo-n { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); white-space: nowrap; text-align: right; }
+
+/* Version drift (the hero) — location chooser + "around the last edit" callout + timeline. */
+.sk-drift-loc-row { display: inline-flex; align-items: center; gap: 8px; margin: 2px 0 10px; }
+/* Match the shared filter-select styling (this select lives outside .filters, so it
+   wouldn't inherit it otherwise) — bordered, rounded, paper-filled, not a raw native box. */
+.sk-drift-loc-row select { border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px;
+  font-size: 12.5px; background: var(--paper); color: var(--ink); }
+.sk-drift-loc-row select:hover { border-color: #d4cdbd; }
+/* "Around the last edit" callout — sits inside the Version drift card, so it uses a
+   subtle track tint (not another bordered box) to read as a nested sub-section. */
+.sk-drift-delta { border-radius: 10px; padding: 14px 16px; margin-top: 10px; max-width: 720px; background: var(--track); }
+.sk-drift-delta-h { font-size: 13px; color: var(--ink); font-weight: 600; margin-bottom: 12px; }
+.sk-drift-cmp { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 14px; margin-bottom: 4px; margin-top: 14px; }
+.sk-drift-metric-l { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.sk-drift-metric-v { font-family: ui-monospace, Menlo, monospace; font-size: 18px; color: var(--ink); margin-top: 4px; }
+.sk-drift-arrow { color: var(--gray); }
+.sk-drift-metric-v .sk-drift-worse { color: var(--red); }
+.sk-drift-metric-v .sk-drift-better { color: var(--emerald); }
+.sk-drift-arrow.sk-drift-worse { color: var(--red); }
+.sk-drift-arrow.sk-drift-better { color: var(--emerald); }
+
+/* "What changed" — description before/after + inline body diff (reusing the Sessions
+   file-changes diff view: .fc-diff / .dl for full-width highlight + horizontal scroll). */
+.sk-diff-add { color: var(--emerald); font-weight: 600; }
+.sk-diff-del { color: var(--red); font-weight: 600; }
+.sk-diff-sum { font-size: 12px; color: var(--muted); font-weight: 400; }
+.sk-chg-block { margin: 12px 0; }
+.sk-chg-block + .sk-chg-block { margin-top: 14px; }
+.sk-chg-lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; display: flex; align-items: baseline; gap: 8px; }
+.sk-chg-lbl .sk-diff-sum { text-transform: none; letter-spacing: 0; }
+/* Drift body diff reuses the Sessions .fc-diff/.dl markup, but a SKILL.md is prose — we WRAP
+   long lines instead of horizontal scroll, so the add/del highlight covers the whole line. */
+.sk-chg-block .fc-diff { max-height: 360px; overflow-y: auto; overflow-x: hidden; background: var(--paper); }
+.sk-chg-block .fc-diff .dl { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sk-chg-block .fc-diff .dl .dt { min-width: 0; }
+
+.sk-vers { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; max-width: 720px; }
+.sk-ver { display: grid; grid-template-columns: 68px 1fr 70px; align-items: center; gap: 12px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+.sk-ver-cur { border-color: var(--emerald); background: #faf8f2; }
+.sk-ver-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.sk-ver-cur .sk-ver-tag { color: var(--emerald); }
+.sk-ver-main { min-width: 0; }
+.sk-ver-span { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--ink); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sk-ver-chg { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.sk-chg-desc { color: var(--amber); }
+.sk-ver-stats { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.sk-ver-hash { font-size: 11px; color: var(--gray); text-align: right; }
+
+/* Activation outcomes — "pulls its weight" headline, then a stacked bar + evidence.
+   No filled box: a status-coloured dot leads a bold verdict + plain description line. */
+.sk-weight { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; max-width: 760px; }
+.sk-weight-v { font-size: 14px; font-weight: 600; color: var(--ink); position: relative; padding-left: 16px; }
+.sk-weight-v::before { content: ""; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 9px; height: 9px; border-radius: 999px; background: var(--muted); }
+.sk-weight-d { font-size: 13px; color: var(--muted); }
+.sk-w-ok .sk-weight-v::before { background: var(--emerald); }
+.sk-w-warn .sk-weight-v::before { background: var(--amber); }
+.sk-w-bad .sk-weight-v::before { background: var(--red); }
+.sk-oc-bar { display: flex; height: 14px; border-radius: 999px; overflow: hidden; background: var(--track); margin-top: 14px; max-width: 720px; }
+.sk-oc-seg { display: block; height: 100%; }
+.sk-oc-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
+.sk-oc-leg { font-size: 12px; color: var(--ink); display: inline-flex; align-items: center; gap: 6px; }
+.sk-oc-dot { width: 9px; height: 9px; border-radius: 999px; display: inline-block; }
+.sk-oc-legn { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+.sk-oc-corr { margin-top: 12px; font-size: 12.5px; color: var(--red); }
+.sk-oc-examples { margin-top: 16px; display: flex; flex-direction: column; gap: 12px; max-width: 820px; }
+/* One evidence row per judged firing: a coloured outcome tag + the full sentence,
+   wrapping cleanly. No filled box — the tag colour alone carries the outcome. Rows whose
+   verdict carries a location render as buttons that open the transcript at that call. */
+.sk-oc-ex { display: flex; gap: 14px; align-items: flex-start; font: inherit; font-size: 13.5px;
+  line-height: 1.55; border: 0; background: transparent; padding: 0; text-align: left; width: 100%; }
+.sk-oc-ex-tag { flex: none; width: 72px; font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .04em; padding-top: 2px; }
+.sk-oc-ex-txt { color: var(--muted); }
+.sk-oc-ex-go { flex: none; font-size: 11px; color: var(--emerald); white-space: nowrap; padding-top: 2px;
+  visibility: hidden; }
+button.sk-oc-ex { cursor: pointer; }
+button.sk-oc-ex:hover .sk-oc-ex-txt { color: var(--ink); }
+button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
+/* Collapsed overflow evidence (beyond the top 3) + its reveal toggle. */
+.sk-oc-rest { display: none; flex-direction: column; gap: 8px; }
+.sk-oc-rest.on { display: flex; }
+.sk-oc-more { align-self: flex-start; border: 0; background: transparent; color: var(--emerald); font-size: 12.5px; cursor: pointer; padding: 2px 0; }
+.sk-oc-more:hover { text-decoration: underline; }
+
+/* Co-occurrence list — other skills sharing sessions. */
+#sk-cooc { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-width: 720px; }
+.sk-cooc { display: grid; grid-template-columns: 180px 1fr auto auto auto; align-items: center; gap: 12px; width: 100%;
+  text-align: left; cursor: pointer; border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 8px 12px; font: inherit; }
+.sk-cooc:hover { border-color: var(--emerald); background: #faf8f2; }
+.sk-cooc-name { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sk-cooc-track { height: 8px; background: var(--track); border-radius: 999px; overflow: hidden; }
+.sk-cooc-bar { display: block; height: 100%; background: var(--emerald); border-radius: 999px; min-width: 2px; }
+.sk-cooc-meta { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.sk-cooc-first { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--amber); border: 1px solid var(--amber); border-radius: 999px; padding: 1px 7px; }
+.sk-cooc-go { font-size: 11px; color: var(--emerald); white-space: nowrap; }
+
+.sk-desc { font-size: 14px; line-height: 1.6; color: var(--ink); margin: 4px 0 6px; max-width: 820px; }
+.sk-desc-none { color: var(--gray); font-style: italic; font-size: 13px; }
+.sk-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+.sk-fact-l { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.sk-fact-v { font-size: 14px; color: var(--ink); margin-top: 3px; }
+.sk-tag { display: inline-block; font-size: 9px; background: var(--track); color: var(--muted); border-radius: 4px;
+  padding: 1px 5px; letter-spacing: .04em; vertical-align: middle; }
+/* One-line takeaway under the tiles. A thin status-coloured rule (colour set inline),
+   no filled box — the sentence carries the weight, not a highlight. */
+.sk-advice { font-size: 13.5px; line-height: 1.5; color: var(--ink);
+  border-left: 3px solid var(--line); padding: 2px 0 2px 14px; margin: 16px 0 4px; max-width: 820px; }
+.sk-actions { margin-top: 18px; }
+.sk-view-sessions { font-size: 14px; color: var(--emerald); cursor: pointer; text-decoration: none; }
+.sk-view-sessions:hover { text-decoration: underline; }
+
 /* Bulk-tag popover (filter bar) + user-field editors (drawer summary). */
 .tag-menu { min-width: 250px; }
 .tag-row { display: flex; align-items: center; gap: 6px; padding: 4px; }

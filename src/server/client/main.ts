@@ -10,6 +10,7 @@ import { loadKpis, paintKpis, renderWindow, renderOpenMetric } from './kpis'
 import { renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
 import { renderInsights, reopenInsight, clearCellSelection } from './insights'
+import { renderSkills } from './skills'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose, setOnFacetsChanged } from './sessions'
@@ -46,15 +47,22 @@ function init() {
   withoutSync(function () {
     state.artKind = route.artKind;
     state.metric = route.metric; // the KPI tile that's expanded (default cost_artifact)
+    state.skill = route.skill; // the open per-skill page (null = the roster)
     // Restore the artifacts table's search/sort only when we're landing there
     // (the query params are scoped to the active view).
     if (route.view === 'artifacts') {
       state.art = { q: route.query.q || '', sort: route.query.sort || defaultArtSort(route.artKind), dir: route.query.dir === 'asc' ? 'asc' : 'desc' };
     }
+    if (route.view === 'skills') {
+      var q = route.query;
+      if (q.from || q.to) { state.skillWin = 'custom'; state.skillFrom = q.from || ''; state.skillTo = q.to || ''; }
+      else state.skillWin = q.win === 'all' ? 'all' : (q.win === '7' || q.win === '14' || q.win === '90') ? parseInt(q.win, 10) : 30;
+    }
     renderArtKindSeg();
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail
     renderHighlights(); // pre-render the Highlights tab so it's ready whether we land there or tab in later
     renderInsights(); // same for the Insights tab (refetches only after its own mutations)
+    renderSkills(); // pre-render the Skills tab (fetches its report once)
     setView(landHighlights ? 'highlights' : route.view);
     if (route.session) openDetail(route.session); // deep-linked drawer
   });

@@ -292,7 +292,9 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     let anyMiss = false
     for (const p of ordered) {
       if (p.needs?.llm && !llmEnabled) continue
-      const model = p.needs?.llm ? llmModel : null
+      // Mirror runProcessors' cache key exactly: a heavy-tier processor keys on the heavy
+      // model, else it'd read as a permanent miss here (and mis-count the work total).
+      const model = p.needs?.llm ? (p.model === 'heavy' ? heavyLlm?.model ?? null : llmModel) : null
       const cached = store.processorRun(session.id, p.name)
       if (!cached || cached.version !== p.version || cached.inputHash !== inputHash || cached.model !== model) {
         anyMiss = true
@@ -354,7 +356,7 @@ export async function analyze(opts: AnalyzeOptions): Promise<void> {
     if (repo) store.setSessionRepo(session.id, repo)
 
     const t0 = Date.now()
-    const { costUsd: sessionCost } = await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, sh })
+    const { costUsd: sessionCost } = await runProcessors({ session, processors, store, log, llmEnabled, llmModel, llm, heavyLlm, heavyLlmModel: heavyLlm?.model ?? null, sh })
     const elapsedMs = Date.now() - t0
 
     // `elapsedMs` (this session's own time) decides whether it did real work; the

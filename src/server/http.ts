@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { RESERVED_SESSION_PARAMS, type Bucket, type SessionFilter, type Store } from '../store/store'
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
+import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence, skillOutcomeStats } from './skill-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -246,6 +247,60 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
   }
   if (path === '/api/facets') {
     sendJson(res, 200, store.facetList())
+    return
+  }
+  if (path === '/api/skill-health') {
+    // Per-skill health from sessions: usage status + flags, trend, own-call error
+    // rate. No cost claim
+    sendJson(res, 200, skillHealth(store, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/skill-invocations') {
+    // Every invocation of one skill in the window (session + tool-call idx per row) —
+    // the per-skill drill-down list. `name` required; same window params as skill-health.
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillInvocations(store, name, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/skill-drift') {
+    // Version timeline + before/after around the most recent edit for one skill.
+    // Deliberately NOT windowed by the time filter — it's anchored on edit boundaries
+    // (see skillDrift). `name` required.
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillDrift(store, name, {
+      source: url.searchParams.get('source') ?? undefined,
+      scopeKey: url.searchParams.get('scopeKey') ?? undefined,
+    }))
+    return
+  }
+  if (path === '/api/skill-cooccurrence') {
+    // Other skills that fire in the same sessions as this one — the add/compose signal.
+    // `name` required; windowed like skill-health (it's a current-usage fact).
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillCoOccurrence(store, name, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/skill-outcomes') {
+    // LLM-classified activation outcomes (used/reworked/ignored) for one skill —
+    // null when the classifier hasn't produced verdicts for it. `name` required.
+    const name = url.searchParams.get('name')
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, skillOutcomeStats(store, name, skillWindowFrom(url.searchParams)))
     return
   }
   if (path === '/api/error-categories') {
@@ -647,6 +702,15 @@ function windowFromDays(daysRaw: string | null): { from?: string; to?: string } 
   const days = Number.isFinite(parsed) && parsed > 0 ? parsed : 7
   const now = Date.now()
   return { from: new Date(now - days * 86_400_000).toISOString(), to: new Date(now).toISOString() }
+}
+
+// The Skills tab window from query params: `days` (number | 'all', default 30) or a
+// `from`+`to` ISO custom range that overrides it, plus an optional `source` (which harness's
+// skills to report; absent → the read model picks the default). Shape matches SkillHealthWindow.
+function skillWindowFrom(params: URLSearchParams): { days: number | null; from?: string; to?: string; source?: string } {
+  const daysRaw = params.get('days')
+  const days = daysRaw === 'all' ? null : Number.isFinite(parseInt(daysRaw ?? '', 10)) ? parseInt(daysRaw!, 10) : 30
+  return { days, from: params.get('from') ?? undefined, to: params.get('to') ?? undefined, source: params.get('source') ?? undefined }
 }
 
 // The dashboard SPA is built by tsup into dist/client (app.js + index.html +

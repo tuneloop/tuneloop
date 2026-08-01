@@ -117,16 +117,22 @@ export interface InvokedCap {
  * total distinct-session count. `source` restricts to one harness (the name grammar is
  * harness-specific); omitted counts every source, re-merged by the outer GROUP BY.
  */
-export function queryInvoked(store: Store, sinceIso: string, source?: string): InvokedCap[] {
+export function queryInvoked(store: Store, sinceIso: string, source?: string, untilIso?: string): InvokedCap[] {
+  // `untilIso` (optional upper bound) keeps a capability only if its most-recent
+  // invocation is BEFORE the range end — used by the Skills tab's custom date ranges,
+  // which bound usage on both sides. Omitted (the detector's case) → open-ended, so the
+  // window is just `last_invoked_at >= since`.
   return store.queryAll(
     `SELECT kind, name, repo, SUM(sessions) AS sessions
      FROM capability_usage
      WHERE (? IS NULL OR source = ?)
      GROUP BY kind, name, repo
-     HAVING MAX(last_invoked_at) >= ?`,
+     HAVING MAX(last_invoked_at) >= ? AND (? IS NULL OR MAX(last_invoked_at) < ?)`,
     source ?? null,
     source ?? null,
     sinceIso,
+    untilIso ?? null,
+    untilIso ?? null,
   ) as InvokedCap[]
 }
 

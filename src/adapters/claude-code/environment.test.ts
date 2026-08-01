@@ -686,6 +686,34 @@ describe('skills reader', () => {
     expect(payload.skills[0].description).toBe('Check files')
   })
 
+  it('captures a skill dir that is a symlink to a real directory', async () => {
+    // A skill linked in from elsewhere: ~/.claude/skills/linked -> <external>/linked.
+    // readdir reports the entry as a symlink (not a directory), so it must be
+    // stat-resolved or it would be dropped
+    const external = mkdtempSync(join(tmpdir(), 'cc-skills-external-'))
+    writeFile(join(external, 'linked-skill', 'SKILL.md'), '---\ndescription: Linked in\n---\nLinked body.\n')
+    mkdirSync(join(home, 'skills'), { recursive: true })
+    symlinkSync(join(external, 'linked-skill'), join(home, 'skills', 'linked-skill'))
+    // A real dir alongside it, to prove both are captured.
+    writeFile(join(home, 'skills', 'real-skill', 'SKILL.md'), '---\ndescription: Real\n---\nReal body.\n')
+    try {
+      const payload = cat(await readClaudeCodeEnvironment(), 'skills') as { skills: any[] }
+      const names = payload.skills.map((s) => s.name).sort()
+      expect(names).toEqual(['linked-skill', 'real-skill'])
+      expect(findByName(payload.skills, 'linked-skill').description).toBe('Linked in')
+    } finally {
+      rmSync(external, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a dangling symlink (broken skill dir)', async () => {
+    mkdirSync(join(home, 'skills'), { recursive: true })
+    symlinkSync(join(home, 'skills', 'does-not-exist'), join(home, 'skills', 'dangling'))
+    writeFile(join(home, 'skills', 'real-skill', 'SKILL.md'), '---\ndescription: Real\n---\nbody\n')
+    const payload = cat(await readClaudeCodeEnvironment(), 'skills') as { skills: any[] }
+    expect(payload.skills.map((s) => s.name)).toEqual(['real-skill'])
+  })
+
   it('captures an enabled plugin skill tagged source:plugin:<id>', async () => {
     const ip = join(home, 'plugins', 'cache', 'fd')
     writeFile(join(home, 'settings.json'), JSON.stringify({ enabledPlugins: { 'fd@mkt': true } }))

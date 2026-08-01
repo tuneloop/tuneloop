@@ -211,5 +211,13 @@ export async function readSkillFile(
   const resolvedName = preferFrontmatterName && typeof fm.name === 'string' ? fm.name : name
   const entry: Record<string, unknown> = { name: resolvedName, body, bodyHash }
   if (typeof fm.description === 'string') entry.description = fm.description
+  // The file's mtime — the real edit time, so drift can date a version to when the skill
+  // was actually changed, not the next analyze run. Advisory only (a clone/checkout resets
+  // mtime), so consumers clamp it and fall back to capture time; absent on stat failure.
+  try {
+    entry.editedAt = (await stat(path)).mtime.toISOString()
+  } catch {
+    /* mtime unavailable → consumer falls back to captured_at */
+  }
   return entry
 }

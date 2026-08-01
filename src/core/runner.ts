@@ -35,6 +35,10 @@ export interface RunOptions {
   llmEnabled: boolean
   llmModel: string | null
   llm: LlmClient | null
+  /** The strong (detector-tier) client + model, for processors that opt in via
+   *  `model: 'heavy'`. Defaults to the light client when no distinct heavy tier is set. */
+  heavyLlm?: LlmClient | null
+  heavyLlmModel?: string | null
   sh: ProcessorContext['sh']
 }
 
@@ -45,6 +49,9 @@ export interface RunResult {
 /** Run every applicable processor for one session, honoring deps + the cache. */
 export async function runProcessors(opts: RunOptions): Promise<RunResult> {
   const { session, store, log, llmEnabled, llmModel, llm, sh } = opts
+  // The heavy tier falls back to the light client/model when no distinct one was wired
+  const heavyLlm = opts.heavyLlm ?? llm
+  const heavyLlmModel = opts.heavyLlmModel ?? llmModel
   // enrich-session no longer needs the existing feature tree: it proposes features
   // context-free, and a cross-session finalize() pass reconciles them afterward. So we
   // skip the per-session store.listFeatures() read (which grew with the corpus). The
@@ -66,7 +73,11 @@ export async function runProcessors(opts: RunOptions): Promise<RunResult> {
 
   for (const p of orderProcessors(opts.processors)) {
     if (p.needs?.llm && !llmEnabled) continue
-    const model = p.needs?.llm ? llmModel : null
+    // A `model: 'heavy'` processor runs on the strong client + is cache-keyed by its model,
+    // so a tier switch correctly re-runs. Non-LLM processors key on null (model-independent).
+    const heavy = p.model === 'heavy'
+    ctx.llm = heavy ? heavyLlm : llm
+    const model = p.needs?.llm ? (heavy ? heavyLlmModel : llmModel) : null
 
     // Re-read block attributions fresh so enrich-session sees blocks that
     // outcomes-git persisted earlier in this same loop. Without this, the

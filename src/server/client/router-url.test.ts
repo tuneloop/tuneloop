@@ -17,6 +17,18 @@ describe('parseHash', () => {
     expect(parseHash('#/sessions')).toMatchObject({ view: 'sessions' })
   })
 
+  it('parses the skills roster and a per-skill page', () => {
+    expect(parseHash('#/skills')).toMatchObject({ view: 'skills', skill: null })
+    expect(parseHash('#/skills/ship')).toMatchObject({ view: 'skills', skill: 'ship' })
+    // A plugin-namespaced skill name is URL-encoded (':' → %3A).
+    expect(parseHash('#/skills/' + encodeURIComponent('frontend-design:frontend-design'))).toMatchObject({
+      view: 'skills',
+      skill: 'frontend-design:frontend-design',
+    })
+    // A skill segment only applies on the skills view.
+    expect(parseHash('#/sessions/ship')).toMatchObject({ view: 'sessions', skill: null })
+  })
+
   it('parses an open session drawer on any view', () => {
     expect(parseHash('#/sessions?session=opencode:abc')).toMatchObject({ view: 'sessions', session: 'opencode:abc' })
     expect(parseHash('#/dashboard/ops?session=x1')).toMatchObject({ view: 'dashboard', metric: 'ops', session: 'x1' })
@@ -55,7 +67,7 @@ describe('parseHash', () => {
 })
 
 describe('serializeRoute', () => {
-  const nav = (o: Partial<NavState>): NavState => ({ view: 'dashboard', metric: 'success_rate', artKind: 'feature', ...o })
+  const nav = (o: Partial<NavState>): NavState => ({ view: 'dashboard', metric: 'success_rate', artKind: 'feature', skill: null, ...o })
 
   it('serializes each view path', () => {
     expect(serializeRoute(nav({ view: 'highlights' }), {})).toBe('#/highlights')
@@ -63,6 +75,14 @@ describe('serializeRoute', () => {
     expect(serializeRoute(nav({ view: 'dashboard', metric: 'total_spend' }), {})).toBe('#/dashboard/total_spend')
     expect(serializeRoute(nav({ view: 'artifacts', artKind: 'pr' }), {})).toBe('#/artifacts/pr')
     expect(serializeRoute(nav({ view: 'sessions' }), {})).toBe('#/sessions')
+  })
+
+  it('serializes the skills roster and a per-skill page', () => {
+    expect(serializeRoute(nav({ view: 'skills' }), {})).toBe('#/skills')
+    expect(serializeRoute(nav({ view: 'skills', skill: 'ship' }), {})).toBe('#/skills/ship')
+    expect(serializeRoute(nav({ view: 'skills', skill: 'frontend-design:frontend-design' }), {})).toBe(
+      '#/skills/frontend-design%3Afrontend-design',
+    )
   })
 
   it('appends a key-sorted query and encodes values', () => {
@@ -89,11 +109,13 @@ describe('parseQuery / serializeQuery round-trip', () => {
 
 describe('route round-trip', () => {
   const cases: Array<{ nav: NavState; query: Record<string, string> }> = [
-    { nav: { view: 'highlights', metric: 'success_rate', artKind: 'feature' }, query: {} },
-    { nav: { view: 'insights', metric: 'success_rate', artKind: 'feature' }, query: { session: 'cc:evidence-1' } },
-    { nav: { view: 'dashboard', metric: 'cost_artifact', artKind: 'feature' }, query: { session: 'opencode:xyz' } },
-    { nav: { view: 'artifacts', metric: 'success_rate', artKind: 'pr' }, query: { q: 'fix', sort: 'cost', dir: 'asc' } },
-    { nav: { view: 'sessions', metric: 'success_rate', artKind: 'feature' }, query: { win: 'all', 'f.repo': 'a/b', q: 'x' } },
+    { nav: { view: 'highlights', metric: 'success_rate', artKind: 'feature', skill: null }, query: {} },
+    { nav: { view: 'insights', metric: 'success_rate', artKind: 'feature', skill: null }, query: { session: 'cc:evidence-1' } },
+    { nav: { view: 'dashboard', metric: 'cost_artifact', artKind: 'feature', skill: null }, query: { session: 'opencode:xyz' } },
+    { nav: { view: 'artifacts', metric: 'success_rate', artKind: 'pr', skill: null }, query: { q: 'fix', sort: 'cost', dir: 'asc' } },
+    { nav: { view: 'sessions', metric: 'success_rate', artKind: 'feature', skill: null }, query: { win: 'all', 'f.repo': 'a/b', q: 'x' } },
+    { nav: { view: 'skills', metric: 'success_rate', artKind: 'feature', skill: null }, query: {} },
+    { nav: { view: 'skills', metric: 'success_rate', artKind: 'feature', skill: 'frontend-design:frontend-design' }, query: {} },
   ]
   it('parseHash(serializeRoute(x)) preserves path + query', () => {
     for (const c of cases) {
@@ -101,6 +123,7 @@ describe('route round-trip', () => {
       expect(r.view).toBe(c.nav.view)
       if (c.nav.view === 'dashboard') expect(r.metric).toBe(c.nav.metric)
       if (c.nav.view === 'artifacts') expect(r.artKind).toBe(c.nav.artKind)
+      if (c.nav.view === 'skills') expect(r.skill).toBe(c.nav.skill)
       expect(r.query).toEqual(c.query)
     }
   })
