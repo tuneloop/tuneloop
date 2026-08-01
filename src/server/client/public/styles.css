@@ -776,6 +776,7 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 /* Bulk-tag popover (filter bar) + user-field editors (drawer summary). */
 .tag-menu { min-width: 250px; }
 .tag-row { display: flex; align-items: center; gap: 6px; padding: 4px; }
+.tag-row[hidden] { display: none; } /* the flex rule would otherwise defeat `hidden` */
 .tag-row select, .tag-row input { flex: 1; min-width: 0; border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 5px 8px; font-size: 13px; }
 .tag-msg { padding: 2px 6px; font-size: 12px; color: var(--muted); min-height: 16px; }
 .tag-del { border: 0; background: none; color: #a04b3c; font-size: 12px; cursor: pointer; padding: 2px 4px; text-align: left; }
