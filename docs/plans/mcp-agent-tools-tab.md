@@ -178,7 +178,16 @@ query → empty result → agent retries; `is_error = 0`, invisible today).
 ## Error taxonomy
 
 Ships **as-is** on the existing 19-category regex taxonomy (`src/core/error-category.ts`).
-Known weakness: MCP failures collapse into the broad `integration_error`. Splitting it
+
+Known weakness 1: `user_rejected` is a user DECISION, not a tool failure, but it counts
+toward error rate — so an interactive tool earns a `high-error` pill for being declined.
+Observed on real data (AL-141): `AskUserQuestion`, 10 calls — 7 answered, 3 declined —
+trips the 20% gate at a 30% "error" rate. **Decided 2026-08-04: leave it.** Error rate
+means the same thing everywhere in the app today; excluding the category from the pill
+alone would show a tile reading "30% errors" with no pill, which reads as a bug. Changing
+it app-wide moves a headline metric and needs its own ticket.
+
+Known weakness 2: MCP failures collapse into the broad `integration_error`. Splitting it
 (transport vs tool-returned vs auth) waits for a real corpus — the tab's own occurrence
 lists are the instrument. A future split rides a `NORMALIZE_VERSION` bump and backfills
 for free. The LLM card reads raw messages and doesn't need taxonomy granularity.
