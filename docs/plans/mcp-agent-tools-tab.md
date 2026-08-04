@@ -139,16 +139,35 @@ precision, low recall by design — 6 of 89 failed shell calls on the corpus —
 a wrong blame moves a failure onto an innocent tool while no blame just falls back.
 The compound badge therefore means "the output didn't say which part failed".
 
-**A shell-level error is still an AGENT failure — blame everybody, not nobody.**
+**A shell-level error is still an AGENT failure — blame the segment, not nobody.**
 `echo ===` fails under zsh (equals expansion looks up a command named `==`) and
 aborts the rest of the list, so later segments never run. It is tempting to read
-that as "the shell failed, charge no binary", and that would be wrong: the agent
-wrote a command that isn't portable across shells, which is exactly the kind of
-thing this tab should be counting. Decided 2026-08-04: charge every involved binary
-until we can do better. Doing better means blaming the SEGMENT that contained the
-offending token — the shell names it (`== not found`, `no matches found: docs/*.swp`)
-and that token can be located in the command text — which is a v2, not a reason to
-drop the error.
+that as "the shell failed, charge no binary", and that is wrong: the agent wrote a
+command that isn't portable across shells, which is exactly the kind of thing this
+tab should count. The shell NAMES the offending token (`== not found`,
+`no matches found: docs/*.swp`), and that token can be located in the command text
+— so blame the segment that contains it.
+
+**A user-declined call KEEPS its multi-label — decided 2026-08-04, not changed.**
+`User rejected tool use` means nothing executed (about a fifth of failed shell
+calls), so "blame nobody" is tempting and was proposed. Rejected: a decline is
+information the user wants. You decline because you didn't want the agent running
+*that call as it stood*, and a tool you keep declining is worth seeing. Erasing it
+would delete the signal. Attributing it to the most consequential binary in the
+chain would be better still, but there is no honest way to rank consequence, so
+the multi-label stands.
+
+**A `;`-joined list ends in the segment that set the exit code.** The shell's exit
+status IS the last command's, so an errored `;`-list (or pipeline) failed in its
+final segment — no error text required, which matters because agent commands
+routinely silence stderr (`ls a b 2>/dev/null` as an existence probe was the most
+common failing idiom observed, and it leaves nothing to parse). Does NOT apply to
+`&&`/`||`, where the status could belong to any segment, nor when a shell-level
+abort line shows the list never reached its end.
+
+Two states, then, as before: a named binary, or unknown (NULL — the honest
+multi-label). No "nobody" state, because the one case that argued for it
+(a user decline) is signal worth keeping.
 
 ## Drill-in page (both kinds)
 
