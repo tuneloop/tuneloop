@@ -705,12 +705,13 @@ function invocationRow(o) {
 function clip(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
 /**
- * Marks a call whose command ran several binaries. The failure is listed under
- * each of them and we deliberately don't guess which segment broke — a
- * confident wrong attribution is worse than an honest "one of these". The full
- * command is on the row, and the transcript link settles it.
+ * Marks a call whose command ran several binaries AND whose output didn't name
+ * the one that failed — so the failure is listed under each, and we deliberately
+ * don't guess which segment broke. When the output does name it (see
+ * core/shell-blame.ts) the failure is charged to that binary alone and the row
+ * carries no badge, because there is nothing ambiguous left to warn about.
  */
-var COMPOUND_BADGE = '<span class="sk-inv-tag th-compound" title="This command ran several binaries, so the same failure is listed under each. Open the transcript to see which part failed.">compound</span>';
+var COMPOUND_BADGE = '<span class="sk-inv-tag th-compound" title="This command ran several binaries and its output didn\'t say which one failed, so the failure is listed under each. Open the transcript to see which part broke.">compound</span>';
 
 // ---- Errors by category (ported from the Ops widget) ------------------------
 // The accordion: a bar per category, expanding to lazily fetch that category's

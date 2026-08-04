@@ -24,6 +24,8 @@ let db: ReturnType<typeof openDb>
 interface Call {
   name: string
   action: string
+  /** Which binary the error output named, as ingest would have parsed it. */
+  failedBinary?: string
   /** Shell command — also parsed into tool_call_commands, as ingest does. */
   command?: string
   error?: boolean
@@ -41,8 +43,8 @@ function seedSession(id: string, repo: string | null, startedDaysAgo: number, ca
   calls.forEach((c, idx) => {
     const ts = iso(c.daysAgo ?? startedDaysAgo)
     db.prepare(
-      `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, error_category, error_message, result_empty, command, is_sidechain, ts)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO tool_calls (session_id, idx, name, action, ok, is_error, error_category, error_message, result_empty, failed_binary, command, is_sidechain, ts)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       id,
       idx,
@@ -53,6 +55,7 @@ function seedSession(id: string, repo: string | null, startedDaysAgo: number, ca
       c.error ? (c.errorCategory ?? 'other') : null,
       c.error ? 'boom' : null,
       c.resultEmpty ?? null,
+      c.failedBinary ?? null,
       c.command ?? null,
       c.sidechain ? 1 : 0,
       ts,
@@ -265,6 +268,39 @@ describe('toolHealth — error pills', () => {
     }))
     seedSession('s1', 'repoA', 2, calls)
     expect(row(toolHealth(store, { nowMs: NOW }).builtin, 'gh')!.flags).toContain('high-error')
+  })
+})
+
+describe('toolHealth — blame for compound shell failures', () => {
+  it('charges a blamed failure to that binary alone, not the whole chain', () => {
+    // `ls missing && tsc` fails at ls, so tsc never ran; before blame it carried the
+    // error and showed a 100% failure rate for a command it never executed.
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls missing && npx tsc', error: true, errorCategory: 'not_found', failedBinary: 'ls' },
+    ])
+    const r = toolHealth(store, { nowMs: NOW })
+    expect(row(r.builtin, 'ls')).toMatchObject({ calls: 1, errorCalls: 1 })
+    // npx still shows the call it was part of — "calls involving" is unchanged —
+    // but no longer wears a failure that wasn't its.
+    expect(row(r.builtin, 'npx')).toMatchObject({ calls: 1, errorCalls: 0 })
+  })
+
+  it('keeps the multi-label when the output named nobody', () => {
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls missing && npx tsc', error: true, errorCategory: 'command_failed' },
+    ])
+    const r = toolHealth(store, { nowMs: NOW })
+    expect(row(r.builtin, 'ls')!.errorCalls).toBe(1)
+    expect(row(r.builtin, 'npx')!.errorCalls).toBe(1)
+  })
+
+  it('keeps the blamed failure out of the other binary\'s categories and occurrences', () => {
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls missing && npx tsc', error: true, errorCategory: 'not_found', failedBinary: 'ls' },
+    ])
+    expect(toolHealthDetail(store, 'builtin', 'npx', { nowMs: NOW })!.errorCategories).toEqual([])
+    expect(toolErrorOccurrences(store, 'builtin', 'npx', 'not_found', { nowMs: NOW })).toEqual([])
+    expect(toolErrorOccurrences(store, 'builtin', 'ls', 'not_found', { nowMs: NOW })).toHaveLength(1)
   })
 })
 

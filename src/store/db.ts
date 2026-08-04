@@ -5,7 +5,7 @@ import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 23
+const SCHEMA_VERSION = 24
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -84,6 +84,12 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   -- apply: a non-retrieval action (silent output is success for a write/shell) or a
   -- failed call (already counted as an error). See core/empty-result.ts.
   result_empty INTEGER,
+  -- For a FAILED shell call, which of its binaries the error text named — or NULL
+  -- when the output didn't say. A compound call is attributed to every binary it
+  -- involved, which for an \`&&\` chain is not merely vague but wrong: in
+  -- \`ls missing && tsc\`, tsc never ran. When this is set, the failure counts
+  -- against that binary alone. See core/shell-blame.ts.
+  failed_binary TEXT,
   target_path  TEXT,
   command      TEXT,
   is_sidechain INTEGER,
@@ -729,6 +735,11 @@ function migrate(db: DB): void {
   // "not applicable" until the NORMALIZE_VERSION bump re-ingests and fills them.
   if (tableExists('tool_calls') && !has('tool_calls', 'result_empty')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN result_empty INTEGER')
+  }
+  // Blame for a failed compound shell call. Existing rows stay NULL, which reads
+  // as "unknown" — exactly the pre-existing behaviour — until re-ingest fills it.
+  if (tableExists('tool_calls') && !has('tool_calls', 'failed_binary')) {
+    db.exec('ALTER TABLE tool_calls ADD COLUMN failed_binary TEXT')
   }
   if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
     db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')

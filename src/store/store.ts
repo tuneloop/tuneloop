@@ -16,6 +16,7 @@ import type { MeasureSpec } from '../core/measures'
 import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
 import { resultText } from '../core/result-text'
+import { blameBinary } from '../core/shell-blame'
 import { shellBinaries } from '../core/shell-binaries'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
@@ -249,13 +250,16 @@ export class Store {
       this.db.prepare('DELETE FROM tool_call_commands WHERE session_id = ?').run(session.id)
       const insTool = this.db.prepare(
         `INSERT INTO tool_calls
-           (session_id, idx, name, action, ok, is_error, error_category, error_message, result_empty, target_path, command, is_sidechain, ts, duration_ms)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           (session_id, idx, name, action, ok, is_error, error_category, error_message, result_empty, failed_binary, target_path, command, is_sidechain, ts, duration_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
       const insCommand = this.db.prepare(
         'INSERT INTO tool_call_commands (session_id, idx, seq, binary) VALUES (?,?,?,?)',
       )
       session.toolCalls.forEach((t, idx) => {
+        // Which binaries this shell call ran, and — when it failed — which of them
+        // the error text blames. Computed here so both ride the same parse.
+        const binaries = t.action === 'shell' && t.target.command ? shellBinaries(t.target.command) : []
         // The result payload is read twice over: to fingerprint a failure, and to
         // tell a successful-but-empty retrieval from a real one. Materialize it
         // only when one of those applies — most calls need neither.
@@ -276,6 +280,7 @@ export class Store {
           category,
           message,
           emptyResultFlag(t.action, t.result.ok, text ?? ''),
+          binaries.length && !t.result.ok ? blameBinary(text ?? '', binaries) : null,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,
@@ -284,8 +289,7 @@ export class Store {
         )
         // Which binaries did this shell call involve? Keyed on the tool call's own
         // idx so the child rows join straight back to it.
-        if (t.action !== 'shell' || !t.target.command) return
-        shellBinaries(t.target.command).forEach((binary, seq) => insCommand.run(session.id, idx, seq, binary))
+        binaries.forEach((binary, seq) => insCommand.run(session.id, idx, seq, binary))
       })
 
       this.db.prepare('DELETE FROM usage_facts WHERE session_id = ?').run(session.id)
@@ -2091,7 +2095,12 @@ export class Store {
       params.push(...toolVals)
     }
     if (opts?.shellBinary) {
-      scope.push(`EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ?)`)
+      // A failure whose output named a DIFFERENT binary isn't this binary's to show
+      // (see core/shell-blame.ts); NULL blame stays multi-labelled.
+      scope.push(
+        `EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ?
+                 AND (t.failed_binary IS NULL OR t.failed_binary = c.binary))`,
+      )
       params.push(opts.shellBinary)
     }
     if (scope.length) where.push(`(${scope.join(' OR ')})`)

@@ -45,7 +45,7 @@ export interface BlockMembership {
  * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
  * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
  */
-export const NORMALIZE_VERSION = 6 // 6: shell-binary multi-labels + tool_calls.result_empty
+export const NORMALIZE_VERSION = 7 // 7: tool_calls.failed_binary (blame for compound shell failures)
 
 
 

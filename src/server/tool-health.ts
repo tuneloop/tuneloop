@@ -164,10 +164,18 @@ export interface ToolHealthReport {
 /** Skills have their own tab; shell calls are exploded into binaries, not rowed as `Bash`. */
 const NON_SHELL_TOOL = `t.action NOT IN ('skill', 'shell')`
 
-/** The per-row aggregate columns, shared by the tool-name and shell-binary queries. */
-const AGG_COLUMNS = `COUNT(*) AS calls,
+/**
+ * When a failed compound shell call names the binary that broke, the failure counts
+ * against THAT binary only. Otherwise (`failed_binary IS NULL`) it counts against
+ * every binary involved — the honest multi-label. Applied to the error NUMERATOR
+ * only: "calls involving git" is still every call git was part of.
+ */
+const BLAMED = `(t.failed_binary IS NULL OR t.failed_binary = c.binary)`
+
+/** The per-row aggregate columns. `errored` is the query's own error predicate. */
+const aggColumns = (errored = 't.is_error = 1') => `COUNT(*) AS calls,
        SUM(t.is_sidechain) AS sidechainCalls,
-       SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errorCalls,
+       SUM(CASE WHEN ${errored} THEN 1 ELSE 0 END) AS errorCalls,
        SUM(CASE WHEN t.result_empty = 1 THEN 1 ELSE 0 END) AS emptyCalls,
        SUM(CASE WHEN t.result_empty IS NOT NULL THEN 1 ELSE 0 END) AS emptyEligibleCalls,
        MIN(${TS_NORM}) AS firstUsedAt,
@@ -430,7 +438,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
     // Per (name, action, repo, session): session-grained so folding several raw names
     // onto one server can't double-count a session that used two of its tools.
     const byName = store.queryAll(
-      `SELECT t.name AS name, t.action AS action, s.repo AS repo, t.session_id AS sessionId, ${AGG_COLUMNS}
+      `SELECT t.name AS name, t.action AS action, s.repo AS repo, t.session_id AS sessionId, ${aggColumns()}
        FROM tool_calls t JOIN sessions s ON s.id = t.session_id
        WHERE s.source = ? AND ${NON_SHELL_TOOL} AND ${IN_WINDOW}
        GROUP BY t.name, t.action, s.repo, t.session_id`,
@@ -444,7 +452,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
     }
 
     const byBinary = store.queryAll(
-      `SELECT c.binary AS name, s.repo AS repo, t.session_id AS sessionId, ${AGG_COLUMNS}
+      `SELECT c.binary AS name, s.repo AS repo, t.session_id AS sessionId, ${aggColumns(`t.is_error = 1 AND ${BLAMED}`)}
        FROM tool_call_commands c
        JOIN tool_calls t ON t.session_id = c.session_id AND t.idx = c.idx
        JOIN sessions s ON s.id = t.session_id
@@ -474,7 +482,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
 
     const daysByBinary = store.queryAll(
       `SELECT c.binary AS name, ${TS_DAY} AS day, COUNT(*) AS calls,
-              SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errors
+              SUM(CASE WHEN t.is_error = 1 AND ${BLAMED} THEN 1 ELSE 0 END) AS errors
        FROM tool_call_commands c
        JOIN tool_calls t ON t.session_id = c.session_id AND t.idx = c.idx
        JOIN sessions s ON s.id = t.session_id
@@ -506,7 +514,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
        FROM tool_call_commands c
        JOIN tool_calls t ON t.session_id = c.session_id AND t.idx = c.idx
        JOIN sessions s ON s.id = t.session_id
-       WHERE s.source = ? AND ${IN_WINDOW} AND t.is_error = 1 AND t.error_category IS NOT NULL
+       WHERE s.source = ? AND ${IN_WINDOW} AND t.is_error = 1 AND t.error_category IS NOT NULL AND ${BLAMED}
        GROUP BY c.binary, t.error_category`,
       source,
       ...winParams,
@@ -881,7 +889,11 @@ function entityScope(agg: EntityAgg): { sql: string; params: unknown[] } {
     params.push(...names)
   }
   if (agg.shell) {
-    clauses.push(`EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ?)`)
+    // `... AND BLAMED` so a failure the output pinned on another binary doesn't
+    // list here: the occurrence list must match the category bars above it.
+    clauses.push(
+      `EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ? AND ${BLAMED})`,
+    )
     params.push(agg.name)
   }
   // A built-in name that is also a shell binary would produce both clauses; OR keeps
