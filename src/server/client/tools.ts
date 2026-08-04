@@ -591,10 +591,13 @@ function renderToolPage(box, d) {
 
   if (d.sessions && d.sessions.length) {
     var listed = d.sessions.reduce(function (a, g) { return a + g.calls; }, 0);
-    var note = 'Grouped by session, most recent first. ' +
-      (d.sessions.length < r.sessions
-        ? 'Showing ' + num(d.sessions.length) + ' of ' + num(r.sessions) + ' sessions (' + num(listed) + ' of ' + num(r.calls) + ' calls).'
-        : 'Click a session to see its calls; each one opens the transcript at that call.');
+    // One ordering rule, stated once and applied at both levels.
+    var note = 'Sessions where it failed come first, then most recent — and the same inside each ' +
+      'session. Click a session to see its calls; each one opens the transcript at that call.';
+    if (d.sessions.length < r.sessions) {
+      note += ' Showing ' + num(d.sessions.length) + ' of ' + num(r.sessions) + ' sessions (' +
+        num(listed) + ' of ' + num(r.calls) + ' calls).';
+    }
     html += '<div class="sk-card">' +
       '<div class="sk-sect-h">Calls</div>' +
       '<div class="sk-sect-note">' + esc(note) + '</div>' +

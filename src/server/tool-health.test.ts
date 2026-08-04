@@ -397,13 +397,14 @@ describe('toolHealthDetail', () => {
     seedSession('s1', 'repoA', 2, [mcpCall('sentry', 'a'), mcpCall('sentry', 'b', { error: true })])
     seedSession('s2', 'repoB', 1, [mcpCall('sentry', 'c')])
     const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW })!
-    // Newest session first; each group carries its own counts and its call rows.
+    // Each group carries its own counts and its call rows. s1 leads on the
+    // failures-first rule (see the ordering test below), despite being older.
     expect(d.sessions.map((g) => [g.sessionId, g.calls, g.errorCalls])).toEqual([
-      ['s2', 1, 0],
       ['s1', 2, 1],
+      ['s2', 1, 0],
     ])
-    expect(d.sessions[1]!.items).toHaveLength(2)
-    expect(d.sessions[1]!.items[0]).toMatchObject({ sessionId: 's1', idx: expect.any(Number) })
+    expect(d.sessions[0]!.items).toHaveLength(2)
+    expect(d.sessions[0]!.items[0]).toMatchObject({ sessionId: 's1', idx: expect.any(Number) })
   })
 
   it('reconciles with the tiles: groups sum to the row\'s calls and errors', () => {
@@ -425,6 +426,32 @@ describe('toolHealthDetail', () => {
     expect(d.row.errorCalls).toBe(0)
     const failed = d.sessions.flatMap((g) => g.items).find((i) => i.isError)!
     expect(failed.blamedElsewhere).toBe(true)
+  })
+
+  it('leads with failures at both levels, then falls back to recency', () => {
+    seedSession('clean-new', 'repoA', 1, [mcpCall('sentry', 'a')])
+    seedSession('failed-old', 'repoA', 9, [
+      mcpCall('sentry', 'ok1'),
+      mcpCall('sentry', 'boom', { error: true }),
+      mcpCall('sentry', 'ok2'),
+    ])
+    seedSession('clean-older', 'repoA', 20, [mcpCall('sentry', 'a')])
+    const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW })!
+    // The session with a failure leads despite being older; the clean ones follow
+    // newest-first.
+    expect(d.sessions.map((g) => g.sessionId)).toEqual(['failed-old', 'clean-new', 'clean-older'])
+    // And inside it, the failure leads its own session's calls.
+    expect(d.sessions[0]!.items[0]).toMatchObject({ isError: true })
+  })
+
+  it('gives every session its own item allowance, so a busy one can\'t starve the rest', () => {
+    // A global cap spent itself on the first few sessions: 22 of 29 groups for
+    // `echo` expanded to nothing, and 8 that reported errors listed none.
+    seedSession('busy', 'repoA', 2, Array.from({ length: 60 }, () => mcpCall('sentry', 'a')))
+    seedSession('quiet', 'repoB', 3, [mcpCall('sentry', 'b', { error: true })])
+    const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW })!
+    for (const g of d.sessions) expect(g.items.length).toBeGreaterThan(0)
+    expect(d.sessions.find((g) => g.sessionId === 'quiet')!.items).toHaveLength(1)
   })
 
   it('reports a session\'s TRUE call count even when its listed items are capped', () => {

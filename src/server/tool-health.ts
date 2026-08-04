@@ -68,7 +68,12 @@ const NOISY_EMPTY_MIN_CALLS = 10
  * capped list can't quietly understate how often a tool ran.
  */
 const MAX_CALL_SESSIONS = 50
-const MAX_CALL_ITEMS = 400
+/**
+ * Per SESSION, not across all of them. A global cap was spent almost entirely on
+ * the first few busy sessions — 22 of 29 groups for `echo` expanded to nothing,
+ * and 8 that reported errors listed none of them.
+ */
+const MAX_ITEMS_PER_SESSION = 25
 
 export type ToolKind = 'mcp' | 'builtin'
 
@@ -963,7 +968,9 @@ function loadSessionGroups(store: Store, data: RosterData, agg: EntityAgg): Tool
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
      GROUP BY t.session_id
-     ORDER BY lastTs DESC
+     -- Sessions where it FAILED lead, then most recent. This also decides what the
+     -- cap truncates, so a session with failures is never the one dropped.
+     ORDER BY (errorCalls > 0) DESC, lastTs DESC
      LIMIT ?`,
     // Bind order follows where the placeholders APPEAR in the SQL: the blame
     // predicate sits in the SELECT's errorCalls sum, ahead of the WHERE clause.
@@ -976,21 +983,29 @@ function loadSessionGroups(store: Store, data: RosterData, agg: EntityAgg): Tool
   if (!groups.length) return []
 
   const ids = groups.map((g) => g.sessionId)
+  // ROW_NUMBER partitioned by session gives each group its own allowance, so one
+  // 246-call session can't starve the other 28. Within a session the failures come
+  // first — they're why you opened it — then most recent.
   const items = store.queryAll(
-    `SELECT t.session_id AS sessionId, ${TITLE_EXPR} AS title, t.idx AS idx, s.repo AS repo,
-            ${TS_NORM} AS ts, t.is_error AS isError, t.is_sidechain AS sidechain,
-            t.name AS name, t.command AS command, t.failed_binary AS failedBinary,
-            (SELECT COUNT(*) FROM tool_call_commands c2 WHERE c2.session_id = t.session_id AND c2.idx = t.idx) AS binaryCount
-     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
-       AND t.session_id IN (${ids.map(() => '?').join(', ')})
-     ORDER BY ts DESC, t.idx ASC
-     LIMIT ?`,
+    `SELECT sessionId, title, idx, repo, ts, isError, sidechain, name, command, failedBinary, binaryCount FROM (
+       SELECT t.session_id AS sessionId, ${TITLE_EXPR} AS title, t.idx AS idx, s.repo AS repo,
+              ${TS_NORM} AS ts, t.is_error AS isError, t.is_sidechain AS sidechain,
+              t.name AS name, t.command AS command, t.failed_binary AS failedBinary,
+              (SELECT COUNT(*) FROM tool_call_commands c2 WHERE c2.session_id = t.session_id AND c2.idx = t.idx) AS binaryCount,
+              ROW_NUMBER() OVER (
+                PARTITION BY t.session_id ORDER BY t.is_error DESC, ${TS_NORM} DESC, t.idx ASC
+              ) AS rn
+       FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+       WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
+         AND t.session_id IN (${ids.map(() => '?').join(', ')})
+     )
+     WHERE rn <= ?
+     ORDER BY sessionId, rn`,
     data.source,
     ...win,
     ...scope.params,
     ...ids,
-    MAX_CALL_ITEMS,
+    MAX_ITEMS_PER_SESSION,
   ) as Array<{
     sessionId: string
     title: string | null
