@@ -30,6 +30,16 @@ const SELF_PREFIX = /^([\w.@+/-]+):\s/
 /** `Usage:  gh gist delete …` — a CLI printing its own usage after a bad invocation. */
 const USAGE_LINE = /^Usage:\s+(\S+)/i
 
+/**
+ * zsh puts the name AFTER the message — `(eval):1: command not found: jq` — where
+ * bash puts it before. Both shells appear in these transcripts, so both forms have
+ * to be read or the more common one silently never matches.
+ */
+const ZSH_NOT_FOUND = /(?:command not found|no such file or directory):\s*(\S+)/i
+
+/** `(eval):cd:1: …` — zsh naming the builtin/command that raised the error. */
+const ZSH_EVAL_CMD = /^\(eval\):([\w.-]+):\d+:/
+
 /** `./node_modules/.bin/tsc` and `tsc` are the same tool; compare on the last path segment. */
 function base(name: string): string {
   const trimmed = name.replace(/[:,.]+$/, '')
@@ -56,7 +66,12 @@ export function blameBinary(text: string, binaries: string[]): string | null {
     if (!line) continue
     // The wrapper form first: in `sh: line 1: tsc: not found` the SELF_PREFIX rule
     // would otherwise blame the shell, which isn't the tool that failed.
-    const named = SHELL_WRAPPER.exec(line)?.[1] ?? USAGE_LINE.exec(line)?.[1] ?? SELF_PREFIX.exec(line)?.[1]
+    const named =
+      SHELL_WRAPPER.exec(line)?.[1] ??
+      ZSH_EVAL_CMD.exec(line)?.[1] ??
+      ZSH_NOT_FOUND.exec(line)?.[1] ??
+      USAGE_LINE.exec(line)?.[1] ??
+      SELF_PREFIX.exec(line)?.[1]
     if (!named) continue
     const hit = byBase.get(base(named))
     if (hit) found.add(hit)

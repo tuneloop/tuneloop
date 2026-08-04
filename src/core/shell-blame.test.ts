@@ -24,6 +24,13 @@ describe('blameBinary — naming the segment that failed', () => {
     expect(blameBinary(out, ['ls', 'echo', 'psql'])).toBe('psql')
   })
 
+  it('reads zsh\'s name-after-message form as well as bash\'s name-first one', () => {
+    // zsh: `(eval):1: command not found: jq`; bash: `bash: jq: command not found`.
+    // Both shells show up in real transcripts, so both have to parse.
+    expect(blameBinary('(eval):1: command not found: jq', ['jq', 'curl'])).toBe('jq')
+    expect(blameBinary('(eval):cd:1: no such file or directory: docs', ['cd', 'ls'])).toBe('cd')
+  })
+
   it('reads a usage dump as the tool complaining about its own invocation', () => {
     const out = '--yes required when not running interactively\nUsage:  gh gist delete {<id> | <url>} [flags]'
     expect(blameBinary(out, ['gh', 'echo', 'head'])).toBe('gh')
