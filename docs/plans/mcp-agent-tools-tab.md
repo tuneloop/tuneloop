@@ -144,9 +144,16 @@ The compound badge therefore means "the output didn't say which part failed".
 aborts the rest of the list, so later segments never run. It is tempting to read
 that as "the shell failed, charge no binary", and that is wrong: the agent wrote a
 command that isn't portable across shells, which is exactly the kind of thing this
-tab should count. The shell NAMES the offending token (`== not found`,
-`no matches found: docs/*.swp`), and that token can be located in the command text
-— so blame the segment that contains it.
+tab should count. The shell NAMES the offending word (`== not found`), the word
+appears verbatim in the command, so blame the segment that contains it. **Built.**
+
+Scoped to that ABORT class only, on measurement. A glob no-match
+(`no matches found: docs/*.swp`) reads like the same thing and isn't: under zsh an
+unresolvable word aborts the whole list and sets the exit code whatever the
+separator, while a glob no-match only skips its own command —
+`grep --include=*.x; echo B` prints B and exits 0, so the call's error came from
+somewhere else and blaming the glob's segment would be wrong. It propagates only
+inside an `&&` chain, which the `;`-list rule below is what would tell apart.
 
 **A user-declined call KEEPS its multi-label — decided 2026-08-04, not changed.**
 `User rejected tool use` means nothing executed (about a fifth of failed shell

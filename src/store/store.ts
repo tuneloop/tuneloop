@@ -17,7 +17,7 @@ import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, 
 import { contentHash } from '../core/hash'
 import { resultText } from '../core/result-text'
 import { blameBinary } from '../core/shell-blame'
-import { shellBinaries } from '../core/shell-binaries'
+import { shellBinaries, shellSegments } from '../core/shell-binaries'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
 import type { EvidenceRef, InsightInput } from '../core/detector'
@@ -259,7 +259,8 @@ export class Store {
       session.toolCalls.forEach((t, idx) => {
         // Which binaries this shell call ran, and — when it failed — which of them
         // the error text blames. Computed here so both ride the same parse.
-        const binaries = t.action === 'shell' && t.target.command ? shellBinaries(t.target.command) : []
+        const shellSegs = t.action === 'shell' && t.target.command ? shellSegments(t.target.command) : []
+        const binaries = shellBinaries(t.action === 'shell' ? (t.target.command ?? '') : '')
         // The result payload is read twice over: to fingerprint a failure, and to
         // tell a successful-but-empty retrieval from a real one. Materialize it
         // only when one of those applies — most calls need neither.
@@ -280,7 +281,7 @@ export class Store {
           category,
           message,
           emptyResultFlag(t.action, t.result.ok, text ?? ''),
-          binaries.length && !t.result.ok ? blameBinary(text ?? '', binaries) : null,
+          shellSegs.length && !t.result.ok ? blameBinary(text ?? '', shellSegs) : null,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,

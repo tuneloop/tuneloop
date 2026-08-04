@@ -75,6 +75,34 @@ const MAX_BINARIES = 16
 const MAX_SHELL_DEPTH = 3
 
 /**
+ * One command in the chain: what it runs, and the words it runs it with.
+ *
+ * The tokens are kept because a failure sometimes has to be traced back to the
+ * segment that caused it — the shell names an offending WORD (`== not found`,
+ * `no matches found: docs/*.swp`) rather than a command, and the only way from
+ * that word to a binary is to find which segment contained it. See core/shell-blame.
+ */
+export interface ShellSegment {
+  /** The binary this segment runs; null when it runs none (`cd`, a test, a `$VAR`). */
+  binary: string | null
+  /** The segment's words, quotes stripped. */
+  tokens: string[]
+}
+
+/**
+ * The command chain, segment by segment, in order — `sh -c` scripts flattened in
+ * as their own segments. Nothing is de-duplicated here: a caller asking which
+ * segment failed needs every one of them, in the order the shell ran them.
+ */
+export function shellSegments(command: string): ShellSegment[] {
+  const segs = collectSegments(segments(command), 0)
+  // The same mis-parse guard shellBinaries applies: past this many, quoting broke
+  // and the "chain" is really quoted source code, so trust only its first segment.
+  const named = segs.filter((x) => x.binary).length
+  return named <= MAX_BINARIES ? segs : collectSegments(segments(command).slice(0, 1), 0)
+}
+
+/**
  * The ordered, de-duplicated binaries a shell command involves. Empty when the
  * command runs no tool of its own (`cd /repo`, a bare redirect, blank input).
  *
@@ -83,10 +111,7 @@ const MAX_SHELL_DEPTH = 3
  * `seq` therefore records first appearance in the chain.
  */
 export function shellBinaries(command: string): string[] {
-  const segs = segments(command)
-  const all = dedupe(collect(segs, 0))
-  if (all.length <= MAX_BINARIES) return all
-  return dedupe(collect(segs.slice(0, 1), 0))
+  return dedupe(shellSegments(command).map((s) => s.binary).filter((b): b is string => !!b))
 }
 
 function dedupe(bins: string[]): string[] {
@@ -100,10 +125,33 @@ function dedupe(bins: string[]): string[] {
   return out
 }
 
-function collect(segs: string[][], depth: number): string[] {
-  const out: string[] = []
-  for (const segment of segs) out.push(...binariesOf(segment, depth))
+/**
+ * Resolve each token list to a segment. A `sh -c '<script>'` segment is replaced
+ * by the script's OWN segments, so the chain reads as what actually ran rather
+ * than as the transport that carried it.
+ */
+function collectSegments(segs: string[][], depth: number): ShellSegment[] {
+  const out: ShellSegment[] = []
+  for (const tokens of segs) {
+    const inner = inlineShellIn(tokens)
+    if (inner !== undefined) {
+      if (depth < MAX_SHELL_DEPTH) out.push(...collectSegments(segments(inner), depth + 1))
+      continue
+    }
+    out.push({ binary: binaryOf(tokens), tokens })
+  }
   return out
+}
+
+/** The inline script of a `sh -c` segment, or undefined when it isn't one. */
+function inlineShellIn(tokens: string[]): string | undefined {
+  for (let i = 0; i < tokens.length; i++) {
+    const name = binaryName(tokens[i] ?? '')
+    if (SHELLS.has(name)) return inlineShellScript(tokens, i)
+    // Only a LEADING shell counts; `git commit -m "bash"` must not recurse.
+    if (name && !PREFIXES.has(name) && !WRAPPERS.has(name) && !tokens[i]!.startsWith('-')) return undefined
+  }
+  return undefined
 }
 
 /**
@@ -316,15 +364,15 @@ function skipHeredocBodies(s: string, start: number, delims: string[]): number {
   return i
 }
 
-/** The binaries one segment invokes — usually one, several only when it's `sh -c`. */
-function binariesOf(tokens: string[], depth: number): string[] {
+/** The single binary one segment invokes, or null when it invokes none. */
+function binaryOf(tokens: string[]): string | null {
   /** Set while stepping over a wrapper's own options (`sudo -u x`, `timeout 30`). */
   let wrapper: string | null = null
   let i = 0
   while (i < tokens.length) {
     const raw = tokens[i]!
     // A condition, not an invocation: `[ -x /bin/ls ]` names a path it does not run.
-    if (raw === '[' || raw === '[[' || raw === 'test') return []
+    if (raw === '[' || raw === '[[' || raw === 'test') return null
     // Not a binary at any position: blank, a VAR=x prefix, a redirect, a flag, or
     // punctuation (`{`, `]`, `;` from an escaped `\;`).
     if (!raw || ASSIGNMENT.test(raw) || REDIRECT.test(raw) || raw.startsWith('-') || !/[A-Za-z0-9]/.test(raw)) {
@@ -333,7 +381,7 @@ function binariesOf(tokens: string[], depth: number): string[] {
     }
     // `"$CHROME" --headless` runs something we can't name without executing the
     // shell. Nothing beats a wrong label here, so the segment yields nothing.
-    if (raw.startsWith('$')) return []
+    if (raw.startsWith('$')) return null
     if (wrapper) {
       if (NUMERIC_ARG_WRAPPERS.has(wrapper) && DURATION.test(raw)) {
         i += 1
@@ -344,24 +392,20 @@ function binariesOf(tokens: string[], depth: number): string[] {
     const name = binaryName(raw)
     // An unnameable first word means the segment came out of a mis-parse (a
     // regex fragment, a `{3,4}` quantifier); we don't know what ran, so say so.
-    if (!PLAUSIBLE_NAME.test(name)) return []
+    if (!PLAUSIBLE_NAME.test(name)) return null
     if (PREFIXES.has(name)) {
       i += 1
       continue
     }
-    if (NAVIGATION.has(name)) return []
+    if (NAVIGATION.has(name)) return null
     if (WRAPPERS.has(name)) {
       wrapper = name
       i += 1
       continue
     }
-    if (SHELLS.has(name)) {
-      const inner = inlineShellScript(tokens, i)
-      if (inner !== undefined) return depth >= MAX_SHELL_DEPTH ? [] : collect(segments(inner), depth + 1)
-    }
-    return [name]
+    return name
   }
-  return []
+  return null
 }
 
 /**
