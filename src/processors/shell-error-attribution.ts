@@ -170,7 +170,10 @@ export function normalizeVerdicts(data: Record<string, unknown>, failures: Failu
 
 export const shellErrorAttribution: Processor = {
   name: 'shell-error-attribution',
-  version: 1,
+  // 2: batching replaced a truncating cap. v1 runs judged only the first 20
+  // failures of a session, so a busy one was left partly attributed — and the
+  // cache would happily keep that partial result forever without this bump.
+  version: 2,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
