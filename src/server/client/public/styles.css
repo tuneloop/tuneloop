@@ -1091,6 +1091,13 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
   flex: none; color: var(--red); font-size: 11px; border: 1px solid var(--red);
   border-radius: 999px; padding: 1px 8px; white-space: nowrap;
 }
-/* The expanded calls sit indented under their session, like the error accordion. */
-.th-grp-items { padding: 2px 0 8px 22px; border-left: 2px solid var(--line); margin-left: 10px; }
+/* The expanded calls sit indented under their session, like the error accordion.
+   Capped and scrollable in its own right: one busy session can hold hundreds of
+   calls (246 for `echo` on a real store, ~7k px unbounded), which would fill the
+   outer list entirely and bury every other session. `overscroll-behavior` keeps
+   the inner scroll from chaining out to the page once it bottoms out. */
+.th-grp-items {
+  padding: 2px 0 8px 22px; border-left: 2px solid var(--line); margin-left: 10px;
+  max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
+}
 .th-grp-more { padding-left: 4px; }
