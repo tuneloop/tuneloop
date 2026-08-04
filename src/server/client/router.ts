@@ -22,6 +22,7 @@ import { setView, openDetail, closeDrawer, getSessionParams, applySessionParams 
 import { openMetric } from './kpis'
 import { getArtifactParams, applyArtifactParams } from './artifacts'
 import { openSkill, getSkillParams } from './skills'
+import { openTool, getToolParams } from './tools'
 
 export type { Route } from './router-url'
 
@@ -37,6 +38,7 @@ function currentQuery(): Record<string, string> {
   if (state.view === 'sessions') q = getSessionParams()
   else if (state.view === 'artifacts') q = getArtifactParams()
   else if (state.view === 'skills') q = getSkillParams()
+  else if (state.view === 'tools') q = getToolParams()
   if (state.open) q.session = state.open
   return q
 }
@@ -71,6 +73,7 @@ function applyRoute(r: Route): void {
     else if (r.view === 'artifacts') applyArtifactParams(r.artKind, r.query)
     else if (r.view === 'sessions') applySessionParams(r.query)
     else if (r.view === 'skills') openSkill(r.skill, r.query)
+    else if (r.view === 'tools') openTool(r.toolKind, r.tool, r.query)
     if (r.session && r.session !== state.open) openDetail(r.session)
     else if (!r.session && state.open) closeDrawer()
   } finally {

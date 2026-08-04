@@ -998,3 +998,46 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 .tag-addf-btn { border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 4px; font-size: 12px; cursor: pointer; padding: 2px 8px; }
 .tag-addf-btn:hover { background: #dfe9e0; }
 .tag-addf input { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 3px 8px; font-size: 12px; width: 130px; margin-right: 6px; }
+
+/* ---- Tools tab (MCP / built-in tool health) --------------------------------
+   Layout and typography come from the shared health tokens (.sk-*, see
+   client/health-ui.ts); only the chrome that is unique to this tab lives here. */
+
+/* The MCP / Built-in sub-roster switch, sitting in the panel head. */
+.th-kinds { margin-left: auto; }
+
+/* An error stat in the summary strip reads in its own colour once non-zero, so a
+   problem is visible before you read the label. */
+.th-stat-hero .sk-stat-v { color: var(--red); }
+.th-stat-hero.on .sk-stat-v { color: var(--red); }
+
+/* Built-in rows have no status dot (nothing to install or remove); the slot is
+   held so every row's name column starts at the same x. */
+.th-dot-none { background: transparent; }
+
+/* "shell" / "repo script" chips — what KIND of row this is, distinct from a flag. */
+.th-kind-chip {
+  flex: none; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); background: var(--track); border-radius: 999px; padding: 2px 8px;
+}
+
+/* An error figure that earned the high-error pill. */
+.th-metric-bad .sk-mv, span.th-metric-bad { color: var(--red); }
+
+.th-overall-card { margin-bottom: 18px; }
+
+/* Per-tool table on an MCP server's page. */
+.th-table { display: flex; flex-direction: column; margin-top: 6px; }
+.th-tr {
+  display: grid; grid-template-columns: 1fr 80px 80px 110px; gap: 12px;
+  align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: 13.5px;
+}
+.th-tr:last-child { border-bottom: 0; }
+.th-th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.th-tool-name { font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The command / tool name on a call row in the invocations list. */
+.th-inv-what {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted);
+}

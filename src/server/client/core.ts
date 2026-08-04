@@ -29,7 +29,7 @@ export interface SessTime {
 export interface ClientState {
   // The top-level tab the app is showing. Mirrored into the URL hash by the
   // router; setView() keeps it in step with the DOM.
-  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'tools' | 'dashboard' | 'artifacts' | 'sessions'
   // The session whose detail drawer is open (null = drawer closed). Mirrored into
   // the URL as `?session=<id>` so a session is shareable / reload-survivable.
   open: string | null
@@ -47,6 +47,16 @@ export interface ClientState {
   // Which harness's skills the Skills tab shows ('' = let the server pick the default).
   // Only meaningful when >1 source has skill data; mirrored into the URL as ?source=.
   skillSource: string
+  // Tools tab: which sub-roster ('mcp' | 'builtin'), and the entity whose detail page
+  // is open (null = the roster). Mirrored into the URL as #/tools/<kind>[/<name>].
+  toolKind: string
+  tool: string | null
+  // Tools-tab window — same shape and defaults as the Skills tab's, and the same
+  // URL params (?win= / ?from=&to= / ?source=). The clock is tool-run time.
+  toolWin: number | 'all' | 'custom'
+  toolFrom: string
+  toolTo: string
+  toolSource: string
   overview: any
   home: any // Explore (question-led) stats; null until fetched
   asked: any // the question the user clicked through from, for the grounding banner (null = none)
@@ -84,7 +94,9 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '',
+  toolKind: 'mcp', tool: null, toolWin: 30, toolFrom: '', toolTo: '', toolSource: '',
+  overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 14,

@@ -4,6 +4,7 @@
 //   #/highlights                    the landing digest (empty hash also lands here)
 //   #/recommendations               the recommendations ledger (legacy alias: #/insights)
 //   #/skills[/<name>]               the skill roster, or one skill's detail page
+//   #/tools/<kind>[/<name>]         tools roster (kind = mcp | builtin), or one entity's page
 //   #/dashboard/<metric>            e.g. #/dashboard/cost_artifact
 //   #/artifacts/<kind>[?q=&sort=&dir=]
 //   #/sessions[?win=&q=&outcomes=&artifact=&artifactKind=&sort=&dir=&page=&f.<facet>=…]
@@ -16,27 +17,31 @@
 // defaults rather than erroring, so a stale or hand-mangled hash always resolves.
 
 export interface Route {
-  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'tools' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string // dashboard sub-selection (which KPI is expanded)
   artKind: string // artifacts sub-selection (feature | pr)
   skill: string | null // skills sub-selection: the open per-skill page, or null (roster)
+  toolKind: string // tools sub-tab (mcp | builtin)
+  tool: string | null // tools sub-selection: the open entity page, or null (roster)
   session: string | null // open drawer target, or null (mirror of query.session)
   query: Record<string, string> // full decoded query string (filtered-list state)
 }
 
 /** The path-level slice of client state that maps to the URL path. */
 export interface NavState {
-  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'tools' | 'dashboard' | 'artifacts' | 'sessions'
   metric: string | null
   artKind: string
   skill: string | null
+  toolKind: string
+  tool: string | null
 }
 
 // 'highlights' is routable (so the landing tab is shareable / reload-survivable),
 // but it is NOT the parse fallback — an empty or unknown hash still resolves to
 // 'dashboard' (see parseHash). main.ts decides to LAND on highlights when the hash
 // is empty; an explicit deep link to any other view wins.
-export const VIEWS = ['highlights', 'insights', 'skills', 'dashboard', 'artifacts', 'sessions']
+export const VIEWS = ['highlights', 'insights', 'skills', 'tools', 'dashboard', 'artifacts', 'sessions']
 // URL slug ↔ internal view id. Only the 'insights' view differs: its tab is user-facing
 // "Recommendations", so its shareable URL reads #/recommendations while every DOM id,
 // /api/insights call, and setView('insights') keeps the internal 'insights' id. The old
@@ -44,6 +49,8 @@ export const VIEWS = ['highlights', 'insights', 'skills', 'dashboard', 'artifact
 const SLUG_TO_VIEW: Record<string, string> = { recommendations: 'insights' }
 export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions', 'ops']
 export const ART_KINDS = ['feature', 'pr']
+export const TOOL_KINDS = ['mcp', 'builtin']
+export const DEFAULT_TOOL_KIND = 'mcp'
 export const DEFAULT_METRIC = 'cost_artifact'
 export const DEFAULT_ARTKIND = 'feature'
 
@@ -100,7 +107,19 @@ export function parseHash(hash: string): Route {
     }
   }
 
-  return { view, metric, artKind, skill, session: query.session || null, query }
+  // #/tools/<kind>[/<name>]. The name is a free-form segment — a shell binary can be
+  // a path (`./deploy.sh`), which encodes its slashes, so it stays one segment.
+  const toolKind = view === 'tools' && TOOL_KINDS.indexOf(parts[1]) >= 0 ? parts[1] : DEFAULT_TOOL_KIND
+  let tool: string | null = null
+  if (view === 'tools' && parts[2]) {
+    try {
+      tool = decodeURIComponent(parts[2])
+    } catch {
+      tool = parts[2]
+    }
+  }
+
+  return { view, metric, artKind, skill, toolKind, tool, session: query.session || null, query }
 }
 
 /** Serialize a path slice + a query map into a canonical hash string. */
@@ -112,6 +131,8 @@ export function serializeRoute(nav: NavState, query: Record<string, string>): st
         ? '#/recommendations'
         : nav.view === 'skills'
           ? '#/skills' + (nav.skill ? '/' + encodeURIComponent(nav.skill) : '')
+          : nav.view === 'tools'
+          ? '#/tools/' + (nav.toolKind || DEFAULT_TOOL_KIND) + (nav.tool ? '/' + encodeURIComponent(nav.tool) : '')
           : nav.view === 'artifacts'
           ? '#/artifacts/' + (nav.artKind || DEFAULT_ARTKIND)
           : nav.view === 'sessions'

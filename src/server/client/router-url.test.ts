@@ -29,6 +29,22 @@ describe('parseHash', () => {
     expect(parseHash('#/sessions/ship')).toMatchObject({ view: 'sessions', skill: null })
   })
 
+  it('parses the tools roster, its sub-tab, and an entity page', () => {
+    expect(parseHash('#/tools')).toMatchObject({ view: 'tools', toolKind: 'mcp', tool: null })
+    expect(parseHash('#/tools/builtin')).toMatchObject({ view: 'tools', toolKind: 'builtin', tool: null })
+    expect(parseHash('#/tools/mcp/sentry')).toMatchObject({ view: 'tools', toolKind: 'mcp', tool: 'sentry' })
+    // A shell binary can be a path; its slashes are encoded so it stays one segment.
+    expect(parseHash('#/tools/builtin/' + encodeURIComponent('./deploy.sh'))).toMatchObject({
+      view: 'tools',
+      toolKind: 'builtin',
+      tool: './deploy.sh',
+    })
+    // An unknown sub-tab falls back rather than erroring.
+    expect(parseHash('#/tools/nonsense')).toMatchObject({ view: 'tools', toolKind: 'mcp' })
+    // The segments only apply on the tools view.
+    expect(parseHash('#/skills/ship')).toMatchObject({ view: 'skills', tool: null })
+  })
+
   it('parses an open session drawer on any view', () => {
     expect(parseHash('#/sessions?session=opencode:abc')).toMatchObject({ view: 'sessions', session: 'opencode:abc' })
     expect(parseHash('#/dashboard/ops?session=x1')).toMatchObject({ view: 'dashboard', metric: 'ops', session: 'x1' })
@@ -67,7 +83,7 @@ describe('parseHash', () => {
 })
 
 describe('serializeRoute', () => {
-  const nav = (o: Partial<NavState>): NavState => ({ view: 'dashboard', metric: 'success_rate', artKind: 'feature', skill: null, ...o })
+  const nav = (o: Partial<NavState>): NavState => ({ view: 'dashboard', metric: 'success_rate', artKind: 'feature', skill: null, toolKind: 'mcp', tool: null, ...o })
 
   it('serializes each view path', () => {
     expect(serializeRoute(nav({ view: 'highlights' }), {})).toBe('#/highlights')
@@ -75,6 +91,14 @@ describe('serializeRoute', () => {
     expect(serializeRoute(nav({ view: 'dashboard', metric: 'total_spend' }), {})).toBe('#/dashboard/total_spend')
     expect(serializeRoute(nav({ view: 'artifacts', artKind: 'pr' }), {})).toBe('#/artifacts/pr')
     expect(serializeRoute(nav({ view: 'sessions' }), {})).toBe('#/sessions')
+    expect(serializeRoute(nav({ view: 'tools' }), {})).toBe('#/tools/mcp')
+    expect(serializeRoute(nav({ view: 'tools', toolKind: 'builtin' }), {})).toBe('#/tools/builtin')
+    expect(serializeRoute(nav({ view: 'tools', toolKind: 'mcp', tool: 'sentry' }), {})).toBe('#/tools/mcp/sentry')
+  })
+
+  it('round-trips a tools entity whose name is a path', () => {
+    const hash = serializeRoute(nav({ view: 'tools', toolKind: 'builtin', tool: './deploy.sh' }), {})
+    expect(parseHash(hash)).toMatchObject({ view: 'tools', toolKind: 'builtin', tool: './deploy.sh' })
   })
 
   it('serializes the skills roster and a per-skill page', () => {
