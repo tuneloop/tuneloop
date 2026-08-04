@@ -159,6 +159,7 @@ ones that need specifics.
 | `outcomes-git` | static + network | Detects commits and PRs the session **created or merged** from the transcript, then asks `gh` for live PR status (degrades gracefully offline). Also catches **explicit reviews** (`gh pr review`, GitHub MCP) as a deterministic "this session reviewed PR X". |
 | `pr-content-match` | network | Recovers the common case where you ask the agent to write code, then commit and push it yourself — so there's no `gh pr create` in the transcript. Matches the lines the agent authored against the added lines of each of *your own* candidate PRs; the matched fraction becomes the PR's AI-attribution. |
 | `enrich-session` | enrichment (LLM) | One batched structured LLM call per session: work type, complexity, autonomy, an intent summary, key decisions, a success judgment, and feature linkage. Skipped entirely with no LLM key. |
+| `shell-error-attribution` | enrichment (LLM) | Which segment of a failed **compound** shell command actually failed, read from its output, plus that failure's error category. Only failed shell calls involving more than one binary — a single-binary failure is already unambiguous. Never overrules the deterministic verdict from `core/shell-blame.ts`; it only fills the gaps that shell semantics can't close. Skipped entirely with no LLM key, leaving the coarser multi-label. |
 
 ## Blocks and cost attribution (`src/core/blocks.ts`)
 
