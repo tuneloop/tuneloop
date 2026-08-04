@@ -715,7 +715,8 @@ function sessionGroupRow(g) {
     '</button>' +
     '<div class="th-grp-items" hidden>' + g.items.map(invocationRow).join('') +
       (g.items.length < g.calls
-        ? '<div class="sk-sect-note th-grp-more">Showing the ' + num(g.items.length) + ' most recent of ' + num(g.calls) + '.</div>'
+        ? '<div class="sk-sect-note th-grp-more">Showing ' + num(g.items.length) + ' of ' + num(g.calls) +
+          ' — failures first, then the most recent of the rest.</div>'
         : '') +
     '</div>' +
     '</div>';
