@@ -4956,6 +4956,17 @@ function readableOutput(action: CanonicalAction | undefined, raw: unknown): stri
  * genuinely vendor-neutral input fields (`prompt`, `pattern`, `url`, `todos`,
  * `questions`), whose spellings match across harnesses.
  */
+/**
+ * How much of a tool's input the transcript shows. Generous on purpose: the old
+ * 2,000 was below the p99 of real commands (3,479 on a sample store, max 10,296),
+ * so it cut the tail off precisely the long scripted commands a reader opens the
+ * transcript to understand — and the viewer's expand toggle then implied it was
+ * showing the whole thing. Lifting it to 20,000 covered every command observed
+ * and cost 85KB across a 2,200-call store, because the median command is 143
+ * characters and only 2.9% exceeded the old cap at all.
+ */
+const TOOL_INPUT_MAX = 20_000
+
 function toolCommandText(tc: ToolCall | undefined, input: Record<string, unknown> | undefined): string {
   if (!input) return ''
   switch (tc?.action) {
@@ -4963,7 +4974,7 @@ function toolCommandText(tc: ToolCall | undefined, input: Record<string, unknown
     case 'file_write':
       return clip(tc.target.paths?.[0] ?? '', 2000)
     case 'shell':
-      return clip(tc.target.command ?? '', 2000)
+      return clip(tc.target.command ?? '', TOOL_INPUT_MAX)
     case 'task_spawn':
       return firstStringField(input, ['prompt'])
     case 'skill':
@@ -4984,7 +4995,7 @@ function toolCommandText(tc: ToolCall | undefined, input: Record<string, unknown
   const query = firstStringField(input, ['query'])
   if (query) return query
   try {
-    return clip(JSON.stringify(input, null, 2), 2000)
+    return clip(JSON.stringify(input, null, 2), TOOL_INPUT_MAX)
   } catch {
     return ''
   }
@@ -4994,7 +5005,7 @@ function toolCommandText(tc: ToolCall | undefined, input: Record<string, unknown
 function firstStringField(input: Record<string, unknown>, keys: string[]): string {
   for (const k of keys) {
     const val = input[k]
-    if (typeof val === 'string' && val) return clip(val, 2000)
+    if (typeof val === 'string' && val) return clip(val, TOOL_INPUT_MAX)
   }
   return ''
 }
@@ -5009,12 +5020,19 @@ function renderTodos(input: Record<string, unknown>): string {
     const mark = status === 'completed' ? '✓' : status === 'in_progress' ? '▶' : '○'
     return `${mark} ${typeof o.content === 'string' ? o.content : ''}`
   })
-  return clip(lines.join('\n'), 2000)
+  return clip(lines.join('\n'), TOOL_INPUT_MAX)
 }
 
+/**
+ * Truncate for display, SAYING SO. A bare '…' reads as part of the command, and
+ * the transcript's expand toggle makes a clipped block look complete — so the
+ * marker names what was dropped instead of hinting at it.
+ */
 function clip(s: string | undefined, n: number): string {
   if (!s) return ''
-  return s.length > n ? s.slice(0, n) + ' …' : s
+  if (s.length <= n) return s
+  const dropped = s.length - n
+  return s.slice(0, n) + `\n… [${dropped.toLocaleString('en-US')} more characters, clipped for display]`
 }
 
 /**
