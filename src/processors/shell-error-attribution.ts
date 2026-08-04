@@ -18,6 +18,7 @@
  * a deterministic verdict: those come from verified shell semantics, this is a
  * reading of prose.
  */
+import { addUsage, emptyUsage } from '../core/model'
 import { registerProcessor } from '../core/registry'
 import { costOfUsage } from '../pricing/pricing'
 import { ERROR_CATEGORIES } from '../core/error-category'
@@ -33,8 +34,13 @@ const TOOL_NAME = 'attribute_shell_failures'
 /** Annotation key per attributed call; `blame:<tool_call idx>` so SQL can join on it. */
 export const BLAME_KEY_PREFIX = 'blame:'
 
-/** Failures judged per session per run. Sessions average ~1; this is a runaway guard. */
-const MAX_FAILURES = 20
+/**
+ * Failures per LLM CALL, not per session. It bounds one request's size; a session
+ * with more simply takes more calls, so coverage is never capped. It started as a
+ * truncating cap and dropped 7 of 100 failures on one busy session — the same
+ * silent-cap shape this feature exists to correct.
+ */
+const FAILURES_PER_CALL = 20
 
 /** Command and output budget per failure, so one enormous dump can't dominate the call. */
 const MAX_COMMAND_CHARS = 2_000
@@ -173,16 +179,22 @@ export const shellErrorAttribution: Processor = {
 
     const failures = collectFailures(session)
     if (failures.length === 0) return {}
-    if (failures.length > MAX_FAILURES) {
-      ctx.log.warn(`shell-error-attribution: ${session.id} has ${failures.length} compound failures; judging the first ${MAX_FAILURES}`)
+
+    let usage = emptyUsage()
+    const verdicts: ShellBlameVerdict[] = []
+    for (let i = 0; i < failures.length; i += FAILURES_PER_CALL) {
+      const batch = failures.slice(i, i + FAILURES_PER_CALL)
+      const { system, user } = buildPrompt(batch)
+      try {
+        const res = await llm.completeStructured({ system, user, schema: outputSchema(), toolName: TOOL_NAME, maxTokens: 2048 })
+        usage = addUsage(usage, res.usage)
+        verdicts.push(...normalizeVerdicts(res.data, batch))
+      } catch (e) {
+        // One bad chunk shouldn't lose the verdicts the others produced.
+        ctx.log.warn(`shell-error-attribution: ${session.id} batch ${i / FAILURES_PER_CALL + 1} failed: ${String(e)}`)
+      }
     }
-    const batch = failures.slice(0, MAX_FAILURES)
-
-    const { system, user } = buildPrompt(batch)
-    const { data, usage } = await llm.completeStructured({ system, user, schema: outputSchema(), toolName: TOOL_NAME, maxTokens: 2048 })
     const selfCost = { tokens: usage, usd: costOfUsage(llm.provider, llm.model, usage) }
-
-    const verdicts = normalizeVerdicts(data, batch)
     if (verdicts.length === 0) return { selfCost }
 
     // One annotation per call rather than one map per session, so the read model

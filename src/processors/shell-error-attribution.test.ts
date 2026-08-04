@@ -108,6 +108,43 @@ describe('normalizeVerdicts', () => {
   })
 })
 
+describe('batching', () => {
+  /** A session with `n` distinct compound failures. */
+  const busy = (n: number) => session(Array.from({ length: n }, (_, i) => shell(`ls /nope${i} && npx tsc`, false, 'boom')))
+
+  it('splits a busy session across calls instead of dropping the tail', async () => {
+    // This started as a truncating cap and silently dropped 7 of 100 failures on
+    // one real session — the exact silent-cap shape this feature exists to fix.
+    const seen: number[] = []
+    const llm = {
+      model: 'test', provider: 'anthropic',
+      completeStructured: async (req: { user: string }) => {
+        const idxs = [...req.user.matchAll(/### failure idx=(\d+)/g)].map((m) => Number(m[1]))
+        seen.push(...idxs)
+        return { data: { failures: idxs.map((idx) => ({ idx, binary: 'ls', category: null })) }, usage: emptyUsage() }
+      },
+    }
+    const res = await shellErrorAttribution.run({ llm, session: busy(27), log: { warn() {}, debug() {} } } as never)
+    // Two calls, and every failure judged — none left behind.
+    expect(seen).toHaveLength(27)
+    expect(res.annotations).toHaveLength(27)
+  })
+
+  it('keeps the verdicts from the batches that succeeded when one call fails', async () => {
+    let call = 0
+    const llm = {
+      model: 'test', provider: 'anthropic',
+      completeStructured: async (req: { user: string }) => {
+        if (call++ === 0) throw new Error('provider hiccup')
+        const idxs = [...req.user.matchAll(/### failure idx=(\d+)/g)].map((m) => Number(m[1]))
+        return { data: { failures: idxs.map((idx) => ({ idx, binary: 'ls', category: null })) }, usage: emptyUsage() }
+      },
+    }
+    const res = await shellErrorAttribution.run({ llm, session: busy(27), log: { warn() {}, debug() {} } } as never)
+    expect(res.annotations).toHaveLength(7) // the second batch survived
+  })
+})
+
 describe('processor wiring', () => {
   it('is LLM-gated enrichment, so a store analyzed without a key is unchanged', () => {
     expect(shellErrorAttribution).toMatchObject({ name: 'shell-error-attribution', kind: 'enrichment', needs: { llm: true } })
