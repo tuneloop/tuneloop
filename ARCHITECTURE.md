@@ -207,6 +207,8 @@ The tables (`src/store/db.ts`):
 - `session_blobs` — gzipped normalized JSON, for the transcript viewer
 - `usage_facts` — per-assistant-message tokens/cost, so spend slices by model
 - `tool_calls` — one row per tool call
+- `tool_call_commands` — the binaries each shell call ran (`git`, `./deploy.sh`),
+  one row per binary: a chained command involves several
 - `blocks`, `block_usage`, `block_tool`, `block_annotations`, `block_artifacts` —
   the block partition and everything attributed to it
 - `artifacts` — polymorphic: `file` / `commit` / `pr` / `ticket` / `feature`,

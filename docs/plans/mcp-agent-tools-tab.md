@@ -87,19 +87,30 @@ No used/unused status, no config chips (nothing to install or remove). Error pil
 
 ### Shell command categorization (multi-label)
 
-At ingest, parse each shell command into an **ordered list of meaningful binaries**:
+At ingest, parse each shell command into an **ordered list of meaningful binaries**
+(`src/core/shell-binaries.ts`):
 
 1. Split into top-level segments on `&&`, `||`, `;`, `|` — quote-aware (a small parser,
-   not a regex).
+   not a regex). Also on **newlines** and top-level subshell parens, both of which are
+   real chain boundaries in agent commands. Quotes, `$(…)`, backticks and **heredoc
+   bodies** are text, not boundaries — splitting a heredoc'd Python script by line
+   would invent binaries out of its source. A lone `&` is deliberately NOT a boundary:
+   it would cut `2>&1` in half.
 2. Per segment, take the first word; strip wrapper/navigation tokens: `cd`, `sudo`,
-   `env`, `time`, `timeout`, `VAR=x` prefixes, `sh -c` unwrapping.
-3. Store the surviving list in a child table:
+   `env`, `time`, `timeout`, `VAR=x` prefixes, `sh -c` unwrapping. A navigation-only
+   segment (`cd /repo`) yields nothing. Absolute/`~`-relative paths reduce to their
+   basename; repo-relative ones (`./deploy.sh`) stay whole — the path is what marks
+   them as this project's script. Runners (`npx`, `uv run`) report as themselves;
+   collapsing them to the wrapped tool is a guess.
+3. Store the surviving list — **de-duplicated, first appearance wins** — in a child
+   table. The consumer asks "did this call involve `git`?", never how many times, and
+   repeats would fan out any join:
 
 ```sql
 CREATE TABLE tool_call_commands (
   session_id TEXT,
   idx        INTEGER,   -- FK (session_id, idx) → tool_calls
-  seq        INTEGER,   -- position in the command chain
+  seq        INTEGER,   -- first appearance in the command chain
   binary     TEXT,      -- 'git', './deploy.sh', ...
   PRIMARY KEY (session_id, idx, seq)
 );
@@ -150,9 +161,13 @@ In order, cloning the skill detail page skeleton:
 Error rate measures loud failures; empty-and-retry is the silent failure mass (bad
 query → empty result → agent retries; `is_error = 0`, invisible today).
 
-- New nullable `tool_calls.result_empty` column, computed at ingest, **populated only
-  for retrieval-shaped calls** (`action IN ('search','web','mcp_call')`); `NULL`
-  elsewhere — for shell/writes, empty output *is* success.
+- New nullable `tool_calls.result_empty` column, computed at ingest
+  (`src/core/empty-result.ts`), **populated only for retrieval-shaped calls**
+  (`action IN ('search','web','mcp_call')`); `NULL` elsewhere — for shell/writes,
+  empty output *is* success. Also `NULL` for a **failed** retrieval call: it already
+  counts as an error, and counting it twice would make the two stats overlap. So the
+  empty rate's denominator is successful retrieval calls — exactly the
+  silent-failure framing.
 - Conservative heuristic: empty string, `[]`, `{}`, "no matches / no results" shapes.
 - ALTER-safe migration, gated on `NORMALIZE_VERSION` bump → backfills on re-ingest.
 - Surfaced as a **separate stat** (tile + roster tooltip). Not folded into error rate;

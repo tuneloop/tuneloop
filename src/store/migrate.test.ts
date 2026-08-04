@@ -93,3 +93,63 @@ describe('detector_runs → append-only log migration', () => {
     db.close()
   })
 })
+
+/**
+ * Roll a store back to its pre-v22 tool-call shape — `tool_calls` without
+ * `result_empty`, no `tool_call_commands` — with one call already in it. This is
+ * what an npm user's existing store looks like; reopening it must upgrade in
+ * place, not lose the row (back-compat is required, not optional).
+ */
+function seedPreToolHealthStore(): string {
+  const path = join(dir, `t${n++}.db`)
+  const db = openDb(path)
+  db.exec(`
+    DROP TABLE tool_call_commands;
+    DROP TABLE tool_calls;
+    CREATE TABLE tool_calls (
+      session_id   TEXT,
+      idx          INTEGER,
+      name         TEXT,
+      action       TEXT,
+      ok           INTEGER,
+      is_error     INTEGER,
+      error_category TEXT,
+      error_message TEXT,
+      target_path  TEXT,
+      command      TEXT,
+      is_sidechain INTEGER,
+      ts           TEXT,
+      duration_ms  INTEGER,
+      PRIMARY KEY (session_id, idx),
+      FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+  `)
+  db.prepare('INSERT INTO sessions (id, session_id, source, provider) VALUES (?,?,?,?)').run('s1', 's1', 'claude-code', 'anthropic')
+  db.prepare("INSERT INTO tool_calls (session_id, idx, name, action, ok, command) VALUES ('s1', 0, 'Bash', 'shell', 1, 'git status')").run()
+  db.close()
+  return path
+}
+
+describe('tool-call health migration (schema 22)', () => {
+  it('adds result_empty to an existing tool_calls without touching its rows', () => {
+    const db = openDb(seedPreToolHealthStore())
+    expect(db.prepare('SELECT command, result_empty AS e FROM tool_calls').get()).toEqual({ command: 'git status', e: null })
+    db.close()
+  })
+
+  it('creates tool_call_commands empty — it backfills on re-ingest, not in the migration', () => {
+    // Backfilling here would mean re-parsing every stored command against a parser
+    // that will keep changing; the NORMALIZE_VERSION bump re-ingests instead.
+    const db = openDb(seedPreToolHealthStore())
+    expect(db.prepare('SELECT COUNT(*) AS c FROM tool_call_commands').get()).toMatchObject({ c: 0 })
+    db.close()
+  })
+
+  it('is idempotent — a second open neither re-adds the column nor drops rows', () => {
+    const path = seedPreToolHealthStore()
+    openDb(path).close()
+    const db = openDb(path)
+    expect(db.prepare('SELECT COUNT(*) AS c FROM tool_calls').get()).toMatchObject({ c: 1 })
+    db.close()
+  })
+})

@@ -7,6 +7,7 @@ import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
 import { blockSpine, deterministicBlocks } from '../core/blocks'
 import type { Block } from '../core/blocks'
+import { emptyResultFlag, isRetrievalAction } from '../core/empty-result'
 import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
@@ -14,6 +15,7 @@ import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
+import { shellBinaries } from '../core/shell-binaries'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
 import type { EvidenceRef, InsightInput } from '../core/detector'
@@ -225,15 +227,24 @@ export class Store {
         .run(session.id, gzipSync(Buffer.from(JSON.stringify(session))))
 
       this.db.prepare('DELETE FROM tool_calls WHERE session_id = ?').run(session.id)
+      this.db.prepare('DELETE FROM tool_call_commands WHERE session_id = ?').run(session.id)
       const insTool = this.db.prepare(
         `INSERT INTO tool_calls
-           (session_id, idx, name, action, ok, is_error, error_category, error_message, target_path, command, is_sidechain, ts, duration_ms)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           (session_id, idx, name, action, ok, is_error, error_category, error_message, result_empty, target_path, command, is_sidechain, ts, duration_ms)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      const insCommand = this.db.prepare(
+        'INSERT INTO tool_call_commands (session_id, idx, seq, binary) VALUES (?,?,?,?)',
       )
       session.toolCalls.forEach((t, idx) => {
+        // The result payload is read twice over: to fingerprint a failure, and to
+        // tell a successful-but-empty retrieval from a real one. Materialize it
+        // only when one of those applies — most calls need neither.
+        const retrieval = isRetrievalAction(t.action)
+        const text = !t.result.ok || retrieval ? resultText(t.result.raw) : null
         // For failed calls, fingerprint a cross-harness category + keep a one-line
         // error snippet (both NULL when ok), computed at ingest. Clip before classify.
-        const errText = t.result.ok ? null : resultText(t.result.raw)
+        const errText = t.result.ok ? null : (text ?? '')
         const category = errText == null ? null : classifyError(t.action, errText.slice(0, 8000))
         const message = errText == null ? null : errText.replace(/\s+/g, ' ').trim().slice(0, 200) || null
         insTool.run(
@@ -245,12 +256,17 @@ export class Store {
           t.result.isError ? 1 : 0,
           category,
           message,
+          emptyResultFlag(t.action, t.result.ok, text ?? ''),
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,
           t.isSidechain ? 1 : 0,
           t.ts ?? null,
           t.durationMs ?? null,
         )
+        // Which binaries did this shell call involve? Keyed on the tool call's own
+        // idx so the child rows join straight back to it.
+        if (t.action !== 'shell' || !t.target.command) return
+        shellBinaries(t.target.command).forEach((binary, seq) => insCommand.run(session.id, idx, seq, binary))
       })
 
       this.db.prepare('DELETE FROM usage_facts WHERE session_id = ?').run(session.id)

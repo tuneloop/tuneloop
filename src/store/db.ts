@@ -5,7 +5,7 @@ import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 21
+const SCHEMA_VERSION = 22
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   is_error     INTEGER,
   error_category TEXT,
   error_message TEXT,
+  -- Did a SUCCESSFUL retrieval call return nothing? NULL when the question doesn't
+  -- apply: a non-retrieval action (silent output is success for a write/shell) or a
+  -- failed call (already counted as an error). See core/empty-result.ts.
+  result_empty INTEGER,
   target_path  TEXT,
   command      TEXT,
   is_sidechain INTEGER,
@@ -91,6 +95,23 @@ CREATE TABLE IF NOT EXISTS tool_calls (
 CREATE INDEX IF NOT EXISTS ix_tool_calls_name ON tool_calls(name);
 CREATE INDEX IF NOT EXISTS ix_tool_calls_action ON tool_calls(action);
 CREATE INDEX IF NOT EXISTS ix_tool_calls_error_category ON tool_calls(error_category);
+
+-- The binaries each shell call ran, one row per binary (core/shell-binaries.ts).
+-- A child table rather than a column because a real command is a chain:
+-- \`cd repo && npm run build | tee log\` involves both \`npm\` and \`tee\`, and the
+-- built-in tools roster promotes each to its own row. Consequence, by design:
+-- a compound call counts toward EVERY binary it involves, so per-binary counts
+-- don't sum to the shell-call total — the UI says "calls involving X".
+-- Rewritten per session on re-ingest, like tool_calls.
+CREATE TABLE IF NOT EXISTS tool_call_commands (
+  session_id TEXT,
+  idx        INTEGER,   -- the tool_calls row this came from: (session_id, idx)
+  seq        INTEGER,   -- first appearance in the command chain (repeats collapse)
+  binary     TEXT,      -- 'git', './deploy.sh', ...
+  PRIMARY KEY (session_id, idx, seq),
+  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_tool_call_commands_binary ON tool_call_commands(binary);
 
 -- Per-assistant-message usage facts: the atomic grain of token economics.
 -- Model / main-vs-sidechain / time are dimension columns, so every usage
@@ -685,6 +706,11 @@ function migrate(db: DB): void {
   }
   if (tableExists('tool_calls') && !has('tool_calls', 'error_message')) {
     db.exec('ALTER TABLE tool_calls ADD COLUMN error_message TEXT')
+  }
+  // Empty-result tracking. Existing rows stay NULL — indistinguishable from
+  // "not applicable" until the NORMALIZE_VERSION bump re-ingests and fills them.
+  if (tableExists('tool_calls') && !has('tool_calls', 'result_empty')) {
+    db.exec('ALTER TABLE tool_calls ADD COLUMN result_empty INTEGER')
   }
   if (tableExists('processor_runs') && !has('processor_runs', 'invalidated')) {
     db.exec('ALTER TABLE processor_runs ADD COLUMN invalidated INTEGER NOT NULL DEFAULT 0')
