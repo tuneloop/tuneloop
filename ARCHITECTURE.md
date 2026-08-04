@@ -185,6 +185,7 @@ pattern as an insight and, where possible, attaches a fix you can apply.
 | `context-exhaustion` | S | Repos whose sessions keep hitting the context window and compacting — a nudge to split work or lean on subagents. |
 | `kitchen-sink` | P | Single sessions that mixed several unrelated objectives — where the session should have been split. |
 | `recurring-themes` | X | Clusters the corrections and re-supplied context you had to repeat across sessions into themes, each with a generated fix. Gated to a Sonnet-class-or-stronger model. |
+| `tool-error-advice` | X | Reads the full error text of a tool that keeps failing and drafts a diagnosis + paste-ready agent-instructions snippet. The one detector that emits **no insights** — its output is the "Suggested fix" card on the Tools tab, not a row in the ledger. |
 
 **Fixes.** An insight's fix is one of four types, by the action it expects: a
 **fix-prompt** (a self-contained prompt — diagnosis, evidence excerpts, acceptance
@@ -209,6 +210,8 @@ The tables (`src/store/db.ts`):
 - `tool_calls` — one row per tool call
 - `tool_call_commands` — the binaries each shell call ran (`git`, `./deploy.sh`),
   one row per binary: a chained command involves several
+- `tool_error_advice` — the LLM "Suggested fix" card per failing tool/server,
+  hash-gated on the failures it was drafted from
 - `blocks`, `block_usage`, `block_tool`, `block_annotations`, `block_artifacts` —
   the block partition and everything attributed to it
 - `artifacts` — polymorphic: `file` / `commit` / `pr` / `ticket` / `feature`,

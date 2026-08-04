@@ -532,6 +532,11 @@ function renderToolPage(box, d) {
 
   html += '<div class="sk-advice" style="border-left-color:' + accent + '">' + esc(d.advice) + '</div>';
 
+  // The LLM "Suggested fix" card. Only high-error entities ever get one, and only
+  // when an LLM provider was configured for the analyze run, so the section stays
+  // hidden until we know one exists rather than showing an empty promise.
+  html += '<div class="sk-card th-fix-card" id="th-fix" style="display:none"></div>';
+
   // Error-rate trend, then the categories behind it.
   if (r.calls > 0) {
     html += '<div class="sk-card">' +
@@ -594,12 +599,54 @@ function renderToolPage(box, d) {
   var back = box.querySelector('#th-back');
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
   if (r.calls > 0) wireTrendTooltip(box.querySelector('#th-trend'));
+  loadFixCard(d);
   Array.prototype.forEach.call(box.querySelectorAll('.sk-inv'), function (el) {
     el.onclick = function () {
       openDetail(this.getAttribute('data-session'), { toolTarget: parseInt(this.getAttribute('data-idx'), 10) });
     };
   });
   if (d.errorCategories && d.errorCategories.length) renderErrorCats(box, d);
+}
+
+/**
+ * Fetch and reveal the LLM advice card. Stays hidden on null (no card drafted) or
+ * on error — an empty "Suggested fix" heading would read as a broken feature
+ * rather than as "nothing to say here".
+ */
+function loadFixCard(d) {
+  get('/api/tool-error-advice?kind=' + encodeURIComponent(d.kind) + '&name=' + encodeURIComponent(d.name) + '&' + tlWinQuery())
+    .then(function (a) {
+      if (!a || state.tool !== d.name) return;
+      var host = $('#th-fix');
+      if (!host) return;
+      var stamp = a.generatedAt ? ' · drafted ' + dayOf(a.generatedAt) : '';
+      host.innerHTML =
+        sectHead('Suggested fix', 'Written by reading the full error text of these failures — not the 200-character summaries stored for the roster. Check it before pasting: it is a draft from the evidence, not a verified fix.') +
+        (a.diagnosis ? '<div class="th-fix-diag">' + esc(a.diagnosis) + '</div>' : '') +
+        (a.snippet
+          ? '<div class="th-fix-snip"><div class="th-fix-snip-head">' +
+              '<span>Paste into your agent instructions (CLAUDE.md or equivalent)</span>' +
+              '<button type="button" class="ins-btn th-fix-copy">Copy</button></div>' +
+              '<pre class="th-fix-pre">' + esc(a.snippet) + '</pre></div>'
+          : '<div class="sk-sect-note">No instruction would prevent these — see the diagnosis.</div>') +
+        '<div class="sk-sect-note">' + esc((a.model || 'LLM') + stamp) + '</div>';
+      host.style.display = '';
+      var copy = host.querySelector('.th-fix-copy');
+      if (copy) copy.onclick = function () { copySnippet(a.snippet, this); };
+    })
+    .catch(function () { /* leave hidden */ });
+}
+
+function copySnippet(text, btn) {
+  navigator.clipboard.writeText(text).then(function () {
+    var orig = btn.textContent;
+    btn.textContent = 'Copied ✓';
+    setTimeout(function () { btn.textContent = orig; }, 1500);
+  }, function () {
+    var orig = btn.textContent;
+    btn.textContent = 'Copy failed';
+    setTimeout(function () { btn.textContent = orig; }, 1500);
+  });
 }
 
 // The per-tool table for an MCP server: calls, errors, last used.

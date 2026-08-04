@@ -161,6 +161,32 @@ describe('tool-health endpoints', () => {
     expect(await get('/api/tool-health-detail?kind=nonsense&name=x')).toMatchObject({ error: expect.any(String) })
   })
 
+  it('GET /api/tool-error-advice is null until a card has been drafted', async () => {
+    const { db, get } = await start(true)
+    seedTools(db)
+    expect(await get('/api/tool-error-advice?kind=mcp&name=sentry')).toBeNull()
+  })
+
+  it('GET /api/tool-error-advice returns the drafted card', async () => {
+    const { db, store, get } = await start(true)
+    seedTools(db)
+    store.setToolErrorAdvice('claude-code', 'mcp', 'sentry', {
+      diagnosis: 'The token has expired.',
+      snippet: '## sentry\nRe-auth before querying.',
+      evidenceHash: 'h1',
+      model: 'test-model',
+    })
+    expect(await get('/api/tool-error-advice?kind=mcp&name=sentry')).toMatchObject({
+      diagnosis: 'The token has expired.',
+      model: 'test-model',
+    })
+  })
+
+  it('GET /api/tool-error-advice rejects a missing name', async () => {
+    const { get } = await start(true)
+    expect(await get('/api/tool-error-advice?kind=mcp')).toMatchObject({ error: expect.any(String) })
+  })
+
   it('GET /api/error-occurrences scopes by entity when kind+name are given', async () => {
     const { db, get } = await start(true)
     seedTools(db)

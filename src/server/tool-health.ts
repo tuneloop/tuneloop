@@ -958,6 +958,60 @@ export function toolErrorOccurrences(
   })
 }
 
+/** One failed call of an entity, with the coordinates to reach its FULL text. */
+export interface ToolErrorSample {
+  sessionId: string
+  /** Tool-call idx within its session — indexes `session.toolCalls` in the blob. */
+  idx: number
+  name: string
+  command: string | null
+  category: string | null
+  /** The store's clipped (200-char) message. The full text lives in the session blob. */
+  message: string | null
+  ts: string | null
+}
+
+/**
+ * An entity's failed calls in the window, newest first — the evidence the
+ * tool-error-advice pass reads. It returns COORDINATES rather than text, because
+ * the stored `error_message` is clipped to 200 characters and the advice pass
+ * needs the whole thing from the session blob.
+ */
+export function toolErrorSamples(store: Store, kind: ToolKind, name: string, win: HealthWindow = {}, limit = 25): ToolErrorSample[] {
+  const data = collect(store, win)
+  const agg = data.entities.get(entityKey(kind, name))
+  if (!agg) return []
+  const scope = entityScope(agg)
+  return store.queryAll(
+    `SELECT t.session_id AS sessionId, t.idx AS idx, t.name AS name, t.command AS command,
+            t.error_category AS category, t.error_message AS message, ${TS_NORM} AS ts
+     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     WHERE s.source = ? AND ${IN_WINDOW} AND t.is_error = 1 AND ${scope.sql}
+     ORDER BY ts DESC, t.idx ASC
+     LIMIT ?`,
+    data.source,
+    data.sinceIso,
+    data.untilIso ?? null,
+    data.untilIso ?? null,
+    ...scope.params,
+    limit,
+  ) as ToolErrorSample[]
+}
+
+/**
+ * The cached LLM advice card for one entity, resolved against the SAME source the
+ * roster resolved — so the card on a page can never belong to another harness's
+ * server of the same name. Null when no card exists (the common case).
+ */
+export function toolAdviceCard(store: Store, kind: ToolKind, name: string, win: HealthWindow = {}) {
+  const source = resolveSource(store, availableToolSources(store), win.source)
+  if (!source) return null
+  const row = store.toolErrorAdvice(source, kind, name)
+  // A declined pass is cached as an empty snippet so it isn't re-asked; there is
+  // nothing to show for it, so the card stays hidden.
+  return row && (row.diagnosis || row.snippet) ? row : null
+}
+
 // ---- Deterministic advice -------------------------------------------------
 
 const CATEGORY_LABEL = new Map(ERROR_CATEGORIES.map((c) => [c.key, c.label]))

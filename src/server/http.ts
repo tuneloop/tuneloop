@@ -7,7 +7,7 @@ import { RESERVED_SESSION_PARAMS, type Bucket, type SessionFilter, type Store } 
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
 import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence, skillOutcomeStats } from './skill-health'
-import { toolErrorOccurrences, toolHealth, toolHealthDetail } from './tool-health'
+import { toolAdviceCard, toolErrorOccurrences, toolHealth, toolHealthDetail } from './tool-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -325,6 +325,20 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       return
     }
     sendJson(res, 200, toolHealthDetail(store, kind, name, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/tool-error-advice') {
+    // The LLM "Suggested fix" card for one entity — null until the
+    // tool-error-advice detector has drafted one (it only drafts for entities
+    // wearing a high-error pill, and only when an LLM provider is configured).
+    // The client hides the card on null rather than showing an empty section.
+    const kind = url.searchParams.get('kind')
+    const name = url.searchParams.get('name')
+    if ((kind !== 'mcp' && kind !== 'builtin') || !name) {
+      sendJson(res, 400, { error: 'kind (mcp|builtin) and name required' })
+      return
+    }
+    sendJson(res, 200, toolAdviceCard(store, kind, name, skillWindowFrom(url.searchParams)))
     return
   }
   if (path === '/api/error-categories') {

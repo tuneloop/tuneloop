@@ -15,6 +15,7 @@ import { aliasFor } from '../core/measures'
 import type { MeasureSpec } from '../core/measures'
 import type { ArtifactInput, DetectorRunRow, EnvSnapshotAsOf, EnvSnapshotInput, EnvSnapshotRow, FeatureRevisionInput, FixMarkerSightingInput, InsightState, KitchenSinkVerdictInput, ProcessorRunRow, SessionArtifactRole, ThemeEventInput, ThemeInput, ThemeRef, UsageFactInput } from './types'
 import { contentHash } from '../core/hash'
+import { resultText } from '../core/result-text'
 import { shellBinaries } from '../core/shell-binaries'
 import { firstUserPrompt, isSyntheticUser } from '../core/turns'
 import { insightId } from '../core/detector'
@@ -68,6 +69,17 @@ export interface ErrorOccurrence {
    * as compound and shows the whole command rather than guessing.
    */
   binaryCount?: number
+}
+
+/** The cached LLM "Suggested fix" card for one tool/server (see tool_error_advice). */
+export interface ToolErrorAdviceRow {
+  diagnosis: string
+  /** Paste-ready agent-instructions block; '' when the pass had nothing worth pasting. */
+  snippet: string
+  /** The failure set this was drafted from — the regenerate gate. */
+  evidenceHash: string
+  model: string | null
+  generatedAt: string | null
 }
 
 export interface Summary {
@@ -3595,6 +3607,40 @@ export class Store {
     })
   }
 
+  /**
+   * The cached "Suggested fix" card for one tool/server, or null when the
+   * tool-error-advice pass hasn't produced one (no LLM configured, the entity
+   * never earned a high-error pill, or the pass declined it). The dashboard
+   * hides the card entirely in that case rather than showing an empty section.
+   */
+  toolErrorAdvice(source: string, kind: string, name: string): ToolErrorAdviceRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT diagnosis, snippet, evidence_hash AS evidenceHash, model, generated_at AS generatedAt
+         FROM tool_error_advice WHERE source = ? AND kind = ? AND name = ?`,
+      )
+      .get(source, kind, name) as ToolErrorAdviceRow | undefined
+    return row ?? null
+  }
+
+  /** Cache (or refresh) one entity's advice card, keyed on the evidence it was drafted from. */
+  setToolErrorAdvice(
+    source: string,
+    kind: string,
+    name: string,
+    a: { diagnosis: string; snippet: string; evidenceHash: string; model?: string },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO tool_error_advice (source, kind, name, diagnosis, snippet, evidence_hash, model, generated_at)
+         VALUES (?,?,?,?,?,?,?,?)
+         ON CONFLICT(source, kind, name) DO UPDATE SET
+           diagnosis = excluded.diagnosis, snippet = excluded.snippet,
+           evidence_hash = excluded.evidence_hash, model = excluded.model, generated_at = excluded.generated_at`,
+      )
+      .run(source, kind, name, a.diagnosis, a.snippet, a.evidenceHash, a.model ?? null, new Date().toISOString())
+  }
+
   /** Cache a theme's LLM-generated fix (+ its one-line recommendation) and the hash of the occurrence set it was built from. */
   setThemeFix(id: string, fixType: string, fixContent: string, fixRecommendation: string | null, fixHash: string): void {
     this.db
@@ -4988,27 +5034,3 @@ function clipError(s: string): string {
 }
 
 /** Best-effort readable text from a tool result's raw payload (string, content-block array, or object). */
-function resultText(raw: unknown): string {
-  if (raw == null) return ''
-  if (typeof raw === 'string') return raw
-  if (Array.isArray(raw)) {
-    return raw
-      .map((b) => (typeof b === 'string' ? b : b && typeof b === 'object' && 'text' in b ? String((b as { text: unknown }).text) : ''))
-      .filter(Boolean)
-      .join('\n')
-  }
-  if (typeof raw === 'object') {
-    const o = raw as Record<string, unknown>
-    for (const k of ['stdout', 'stderr', 'error', 'message', 'content']) {
-      const v = o[k]
-      if (typeof v === 'string' && v) return v
-      if (Array.isArray(v)) return resultText(v)
-    }
-    try {
-      return JSON.stringify(o)
-    } catch {
-      return ''
-    }
-  }
-  return String(raw)
-}

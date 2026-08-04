@@ -14,6 +14,7 @@
     "unused-capabilities": { "enabled": true },
     "context-exhaustion": { "enabled": true },
     "recurring-themes": { "enabled": true },
-    "kitchen-sink": { "enabled": true }
+    "kitchen-sink": { "enabled": true },
+    "tool-error-advice": { "enabled": true }
   }
 }

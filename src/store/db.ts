@@ -5,7 +5,7 @@ import { DROP_SHARE, HIT_READ_SHARE, MIN_CONTEXT_TOKENS, PEAK_FLOOR, SHRUNK_CTX_
 
 export type DB = Database.Database
 
-const SCHEMA_VERSION = 22
+const SCHEMA_VERSION = 23
 
 /**
  * The store is fact tables only — no pre-aggregated metrics. Every dashboard
@@ -112,6 +112,24 @@ CREATE TABLE IF NOT EXISTS tool_call_commands (
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_tool_call_commands_binary ON tool_call_commands(binary);
+
+-- The LLM "Suggested fix" card for a tool/server that keeps failing: a short
+-- diagnosis plus a paste-ready agent-instructions snippet. Keyed on the ENTITY
+-- (not a session) because the advice is about a cross-session pattern, which is
+-- also why it can't live in \`annotations\` — those are session-scoped by FK.
+-- \`evidence_hash\` is the regenerate gate: unchanged failures reuse the cached
+-- card, so a quiet re-analyze costs nothing (the \`theme.fix_hash\` precedent).
+CREATE TABLE IF NOT EXISTS tool_error_advice (
+  source        TEXT,
+  kind          TEXT,      -- 'mcp' | 'builtin'
+  name          TEXT,      -- server name, tool name, or shell binary
+  diagnosis     TEXT,      -- what is going wrong, in a sentence or two
+  snippet       TEXT,      -- paste-ready agent-instructions block ('' when the pass declined)
+  evidence_hash TEXT NOT NULL,
+  model         TEXT,
+  generated_at  TEXT,
+  PRIMARY KEY (source, kind, name)
+);
 
 -- Per-assistant-message usage facts: the atomic grain of token economics.
 -- Model / main-vs-sidechain / time are dimension columns, so every usage
