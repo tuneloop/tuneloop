@@ -175,12 +175,24 @@ export interface ToolHealthReport {
 const NON_SHELL_TOOL = `t.action NOT IN ('skill', 'shell')`
 
 /**
- * When a failed compound shell call names the binary that broke, the failure counts
- * against THAT binary only. Otherwise (`failed_binary IS NULL`) it counts against
- * every binary involved — the honest multi-label. Applied to the error NUMERATOR
- * only: "calls involving git" is still every call git was part of.
+ * Join the LLM's reading of a failure, when the enrichment processor produced one.
+ * Deterministic blame always wins — that comes from verified shell semantics,
+ * this is a reading of prose — so the LLM only fills gaps the parser left NULL.
  */
-const BLAMED = `(t.failed_binary IS NULL OR t.failed_binary = c.binary)`
+const BLAME_JOIN = `LEFT JOIN annotations ab
+       ON ab.session_id = t.session_id AND ab.processor = 'shell-error-attribution'
+      AND ab.key = 'blame:' || t.idx`
+
+/** Deterministic verdict, else the LLM's, else NULL (unattributed). */
+const EFFECTIVE_BLAME = `COALESCE(t.failed_binary, json_extract(ab.value, '$.binary'))`
+
+/**
+ * When a failed compound shell call names the binary that broke, the failure counts
+ * against THAT binary only. Otherwise (no verdict at all) it counts against every
+ * binary involved — the honest multi-label. Applied to the error NUMERATOR only:
+ * "calls involving git" is still every call git was part of.
+ */
+const BLAMED = `(${EFFECTIVE_BLAME} IS NULL OR ${EFFECTIVE_BLAME} = c.binary)`
 
 /** The per-row aggregate columns. `errored` is the query's own error predicate. */
 const aggColumns = (errored = 't.is_error = 1') => `COUNT(*) AS calls,
@@ -466,6 +478,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
        FROM tool_call_commands c
        JOIN tool_calls t ON t.session_id = c.session_id AND t.idx = c.idx
        JOIN sessions s ON s.id = t.session_id
+       ${BLAME_JOIN}
        WHERE s.source = ? AND ${IN_WINDOW}
        GROUP BY c.binary, s.repo, t.session_id`,
       source,
@@ -496,6 +509,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
        FROM tool_call_commands c
        JOIN tool_calls t ON t.session_id = c.session_id AND t.idx = c.idx
        JOIN sessions s ON s.id = t.session_id
+       ${BLAME_JOIN}
        WHERE s.source = ? AND ${IN_WINDOW} AND t.ts IS NOT NULL
        GROUP BY c.binary, day`,
       source,
@@ -524,6 +538,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
        FROM tool_call_commands c
        JOIN tool_calls t ON t.session_id = c.session_id AND t.idx = c.idx
        JOIN sessions s ON s.id = t.session_id
+       ${BLAME_JOIN}
        WHERE s.source = ? AND ${IN_WINDOW} AND t.is_error = 1 AND t.error_category IS NOT NULL AND ${BLAMED}
        GROUP BY c.binary, t.error_category`,
       source,
@@ -951,7 +966,7 @@ function entityScope(agg: EntityAgg): { sql: string; params: unknown[] } {
  */
 function errorBlame(agg: EntityAgg): { sql: string; params: unknown[] } {
   return agg.shell
-    ? { sql: `(t.failed_binary IS NULL OR t.failed_binary = ?)`, params: [agg.name] }
+    ? { sql: `(${EFFECTIVE_BLAME} IS NULL OR ${EFFECTIVE_BLAME} = ?)`, params: [agg.name] }
     : { sql: '1 = 1', params: [] }
 }
 
@@ -966,6 +981,7 @@ function loadSessionGroups(store: Store, data: RosterData, agg: EntityAgg): Tool
             SUM(CASE WHEN t.is_error = 1 AND ${blame.sql} THEN 1 ELSE 0 END) AS errorCalls,
             MAX(${TS_NORM}) AS lastTs
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     ${BLAME_JOIN}
      WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
      GROUP BY t.session_id
      -- Sessions where it FAILED lead, then most recent. This also decides what the
@@ -990,12 +1006,13 @@ function loadSessionGroups(store: Store, data: RosterData, agg: EntityAgg): Tool
     `SELECT sessionId, title, idx, repo, ts, isError, sidechain, name, command, failedBinary, binaryCount FROM (
        SELECT t.session_id AS sessionId, ${TITLE_EXPR} AS title, t.idx AS idx, s.repo AS repo,
               ${TS_NORM} AS ts, t.is_error AS isError, t.is_sidechain AS sidechain,
-              t.name AS name, t.command AS command, t.failed_binary AS failedBinary,
+              t.name AS name, t.command AS command, ${EFFECTIVE_BLAME} AS failedBinary,
               (SELECT COUNT(*) FROM tool_call_commands c2 WHERE c2.session_id = t.session_id AND c2.idx = t.idx) AS binaryCount,
               ROW_NUMBER() OVER (
                 PARTITION BY t.session_id ORDER BY t.is_error DESC, ${TS_NORM} DESC, t.idx ASC
               ) AS rn
        FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+       ${BLAME_JOIN}
        WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
          AND t.session_id IN (${ids.map(() => '?').join(', ')})
      )

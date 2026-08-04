@@ -304,6 +304,59 @@ describe('toolHealth — blame for compound shell failures', () => {
   })
 })
 
+describe('toolHealth — LLM-attributed failures', () => {
+  /** What the shell-error-attribution processor writes for one call. */
+  const llmBlame = (sessionId: string, idx: number, binary: string | null) =>
+    db.prepare(`INSERT INTO annotations (session_id, processor, key, value) VALUES (?, 'shell-error-attribution', ?, ?)`)
+      .run(sessionId, 'blame:' + idx, JSON.stringify({ binary, category: null, model: 'test' }))
+
+  it('uses the LLM verdict where the parser could not tell', () => {
+    // `&&` chains are the deterministic ceiling: the exit code can't say where the
+    // chain stopped, so without this the failure is charged to both binaries.
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls /nope && npx tsc', error: true, errorCategory: 'not_found' },
+    ])
+    llmBlame('s1', 0, 'ls')
+    const r = toolHealth(store, { nowMs: NOW })
+    expect(row(r.builtin, 'ls')).toMatchObject({ calls: 1, errorCalls: 1 })
+    expect(row(r.builtin, 'npx')).toMatchObject({ calls: 1, errorCalls: 0 })
+  })
+
+  it('never overrules the deterministic verdict', () => {
+    // Shell semantics beat a reading of prose. If they disagree, the parser wins.
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls /nope && npx tsc', error: true, errorCategory: 'not_found', failedBinary: 'ls' },
+    ])
+    llmBlame('s1', 0, 'npx')
+    const r = toolHealth(store, { nowMs: NOW })
+    expect(row(r.builtin, 'ls')!.errorCalls).toBe(1)
+    expect(row(r.builtin, 'npx')!.errorCalls).toBe(0)
+  })
+
+  it('falls back to the multi-label when the model also could not tell', () => {
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls /nope && npx tsc', error: true, errorCategory: 'not_found' },
+    ])
+    llmBlame('s1', 0, null)
+    const r = toolHealth(store, { nowMs: NOW })
+    expect(row(r.builtin, 'ls')!.errorCalls).toBe(1)
+    expect(row(r.builtin, 'npx')!.errorCalls).toBe(1)
+  })
+
+  it('keeps the detail page consistent with the roster', () => {
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls /nope && npx tsc', error: true, errorCategory: 'not_found' },
+    ])
+    llmBlame('s1', 0, 'ls')
+    const d = toolHealthDetail(store, 'builtin', 'npx', { nowMs: NOW })!
+    expect(d.row.errorCalls).toBe(0)
+    expect(d.errorCategories).toEqual([]) // not npx's failure, so not in its categories
+    expect(d.sessions.reduce((a, g) => a + g.errorCalls, 0)).toBe(0)
+    // The call is still listed — npx was in the command — but badged, not counted.
+    expect(d.sessions[0]!.items[0]).toMatchObject({ isError: true, blamedElsewhere: true })
+  })
+})
+
 describe('toolHealth — empty results and trends', () => {
   it('reports the empty-result rate as its own stat, off error rate', () => {
     seedSession('s1', 'repoA', 2, [
