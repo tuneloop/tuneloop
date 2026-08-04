@@ -19,6 +19,7 @@ import {
   fact, pageTile, rateChart, sectHead, sourceLabel, sparkline, TIME_PRESETS,
   trendChart, trendGranLabel, wireTrendTooltip, windowPhrase,
 } from './health-ui';
+import { filterRows, rollupTail } from './tools-roster';
 
 // Cached roster, keyed on the window+source it was fetched for. A window change
 // refetches; an unchanged window repaints from cache.
@@ -29,6 +30,8 @@ var tlReportKey = null;
 //   tlSearch = case-insensitive substring on the entity name
 var tlStatus = '';
 var tlSearch = '';
+// The built-in roster rolls its shell long-tail into one row; this expands it.
+var tlShowAllShell = false;
 // The open detail page's payload, keyed `<kind> <name>` so a stale response for a
 // page the user has already left is ignored.
 var tlDetail = null;
@@ -154,7 +157,7 @@ function loadTools() {
 export function openTool(kind, name, query?) {
   if (query) applyToolWin(query);
   var nextKind = kind === 'builtin' ? 'builtin' : 'mcp';
-  if (nextKind !== state.toolKind) tlStatus = ''; // each roster has its own default view
+  if (nextKind !== state.toolKind) { tlStatus = ''; tlShowAllShell = false; } // each roster has its own default view
   state.toolKind = nextKind;
   state.tool = name || null;
   syncHash();
@@ -210,6 +213,7 @@ function paintRoster(box, d) {
       '<div class="th-overall" id="th-overall"></div>' +
       '<div class="filters sk-filters" id="th-filters"></div>' +
       '<div class="sk-roster" id="th-roster"></div>' +
+      '<div class="th-roster-note" id="th-roster-note"></div>' +
     '</div>';
 
   Array.prototype.forEach.call(box.querySelectorAll('#th-kinds button'), function (b) {
@@ -220,6 +224,7 @@ function paintRoster(box, d) {
   renderOverallTrend(d);
   renderFilters(d);
   renderRoster(section(d).rows || []);
+  renderRosterNote(d);
 }
 
 // Summary strip: the window's totals, each a one-click filter (kept in sync with
@@ -340,24 +345,10 @@ function renderFilters(d) {
   };
 }
 
-// Apply the status filter + name search. Default: MCP shows used only; built-ins
-// show everything (they have no unused state to hide).
-function filterRows(rows) {
-  var out = rows;
-  if (tlStatus === '' && state.toolKind === 'mcp') out = out.filter(function (r) { return r.status === 'used'; });
-  else if (tlStatus === 'unused') out = out.filter(function (r) { return r.status === 'unused'; });
-  else if (tlStatus && tlStatus !== 'all') out = out.filter(function (r) { return hasFlag(r, tlStatus); });
-  if (tlSearch) {
-    var q = tlSearch.toLowerCase();
-    out = out.filter(function (r) { return r.name.toLowerCase().indexOf(q) >= 0; });
-  }
-  return out;
-}
-
 function renderRoster(rows) {
   var host = $('#th-roster');
   if (!host) return;
-  var shown = filterRows(rows);
+  var shown = filterRows(rows, state.toolKind, tlStatus, tlSearch);
   if (!shown.length) {
     var msg = tlStatus === '' && !tlSearch
       ? (state.toolKind === 'mcp'
@@ -367,10 +358,83 @@ function renderRoster(rows) {
     host.innerHTML = '<div class="sk-empty">' + msg + '</div>';
     return;
   }
-  host.innerHTML = shown.map(toolRow).join('');
+  // The shell long tail folds into one row so the tools that matter stay visible.
+  // Only in the default view: once you've filtered or searched, you asked for
+  // exactly these rows and hiding some of them would be a lie about the result.
+  var tail = [];
+  if (state.toolKind === 'builtin' && !tlSearch && !tlStatus && !tlShowAllShell) {
+    tail = rollupTail(shown);
+    if (tail.length) {
+      var rolled = {};
+      tail.forEach(function (r) { rolled[r.name] = 1; });
+      shown = shown.filter(function (r) { return !rolled[r.name]; });
+    }
+  }
+
+  host.innerHTML = shown.map(toolRow).join('') + (tail.length ? rollupRow(tail) : '') +
+    (tlShowAllShell ? '<div class="th-rollup-back"><a id="th-collapse">collapse the shell long tail</a></div>' : '');
+
   Array.prototype.forEach.call(host.querySelectorAll('.sk-row-head'), function (el) {
     el.onclick = function () { openTool(state.toolKind, this.getAttribute('data-name')); };
   });
+  var roll = host.querySelector('#th-rollup');
+  if (roll) roll.onclick = function () { tlShowAllShell = true; paintTools(); };
+  var collapse = host.querySelector('#th-collapse');
+  if (collapse) collapse.onclick = function () { tlShowAllShell = false; paintTools(); };
+}
+
+// The "other shell" row: the tail's totals, expandable. Not a link to a detail
+// page — it isn't an entity, it's a count of the ones we folded away, so it names
+// them in its tooltip rather than pretending to be one thing.
+function rollupRow(tail) {
+  var calls = 0, errors = 0;
+  tail.forEach(function (r) { calls += r.calls; errors += r.errorCalls; });
+  var shownNames = tail.slice(0, 12).map(function (r) { return r.name; }).join(', ');
+  var names = tail.length > 12 ? shownNames + ', +' + num(tail.length - 12) + ' more' : shownNames;
+  return '<div class="sk-row">' +
+    '<div class="sk-row-head th-rollup" id="th-rollup" title="' + esc(names) + '">' +
+      '<span class="sk-dot th-dot-none"></span>' +
+      '<span class="sk-name th-rollup-name">' + num(tail.length) + ' more shell binaries</span>' +
+      '<span class="sk-flags"></span>' +
+      '<span class="sk-spark"></span>' +
+      '<span class="sk-metric"><span class="sk-mv">' + num(calls) + '</span><span class="sk-ml">calls</span></span>' +
+      '<span class="sk-metric"><span class="sk-mv">—</span><span class="sk-ml">sessions</span></span>' +
+      '<span class="sk-metric"><span class="sk-mv">' + (calls ? pct(errors / calls) : '—') + '</span><span class="sk-ml">errors</span></span>' +
+      '<span class="sk-caret">+</span>' +
+    '</div>' +
+    '</div>';
+}
+
+/**
+ * The note under the built-in roster. It states the two things about these
+ * numbers that would otherwise mislead: a compound command counts toward every
+ * binary it involved (so the rows don't sum), and shell calls that named no
+ * binary belong to no row at all.
+ */
+function renderRosterNote(d) {
+  var host = $('#th-roster-note');
+  if (!host) return;
+  if (state.toolKind !== 'builtin') { host.innerHTML = ''; return; }
+  var s = section(d);
+  var note = 'Shell binaries are counted per call that <em>involved</em> them — <code>npm ci &amp;&amp; npm test | tee log</code> ' +
+    'counts toward <code>npm</code> and <code>tee</code>, so these rows deliberately don\'t sum to your total shell calls.';
+  if (s.unlabeledShellCalls > 0) {
+    note += ' A further ' + num(s.unlabeledShellCalls) + ' shell ' + (s.unlabeledShellCalls === 1 ? 'call' : 'calls') +
+      ' ran no binary of their own (<code>cd</code>, a bare redirect) and appear in no row.';
+  }
+  host.innerHTML = note;
+}
+
+/**
+ * The calls-metric tooltip. For a shell binary the number is "calls that INVOLVED
+ * this binary", not "calls of it" — a compound command counts toward each binary
+ * in its chain, so the label has to say so or the roster reads as double-counting.
+ */
+function callsTip(r) {
+  var base = r.shell
+    ? num(r.calls) + ' shell ' + (r.calls === 1 ? 'call' : 'calls') + ' involved ' + r.name
+    : num(r.calls) + ' ' + (r.calls === 1 ? 'call' : 'calls');
+  return r.sidechainCalls > 0 ? base + ' · ' + num(r.sidechainCalls) + ' via subagents' : base;
 }
 
 function toolRow(r) {
@@ -385,10 +449,11 @@ function toolRow(r) {
       (s ? '<span class="sk-dot" style="background:' + s.color + '"></span>' : '<span class="sk-dot th-dot-none"></span>') +
       '<span class="sk-name">' + esc(r.name) + '</span>' +
       (r.shell ? '<span class="th-kind-chip" title="A binary run through the shell, promoted out of Bash commands.">shell</span>' : '') +
+      (r.repoLocal ? '<span class="th-kind-chip" title="Invoked by repo-relative path — this project\'s own script.">repo script</span>' : '') +
       '<span class="sk-flags">' + chips + '</span>' +
       '<span class="sk-spark">' + sparkline(r.spark) + '</span>' +
-      '<span class="sk-metric"' + (r.sidechainCalls > 0 ? ' title="' + esc(num(r.sidechainCalls) + ' of ' + num(r.calls) + ' via subagents') + '"' : '') +
-        '><span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">calls</span></span>' +
+      '<span class="sk-metric" title="' + esc(callsTip(r)) + '">' +
+        '<span class="sk-mv">' + num(r.calls) + '</span><span class="sk-ml">' + (r.shell ? 'involving' : 'calls') + '</span></span>' +
       '<span class="sk-metric"><span class="sk-mv">' + num(r.sessions) + '</span><span class="sk-ml">sessions</span></span>' +
       '<span class="sk-metric' + (hasFlag(r, 'high-error') ? ' th-metric-bad' : '') + '"><span class="sk-mv">' + errRate + '</span><span class="sk-ml">errors</span></span>' +
       '<span class="sk-caret">›</span>' +
@@ -452,9 +517,10 @@ function renderToolPage(box, d) {
   // Headline stats. Empty-result rate is its OWN tile, never folded into the error
   // rate: a call that succeeds and returns nothing is a different problem.
   var winSub = winPhrase('in the last ', 'over all time');
-  var callsSub = r.sidechainCalls > 0 ? winSub + ' · ' + num(r.sidechainCalls) + ' via subagents' : winSub;
+  var callsSub = (r.shell ? 'shell calls involving ' + r.name + ', ' : '') + winSub;
+  if (r.sidechainCalls > 0) callsSub += ' · ' + num(r.sidechainCalls) + ' via subagents';
   html += '<div class="sk-page-tiles">' +
-    pageTile(num(r.calls), 'Calls', callsSub) +
+    pageTile(num(r.calls), r.shell ? 'Calls involving it' : 'Calls', callsSub) +
     pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
     pageTile(r.calls > 0 ? pct(r.errorCalls / r.calls) : '—', 'Error rate',
       r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls failed' : 'no calls to measure') +
@@ -572,6 +638,7 @@ function invocationRow(o) {
   var when = o.ts ? String(o.ts).slice(0, 10) : '—';
   var tags = '';
   if (o.sidechain) tags += '<span class="sk-inv-tag sk-inv-sub" title="Ran inside a subagent, not the main conversation.">subagent</span>';
+  if (o.compound) tags += COMPOUND_BADGE;
   if (o.isError) tags += '<span class="sk-inv-tag sk-inv-err">errored</span>';
   var what = o.command || o.name || '';
   return '<button class="sk-inv" data-session="' + esc(o.sessionId) + '" data-idx="' + esc(String(o.idx)) + '">' +
@@ -585,6 +652,14 @@ function invocationRow(o) {
 }
 
 function clip(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+/**
+ * Marks a call whose command ran several binaries. The failure is listed under
+ * each of them and we deliberately don't guess which segment broke — a
+ * confident wrong attribution is worse than an honest "one of these". The full
+ * command is on the row, and the transcript link settles it.
+ */
+var COMPOUND_BADGE = '<span class="sk-inv-tag th-compound" title="This command ran several binaries, so the same failure is listed under each. Open the transcript to see which part failed.">compound</span>';
 
 // ---- Errors by category (ported from the Ops widget) ------------------------
 // The accordion: a bar per category, expanding to lazily fetch that category's
@@ -663,7 +738,7 @@ function renderOcc(panel, cat, occ, tips, total) {
   var list = occ.map(function (o, i) {
     var cmd = o.command || o.targetPath || '';
     return '<div class="occ-row" data-i="' + i + '" title="click to open the transcript at this error">' +
-      '<span class="occ-tool">' + esc(o.name) + '</span>' +
+      '<span class="occ-tool">' + esc(o.name) + (o.binaryCount > 1 ? COMPOUND_BADGE : '') + '</span>' +
       '<span class="occ-cmd" title="' + esc(cmd) + '">' + esc(clip(cmd, 44)) + '</span>' +
       '<span class="occ-msg" title="' + esc(o.message || '') + '">' + esc(clip(o.message || '', 60)) + '</span>' +
       '<span class="occ-sess">' + esc(clip(o.title || '(untitled)', 22)) + '</span>' +

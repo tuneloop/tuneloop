@@ -444,8 +444,20 @@ describe('toolErrorOccurrences', () => {
     seedSession('s1', 'repoA', 2, [
       { name: 'Bash', action: 'shell', command: 'npm ci && npm test', error: true, errorCategory: 'test_failure' },
     ])
-    const occ = toolErrorOccurrences(store, 'builtin', 'npm', 'test_failure', { nowMs: NOW }) as Array<{ command: string }>
+    const occ = toolErrorOccurrences(store, 'builtin', 'npm', 'test_failure', { nowMs: NOW })
     expect(occ).toHaveLength(1)
     expect(occ[0]!.command).toBe('npm ci && npm test')
+  })
+
+  it('reports how many binaries a failing command involved, so the UI can badge it', () => {
+    // The same failure is listed under BOTH binaries and we can't say which segment
+    // broke; the count is what lets the row say so instead of implying `git` failed.
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'git pull && npm test', error: true, errorCategory: 'test_failure' },
+      { name: 'Bash', action: 'shell', command: 'npm run lint', error: true, errorCategory: 'test_failure' },
+    ])
+    const npm = toolErrorOccurrences(store, 'builtin', 'npm', 'test_failure', { nowMs: NOW })
+    expect(npm.map((o) => o.binaryCount)).toEqual([2, 1])
+    expect(toolErrorOccurrences(store, 'builtin', 'git', 'test_failure', { nowMs: NOW }).map((o) => o.binaryCount)).toEqual([2])
   })
 })

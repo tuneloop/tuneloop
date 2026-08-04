@@ -1041,3 +1041,21 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
   flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted);
 }
+
+/* The semantics note under the built-in roster: why the rows don't sum. */
+.th-roster-note {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: 12.5px; line-height: 1.55; color: var(--muted); max-width: 780px;
+}
+.th-roster-note code { font-size: 11.5px; background: var(--track); border-radius: 4px; padding: 1px 5px; }
+
+/* The rolled-up shell long tail — a count, not an entity, so it reads quieter
+   than a real row and its caret is a "+" rather than a chevron. */
+.th-rollup-name { color: var(--muted) !important; font-weight: 500 !important; font-style: italic; }
+.th-rollup .sk-caret { color: var(--muted); }
+.th-rollup-back { padding: 10px 4px; font-size: 12.5px; }
+.th-rollup-back a { cursor: pointer; }
+
+/* A failure that came from a command running several binaries. */
+.th-compound { color: var(--muted); border-color: var(--line); margin-left: 6px; }
+.occ-tool .th-compound { font-size: 10px; }

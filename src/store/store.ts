@@ -61,6 +61,13 @@ export interface ErrorOccurrence {
   message: string | null
   ts: string | null
   startedAt: string | null
+  /**
+   * How many shell binaries the call's command involved — present only when the
+   * query was scoped to one binary. `> 1` means this failure is listed under
+   * several binaries and we can't say which segment failed, so the UI badges it
+   * as compound and shows the whole command rather than guessing.
+   */
+  binaryCount?: number
 }
 
 export interface Summary {
@@ -2080,10 +2087,15 @@ export class Store {
       where.push('s.source = ?')
       params.push(opts.source)
     }
+    // Only a binary-scoped query needs the compound count; the Ops widget's payload
+    // stays exactly as it was.
+    const binaryCount = opts?.shellBinary
+      ? `, (SELECT COUNT(*) FROM tool_call_commands c2 WHERE c2.session_id = t.session_id AND c2.idx = t.idx) AS binaryCount`
+      : ''
     const sql = `SELECT t.session_id AS sessionId, ${titleExpr('s')} AS title, t.idx AS idx,
                         t.name AS name, t.action AS action, t.command AS command,
                         t.target_path AS targetPath, t.error_message AS message,
-                        t.ts AS ts, s.started_at AS startedAt
+                        t.ts AS ts, s.started_at AS startedAt${binaryCount}
                  FROM tool_calls t JOIN sessions s ON s.id = t.session_id
                  WHERE ${where.join(' AND ')}
                  ORDER BY s.started_at DESC, t.idx ASC
