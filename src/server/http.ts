@@ -7,6 +7,7 @@ import { RESERVED_SESSION_PARAMS, type Bucket, type SessionFilter, type Store } 
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
 import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence, skillOutcomeStats } from './skill-health'
+import { toolErrorOccurrences, toolHealth, toolHealthDetail } from './tool-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -303,6 +304,29 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, skillOutcomeStats(store, name, skillWindowFrom(url.searchParams)))
     return
   }
+  if (path === '/api/tool-health') {
+    // Both rosters (MCP servers / built-in tools + promoted shell binaries) with
+    // per-entity stats, error pills, hygiene chips and trends. Same window params
+    // as skill-health; the clock is tool-run time throughout.
+    sendJson(res, 200, toolHealth(store, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/tool-health-detail') {
+    // One entity's drill-in: stats, per-repo, per-tool, errors by category,
+    // invocations, install details and the deterministic advice line.
+    const kind = url.searchParams.get('kind')
+    const name = url.searchParams.get('name')
+    if (kind !== 'mcp' && kind !== 'builtin') {
+      sendJson(res, 400, { error: 'kind must be mcp or builtin' })
+      return
+    }
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    sendJson(res, 200, toolHealthDetail(store, kind, name, skillWindowFrom(url.searchParams)))
+    return
+  }
   if (path === '/api/error-categories') {
     // Taxonomy metadata (labels + tooltip descriptions) for the error-category widget.
     sendJson(res, 200, ERROR_CATEGORIES)
@@ -313,6 +337,16 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const category = url.searchParams.get('category')
     if (!category) {
       sendJson(res, 400, { error: 'missing category' })
+      return
+    }
+    // Entity-scoped form (the tools tab): `kind` + `name` scope to one MCP server,
+    // built-in tool, or shell binary — and switch to the tool-run clock the rest of
+    // that tab uses. Without them this is the Ops widget's original session-clocked
+    // query, unchanged.
+    const kind = url.searchParams.get('kind')
+    const name = url.searchParams.get('name')
+    if ((kind === 'mcp' || kind === 'builtin') && name) {
+      sendJson(res, 200, toolErrorOccurrences(store, kind, name, category, skillWindowFrom(url.searchParams)))
       return
     }
     const window = { from: url.searchParams.get('from') ?? undefined, to: url.searchParams.get('to') ?? undefined }

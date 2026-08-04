@@ -2022,18 +2022,63 @@ export class Store {
    * deep-links to that exact error block. Windowed like breakdown. Capped at 50; the
    * widget shows the true total (the bar count) with a "+N more" note past the cap.
    */
-  errorOccurrences(category: string, window?: { from?: string; to?: string }, toolNames?: string[]): ErrorOccurrence[] {
+  errorOccurrences(
+    category: string,
+    window?: { from?: string; to?: string },
+    toolNames?: string[],
+    opts?: {
+      /**
+       * Also match calls whose shell command INVOLVED this binary (via
+       * tool_call_commands) — the tools tab's per-binary drill-in, where a
+       * compound `npm ci && npm test` must show up under `npm`. OR'd with
+       * `toolNames` when both are given, since one entity can be both.
+       */
+      shellBinary?: string
+      /**
+       * Which clock windows the rows. 'session' (default) keeps the Ops widget's
+       * long-standing behavior; 'tool' dates each row by when the call actually
+       * ran, which is the clock the tools tab uses everywhere.
+       */
+      clock?: 'session' | 'tool'
+      /**
+       * Restrict to one harness. The tools tab reports one source at a time, so
+       * without this its per-category bar counts (source-scoped) and this list
+       * (all sources) disagree — a `git` failure in a Pi session showing up under
+       * the Claude Code roster's count of 3 as a 4th row.
+       */
+      source?: string
+    },
+  ): ErrorOccurrence[] {
     const where = ['t.error_category = ?']
     const params: unknown[] = [category]
-    if (window?.from && window?.to) {
-      where.push('s.started_at >= ? AND s.started_at < ?')
-      params.push(window.from, window.to)
+    // Each bound applies on its own, so an open-ended window ("since X, up to now")
+    // can pass only `from`. It has to: the tool clock normalizes ts to whole seconds,
+    // so a `to` of Date.now() — which carries milliseconds — sorts BEFORE a call made
+    // in that same second and would drop it.
+    const clockExpr = opts?.clock === 'tool' ? `strftime('%Y-%m-%dT%H:%M:%SZ', t.ts)` : 's.started_at'
+    if (window?.from) {
+      where.push(`${clockExpr} >= ?`)
+      params.push(window.from)
+    }
+    if (window?.to) {
+      where.push(`${clockExpr} < ?`)
+      params.push(window.to)
     }
     // Row-level tool scope, mirroring the widget's tool filter (Bash's timeouts, …).
     const toolVals = (toolNames ?? []).filter(Boolean)
+    const scope: string[] = []
     if (toolVals.length) {
-      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
+      scope.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
       params.push(...toolVals)
+    }
+    if (opts?.shellBinary) {
+      scope.push(`EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ?)`)
+      params.push(opts.shellBinary)
+    }
+    if (scope.length) where.push(`(${scope.join(' OR ')})`)
+    if (opts?.source) {
+      where.push('s.source = ?')
+      params.push(opts.source)
     }
     const sql = `SELECT t.session_id AS sessionId, ${titleExpr('s')} AS title, t.idx AS idx,
                         t.name AS name, t.action AS action, t.command AS command,

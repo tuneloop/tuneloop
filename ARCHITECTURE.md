@@ -355,7 +355,9 @@ src/
   llm/           provider presets + Anthropic/OpenAI clients + JSON coercion
   pricing/       static price table + OpenRouter backfill
   query/         read-only SQL runner for `tuneloop query`
-  server/        HTTP API (http.ts) + the dashboard client (client/)
+  server/        HTTP API (http.ts) + the dashboard client (client/); the health
+                 read models (skill-health, tool-health) share one clock and
+                 calendar axis via health-window.ts
   commands/      analyze / serve / query entry points
   cli.ts         argument parsing and command wiring
 ```
