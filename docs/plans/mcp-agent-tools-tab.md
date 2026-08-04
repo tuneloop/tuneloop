@@ -127,6 +127,29 @@ relationship "sessions using skill X" has to total sessions — the UI copy says
 lets the user disambiguate. No per-segment failure attribution in v1 — a
 wrong-but-confident attribution is worse than an honest multi-label.
 
+**Blame, where the output says so** (`src/core/shell-blame.ts`, added while building
+AL-143). For `&&` chains the multi-label isn't just vague, it's wrong: in
+`ls missing && tsc`, tsc never ran, yet it carried the failure — on a real corpus
+`psql` and `createdb` had failure rates built entirely from commands they never
+executed. Unix tools usually prefix their own name onto a failure, so ingest reads
+that prefix (bash's name-first form, zsh's name-last form, a usage dump) and stores
+`tool_calls.failed_binary` when exactly one of the call's OWN binaries is named. The
+error then counts against that binary alone; NULL keeps the multi-label. High
+precision, low recall by design — 6 of 89 failed shell calls on the corpus — because
+a wrong blame moves a failure onto an innocent tool while no blame just falls back.
+The compound badge therefore means "the output didn't say which part failed".
+
+**A shell-level error is still an AGENT failure — blame everybody, not nobody.**
+`echo ===` fails under zsh (equals expansion looks up a command named `==`) and
+aborts the rest of the list, so later segments never run. It is tempting to read
+that as "the shell failed, charge no binary", and that would be wrong: the agent
+wrote a command that isn't portable across shells, which is exactly the kind of
+thing this tab should be counting. Decided 2026-08-04: charge every involved binary
+until we can do better. Doing better means blaming the SEGMENT that contained the
+offending token — the shell names it (`== not found`, `no matches found: docs/*.swp`)
+and that token can be located in the command text — which is a v2, not a reason to
+drop the error.
+
 ## Drill-in page (both kinds)
 
 In order, cloning the skill detail page skeleton:
