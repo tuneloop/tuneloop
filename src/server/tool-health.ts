@@ -62,8 +62,13 @@ export const DEGRADING_MIN_RATIO = 1.5
 const NOISY_EMPTY_SHARE = 0.3
 const NOISY_EMPTY_MIN_CALLS = 10
 
-/** Cap on the invocations list; the page shows the row's true `calls` beside it. */
-const MAX_INVOCATIONS = 100
+/**
+ * The calls list is grouped by session. These cap the LISTING, never the counts:
+ * each group reports its session's true totals from an aggregate query, so a
+ * capped list can't quietly understate how often a tool ran.
+ */
+const MAX_CALL_SESSIONS = 50
+const MAX_CALL_ITEMS = 400
 
 export type ToolKind = 'mcp' | 'builtin'
 
@@ -242,7 +247,7 @@ interface EntityAgg {
   errorCats: Map<string, number>
 }
 
-const entityKey = (kind: ToolKind, name: string) => `${kind} ${name}`
+const entityKey = (kind: ToolKind, name: string) => `${kind}\u0000${name}`
 
 function newAgg(kind: ToolKind, name: string, shell: boolean): EntityAgg {
   return {
@@ -782,6 +787,23 @@ export interface ToolInvocation {
   command: string | null
   /** Shell rows: the call ran more than one binary, so this error is shared — the compound badge. */
   compound: boolean
+  /** The call failed, but the output blamed a different binary in the same chain. */
+  blamedElsewhere?: boolean
+}
+
+/**
+ * One session's calls of this entity. `calls`/`errorCalls` are the session's TRUE
+ * totals; `items` is the (capped) list behind them, so a group can honestly say
+ * "12 calls" while listing the most recent few.
+ */
+export interface ToolSessionGroup {
+  sessionId: string
+  title: string | null
+  repo: string | null
+  calls: number
+  errorCalls: number
+  lastTs: string | null
+  items: ToolInvocation[]
 }
 
 export interface ToolHealthDetail {
@@ -798,7 +820,13 @@ export interface ToolHealthDetail {
    */
   perTool: Array<{ name: string; calls: number; errorCalls: number; lastUsedAt: string | null }>
   errorCategories: Array<{ category: string; calls: number }>
-  invocations: ToolInvocation[]
+  /**
+   * The calls, grouped by session and newest-session first. Grouped because a busy
+   * tool produces hundreds of near-identical rows, and the session is the unit a
+   * user actually navigates to. `row.sessions` is the true session count, so the
+   * page can say how many groups it is showing of how many.
+   */
+  sessions: ToolSessionGroup[]
   details: {
     scope?: 'global' | 'project'
     sourceFiles?: string[]
@@ -852,7 +880,7 @@ export function toolHealthDetail(store: Store, kind: ToolKind, name: string, win
     perRepo,
     perTool,
     errorCategories,
-    invocations: loadInvocations(store, data, agg),
+    sessions: loadSessionGroups(store, data, agg),
     details: {
       scope: primary?.scope,
       sourceFiles: primary ? [...new Set(installed.flatMap((i) => i.sourceFiles))] : undefined,
@@ -878,6 +906,11 @@ function toolLabel(rawName: string, server: string): string {
  * SQL scoping one entity's calls. MCP servers and built-in tools scope by raw tool
  * name; a shell binary scopes through its child table, which is what makes "the
  * calls that INVOLVED git" (compound commands included) expressible at all.
+ *
+ * MEMBERSHIP only — no blame filter. A call whose failure was pinned on another
+ * binary still involved this one, and the roster's `calls` counts it; filtering it
+ * out here made the calls list sum to one less than the tile above it. Blame
+ * belongs to the error NUMERATOR, which is what `errorBlame` is for.
  */
 function entityScope(agg: EntityAgg): { sql: string; params: unknown[] } {
   const clauses: string[] = []
@@ -889,11 +922,7 @@ function entityScope(agg: EntityAgg): { sql: string; params: unknown[] } {
     params.push(...names)
   }
   if (agg.shell) {
-    // `... AND BLAMED` so a failure the output pinned on another binary doesn't
-    // list here: the occurrence list must match the category bars above it.
-    clauses.push(
-      `EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ? AND ${BLAMED})`,
-    )
+    clauses.push(`EXISTS (SELECT 1 FROM tool_call_commands c WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = ?)`)
     params.push(agg.name)
   }
   // A built-in name that is also a shell binary would produce both clauses; OR keeps
@@ -901,23 +930,67 @@ function entityScope(agg: EntityAgg): { sql: string; params: unknown[] } {
   return { sql: clauses.length ? `(${clauses.join(' OR ')})` : '1 = 0', params }
 }
 
-function loadInvocations(store: Store, data: RosterData, agg: EntityAgg): ToolInvocation[] {
+/**
+ * The entity's calls, grouped by session.
+ *
+ * Two queries on purpose. The AGGREGATE gives each session its true call/error
+ * totals; the ITEM query then fetches the individual calls for those sessions,
+ * capped. Grouping a capped item list client-side would have produced counts that
+ * silently meant "of the most recent 100" — a number that looks authoritative and
+ * isn't. Sessions are ordered newest-call-first, which is the order a user scans.
+ */
+/**
+ * The error-attribution predicate for one entity: a failure counts as ITS failure
+ * when the output blamed it, or blamed nobody. Non-shell entities have no chain to
+ * disambiguate, so every failure is theirs.
+ */
+function errorBlame(agg: EntityAgg): { sql: string; params: unknown[] } {
+  return agg.shell
+    ? { sql: `(t.failed_binary IS NULL OR t.failed_binary = ?)`, params: [agg.name] }
+    : { sql: '1 = 1', params: [] }
+}
+
+function loadSessionGroups(store: Store, data: RosterData, agg: EntityAgg): ToolSessionGroup[] {
   const scope = entityScope(agg)
-  const rows = store.queryAll(
+  const blame = errorBlame(agg)
+  const win = [data.sinceIso, data.untilIso ?? null, data.untilIso ?? null]
+
+  const groups = store.queryAll(
+    `SELECT t.session_id AS sessionId, ${TITLE_EXPR} AS title, s.repo AS repo,
+            COUNT(*) AS calls,
+            SUM(CASE WHEN t.is_error = 1 AND ${blame.sql} THEN 1 ELSE 0 END) AS errorCalls,
+            MAX(${TS_NORM}) AS lastTs
+     FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
+     GROUP BY t.session_id
+     ORDER BY lastTs DESC
+     LIMIT ?`,
+    // Bind order follows where the placeholders APPEAR in the SQL: the blame
+    // predicate sits in the SELECT's errorCalls sum, ahead of the WHERE clause.
+    ...blame.params,
+    data.source,
+    ...win,
+    ...scope.params,
+    MAX_CALL_SESSIONS,
+  ) as Array<{ sessionId: string; title: string | null; repo: string | null; calls: number; errorCalls: number; lastTs: string | null }>
+  if (!groups.length) return []
+
+  const ids = groups.map((g) => g.sessionId)
+  const items = store.queryAll(
     `SELECT t.session_id AS sessionId, ${TITLE_EXPR} AS title, t.idx AS idx, s.repo AS repo,
             ${TS_NORM} AS ts, t.is_error AS isError, t.is_sidechain AS sidechain,
-            t.name AS name, t.command AS command,
+            t.name AS name, t.command AS command, t.failed_binary AS failedBinary,
             (SELECT COUNT(*) FROM tool_call_commands c2 WHERE c2.session_id = t.session_id AND c2.idx = t.idx) AS binaryCount
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE s.source = ? AND ${IN_WINDOW} AND ${scope.sql}
+       AND t.session_id IN (${ids.map(() => '?').join(', ')})
      ORDER BY ts DESC, t.idx ASC
      LIMIT ?`,
     data.source,
-    data.sinceIso,
-    data.untilIso ?? null,
-    data.untilIso ?? null,
+    ...win,
     ...scope.params,
-    MAX_INVOCATIONS,
+    ...ids,
+    MAX_CALL_ITEMS,
   ) as Array<{
     sessionId: string
     title: string | null
@@ -928,20 +1001,32 @@ function loadInvocations(store: Store, data: RosterData, agg: EntityAgg): ToolIn
     sidechain: number
     name: string
     command: string | null
+    failedBinary: string | null
     binaryCount: number
   }>
-  return rows.map((r) => ({
-    sessionId: r.sessionId,
-    title: r.title,
-    idx: r.idx,
-    repo: r.repo,
-    ts: r.ts,
-    isError: r.isError === 1,
-    sidechain: r.sidechain === 1,
-    name: r.name,
-    command: r.command,
-    compound: r.binaryCount > 1,
-  }))
+
+  const bySession = new Map<string, ToolInvocation[]>()
+  for (const r of items) {
+    const list = bySession.get(r.sessionId) ?? []
+    list.push({
+      sessionId: r.sessionId,
+      title: r.title,
+      idx: r.idx,
+      repo: r.repo,
+      ts: r.ts,
+      isError: r.isError === 1,
+      sidechain: r.sidechain === 1,
+      name: r.name,
+      command: r.command,
+      compound: r.binaryCount > 1,
+      // The call failed, but its output named a DIFFERENT binary in the chain — so
+      // it isn't this tool's failure, and badging it "errored" here would say it was.
+      blamedElsewhere: !!r.failedBinary && r.failedBinary !== agg.name,
+    })
+    bySession.set(r.sessionId, list)
+  }
+
+  return groups.map((g) => ({ ...g, items: bySession.get(g.sessionId) ?? [] }))
 }
 
 /**

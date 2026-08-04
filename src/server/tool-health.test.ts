@@ -393,11 +393,47 @@ describe('toolHealthDetail', () => {
     expect(toolHealthDetail(store, 'builtin', 'npm', { nowMs: NOW })!.row.calls).toBe(2)
   })
 
-  it('carries an invocations list with transcript anchors', () => {
+  it('groups the calls by session, with that session\'s real totals', () => {
     seedSession('s1', 'repoA', 2, [mcpCall('sentry', 'a'), mcpCall('sentry', 'b', { error: true })])
+    seedSession('s2', 'repoB', 1, [mcpCall('sentry', 'c')])
     const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW })!
-    expect(d.invocations).toHaveLength(2)
-    expect(d.invocations[0]).toMatchObject({ sessionId: 's1', idx: expect.any(Number) })
+    // Newest session first; each group carries its own counts and its call rows.
+    expect(d.sessions.map((g) => [g.sessionId, g.calls, g.errorCalls])).toEqual([
+      ['s2', 1, 0],
+      ['s1', 2, 1],
+    ])
+    expect(d.sessions[1]!.items).toHaveLength(2)
+    expect(d.sessions[1]!.items[0]).toMatchObject({ sessionId: 's1', idx: expect.any(Number) })
+  })
+
+  it('reconciles with the tiles: groups sum to the row\'s calls and errors', () => {
+    // Caught twice while building this — once by a blame filter leaking into
+    // membership (591 calls in the tile, 590 in the list), once by a parameter
+    // bound in the wrong position (zero groups). Both were silent.
+    seedSession('s1', 'repoA', 3, [
+      { name: 'Bash', action: 'shell', command: 'git status && npm test', error: true, errorCategory: 'test_failure', failedBinary: 'npm' },
+      { name: 'Bash', action: 'shell', command: 'git push' },
+    ])
+    seedSession('s2', 'repoB', 1, [{ name: 'Bash', action: 'shell', command: 'git log' }])
+    const d = toolHealthDetail(store, 'builtin', 'git', { nowMs: NOW })!
+    expect(d.sessions).toHaveLength(d.row.sessions)
+    expect(d.sessions.reduce((a, g) => a + g.calls, 0)).toBe(d.row.calls)
+    expect(d.sessions.reduce((a, g) => a + g.errorCalls, 0)).toBe(d.row.errorCalls)
+    // git was in the failing command but npm was blamed: the call is listed (it
+    // involved git) yet counts against neither git's errors nor its badge.
+    expect(d.row.calls).toBe(3)
+    expect(d.row.errorCalls).toBe(0)
+    const failed = d.sessions.flatMap((g) => g.items).find((i) => i.isError)!
+    expect(failed.blamedElsewhere).toBe(true)
+  })
+
+  it('reports a session\'s TRUE call count even when its listed items are capped', () => {
+    // The counts come from an aggregate, not from len(items) — otherwise a capped
+    // list would quietly understate how often the tool actually ran.
+    seedSession('s1', 'repoA', 2, Array.from({ length: 12 }, () => mcpCall('sentry', 'a')))
+    const g = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW })!.sessions[0]!
+    expect(g.calls).toBe(12)
+    expect(g.items.length).toBeLessThanOrEqual(g.calls)
   })
 
   it('always states an advice line, naming the dominant error category when there is one', () => {

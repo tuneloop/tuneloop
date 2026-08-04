@@ -589,12 +589,16 @@ function renderToolPage(box, d) {
   }
   html += '</div></div>';
 
-  if (d.invocations && d.invocations.length) {
+  if (d.sessions && d.sessions.length) {
+    var listed = d.sessions.reduce(function (a, g) { return a + g.calls; }, 0);
+    var note = 'Grouped by session, most recent first. ' +
+      (d.sessions.length < r.sessions
+        ? 'Showing ' + num(d.sessions.length) + ' of ' + num(r.sessions) + ' sessions (' + num(listed) + ' of ' + num(r.calls) + ' calls).'
+        : 'Click a session to see its calls; each one opens the transcript at that call.');
     html += '<div class="sk-card">' +
       '<div class="sk-sect-h">Calls</div>' +
-      '<div class="sk-sect-note">Each row opens the session and scrolls to that call.' +
-        (r.calls > d.invocations.length ? ' Showing the ' + num(d.invocations.length) + ' most recent of ' + num(r.calls) + '.' : '') + '</div>' +
-      '<div class="sk-invocations">' + d.invocations.map(invocationRow).join('') + '</div>' +
+      '<div class="sk-sect-note">' + esc(note) + '</div>' +
+      '<div class="th-calls" id="th-calls">' + d.sessions.map(sessionGroupRow).join('') + '</div>' +
       '</div>';
   }
 
@@ -604,11 +608,7 @@ function renderToolPage(box, d) {
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
   if (r.calls > 0) wireTrendTooltip(box.querySelector('#th-trend'));
   loadFixCard(d);
-  Array.prototype.forEach.call(box.querySelectorAll('.sk-inv'), function (el) {
-    el.onclick = function () {
-      openDetail(this.getAttribute('data-session'), { toolTarget: parseInt(this.getAttribute('data-idx'), 10) });
-    };
-  });
+  wireCallGroups(box);
   if (d.errorCategories && d.errorCategories.length) renderErrorCats(box, d);
 }
 
@@ -685,12 +685,76 @@ function repoBreakdown(rows, color) {
   }).join('') + '</div>';
 }
 
+/**
+ * One session's calls, collapsed to a single row. A busy tool produces hundreds of
+ * near-identical call rows, and the session is the unit a user actually navigates
+ * to — so the session leads, and its calls are one click away.
+ *
+ * A single-call session opens its transcript directly: expanding to reveal one row
+ * would be a click that buys nothing.
+ */
+function sessionGroupRow(g) {
+  var single = g.calls === 1 && g.items.length === 1;
+  var when = g.lastTs ? String(g.lastTs).slice(0, 10) : '—';
+  var errs = g.errorCalls > 0
+    ? '<span class="th-grp-errs" title="' + esc(num(g.errorCalls) + ' of these failed') + '">' + num(g.errorCalls) + ' errored</span>'
+    : '';
+  return '<div class="th-grp" data-session="' + esc(g.sessionId) + '">' +
+    '<button type="button" class="th-grp-head" data-single="' + (single ? '1' : '') + '"' +
+      ' data-idx="' + esc(String(single ? g.items[0].idx : '')) + '">' +
+      '<span class="th-grp-caret">' + (single ? '' : '›') + '</span>' +
+      '<span class="th-grp-title">' + esc(g.title || g.sessionId) + '</span>' +
+      (g.repo ? '<span class="sk-inv-repo">' + esc(g.repo) + '</span>' : '') +
+      errs +
+      '<span class="th-grp-n">' + num(g.calls) + (g.calls === 1 ? ' call' : ' calls') + '</span>' +
+      '<span class="sk-inv-date">' + esc(when) + '</span>' +
+      '<span class="sk-inv-go">' + (single ? 'open ↗' : '') + '</span>' +
+    '</button>' +
+    '<div class="th-grp-items" hidden>' + g.items.map(invocationRow).join('') +
+      (g.items.length < g.calls
+        ? '<div class="sk-sect-note th-grp-more">Showing the ' + num(g.items.length) + ' most recent of ' + num(g.calls) + '.</div>'
+        : '') +
+    '</div>' +
+    '</div>';
+}
+
+/**
+ * Session rows toggle their calls open (single-call sessions jump straight to the
+ * transcript); call rows open the transcript at that exact call. Scoped to the
+ * page container, never a global query.
+ */
+function wireCallGroups(box) {
+  Array.prototype.forEach.call(box.querySelectorAll('.th-grp-head'), function (head) {
+    head.onclick = function () {
+      if (this.getAttribute('data-single')) {
+        openDetail(this.parentNode.getAttribute('data-session'), { toolTarget: parseInt(this.getAttribute('data-idx'), 10) });
+        return;
+      }
+      var items = this.parentNode.querySelector('.th-grp-items');
+      var opening = items.hidden;
+      items.hidden = !opening;
+      this.classList.toggle('open', opening);
+    };
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('.sk-inv'), function (el) {
+    el.onclick = function () {
+      openDetail(this.getAttribute('data-session'), { toolTarget: parseInt(this.getAttribute('data-idx'), 10) });
+    };
+  });
+}
+
 function invocationRow(o) {
   var when = o.ts ? String(o.ts).slice(0, 10) : '—';
   var tags = '';
   if (o.sidechain) tags += '<span class="sk-inv-tag sk-inv-sub" title="Ran inside a subagent, not the main conversation.">subagent</span>';
   if (o.compound) tags += COMPOUND_BADGE;
-  if (o.isError) tags += '<span class="sk-inv-tag sk-inv-err">errored</span>';
+  // The call failed, but its output named a different binary in the chain — so say
+  // that, rather than badging this tool with someone else's failure.
+  if (o.isError && o.blamedElsewhere) {
+    tags += '<span class="sk-inv-tag th-compound" title="This call failed, but its output named a different binary in the same command.">failed elsewhere</span>';
+  } else if (o.isError) {
+    tags += '<span class="sk-inv-tag sk-inv-err">errored</span>';
+  }
   var what = o.command || o.name || '';
   return '<button class="sk-inv" data-session="' + esc(o.sessionId) + '" data-idx="' + esc(String(o.idx)) + '">' +
     '<span class="sk-inv-title">' + esc(o.title || o.sessionId) + '</span>' +

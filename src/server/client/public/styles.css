@@ -1072,3 +1072,25 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
   margin: 0; padding: 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
   line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--ink);
 }
+
+/* Grouped calls list on a tool's page. Capped so a busy tool can't push the rest
+   of the page (details, install info) off the bottom of a long scroll. */
+.th-calls { max-height: 420px; overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--line); }
+.th-grp { border-bottom: 1px solid var(--line); }
+.th-grp-head {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: none; border: 0; padding: 9px 6px; cursor: pointer; font: inherit; font-size: 13px;
+}
+.th-grp-head:hover { background: var(--track); }
+.th-grp-caret { flex: none; width: 10px; color: var(--muted); transition: transform .12s ease; }
+.th-grp-head.open .th-grp-caret { transform: rotate(90deg); color: var(--emerald); }
+.th-grp-head.open .th-grp-title { color: var(--emerald); }
+.th-grp-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.th-grp-n { flex: none; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.th-grp-errs {
+  flex: none; color: var(--red); font-size: 11px; border: 1px solid var(--red);
+  border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+}
+/* The expanded calls sit indented under their session, like the error accordion. */
+.th-grp-items { padding: 2px 0 8px 22px; border-left: 2px solid var(--line); margin-left: 10px; }
+.th-grp-more { padding-left: 4px; }
