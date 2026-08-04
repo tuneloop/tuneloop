@@ -1058,7 +1058,7 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 
 /* A failure that came from a command running several binaries. */
 .th-compound { color: var(--muted); border-color: var(--line); margin-left: 6px; }
-.occ-tool .th-compound { font-size: 10px; }
+.occ-cmd .th-compound { font-size: 10px; margin: 0 6px 0 0; vertical-align: baseline; }
 
 /* The LLM "Suggested fix" card on a tool's page. */
 .th-fix-diag { font-size: 13.5px; line-height: 1.6; color: var(--ink); margin: 4px 0 12px; max-width: 760px; }

@@ -550,7 +550,11 @@ function renderToolPage(box, d) {
   if (d.errorCategories && d.errorCategories.length) {
     html += '<div class="sk-card">' +
       sectHead('Errors by category', 'What its failures were, fingerprinted into a shared taxonomy. Open one to see the actual failed calls and step through them in the transcripts.') +
-      '<div id="th-errcat"></div>' +
+      // `errcat` is load-bearing, not decorative: the widget's column widths,
+      // the count/share separation, and the row's pointer + hover states are all
+      // scoped under it. Without it the count and the share collide ("5" + "42%"
+      // reads as "542%").
+      '<div class="errcat" id="th-errcat"></div>' +
       '</div>';
   }
 
@@ -785,8 +789,11 @@ function renderOcc(panel, cat, occ, tips, total) {
   var list = occ.map(function (o, i) {
     var cmd = o.command || o.targetPath || '';
     return '<div class="occ-row" data-i="' + i + '" title="click to open the transcript at this error">' +
-      '<span class="occ-tool">' + esc(o.name) + (o.binaryCount > 1 ? COMPOUND_BADGE : '') + '</span>' +
-      '<span class="occ-cmd" title="' + esc(cmd) + '">' + esc(clip(cmd, 44)) + '</span>' +
+      '<span class="occ-tool">' + esc(o.name) + '</span>' +
+      // The badge belongs with the COMMAND, not the tool name: it is a fact about
+      // the command's shape, and the tool column is a fixed 92px that clips it.
+      '<span class="occ-cmd" title="' + esc(cmd) + '">' +
+        (o.binaryCount > 1 ? COMPOUND_BADGE : '') + esc(clip(cmd, 44)) + '</span>' +
       '<span class="occ-msg" title="' + esc(o.message || '') + '">' + esc(clip(o.message || '', 60)) + '</span>' +
       '<span class="occ-sess">' + esc(clip(o.title || '(untitled)', 22)) + '</span>' +
       '<span class="occ-date">' + esc(dayOf(o.ts || o.startedAt)) + '</span></div>';
