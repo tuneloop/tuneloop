@@ -3,7 +3,77 @@ import { blameBinary } from './shell-blame'
 import { shellSegments, type ShellSegment } from './shell-binaries'
 
 /** A stand-in chain when the test cares about the binaries, not the command text. */
-const segs = (...binaries: string[]): ShellSegment[] => binaries.map((b) => ({ binary: b, tokens: [b] }))
+const segs = (...binaries: string[]): ShellSegment[] =>
+  // `&&`-joined: these fixtures test the name-matching rules, and `&&` keeps the
+  // exit-position rule (which only fires after `;`/newline/`|`) out of the way.
+  binaries.map((b, i) => ({ binary: b, tokens: [b], sep: i === 0 ? null : '&&' }))
+
+describe('blameBinary — the exit code came from the last segment', () => {
+  it('blames the last segment of a `;` list, with no error text at all', () => {
+    // The idiom this exists for: an existence probe with stderr discarded. The
+    // shell's status IS the last command's, so `ls` is what failed — and nothing
+    // in the output says so.
+    const cmd = 'echo "--- lockfiles ---"; ls /repo/*lock* /repo/pnpm-lock.yaml 2>/dev/null'
+    expect(blameBinary('/repo/package-lock.json', shellSegments(cmd))).toBe('ls')
+  })
+
+  it('applies after a newline and after a pipe, the other last-ran separators', () => {
+    expect(blameBinary('out', shellSegments('echo hi\nls /nope'))).toBe('ls')
+    expect(blameBinary('out', shellSegments('cat log | wc -l'))).toBe('wc')
+  })
+
+  it('stays silent after `&&` — the chain may have stopped anywhere', () => {
+    // Exactly the case blame was built for: `ls missing && tsc` fails at ls, so
+    // blaming the last segment would pin it on the command that never ran.
+    expect(blameBinary('out', shellSegments('ls missing && npx tsc'))).toBeNull()
+    expect(blameBinary('out', shellSegments('ls missing || npx tsc'))).toBeNull()
+  })
+
+  it('stays silent when an `&&` sits ANYWHERE earlier, not just before the last segment', () => {
+    // `A && B | C`: the pipe says C follows B, but if A failed the whole pipeline
+    // was skipped. Checking only the final join blamed `sed` on real commands
+    // whose earlier link never ran.
+    expect(blameBinary('out', shellSegments('nl -ba a.ts | sed -n 1,5p && nl -ba b.ts | sed -n 9,10p'))).toBeNull()
+  })
+
+  it('finds a shell abort even when it lands past the self-prefix scan window', () => {
+    // A command that dumps a file before aborting pushes its `(eval)` line far
+    // down; missing it let the exit-position rule fire on a list that never
+    // reached its end, blaming the trailing `sed`.
+    const cmd = 'sed -n 1,60p a.ts; echo ===; sed -n 350,400p b.ts'
+    const out = new Array(80).fill('a line of the dumped file').join('\n') + '\n(eval):1: == not found'
+    expect(blameBinary(out, shellSegments(cmd))).toBe('echo')
+  })
+
+  it('stays silent when the shell aborted — the list never reached its end', () => {
+    // `echo ===` abandons the rest, so the last segment never ran. Rule 1 blames
+    // `echo`; the exit-position rule must not overrule it with `grep`.
+    const cmd = 'sed -n 1,5p f.ts; echo ===; grep -n x f.ts'
+    expect(blameBinary('(eval):1: == not found', shellSegments(cmd))).toBe('echo')
+    // And when the aborting word can't be located, it abstains rather than
+    // falling through to the last segment.
+    expect(blameBinary('(eval):1: ^^ not found', shellSegments(cmd))).toBeNull()
+  })
+
+  it('stays silent when the exit code was not the command\'s verdict', () => {
+    // A decline ran nothing, and a timeout is the harness's kill rather than a
+    // command's answer — neither says the last segment is at fault. A decline
+    // keeps its multi-label by decision: it is signal, not noise.
+    const cmd = 'echo hi; ls /nope'
+    expect(blameBinary('User rejected tool use', shellSegments(cmd))).toBeNull()
+    expect(blameBinary('Error: Exit code 143\nCommand timed out after 2m 0s', shellSegments(cmd))).toBeNull()
+  })
+
+  it('stays silent when the last segment runs nothing', () => {
+    expect(blameBinary('out', shellSegments('npm test; cd /repo'))).toBeNull()
+  })
+
+  it('yields to the error text when it names a binary', () => {
+    // Reading the output beats inferring from position.
+    const cmd = 'ls /nope; grep -n x f.ts'
+    expect(blameBinary('ls: /nope: No such file or directory', shellSegments(cmd))).toBe('ls')
+  })
+})
 
 describe('blameBinary — naming the segment that failed', () => {
   it('blames the binary that prefixed the error line', () => {
@@ -79,14 +149,16 @@ describe('blameBinary — naming the segment that failed', () => {
     expect(blameBinary(out, shellSegments(cmd))).toBe('echo')
   })
 
-  it('does NOT blame a glob no-match — it is a different failure from an abort', () => {
-    // Measured under zsh: an unresolvable WORD aborts the whole list and sets the
-    // exit code whatever the separator, but a glob no-match only skips its own
-    // command — `grep --include=*.x; echo B` prints B and exits 0. So the call's
-    // error came from elsewhere, and blaming the glob's segment would be wrong.
-    // It only propagates inside an `&&` chain, which needs separator awareness.
-    const cmd = 'grep -rn x src/ --include=*.ts; echo done'
-    expect(blameBinary('(eval):1: no matches found: --include=*.ts', shellSegments(cmd))).toBeNull()
+  it('blames a glob no-match only when its failure could reach the exit code', () => {
+    // A glob no-match skips its own command instead of abandoning the list, so
+    // unlike an abort it has to be shown to matter. Measured under zsh:
+    // `grep --include=*.x; echo B` prints B and exits 0 — the call's error came
+    // from elsewhere, so grep is not to blame. Behind an `&&` the chain stops
+    // there, and it is.
+    const err = '(eval):1: no matches found: --include=*.ts'
+    expect(blameBinary(err, shellSegments('grep -rn x src/ --include=*.ts && echo done'))).toBe('grep')
+    expect(blameBinary(err, shellSegments('echo hi; grep -rn x src/ --include=*.ts'))).toBe('grep')
+    expect(blameBinary(err, shellSegments('grep -rn x src/ --include=*.ts; echo done'))).not.toBe('grep')
   })
 
   it('takes the FIRST segment holding the word — the shell stops at the first one', () => {

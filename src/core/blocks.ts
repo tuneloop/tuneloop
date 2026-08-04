@@ -45,7 +45,7 @@ export interface BlockMembership {
  * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
  * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
  */
-export const NORMALIZE_VERSION = 10 // 10: blame-by-token narrowed to the abort class only
+export const NORMALIZE_VERSION = 12 // 12: exit-position blame requires an unconditional chain
 
 
 

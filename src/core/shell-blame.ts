@@ -1,4 +1,4 @@
-import type { ShellSegment } from './shell-binaries'
+import type { SegmentSep, ShellSegment } from './shell-binaries'
 
 /**
  * Which binary in a compound shell command actually failed?
@@ -57,7 +57,39 @@ const ZSH_EVAL_CMD = /^\(eval\):([\w.-]+):\d+:/
  * segment would be wrong. It only propagates inside an `&&` chain, which needs
  * separator awareness to tell apart (see the `;`-list rule in the design doc).
  */
-const SHELL_TOKEN = [/^(?:\(eval\)|z?sh):(?:\d+:)?\s*(\S+) not found/i]
+const ABORT_TOKEN = [/^(?:\(eval\)|z?sh):(?:\d+:)?\s*(\S+) not found/i]
+
+/**
+ * A word the shell couldn't resolve that only SKIPS its own command rather than
+ * abandoning the list: a glob matching nothing. Measured under zsh,
+ * `grep --include=*.x; echo B` prints B and exits 0 — so this segment's failure
+ * reaches the exit code only when nothing ran after it, or when the next join is
+ * an `&&` that stops the chain. Hence `failurePropagates`.
+ */
+const SKIP_TOKEN = [/^(?:\(eval\)|z?sh):(?:\d+:)?\s*no matches found:\s*(\S+)/i]
+
+/**
+ * Joins that ALWAYS proceed to the next command. The shell's exit status is the
+ * last command that ran, so if a chain is built only from these, its final segment
+ * is guaranteed to have run and its status IS the call's — verified identical in
+ * bash and zsh (`true; false` → 1, `false; true` → 0, `true | false` → 1,
+ * `false | true` → 0).
+ *
+ * One `&&` or `||` ANYWHERE breaks the guarantee, not just immediately before the
+ * last segment: in `A && B | C` the pipe says C follows B, but if A failed the
+ * whole pipeline was skipped. Checking only the final join blamed `sed` for
+ * commands whose earlier link never succeeded.
+ */
+const UNCONDITIONAL_JOINS = new Set<SegmentSep>([';', '\n', '|', '(', ')'])
+
+/**
+ * The call didn't fail on its own terms, so its exit code says nothing about which
+ * segment is at fault: the user declined it (nothing ran), or the harness killed
+ * it partway (the status is the kill, not a command's verdict). A decline in
+ * particular KEEPS its multi-label by decision — it is signal about the call the
+ * user didn't want, not noise to reassign.
+ */
+const NOT_THE_COMMANDS_VERDICT = /user rejected|doesn'?t want to proceed|tool use was rejected|rejected by user|command timed out|timed out after|\binterrupted\b/i
 
 /** `./node_modules/.bin/tsc` and `tsc` are the same tool; compare on the last path segment. */
 function base(name: string): string {
@@ -80,8 +112,15 @@ export function blameBinary(text: string, segments: ShellSegment[]): string | nu
     if (seg.binary && !byBase.has(base(seg.binary))) byBase.set(base(seg.binary), seg.binary)
   }
 
+  // Tool self-prefixes are only trusted near the top (a name deep in a payload is
+  // prose, not a failure line). The SHELL's own markers are trusted anywhere: they
+  // are distinctive, and they arrive on stderr interleaved wherever the shell got
+  // to — a command that dumps 60 lines of a file before aborting was pushing its
+  // abort line past this cap, letting the exit-position rule fire on a list that
+  // never reached its end.
   const found = new Set<string>()
-  const lines = text.split('\n', MAX_SCAN_LINES)
+  const allLines = text.split('\n')
+  const lines = allLines.slice(0, MAX_SCAN_LINES)
   for (const raw of lines) {
     const line = raw.trim()
     if (!line) continue
@@ -100,7 +139,44 @@ export function blameBinary(text: string, segments: ShellSegment[]): string | nu
     if (found.size > 1) return null
   }
   if (found.size === 1) return [...found][0]!
-  return blameByToken(lines, segments)
+
+  const byToken = blameByToken(allLines, segments)
+  if (byToken) return byToken
+  // An abort means the list never reached its end, so the exit-position rule's
+  // premise — that the last segment ran — is false.
+  const aborted = allLines.some((l) => ABORT_TOKEN.some((re) => re.test(l.trim())))
+  if (aborted || NOT_THE_COMMANDS_VERDICT.test(text)) return null
+  return blameByExitPosition(segments)
+}
+
+/** Could this segment's failure have reached the exit code? */
+function failurePropagates(i: number, segments: ShellSegment[]): boolean {
+  const next = segments[i + 1]
+  // Nothing ran after it, so its status is the command's. Or the next join is an
+  // `&&`, which stops on failure. (`||` does NOT: it runs its alternative, and
+  // that alternative's status is what survives.)
+  return !next || next.sep === '&&'
+}
+
+/**
+ * When the chain's last segment is guaranteed to have run, the call's exit code is
+ * that segment's — so it is the one that failed.
+ *
+ * This needs no error text at all, which is the point: agent commands routinely
+ * end in an existence probe with stderr discarded (`ls a b 2>/dev/null`), leaving
+ * nothing to parse while still setting a non-zero status. Reading the exit code's
+ * provenance from the chain's shape gets there anyway.
+ *
+ * Deliberately silent after `&&`/`||`: the status could belong to any segment the
+ * chain stopped at, and guessing the last one would be wrong precisely when a
+ * chain fails early — the case that motivated blame in the first place.
+ */
+function blameByExitPosition(segments: ShellSegment[]): string | null {
+  const last = segments[segments.length - 1]
+  if (!last?.binary || !last.sep) return null
+  // Every join must be unconditional, or some earlier link may have skipped the rest.
+  if (!segments.every((seg) => !seg.sep || UNCONDITIONAL_JOINS.has(seg.sep))) return null
+  return last.binary
 }
 
 /**
@@ -122,17 +198,25 @@ function blameByToken(lines: string[], segments: ShellSegment[]): string | null 
   for (const raw of lines) {
     const line = raw.trim()
     if (!line) continue
-    let token: string | undefined
-    for (const re of SHELL_TOKEN) {
-      token = re.exec(line)?.[1]
-      if (token) break
-    }
+    const abort = firstMatch(ABORT_TOKEN, line)
+    const skip = abort ? undefined : firstMatch(SKIP_TOKEN, line)
+    const token = abort ?? skip
     // A one-character word is too weak to locate: it would match almost any
     // segment, and a confident wrong blame is worse than none.
     if (!token || token.length < 2) continue
-    for (const seg of segments) {
-      if (seg.binary && seg.tokens.some((t) => t.includes(token!))) return seg.binary
-    }
+    const i = segments.findIndex((seg) => seg.binary && seg.tokens.some((t) => t.includes(token)))
+    if (i < 0) continue
+    // An abort takes the whole list down, so its segment is necessarily the one
+    // that set the status. A mere skip has to be shown to reach the exit code.
+    if (abort || failurePropagates(i, segments)) return segments[i]!.binary
   }
   return null
+}
+
+function firstMatch(patterns: RegExp[], line: string): string | undefined {
+  for (const re of patterns) {
+    const m = re.exec(line)?.[1]
+    if (m) return m
+  }
+  return undefined
 }

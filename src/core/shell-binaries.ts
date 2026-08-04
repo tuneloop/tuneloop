@@ -87,7 +87,17 @@ export interface ShellSegment {
   binary: string | null
   /** The segment's words, quotes stripped. */
   tokens: string[]
+  /**
+   * The separator that PRECEDED this segment; null for the first. It carries the
+   * shell's exit-status rule: after `;`, a newline or a `|`, this segment is
+   * guaranteed to have run, so if it is the last one its status IS the command's.
+   * After `&&`/`||` that guarantee is gone — an earlier segment may have failed
+   * and stopped the chain.
+   */
+  sep: SegmentSep | null
 }
+
+export type SegmentSep = '&&' | '||' | '|' | ';' | '\n' | '(' | ')'
 
 /**
  * The command chain, segment by segment, in order — `sh -c` scripts flattened in
@@ -130,17 +140,27 @@ function dedupe(bins: string[]): string[] {
  * by the script's OWN segments, so the chain reads as what actually ran rather
  * than as the transport that carried it.
  */
-function collectSegments(segs: string[][], depth: number): ShellSegment[] {
+function collectSegments(segs: RawSegment[], depth: number): ShellSegment[] {
   const out: ShellSegment[] = []
-  for (const tokens of segs) {
+  for (const { tokens, sep } of segs) {
     const inner = inlineShellIn(tokens)
     if (inner !== undefined) {
-      if (depth < MAX_SHELL_DEPTH) out.push(...collectSegments(segments(inner), depth + 1))
+      if (depth >= MAX_SHELL_DEPTH) continue
+      const nested = collectSegments(segments(inner), depth + 1)
+      // The script's first command inherits the separator that introduced the
+      // `sh -c` itself — that's the join the outer chain actually made.
+      if (nested[0]) nested[0] = { ...nested[0], sep }
+      out.push(...nested)
       continue
     }
-    out.push({ binary: binaryOf(tokens), tokens })
+    out.push({ binary: binaryOf(tokens), tokens, sep })
   }
   return out
+}
+
+interface RawSegment {
+  tokens: string[]
+  sep: SegmentSep | null
 }
 
 /** The inline script of a `sh -c` segment, or undefined when it isn't one. */
@@ -160,10 +180,12 @@ function inlineShellIn(tokens: string[]): string | undefined {
  * A lone `&` is NOT a boundary — it would cut `2>&1` in half, and backgrounding
  * is vanishingly rare in agent commands next to that cost.
  */
-function segments(command: string): string[][] {
-  const segs: string[][] = []
+function segments(command: string): RawSegment[] {
+  const segs: RawSegment[] = []
   let cur: string[] = []
   let tok = ''
+  /** The separator that opened `cur`; null for the first segment. */
+  let segSep: SegmentSep | null = null
   /** Heredoc delimiters opened on this line, awaiting their body at the newline. */
   let pending: string[] = []
 
@@ -171,10 +193,12 @@ function segments(command: string): string[][] {
     if (tok) cur.push(tok)
     tok = ''
   }
-  const endSegment = () => {
+  /** Close the current segment; `nextSep` is the separator that opens the next one. */
+  const endSegment = (nextSep: SegmentSep | null = null) => {
     endToken()
-    if (cur.length) segs.push(cur)
+    if (cur.length) segs.push({ tokens: cur, sep: segSep })
     cur = []
+    segSep = nextSep
   }
 
   const n = command.length
@@ -223,19 +247,20 @@ function segments(command: string): string[][] {
       continue
     }
     if (c === '\n') {
-      endSegment()
+      endSegment('\n')
       i = skipHeredocBodies(command, i + 1, pending)
       pending = []
       continue
     }
     if (c === '&' && command[i + 1] === '&') {
-      endSegment()
+      endSegment('&&')
       i += 2
       continue
     }
     if (c === '|') {
-      endSegment()
-      i += command[i + 1] === '|' ? 2 : 1
+      const double = command[i + 1] === '|'
+      endSegment(double ? '||' : '|')
+      i += double ? 2 : 1
       continue
     }
     // `cnt() { … }` DEFINES a helper; it runs nothing, so the header is dropped
@@ -248,7 +273,7 @@ function segments(command: string): string[][] {
       continue
     }
     if (c === ';' || c === '(' || c === ')') {
-      endSegment()
+      endSegment(c as SegmentSep)
       i += 1
       continue
     }
