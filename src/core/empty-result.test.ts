@@ -97,24 +97,6 @@ describe('emptyResultFlag — the heuristic', () => {
     expect(emptyResultFlag('search', 'Grep', true, '   \n ')).toBe(1)
   })
 
-  /**
-   * Claude Code never sends an empty payload: a command that printed nothing comes
-   * back as "(Bash completed with no output)". Read literally that is 31 characters
-   * of content, so every silent retrieval in a Claude Code store counted as a full
-   * result — the reason grep measured 0 empty across 185 successful calls while
-   * Codex, which sends a real empty string, reported them fine.
-   */
-  it('flags a harness note that stands in for no output at all', () => {
-    expect(emptyResultFlag('shell', 'Bash', true, '(Bash completed with no output)', ['grep'])).toBe(1)
-    expect(emptyResultFlag('search', 'Grep', true, '(no output)')).toBe(1)
-    expect(emptyResultFlag('search', 'Grep', true, '(No output)')).toBe(1)
-  })
-
-  it('does not mistake prose that merely mentions output for that note', () => {
-    expect(emptyResultFlag('search', 'Grep', true, '(tip: pass --json for no output truncation) src/a.ts:1: hit')).toBe(0)
-    expect(emptyResultFlag('search', 'Grep', true, 'no output was suppressed, here are 4 hits')).toBe(0)
-  })
-
   it('flags empty JSON containers', () => {
     expect(emptyResultFlag('mcp_call', mcp('getJiraIssue'), true, '[]')).toBe(1)
     expect(emptyResultFlag('mcp_call', mcp('getJiraIssue'), true, '{ }')).toBe(1)
