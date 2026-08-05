@@ -13,6 +13,7 @@ import {
   toolErrorOccurrences,
   toolHealth,
   toolHealthDetail,
+  TREND_MIN_CALLS,
 } from './tool-health'
 
 const SOURCE = 'claude-code'
@@ -397,6 +398,46 @@ describe('toolHealth — empty results and trends', () => {
     expect(sentry.errorSpark.reduce((a, b) => a + b, 0)).toBe(1)
     expect(r.overallCallSpark.reduce((a, b) => a + b, 0)).toBe(3)
     expect(r.overallErrorSpark.reduce((a, b) => a + b, 0)).toBe(1)
+  })
+
+  /**
+   * The chart sits under the MCP/built-in switch, so it has to describe the roster
+   * that is showing. Summing both is how you get two MCP servers over a chart
+   * counting thousands of shell calls.
+   */
+  it('trends each roster separately, counting every call exactly once', () => {
+    seedSession('s1', 'repoA', 10, [
+      { ...mcpCall('sentry', 'a'), daysAgo: 3 },
+      { ...mcpCall('sentry', 'b'), daysAgo: 3, error: true },
+      { name: 'Read', action: 'other', daysAgo: 2 },
+      { name: 'Bash', action: 'shell', command: 'git status && npm test', daysAgo: 1, error: true },
+    ])
+    const r = toolHealth(store, { nowMs: NOW, days: 7 })
+
+    expect(r.mcp.trend.calls).toBe(2)
+    expect(r.mcp.trend.errors).toBe(1)
+    // Two binaries, but one call: the trend is a rate, so it must not multi-label.
+    expect(r.builtin.trend.calls).toBe(2)
+    expect(r.builtin.trend.errors).toBe(1)
+    expect(r.mcp.trend.calls + r.builtin.trend.calls).toBe(
+      r.overallCallSpark.reduce((a, b) => a + b, 0),
+    )
+  })
+
+  it('refuses to chart a rate that rests on too few calls', () => {
+    seedSession('thin', 'repoA', 10, [
+      { ...mcpCall('sentry', 'a'), daysAgo: 3 },
+      { ...mcpCall('sentry', 'b'), daysAgo: 3, error: true },
+    ])
+    const thin = toolHealth(store, { nowMs: NOW, days: 7 })
+    expect(thin.mcp.trend.chartable).toBe(false)
+    expect(thin.mcp.trend.activeDays).toBe(1)
+
+    const many: Call[] = []
+    for (let i = 0; i < TREND_MIN_CALLS + 5; i++) many.push({ ...mcpCall('sentry', 'a'), daysAgo: i % 6 })
+    seedSession('fat', 'repoA', 10, many)
+    const fat = toolHealth(store, { nowMs: NOW, days: 7 })
+    expect(fat.mcp.trend.chartable).toBe(true)
   })
 })
 

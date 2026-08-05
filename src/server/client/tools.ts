@@ -39,9 +39,11 @@ var tlDetailKey = null;
 
 // The two sub-rosters. `mcp` has an install side (status + hygiene chips); `builtin`
 // has none — there is nothing to install or remove, so it carries error pills only.
+// `l` labels the switch; `noun` is the adjective form for running prose ("42 MCP
+// calls failed"), where the switch label would read as "MCP servers calls".
 var KINDS = [
-  { k: 'mcp', l: 'MCP servers', full: 'MCP servers the agent called, and any installed but unused' },
-  { k: 'builtin', l: 'Built-in tools', full: 'Built-in tools and the shell binaries they ran' }
+  { k: 'mcp', l: 'MCP servers', noun: 'MCP', full: 'MCP servers the agent called, and any installed but unused' },
+  { k: 'builtin', l: 'Built-in tools', noun: 'built-in', full: 'Built-in tools and the shell binaries they ran' }
 ];
 
 // Status presentation for MCP rows. Unused is GREY, not red: with deferred tool
@@ -286,19 +288,44 @@ function renderOverview(d) {
 
 // The overall error-rate trend above the roster — the one surviving job of the
 // old Metrics → Ops tool charts, now on tool-run time like everything else here.
+/**
+ * The active roster's error trend — MCP or built-in, never both summed.
+ *
+ * It sits under the switch, so a chart of every tool call on the tab silently
+ * contradicted the control right above it: two MCP servers, and a chart counting
+ * 7,000 shell calls.
+ *
+ * Below a usable denominator the bars are replaced by the same facts in words.
+ * A rate chart drawn over a handful of calls is worse than no chart — one failure
+ * in a three-call week is a 33% bar, and a shape invites reading a trend into it.
+ */
 function renderOverallTrend(d) {
   var host = $('#th-overall');
   if (!host) return;
-  var calls = d.overallCallSpark || [];
-  var total = calls.reduce(function (a, b) { return a + b; }, 0);
-  if (!total) { host.innerHTML = ''; return; }
-  var errs = (d.overallErrorSpark || []).reduce(function (a, b) { return a + b; }, 0);
+  var kind = KINDS.filter(function (k) { return k.k === state.toolKind; })[0];
+  var label = kind ? kind.noun : 'tool';
+  var t = (section(d) || {}).trend;
+  if (!t || !t.calls) { host.innerHTML = ''; return; }
+
+  var span = esc(winPhrase('in the last ', 'across your full history'));
+  var rate = pct(t.errors / t.calls);
+  if (!t.chartable) {
+    host.innerHTML =
+      '<div class="sk-card th-overall-card">' +
+        sectHead('Error rate over time', 'Too little ' + label + ' activity to plot a rate per ' + trendGranLabel(d.sparkBuckets) + ', so the totals are stated instead.') +
+        '<div class="sk-empty th-thin">Too few ' + esc(label) + ' calls to chart a rate. ' +
+          num(t.errors) + ' of ' + num(t.calls) + ' failed ' + span +
+          ', across ' + num(t.activeDays) + (t.activeDays === 1 ? ' day' : ' days') + ' with any activity.</div>' +
+      '</div>';
+    return;
+  }
+
   host.innerHTML =
     '<div class="sk-card th-overall-card">' +
-      sectHead('Error rate over time', 'Every tool call this harness made, bucketed by when the call ran. Each bar is that bucket\'s failed calls over its total calls.') +
-      '<div class="sk-trend" id="th-overall-trend">' + rateChart(d.overallErrorSpark, calls, d.sparkBuckets) + '</div>' +
-      '<div class="sk-sect-note">' + num(errs) + ' of ' + num(total) + ' calls failed ' +
-        esc(winPhrase('in the last ', 'across your full history')) + ' (' + pct(total ? errs / total : 0) + ' overall), per ' +
+      sectHead('Error rate over time', 'Every ' + label + ' call, bucketed by when the call ran. Each bar is that bucket\'s failed calls over its total calls. Calls count once each, so this is a true rate and won\'t equal the sum of the rows below.') +
+      '<div class="sk-trend" id="th-overall-trend">' + rateChart(t.errorSpark, t.callSpark, d.sparkBuckets) + '</div>' +
+      '<div class="sk-sect-note">' + num(t.errors) + ' of ' + num(t.calls) + ' ' + esc(label) + ' calls failed ' +
+        span + ' (' + rate + ' overall), per ' +
         trendGranLabel(d.sparkBuckets) + '. Hover a bar for its exact split.</div>' +
     '</div>';
   wireTrendTooltip($('#th-overall-trend'));

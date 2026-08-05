@@ -127,10 +127,56 @@ export interface ToolHealthRow {
   recentErrorRate?: number
 }
 
+/**
+ * One roster's own error trend, so the chart above a roster describes THAT roster
+ * rather than every tool call on the tab.
+ *
+ * Calls are counted once each, by the entity they resolve to — a compound shell call
+ * counts once toward built-ins even though the roster multi-labels it across every
+ * binary it ran. So this is a true rate, and it deliberately won't equal the sum of
+ * the roster's rows.
+ */
+export interface KindTrend {
+  callSpark: number[]
+  errorSpark: number[]
+  calls: number
+  errors: number
+  /** Distinct days with at least one call — the honest measure of how much data this is. */
+  activeDays: number
+  /** Spark buckets with at least one call. */
+  activeBuckets: number
+  /** Whether the denominator supports per-bucket percentages at all. */
+  chartable: boolean
+}
+
+/**
+ * A rate chart needs a denominator. Under this many calls, or spread over fewer
+ * than this many populated buckets, each bar swings on single calls — one failure
+ * in a three-call week draws a 33% bar that means nothing. Below the bar, state the
+ * totals in words instead of drawing a shape that invites reading a trend into noise.
+ */
+export const TREND_MIN_CALLS = 50
+export const TREND_MIN_BUCKETS = 3
+
+export function kindTrend(callSpark: number[], errorSpark: number[], activeDays: number): KindTrend {
+  const calls = callSpark.reduce((a, b) => a + b, 0)
+  const activeBuckets = callSpark.reduce((n, c) => n + (c > 0 ? 1 : 0), 0)
+  return {
+    callSpark,
+    errorSpark,
+    calls,
+    errors: errorSpark.reduce((a, b) => a + b, 0),
+    activeDays,
+    activeBuckets,
+    chartable: calls >= TREND_MIN_CALLS && activeBuckets >= TREND_MIN_BUCKETS,
+  }
+}
+
 export interface ToolRosterSection<T> {
   rows: T[]
   totalHighError: number
   totalDegrading: number
+  trend: KindTrend
 }
 
 export interface McpSection extends ToolRosterSection<ToolHealthRow> {
@@ -595,21 +641,38 @@ function collect(store: Store, win: HealthWindow, rawName?: string): RosterData 
   }
   rows.sort(rankRows)
 
+  // Grouped by name/action, not just day, so each call can be attributed to its
+  // roster through resolveEntity — the one place the MCP grammar lives. A LIKE
+  // 'mcp__%' predicate would be simpler and wrong: OpenCode writes MCP calls as
+  // bare `<server>_<tool>`, and they would all be counted as built-ins.
   const overall = store.queryAll(
-    `SELECT ${TS_DAY} AS day, COUNT(*) AS calls, SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errors
+    `SELECT ${TS_DAY} AS day, t.name AS name, t.action AS action,
+            COUNT(*) AS calls, SUM(CASE WHEN t.is_error = 1 THEN 1 ELSE 0 END) AS errors
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
      WHERE s.source = ? AND ${IN_WINDOW} AND t.ts IS NOT NULL
-     GROUP BY day`,
+     GROUP BY day, name, action`,
     source,
     ...winParams,
-  ) as Array<{ day: string; calls: number; errors: number }>
+  ) as Array<{ day: string; name: string; action: string; calls: number; errors: number }>
   const overallCallSpark = new Array(sparkBuckets.length).fill(0)
   const overallErrorSpark = new Array(sparkBuckets.length).fill(0)
+  const byKind: Record<ToolKind, { calls: number[]; errors: number[]; days: Set<string> }> = {
+    mcp: { calls: new Array(sparkBuckets.length).fill(0), errors: new Array(sparkBuckets.length).fill(0), days: new Set() },
+    builtin: { calls: new Array(sparkBuckets.length).fill(0), errors: new Array(sparkBuckets.length).fill(0), days: new Set() },
+  }
   for (const r of overall) {
     const b = bucketIndex(sparkBuckets, Date.parse(r.day + 'T00:00:00Z'))
     if (b < 0) continue
     overallCallSpark[b] += r.calls
     overallErrorSpark[b] += r.errors
+    // A malformed mcp__ name resolves to nothing and is rowed nowhere, so it stays
+    // out of both rosters' trends while still counting in the page-level overall.
+    const ent = resolveEntity(r.name, r.action)
+    if (!ent) continue
+    const k = byKind[ent.kind]
+    k.calls[b] = (k.calls[b] ?? 0) + r.calls
+    k.errors[b] = (k.errors[b] ?? 0) + r.errors
+    k.days.add(r.day)
   }
 
   const unlabeled = source
@@ -640,12 +703,14 @@ function collect(store: Store, win: HealthWindow, rawName?: string): RosterData 
         totalHighError: mcpRows.filter((r) => has(r, 'high-error')).length,
         totalDegrading: mcpRows.filter((r) => has(r, 'degrading')).length,
         observedOnly,
+        trend: kindTrend(byKind.mcp.calls, byKind.mcp.errors, byKind.mcp.days.size),
       },
       builtin: {
         rows: builtinRows,
         totalHighError: builtinRows.filter((r) => has(r, 'high-error')).length,
         totalDegrading: builtinRows.filter((r) => has(r, 'degrading')).length,
         unlabeledShellCalls: unlabeled,
+        trend: kindTrend(byKind.builtin.calls, byKind.builtin.errors, byKind.builtin.days.size),
       },
     },
     entities,
