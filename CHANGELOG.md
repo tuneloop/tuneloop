@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-05
+
+### Added
+
+- **MCP / Tools tab.** A new top-level tab that does for tool calls what the Skills
+  tab does for skills, organized around errors and what to do about them. Two
+  sub-tabs — **MCP servers** (row = server, parsed from `mcp__<server>__<tool>`) and
+  **Built-in tools** (row = a built-in tool or a shell binary promoted from the
+  commands it ran) — each a roster with clickable stat pills that double as filters,
+  an error-rate trend, and a drill-in detail page carrying per-tool chips, an
+  errors-by-category breakdown, and the failing calls grouped by session. The hero
+  signals are the `high-error` and `degrading` pills; `unused`, `scope-down` and
+  `not-in-config` stay as quiet hygiene chips. Counts read `tool_calls` directly and
+  include sidechain calls, so a server only ever called by a subagent still reads as
+  in use. ([#119])
+- **LLM "Suggested fix" card for failing tools.** A server or tool carrying the
+  `high-error` pill gets a short diagnosis plus a paste-ready agent-instructions
+  snippet, cached per entity and regenerated only when the underlying failures
+  change, so a quiet re-analyze costs nothing. ([#119])
+- **Shell failure attribution.** A failing `Bash` call is now blamed on the binary
+  that actually failed rather than smeared across every binary in the chain — read
+  from the error text (bash and zsh formats), from exit position for unconditional
+  chains, and, for compound failures the deterministic rules can't call, by a new
+  `shell-error-attribution` LLM processor. Shell calls are also multi-labeled: `cd
+  repo && npm run build | tee log` counts toward both `npm` and `tee`, which is why
+  per-binary counts don't sum to the shell-call total. ([#119])
+- **Empty-result tracking.** A successful retrieval call that came back with nothing
+  is recorded as such, decided per binary and per MCP tool, so a search that
+  silently finds nothing is visible instead of counting as a clean success. ([#119])
+
+### Changed
+
+- **Tab order.** Highlights, Metrics, Skills, MCP/Tools, Artifacts, Sessions,
+  Recommendations. ([#119])
+- **The Metrics → Ops "Tool error rate" KPI is removed**, along with its Tools and
+  Skills sub-tabs — both are now top-level tabs that answer the same question with
+  drill-in. `/api/ops-over-time` and `/api/tool-names` go with it; an old
+  `#/dashboard/ops` bookmark falls back rather than erroring. ([#119])
+
+### Fixed
+
+- **Transcript viewer no longer silently truncates tool input.** Long commands were
+  clipped server-side at 2,000 characters with a bare ellipsis, and the expand toggle
+  then made the clipped block look complete. The cap is now 20,000 characters, and
+  when it does fire the marker names what it dropped. ([#119])
+- **Errors-by-category widget lost its scoped styles** on the tool detail page, so a
+  count and its share ran together ("542%" for 5 errors at 42%). ([#119])
+
 ## [0.7.0] - 2026-07-31
 
 ### Added
@@ -201,7 +249,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
-[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.6.0
 [0.5.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.5.0
@@ -212,6 +261,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#119]: https://github.com/tuneloop/tuneloop/pull/119
 [#117]: https://github.com/tuneloop/tuneloop/pull/117
 [#116]: https://github.com/tuneloop/tuneloop/pull/116
 [#112]: https://github.com/tuneloop/tuneloop/pull/112
