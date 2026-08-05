@@ -1036,22 +1036,30 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
   display: grid; grid-template-columns: 1fr 80px 80px 110px; gap: 12px;
   align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: 13.5px;
 }
-button.th-tool-row {
-  width: 100%; text-align: left; background: none; border-left: 0; border-right: 0; border-top: 0;
-  cursor: pointer; font: inherit; font-size: 13.5px; color: var(--ink);
+/* The read-out's cross-reference to the active chip — not a control. */
+.th-tr-on { background: #dfe9e0; }
+.th-tr-on .th-tool-name { color: var(--emerald); font-weight: 600; }
+
+/* The tool scope control — see toolChips(). Sits above the stats it scopes, so the
+   filled chip and the numbers it produced are read in one glance. */
+.th-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 4px; }
+.th-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); background: var(--paper); border-radius: 999px;
+  padding: 4px 11px; cursor: pointer;
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted);
 }
-button.th-tool-row:hover { background: var(--track); }
-button.th-tool-row.on { background: #dfe9e0; }
-button.th-tool-row.on .th-tool-name { color: var(--emerald); font-weight: 600; }
+.th-chip:hover { color: var(--ink); border-color: var(--muted); }
+.th-chip.on { background: var(--emerald); border-color: var(--emerald); color: #f3efe6; }
+.th-chip-all { font-family: inherit; }
+.th-chip-n { font-size: 11px; opacity: .7; }
+.th-chip-e { font-size: 11px; font-weight: 600; color: var(--red); }
+.th-chip.on .th-chip-e { color: #ffdcd4; }
 
 /* Says the page is narrowed, next to the numbers that are narrowed. */
 .th-scoped {
   margin: 14px 0 -4px; padding: 8px 12px; border-left: 3px solid var(--emerald);
   background: var(--paper); font-size: 13px; color: var(--ink);
-}
-.th-scope-clear {
-  border: 0; background: none; padding: 0; margin-left: 4px;
-  color: var(--emerald); cursor: pointer; font: inherit; font-size: 13px; text-decoration: underline;
 }
 .th-tr:last-child { border-bottom: 0; }
 .th-th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }

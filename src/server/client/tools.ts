@@ -542,11 +542,15 @@ function renderToolPage(box, d) {
     chips +
     '</div>';
 
-  // Every number below is narrowed, so say so where the numbers are — a scoped page
-  // that looks unscoped is how you end up quoting a tool's error rate as a server's.
+  // The scope control goes above the numbers it scopes.
+  html += toolChips(d);
+
+  // And it still says so in words next to them — a scoped page that looks unscoped
+  // is how you end up quoting a tool's error rate as a server's. The All chip is
+  // the way back, so this no longer carries a clear button of its own.
   if (d.tool) {
-    html += '<div class="th-scoped">Showing <strong>' + esc(toolLabelOf(d, d.tool)) + '</strong> only. ' +
-      '<button type="button" class="th-scope-clear">show all of ' + esc(r.name) + '</button></div>';
+    html += '<div class="th-scoped">Every number below is <strong>' + esc(toolLabelOf(d, d.tool)) +
+      '</strong> only, not all of ' + esc(r.name) + '.</div>';
   }
 
   // Headline stats. Empty-result rate is its OWN tile, never folded into the error
@@ -651,15 +655,19 @@ function renderToolPage(box, d) {
   wireCallGroups(box);
   if (d.errorCategories && d.errorCategories.length) renderErrorCats(box, d);
 
-  // The per-tool table doubles as the filter: a row toggles, the banner clears.
-  Array.prototype.forEach.call(box.querySelectorAll('.th-tool-row'), function (el) {
-    el.onclick = function () {
-      var raw = this.getAttribute('data-raw');
-      setToolFilter(isToolSelected(raw, d.tool) ? '' : raw);
-    };
+  // The chips are the page's only tool filter; All carries the empty name.
+  Array.prototype.forEach.call(box.querySelectorAll('.th-chip'), function (el) {
+    el.onclick = function () { setToolFilter(this.getAttribute('data-raw')); };
   });
-  var clear = box.querySelector('.th-scope-clear');
-  if (clear) clear.onclick = function () { setToolFilter(''); };
+
+  // Restore after layout rather than inline: the page has just been rebuilt, and a
+  // scroll set against a not-yet-laid-out document gets clamped to whatever height
+  // the browser thinks it has at that instant.
+  if (keepScroll != null) {
+    var y = keepScroll;
+    keepScroll = null;
+    requestAnimationFrame(function () { window.scrollTo(0, y); });
+  }
 }
 
 /**
@@ -703,31 +711,52 @@ function copySnippet(text, btn) {
   });
 }
 
-// The per-tool table for an MCP server: calls, errors, last used.
 /**
- * The server's tools — and the page's filter. Clicking a row narrows every number
- * above it to that tool; clicking the active one clears it. A table rather than a
- * dropdown because the counts are the reason you'd pick a tool at all.
+ * The page's scope control: one chip per tool, plus All.
  *
- * Always lists every tool, including while narrowed: it has to keep offering the
- * options you are not currently looking at.
+ * It sits directly above the numbers it scopes, so the causality reads top-down and
+ * a click doesn't move the page out from under you. It was the table below doing
+ * this job, which put the control a screen away from everything it changed and made
+ * filtering something you could only discover by clicking a row that looked inert.
+ *
+ * Always lists every tool, including while narrowed: a scope control has to keep
+ * offering the options you are not currently looking at.
+ */
+function toolChips(d) {
+  var rows = (d.perTool || []).filter(function (t) { return !!t.raw; });
+  if (!rows.length) return '';
+  var all = !d.tool;
+  return '<div class="th-chips" role="group" aria-label="Show one tool only">' +
+    '<button type="button" class="th-chip th-chip-all' + (all ? ' on' : '') + '" data-raw=""' +
+    ' aria-pressed="' + (all ? 'true' : 'false') + '" title="Show every tool on this server">All</button>' +
+    rows.map(function (t) {
+      var on = isToolSelected(t.raw, d.tool);
+      return '<button type="button" class="th-chip' + (on ? ' on' : '') + '" data-raw="' + esc(t.raw) + '"' +
+        ' aria-pressed="' + (on ? 'true' : 'false') + '"' +
+        ' title="' + esc(on ? 'Showing ' + t.name + ' only — pick All to clear' : 'Show only ' + t.name) + '">' +
+        esc(t.name) + '<span class="th-chip-n">' + num(t.calls) + '</span>' +
+        // Errors ride along because a failing tool is the one you'd most want to
+        // scope to; the table below still carries the full column for comparison.
+        (t.errorCalls > 0 ? '<span class="th-chip-e" title="' + esc(num(t.errorCalls) + ' failed') + '">' + num(t.errorCalls) + '</span>' : '') +
+        '</button>';
+    }).join('') + '</div>';
+}
+
+/**
+ * The per-tool read-out: calls, errors, last used. Deliberately NOT interactive —
+ * the chips above are the filter. Two controls over one piece of state is how the
+ * two drift apart. The scoped row still highlights, as a cross-reference.
  */
 function toolTable(rows, active) {
   return '<div class="th-table">' +
     '<div class="th-tr th-th"><span>Tool</span><span>Calls</span><span>Errors</span><span>Last used</span></div>' +
     rows.map(function (t) {
-      var on = isToolSelected(t.raw, active);
-      // A row with no raw name cannot filter anything, so it renders as plain text
-      // rather than as a button that looks clickable and silently does nothing.
-      var cells =
+      return '<div class="th-tr' + (isToolSelected(t.raw, active) ? ' th-tr-on' : '') + '">' +
         '<span class="th-tool-name">' + esc(t.name) + '</span>' +
         '<span>' + num(t.calls) + '</span>' +
         '<span' + (t.errorCalls > 0 ? ' class="th-metric-bad"' : '') + '>' + num(t.errorCalls) + '</span>' +
-        '<span>' + esc(t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : '—') + '</span>';
-      if (!t.raw) return '<div class="th-tr">' + cells + '</div>';
-      return '<button type="button" class="th-tr th-tool-row' + (on ? ' on' : '') + '" data-raw="' + esc(t.raw) + '"' +
-        ' title="' + esc(on ? 'Showing only ' + t.name + ' — click to clear' : 'Show only ' + t.name) + '">' +
-        cells + '</button>';
+        '<span>' + esc(t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : '—') + '</span>' +
+        '</div>';
     }).join('') + '</div>';
 }
 
@@ -737,8 +766,21 @@ function toolLabelOf(d, raw) {
   return hit ? hit.name : raw;
 }
 
+/**
+ * Where to leave the viewport once the next detail render lands, or null to leave
+ * scrolling alone.
+ *
+ * Filtering is driven from a table most of the way down the page, but it refetches
+ * and replaces the whole page — which parks the user back at the top, far from the
+ * row they just clicked and with no sense of what changed. Navigation (opening a
+ * tool, going back) should still start at the top, so this is set only by the
+ * filter and cleared as soon as it is honoured.
+ */
+var keepScroll = null;
+
 /** Switch the page's tool filter (empty string clears it) and refetch. */
 function setToolFilter(raw) {
+  keepScroll = window.scrollY;
   state.toolFilter = raw || '';
   syncHash();
   paintTools();
