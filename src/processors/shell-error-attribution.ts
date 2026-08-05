@@ -112,17 +112,73 @@ export function collectFailures(session: Session): Failure[] {
   return out
 }
 
+/**
+ * The system prompt.
+ *
+ * Worked examples rather than prose rules, because the observed failure mode is
+ * not ignorance of the rules — it is reasoning from PLAUSIBILITY. Audited against
+ * real verdicts, the model reliably blamed whichever command looked most
+ * substantial instead of the one the output implicates. Every example below
+ * therefore turns on something only the output can tell you, and two of them
+ * deliberately resolve to a trivial command (`echo`, `true`) over a weighty one.
+ *
+ * Kept generic on purpose: these are textbook shell shapes, not commands lifted
+ * from any particular corpus, so the model learns the semantics rather than a
+ * house style.
+ */
+const SYSTEM_PROMPT = [
+  'You are given shell commands that FAILED, and the output each one produced. For every failure, say which single',
+  'binary caused it. The whole chain is currently blamed for every failure, which is wrong — a command that never',
+  'ran cannot have failed.',
+  '',
+  'How the shell decides the exit code:',
+  '  A && B   runs B only if A SUCCEEDED. If A failed, B never ran.',
+  '  A || B   runs B only if A FAILED. If A succeeded, B never ran.',
+  '  A ; B    always runs both, whatever A did. Same for a newline.',
+  '  A | B    always runs both; the pipeline reports B\'s status, so A failing may not show up at all.',
+  'The command\'s exit code is the status of the LAST command that actually RAN.',
+  '',
+  'Work ONLY from the output shown. Do not reason about which command looks more important or more likely to',
+  'break — the trivial ones fail too, and blaming the substantial one is the most common way to get this wrong.',
+  'If the error came from the SHELL itself (a word it could not resolve, a syntax error) rather than from a',
+  'program, it belongs to the segment containing the text the shell complained about.',
+  '',
+  'Answer null — a perfectly good answer — when the output does not identify a culprit, when nothing ran at all',
+  '(the user declined the call, or the shell failed to parse it), or when the command was killed from outside',
+  '(a timeout, an interrupt); a kill is not a verdict on any command. A wrong attribution is worse than null,',
+  'because it moves a failure onto a tool that did its job.',
+  '',
+  'Examples:',
+  '',
+  '  command: mkdir -p out && cp notes.txt out/ && echo done',
+  '  output:  cp: notes.txt: No such file or directory',
+  '  answer:  cp — it names itself. mkdir must have succeeded for cp to run; echo never ran.',
+  '',
+  '  command: ./configure && make && make install',
+  '  output:  ./configure: line 12: no acceptable C compiler found',
+  '  answer:  ./configure — the first link failed, so neither make ran.',
+  '',
+  '  command: rm -f stale.lock; flock lockfile true',
+  '  output:  flock: lockfile: No such file or directory',
+  '  answer:  flock — `;` runs both, and the exit code is the last one.',
+  '',
+  '  command: pkg-config --exists libfoo || echo "libfoo missing" > report.txt',
+  '  output:  /bin/sh: report.txt: Read-only file system',
+  '  answer:  echo — pkg-config FAILED, which is what made the `||` right-hand side run; its redirect is the error.',
+  '',
+  '  command: tar -cf - data | ssh backup-host "cat > data.tar"',
+  '  output:  ssh: connect to host backup-host port 22: Connection refused',
+  '  answer:  ssh — a pipeline reports the last element\'s status.',
+  '',
+  '  command: make clean && make build',
+  '  output:  Error: Exit code 2',
+  '  answer:  null — both are plausible and nothing here distinguishes them. Do not guess.',
+  '',
+  `Answer via the ${TOOL_NAME} tool.`,
+].join('\n')
+
 export function buildPrompt(failures: Failure[]): { system: string; user: string } {
-  const system =
-    'You read the output of failed shell commands and say which part failed. Each command chains several ' +
-    'binaries, and the whole chain is currently blamed for every failure, which is wrong: in `ls missing && tsc`, ' +
-    '`tsc` never ran. Work ONLY from the output shown. Attribute to a binary when the output makes it clear — a ' +
-    'tool naming itself, a stack trace from a known runtime, a usage dump, an exit code that can only have come ' +
-    'from one command. Answer null when it genuinely does not say, when the user declined the call, or when the ' +
-    'shell failed to parse the command so nothing ran. A wrong attribution is worse than null: it moves a failure ' +
-    'onto a tool that did its job. Remember the shell rules — `&&` stops at the first failure so later commands ' +
-    'never ran, `;` and `|` always continue, and the exit code is the last command that RAN. ' +
-    `Answer via the ${TOOL_NAME} tool.`
+  const system = SYSTEM_PROMPT
 
   const body = failures
     .map(
@@ -175,7 +231,10 @@ export const shellErrorAttribution: Processor = {
   //    refining `command_failed` into something specific, but also overriding an
   //    unmistakable `user_rejected`. Removing it also removes the taxonomy from
   //    the prompt, leaving one question per failure instead of two.
-  version: 3,
+  // 4: rewrote the prompt around worked examples, after auditing real verdicts
+  //    showed the model reasoning from plausibility rather than from the output.
+  //    Adds the missing `||` rule and the timeout case (a kill is not a verdict).
+  version: 4,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {

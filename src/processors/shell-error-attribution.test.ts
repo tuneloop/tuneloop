@@ -61,6 +61,29 @@ describe('buildPrompt', () => {
     expect(user).not.toContain('not_found')
     expect(system).not.toMatch(/classif/i)
   })
+
+  it('states all four join types — `||` was missing and its semantics are distinct', () => {
+    const { system } = buildPrompt(collectFailures(session([shell('a && b', false)])))
+    for (const join of ['A && B', 'A || B', 'A ; B', 'A | B']) expect(system).toContain(join)
+    // The rule the whole thing rests on.
+    expect(system).toMatch(/LAST command that actually RAN/)
+  })
+
+  it('tells the model a kill is not a verdict', () => {
+    // Audit found a timeout blamed on a binary: the harness killed it, so no
+    // command returned a verdict at all.
+    const { system } = buildPrompt(collectFailures(session([shell('a && b', false)])))
+    expect(system).toMatch(/timeout/i)
+    expect(system).toMatch(/kill/i)
+  })
+
+  it('teaches by example, including cases that resolve to a trivial command', () => {
+    // The observed failure mode is blaming whichever command looks weightiest, so
+    // the examples have to include ones that don't resolve that way.
+    const { system } = buildPrompt(collectFailures(session([shell('a && b', false)])))
+    expect(system).toContain('answer:  echo —') // beats pkg-config in its example
+    expect(system).toContain('answer:  null —') // abstaining is demonstrated, not just allowed
+  })
 })
 
 describe('normalizeVerdicts', () => {
