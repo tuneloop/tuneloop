@@ -41,7 +41,9 @@ export interface NavState {
 // but it is NOT the parse fallback — an empty or unknown hash still resolves to
 // 'dashboard' (see parseHash). main.ts decides to LAND on highlights when the hash
 // is empty; an explicit deep link to any other view wins.
-export const VIEWS = ['highlights', 'insights', 'skills', 'tools', 'dashboard', 'artifacts', 'sessions']
+// Membership only (parseHash tests indexOf), but kept in the tab bar's own order so
+// the two don't drift into disagreeing about what the nav looks like.
+export const VIEWS = ['highlights', 'dashboard', 'skills', 'tools', 'artifacts', 'sessions', 'insights']
 // URL slug ↔ internal view id. Only the 'insights' view differs: its tab is user-facing
 // "Recommendations", so its shareable URL reads #/recommendations while every DOM id,
 // /api/insights call, and setView('insights') keeps the internal 'insights' id. The old
