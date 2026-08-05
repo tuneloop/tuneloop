@@ -192,7 +192,7 @@ function paintTools() {
   var anyRows = (d.mcp && d.mcp.rows.length) || (d.builtin && d.builtin.rows.length);
   if (!anyRows) {
     box.innerHTML =
-      '<div class="panel sk-panel"><div class="panel-head"><h2>Tools</h2></div>' +
+      '<div class="panel sk-panel"><div class="panel-head"><h2>MCP/Tools</h2></div>' +
       '<div class="sk-empty">No tool calls in this window. Widen the time filter, or run <code>tuneloop analyze</code> to ingest more sessions.</div></div>';
     return;
   }
@@ -204,7 +204,7 @@ function paintTools() {
 function paintRoster(box, d) {
   box.innerHTML =
     '<div class="panel sk-panel">' +
-      '<div class="panel-head"><h2>Tools</h2>' +
+      '<div class="panel-head"><h2>MCP/Tools</h2>' +
         '<div class="seg th-kinds" id="th-kinds">' + KINDS.map(function (k) {
           return '<button type="button" data-k="' + k.k + '"' + (k.k === state.toolKind ? ' class="on"' : '') + '>' + esc(k.l) + '</button>';
         }).join('') + '</div>' +
