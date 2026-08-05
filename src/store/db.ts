@@ -117,7 +117,15 @@ CREATE TABLE IF NOT EXISTS tool_call_commands (
   PRIMARY KEY (session_id, idx, seq),
   FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS ix_tool_call_commands_binary ON tool_call_commands(binary);
+-- Every column the hot lookup constrains: "is THIS call one that ran grep?", which
+-- a shell binary's detail page asks once per tool call. On (binary) alone SQLite could
+-- only seek to the binary and then compare session_id/idx row by row — with ~1,600
+-- rows for a common binary and ~9,400 tool calls, that is millions of comparisons and
+-- turned a page load into 21 seconds. All three columns indexed makes it one seek.
+-- (binary) first so this still serves plain binary= lookups, which is why the old
+-- single-column index below is dropped rather than kept alongside.
+CREATE INDEX IF NOT EXISTS ix_tool_call_commands_call ON tool_call_commands(binary, session_id, idx);
+DROP INDEX IF EXISTS ix_tool_call_commands_binary;
 
 -- The LLM "Suggested fix" card for a tool/server that keeps failing: a short
 -- diagnosis plus a paste-ready agent-instructions snippet. Keyed on the ENTITY

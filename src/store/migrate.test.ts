@@ -153,3 +153,42 @@ describe('tool-call health migration (schema 22)', () => {
     db.close()
   })
 })
+
+/**
+ * The shell-binary scope — "is this tool call one that ran `grep`?" — is evaluated
+ * once per tool call on every binary's detail page. Indexed on (binary) alone,
+ * SQLite seeks to the binary and then compares session_id/idx row by row, which on a
+ * real store meant millions of comparisons and a 21-second page load. Asserting the
+ * PLAN rather than a duration keeps this honest without being timing-flaky.
+ */
+describe('tool_call_commands lookup index', () => {
+  it('seeks on all three columns the shell scope constrains', () => {
+    const db = openDb(join(dir, `idx${n++}.db`))
+    const plan = (db.prepare(`EXPLAIN QUERY PLAN
+      SELECT 1 FROM tool_calls t WHERE EXISTS (
+        SELECT 1 FROM tool_call_commands c
+        WHERE c.session_id = t.session_id AND c.idx = t.idx AND c.binary = 'grep')`)
+      .all() as Array<{ detail: string }>)
+      .map((r) => r.detail)
+      .join(' | ')
+
+    expect(plan).toMatch(/SEARCH c/)
+    expect(plan).toMatch(/binary=\? AND session_id=\? AND idx=\?/)
+    expect(plan).not.toMatch(/SCAN c/)
+    db.close()
+  })
+
+  it('drops the redundant single-column index it supersedes', () => {
+    const path = join(dir, `idx${n++}.db`)
+    const old = openDb(path)
+    old.exec('CREATE INDEX IF NOT EXISTS ix_tool_call_commands_binary ON tool_call_commands(binary)')
+    old.close()
+
+    const db = openDb(path)
+    const names = (db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tool_call_commands'`)
+      .all() as Array<{ name: string }>).map((r) => r.name)
+    expect(names).toContain('ix_tool_call_commands_call')
+    expect(names).not.toContain('ix_tool_call_commands_binary')
+    db.close()
+  })
+})
