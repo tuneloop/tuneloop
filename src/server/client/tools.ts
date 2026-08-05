@@ -39,7 +39,10 @@ var tlDetailKey = null;
 
 // The two sub-rosters. `mcp` has an install side (status + hygiene chips); `builtin`
 // has none — there is nothing to install or remove, so it carries error pills only.
-var KINDS = [{ k: 'mcp', l: 'MCP servers' }, { k: 'builtin', l: 'Built-in tools' }];
+var KINDS = [
+  { k: 'mcp', l: 'MCP', full: 'MCP servers' },
+  { k: 'builtin', l: 'Tools', full: 'Built-in tools and shell binaries' }
+];
 
 // Status presentation for MCP rows. Unused is GREY, not red: with deferred tool
 // loading an unused server is a hygiene note, not a failure — the red is reserved
@@ -207,15 +210,29 @@ function paintTools() {
   paintRoster(box, d);
 }
 
+/**
+ * The heading IS the switch between the two rosters.
+ *
+ * It was a small segmented control in the far corner — 13px, muted, doing primary
+ * navigation from the one spot nothing draws the eye to. As the heading it sits
+ * where reading starts, and carrying each side's count means the inactive half
+ * advertises what is behind it rather than just naming it.
+ */
+function kindSwitch(d) {
+  var counts = { mcp: (d.mcp.rows || []).length, builtin: (d.builtin.rows || []).length };
+  return '<h2 class="th-switch">' + KINDS.map(function (k, i) {
+    var on = k.k === state.toolKind;
+    return (i ? '<span class="th-switch-sep">·</span>' : '') +
+      '<button type="button" class="th-switch-opt' + (on ? ' on' : '') + '" data-k="' + k.k + '"' +
+      ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(k.full) + '">' +
+      esc(k.l) + '<span class="th-switch-n">' + num(counts[k.k]) + '</span></button>';
+  }).join('') + '</h2>';
+}
+
 function paintRoster(box, d) {
   box.innerHTML =
     '<div class="panel sk-panel">' +
-      // Names what the roster below actually holds; the nav tab carries both.
-      '<div class="panel-head"><h2>' + (state.toolKind === 'mcp' ? 'MCP' : 'Tools') + '</h2>' +
-        '<div class="seg th-kinds" id="th-kinds">' + KINDS.map(function (k) {
-          return '<button type="button" data-k="' + k.k + '"' + (k.k === state.toolKind ? ' class="on"' : '') + '>' + esc(k.l) + '</button>';
-        }).join('') + '</div>' +
-      '</div>' +
+      '<div class="panel-head">' + kindSwitch(d) + '</div>' +
       '<div class="sk-overview" id="th-overview"></div>' +
       '<div class="th-overall" id="th-overall"></div>' +
       '<div class="filters sk-filters" id="th-filters"></div>' +
@@ -223,7 +240,7 @@ function paintRoster(box, d) {
       '<div class="th-roster-note" id="th-roster-note"></div>' +
     '</div>';
 
-  Array.prototype.forEach.call(box.querySelectorAll('#th-kinds button'), function (b) {
+  Array.prototype.forEach.call(box.querySelectorAll('.th-switch-opt'), function (b) {
     b.onclick = function () { openTool(this.getAttribute('data-k'), null); };
   });
 
