@@ -45,9 +45,7 @@ export interface BlockMembership {
  * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
  * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
  */
-export const NORMALIZE_VERSION = 14 // 14: empty-result applies per binary + per MCP tool
-
-
+export const NORMALIZE_VERSION = 15 // 15: the harness "no output" note counts as an empty result
 
 /**
  * Assign a dense ordinal `seq` to every MAIN-THREAD event, in order. Sidechain

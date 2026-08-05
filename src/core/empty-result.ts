@@ -89,6 +89,19 @@ const MAX_EMPTY_LEN = 200
 const EMPTY_CONTAINER = /^(?:\[\s*\]|\{\s*\}|null|none|n\/a)$/i
 
 /**
+ * The harness's own note that the call printed nothing, standing in for the empty
+ * payload it declines to send: Claude Code answers "(Bash completed with no output)".
+ *
+ * Without this, no Claude Code store could ever record an empty result — the note is
+ * 31 characters of content, so a silent retrieval read as a full one. Codex sends a
+ * real empty string, which is why the same corpus reported empties there and none here.
+ *
+ * The whole payload must be one parenthetical, and it may not contain nested
+ * parentheses, so a genuine result that happens to discuss output cannot match.
+ */
+const NO_OUTPUT_NOTE = /^\([^()\n]*\bno output\b[^()\n]*\)$/i
+
+/**
  * The whole payload is one clause reporting that nothing matched. Anchored at
  * both ends and comma-free on purpose: "No results found for the first query,
  * but here are 12 others" is a RESULT, and must not match.
@@ -112,5 +125,5 @@ export function emptyResultFlag(
   const t = text.trim()
   if (!t) return 1
   if (t.length > MAX_EMPTY_LEN) return 0
-  return EMPTY_CONTAINER.test(t) || NOTHING_FOUND.test(t) ? 1 : 0
+  return EMPTY_CONTAINER.test(t) || NO_OUTPUT_NOTE.test(t) || NOTHING_FOUND.test(t) ? 1 : 0
 }
