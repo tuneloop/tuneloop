@@ -19,11 +19,23 @@ export function resultText(raw: unknown): string {
   }
   if (typeof raw === 'object') {
     const o = raw as Record<string, unknown>
+    // Did the harness carry a text field at all? An EMPTY one is an answer —
+    // "the command printed nothing" — and must not be confused with a missing one.
+    let reported = false
     for (const k of ['stdout', 'stderr', 'error', 'message', 'content']) {
       const v = o[k]
-      if (typeof v === 'string' && v) return v
+      if (typeof v === 'string') {
+        if (v) return v
+        reported = true
+        continue
+      }
       if (Array.isArray(v)) return resultText(v)
     }
+    // Claude Code reports silence as {stdout:'', stderr:'', interrupted:false, …}.
+    // Falling through to stringify handed every reader 89 characters of envelope
+    // where the harness had said there was nothing, so a silent retrieval scored
+    // as a full result and no empty result could ever be recorded.
+    if (reported) return ''
     try {
       return JSON.stringify(o)
     } catch {
