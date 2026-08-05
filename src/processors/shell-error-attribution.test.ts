@@ -51,9 +51,15 @@ describe('buildPrompt', () => {
     expect(user).toContain('ls /nope && npx tsc')
     expect(user).toContain('ls: /nope: No such file')
     expect(user).toContain('ls, npx')
-    // The shell rules it has to reason with, and the taxonomy it must classify into.
-    expect(system).toContain('&&')
-    expect(user).toContain('not_found')
+    expect(system).toContain('&&') // the shell rules it has to reason with
+  })
+
+  it('asks one question per failure — no error taxonomy', () => {
+    // Classification was dropped: nothing read it, and it disagreed with the regex
+    // on 46% of failures in both directions.
+    const { system, user } = buildPrompt(collectFailures(session([shell('ls /nope && npx tsc', false, 'boom')])))
+    expect(user).not.toContain('not_found')
+    expect(system).not.toMatch(/classif/i)
   })
 })
 
@@ -61,27 +67,18 @@ describe('normalizeVerdicts', () => {
   const failures = collectFailures(session([shell('ls /nope && npx tsc', false), shell('cat a | wc -l', false)]))
 
   it('accepts a binary from that failure\'s own list', () => {
-    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'ls', category: 'not_found' }] }, failures)).toEqual([
-      { idx: 0, binary: 'ls', category: 'not_found' },
-    ])
+    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'ls' }] }, failures)).toEqual([{ idx: 0, binary: 'ls' }])
   })
 
   it('refuses a binary the command never ran — the failure mode this exists to end', () => {
     // Inventing an entity out of an error message is exactly what the deterministic
-    // rules refuse to do; the model gets no more latitude.
-    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'docker', category: 'not_found' }] }, failures)).toEqual([
-      { idx: 0, binary: null, category: 'not_found' },
-    ])
+    // rules refuse to do; the model gets no more latitude. Downgraded to null
+    // rather than dropped: it answered, just unusably.
+    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'docker' }] }, failures)).toEqual([{ idx: 0, binary: null }])
   })
 
   it('refuses a binary borrowed from a DIFFERENT failure in the same batch', () => {
-    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'wc', category: null }] }, failures)).toEqual([])
-  })
-
-  it('refuses a category outside the taxonomy', () => {
-    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'ls', category: 'made_up' }] }, failures)).toEqual([
-      { idx: 0, binary: 'ls', category: null },
-    ])
+    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: 'wc' }] }, failures)).toEqual([{ idx: 0, binary: null }])
   })
 
   it('drops verdicts for calls we did not ask about, and duplicates', () => {
@@ -89,16 +86,13 @@ describe('normalizeVerdicts', () => {
       { failures: [{ idx: 99, binary: 'ls' }, { idx: 0, binary: 'ls' }, { idx: 0, binary: 'npx' }] },
       failures,
     )
-    expect(out).toEqual([{ idx: 0, binary: 'ls', category: null }])
+    expect(out).toEqual([{ idx: 0, binary: 'ls' }])
   })
 
-  it('keeps null as a real answer — "the output does not say"', () => {
-    // A verdict with neither a binary nor a category carries nothing, so it is
-    // dropped and the call stays on the honest multi-label.
-    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: null, category: null }] }, failures)).toEqual([])
-    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: null, category: 'timeout' }] }, failures)).toEqual([
-      { idx: 0, binary: null, category: 'timeout' },
-    ])
+  it('records null as a real answer — "asked, and the output does not say"', () => {
+    // Kept, not dropped: it is what separates a failure the model declined to
+    // attribute from one it never saw, which matters when auditing coverage.
+    expect(normalizeVerdicts({ failures: [{ idx: 0, binary: null }] }, failures)).toEqual([{ idx: 0, binary: null }])
   })
 
   it('survives junk output rather than throwing', () => {
@@ -121,7 +115,7 @@ describe('batching', () => {
       completeStructured: async (req: { user: string }) => {
         const idxs = [...req.user.matchAll(/### failure idx=(\d+)/g)].map((m) => Number(m[1]))
         seen.push(...idxs)
-        return { data: { failures: idxs.map((idx) => ({ idx, binary: 'ls', category: null })) }, usage: emptyUsage() }
+        return { data: { failures: idxs.map((idx) => ({ idx, binary: 'ls' })) }, usage: emptyUsage() }
       },
     }
     const res = await shellErrorAttribution.run({ llm, session: busy(27), log: { warn() {}, debug() {} } } as never)
@@ -137,7 +131,7 @@ describe('batching', () => {
       completeStructured: async (req: { user: string }) => {
         if (call++ === 0) throw new Error('provider hiccup')
         const idxs = [...req.user.matchAll(/### failure idx=(\d+)/g)].map((m) => Number(m[1]))
-        return { data: { failures: idxs.map((idx) => ({ idx, binary: 'ls', category: null })) }, usage: emptyUsage() }
+        return { data: { failures: idxs.map((idx) => ({ idx, binary: 'ls' })) }, usage: emptyUsage() }
       },
     }
     const res = await shellErrorAttribution.run({ llm, session: busy(27), log: { warn() {}, debug() {} } } as never)

@@ -21,7 +21,6 @@
 import { addUsage, emptyUsage } from '../core/model'
 import { registerProcessor } from '../core/registry'
 import { costOfUsage } from '../pricing/pricing'
-import { ERROR_CATEGORIES } from '../core/error-category'
 import { resultText } from '../core/result-text'
 import { shellSegments } from '../core/shell-binaries'
 import type { AnnotationInput } from '../store/types'
@@ -43,17 +42,21 @@ export const BLAME_KEY_PREFIX = 'blame:'
 const FAILURES_PER_CALL = 20
 
 /** Command and output budget per failure, so one enormous dump can't dominate the call. */
-const MAX_COMMAND_CHARS = 2_000
-const MAX_OUTPUT_CHARS = 2_000
+const MAX_COMMAND_CHARS = 20_000
+const MAX_OUTPUT_CHARS = 20_000
 
-/** What the model is asked to decide about one failed call. */
+/**
+ * What the model is asked to decide about one failed call.
+ *
+ * A `null` binary is a RECORDED answer, not an absent one: it means the model was
+ * shown this failure and said the output doesn't identify a culprit. Keeping those
+ * rows is what separates "asked and declined" from "never asked" when auditing.
+ */
 export interface ShellBlameVerdict {
   /** tool_calls.idx within the session. */
   idx: number
   /** The binary at fault, or null when the output genuinely doesn't say. */
   binary: string | null
-  /** A key from the shared taxonomy, or null. */
-  category: string | null
 }
 
 function outputSchema(): JsonSchema {
@@ -74,10 +77,6 @@ function outputSchema(): JsonSchema {
               type: ['string', 'null'],
               description:
                 'EXACTLY one of the binaries listed for that failure — the one whose own execution produced the error. null if the output does not make it clear, or if nothing ran (a user decline, a shell parse error). Never a name that is not in the list.',
-            },
-            category: {
-              type: ['string', 'null'],
-              description: 'One of the allowed category keys, or null if none fits.',
             },
           },
         },
@@ -123,9 +122,8 @@ export function buildPrompt(failures: Failure[]): { system: string; user: string
     'shell failed to parse the command so nothing ran. A wrong attribution is worse than null: it moves a failure ' +
     'onto a tool that did its job. Remember the shell rules — `&&` stops at the first failure so later commands ' +
     'never ran, `;` and `|` always continue, and the exit code is the last command that RAN. ' +
-    `Also classify each failure into the taxonomy below. Answer via the ${TOOL_NAME} tool.`
+    `Answer via the ${TOOL_NAME} tool.`
 
-  const taxonomy = ERROR_CATEGORIES.map((c) => `- ${c.key}: ${c.description}`).join('\n')
   const body = failures
     .map(
       (f) =>
@@ -140,7 +138,7 @@ export function buildPrompt(failures: Failure[]): { system: string; user: string
     )
     .join('\n\n')
 
-  return { system, user: `Error categories:\n${taxonomy}\n\n${body}` }
+  return { system, user: body }
 }
 
 /**
@@ -150,7 +148,6 @@ export function buildPrompt(failures: Failure[]): { system: string; user: string
  */
 export function normalizeVerdicts(data: Record<string, unknown>, failures: Failure[]): ShellBlameVerdict[] {
   const byIdx = new Map(failures.map((f) => [f.idx, f]))
-  const allowed = new Set(ERROR_CATEGORIES.map((c) => c.key))
   const raw = Array.isArray(data.failures) ? data.failures : []
   const out: ShellBlameVerdict[] = []
   const seen = new Set<number>()
@@ -160,10 +157,10 @@ export function normalizeVerdicts(data: Record<string, unknown>, failures: Failu
     const f = byIdx.get(idx)
     if (!f || seen.has(idx)) continue
     seen.add(idx)
+    // A name outside this failure's own binaries is downgraded to null rather than
+    // dropped: the model still answered, it just answered unusably.
     const binary = typeof o.binary === 'string' && f.binaries.includes(o.binary) ? o.binary : null
-    const category = typeof o.category === 'string' && allowed.has(o.category) ? o.category : null
-    if (!binary && !category) continue // nothing usable — leave the call unattributed
-    out.push({ idx, binary, category })
+    out.push({ idx, binary })
   }
   return out
 }
@@ -171,9 +168,14 @@ export function normalizeVerdicts(data: Record<string, unknown>, failures: Failu
 export const shellErrorAttribution: Processor = {
   name: 'shell-error-attribution',
   // 2: batching replaced a truncating cap. v1 runs judged only the first 20
-  // failures of a session, so a busy one was left partly attributed — and the
-  // cache would happily keep that partial result forever without this bump.
-  version: 2,
+  //    failures of a session, so a busy one was left partly attributed — and the
+  //    cache would happily keep that partial result forever without this bump.
+  // 3: dropped error-category classification. Nothing read it, and asking for it
+  //    disagreed with the regex on 46% of failures in both directions — the model
+  //    refining `command_failed` into something specific, but also overriding an
+  //    unmistakable `user_rejected`. Removing it also removes the taxonomy from
+  //    the prompt, leaving one question per failure instead of two.
+  version: 3,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {
@@ -204,7 +206,7 @@ export const shellErrorAttribution: Processor = {
     // can join on `blame:<idx>` instead of picking JSON apart per row.
     const annotations: AnnotationInput[] = verdicts.map((v) => ({
       key: BLAME_KEY_PREFIX + v.idx,
-      value: { binary: v.binary, category: v.category, model: llm.model },
+      value: { binary: v.binary, model: llm.model },
     }))
     return { annotations, selfCost }
   },
