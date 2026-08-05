@@ -1,6 +1,6 @@
 {
   "name": "tuneloop",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Local analytics for your AI coding sessions. Understand and improve your coding agent usage. tuneloop turns the session transcripts your AI coding tools already write into a local dashboard that gives you cost attribution (what each PR / feature cost) and recommendations for more effective usage grounded in your sessions.",
   "license": "MIT",
   "author": "Tuneloop (https://tuneloop.io)",
