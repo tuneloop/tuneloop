@@ -118,6 +118,15 @@ export function blameBinary(text: string, segments: ShellSegment[]): string | nu
   // to — a command that dumps 60 lines of a file before aborting was pushing its
   // abort line past this cap, letting the exit-position rule fire on a list that
   // never reached its end.
+  // Navigation builtins are blameable but never rostered: `cd docs && cat f` that
+  // dies on a missing `docs` should be charged to `cd`, not left to smear across
+  // `cat`. Since no tool_call_commands row is ever named `cd`, a blame of `cd`
+  // matches no binary and the error simply counts against none of them — which is
+  // right, because none of them ran.
+  for (const seg of segments) {
+    if (seg.builtin && !byBase.has(base(seg.builtin))) byBase.set(base(seg.builtin), seg.builtin)
+  }
+
   const found = new Set<string>()
   const allLines = text.split('\n')
   const lines = allLines.slice(0, MAX_SCAN_LINES)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { blameBinary } from './shell-blame'
-import { shellSegments, type ShellSegment } from './shell-binaries'
+import { shellBinaries, shellSegments, type ShellSegment } from './shell-binaries'
 
 /** A stand-in chain when the test cares about the binaries, not the command text. */
 const segs = (...binaries: string[]): ShellSegment[] =>
@@ -164,6 +164,27 @@ describe('blameBinary — naming the segment that failed', () => {
   it('takes the FIRST segment holding the word — the shell stops at the first one', () => {
     const cmd = 'echo === && printf === && ls'
     expect(blameBinary('(eval):1: == not found', shellSegments(cmd))).toBe('echo')
+  })
+
+  it('blames a navigation builtin the shell named, even though it is never a roster row', () => {
+    // `cd docs` failing means nothing after the `&&` ran, so charging `cat` would
+    // be wrong. `cd` is not a rostered binary, so blaming it charges the error to
+    // no binary at all — which is the correct outcome, not a lost one.
+    const cmd = 'cd docs && cat messaging.md && echo done'
+    expect(blameBinary('(eval):cd:1: no such file or directory: docs', shellSegments(cmd))).toBe('cd')
+  })
+
+  it('exposes navigation builtins on the segment without rostering them', () => {
+    const segs = shellSegments('cd docs && npm test')
+    expect(segs[0]).toMatchObject({ binary: null, builtin: 'cd' })
+    expect(segs[1]).toMatchObject({ binary: 'npm' })
+    // The roster still sees only real tools.
+    expect(shellBinaries('cd docs && npm test')).toEqual(['npm'])
+  })
+
+  it('does not make control keywords blameable', () => {
+    // `for`/`done` cannot fail in a way worth attributing.
+    expect(shellSegments('for f in a b; do npm test; done')[0]).toMatchObject({ binary: null, builtin: undefined })
   })
 
   it('stays silent when the rejected word is in a segment that runs nothing', () => {

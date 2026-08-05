@@ -32,6 +32,23 @@ const NAVIGATION = new Set([
   'done', 'fi', 'esac', 'break', 'continue', 'return', 'exit', 'shift',
 ])
 
+/**
+ * Navigation builtins that can genuinely FAIL and that the shell names when they
+ * do (`(eval):cd:1: no such file or directory: docs`). They are still not roster
+ * entities — nobody wants a `cd` row with 1,273 calls sitting second behind
+ * `echo`, and putting it in the multi-label would have it accumulating errors
+ * that belong to whatever ran after it. But a failure the shell explicitly pins
+ * on `cd` should be attributed to `cd` rather than left to smear across the rest
+ * of the chain, so blame may name one of these even though the roster never does.
+ *
+ * Control keywords (`for`, `done`, `fi`, `exit`) are deliberately absent: they
+ * don't fail in a way worth attributing.
+ */
+export const BLAMEABLE_BUILTINS = new Set([
+  'cd', 'pushd', 'popd', 'source', '.', 'export', 'unset', 'set',
+  'alias', 'local', 'readonly', 'declare', 'typeset',
+])
+
 /** Shell keywords that merely precede a command: step over and keep looking. */
 const PREFIXES = new Set(['do', 'then', 'else', 'elif', 'if', '!'])
 
@@ -85,6 +102,13 @@ const MAX_SHELL_DEPTH = 3
 export interface ShellSegment {
   /** The binary this segment runs; null when it runs none (`cd`, a test, a `$VAR`). */
   binary: string | null
+  /**
+   * The navigation builtin this segment runs, when it runs one — `cd`, `source`,
+   * `export`. Never a roster entity (see BLAMEABLE_BUILTINS), but a failure the
+   * shell pins on it can be attributed to it, which keeps that failure off the
+   * binaries that ran after it.
+   */
+  builtin?: string
   /** The segment's words, quotes stripped. */
   tokens: string[]
   /**
@@ -153,7 +177,7 @@ function collectSegments(segs: RawSegment[], depth: number): ShellSegment[] {
       out.push(...nested)
       continue
     }
-    out.push({ binary: binaryOf(tokens), tokens, sep })
+    out.push({ ...binaryOf(tokens), tokens, sep })
   }
   return out
 }
@@ -390,14 +414,14 @@ function skipHeredocBodies(s: string, start: number, delims: string[]): number {
 }
 
 /** The single binary one segment invokes, or null when it invokes none. */
-function binaryOf(tokens: string[]): string | null {
+function binaryOf(tokens: string[]): { binary: string | null; builtin?: string } {
   /** Set while stepping over a wrapper's own options (`sudo -u x`, `timeout 30`). */
   let wrapper: string | null = null
   let i = 0
   while (i < tokens.length) {
     const raw = tokens[i]!
     // A condition, not an invocation: `[ -x /bin/ls ]` names a path it does not run.
-    if (raw === '[' || raw === '[[' || raw === 'test') return null
+    if (raw === '[' || raw === '[[' || raw === 'test') return { binary: null }
     // Not a binary at any position: blank, a VAR=x prefix, a redirect, a flag, or
     // punctuation (`{`, `]`, `;` from an escaped `\;`).
     if (!raw || ASSIGNMENT.test(raw) || REDIRECT.test(raw) || raw.startsWith('-') || !/[A-Za-z0-9]/.test(raw)) {
@@ -406,7 +430,7 @@ function binaryOf(tokens: string[]): string | null {
     }
     // `"$CHROME" --headless` runs something we can't name without executing the
     // shell. Nothing beats a wrong label here, so the segment yields nothing.
-    if (raw.startsWith('$')) return null
+    if (raw.startsWith('$')) return { binary: null }
     if (wrapper) {
       if (NUMERIC_ARG_WRAPPERS.has(wrapper) && DURATION.test(raw)) {
         i += 1
@@ -417,20 +441,22 @@ function binaryOf(tokens: string[]): string | null {
     const name = binaryName(raw)
     // An unnameable first word means the segment came out of a mis-parse (a
     // regex fragment, a `{3,4}` quantifier); we don't know what ran, so say so.
-    if (!PLAUSIBLE_NAME.test(name)) return null
+    if (!PLAUSIBLE_NAME.test(name)) return { binary: null }
     if (PREFIXES.has(name)) {
       i += 1
       continue
     }
-    if (NAVIGATION.has(name)) return null
+    // Runs no tool, so it is never a roster row — but remember WHICH builtin, so a
+    // failure the shell pins on it can be attributed rather than smeared.
+    if (NAVIGATION.has(name)) return { binary: null, builtin: BLAMEABLE_BUILTINS.has(name) ? name : undefined }
     if (WRAPPERS.has(name)) {
       wrapper = name
       i += 1
       continue
     }
-    return name
+    return { binary: name }
   }
-  return null
+  return { binary: null }
 }
 
 /**

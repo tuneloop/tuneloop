@@ -100,7 +100,11 @@ export function collectFailures(session: Session): Failure[] {
   const out: Failure[] = []
   session.toolCalls.forEach((tc, idx) => {
     if (tc.action !== 'shell' || tc.result.ok || !tc.target.command) return
-    const binaries = shellSegments(tc.target.command).map((s) => s.binary).filter((b): b is string => !!b)
+    const segs = shellSegments(tc.target.command)
+    // Navigation builtins are candidates even though they are never roster rows:
+    // `cd missing && npm test` fails at `cd`, and without it in the list the model
+    // has no way to say so and the failure lands on `npm`.
+    const binaries = [...segs.map((s) => s.binary), ...segs.map((s) => s.builtin)].filter((b): b is string => !!b)
     if (new Set(binaries).size < 2) return
     out.push({
       idx,
@@ -234,7 +238,11 @@ export const shellErrorAttribution: Processor = {
   // 4: rewrote the prompt around worked examples, after auditing real verdicts
   //    showed the model reasoning from plausibility rather than from the output.
   //    Adds the missing `||` rule and the timeout case (a kill is not a verdict).
-  version: 4,
+  // 5: navigation builtins (`cd`, `source`, …) became blameable. The shell names
+  //    them outright — `(eval):cd:1: no such file or directory: docs` — and
+  //    without them in the candidate list that failure landed on whatever the
+  //    chain would have run next.
+  version: 5,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {

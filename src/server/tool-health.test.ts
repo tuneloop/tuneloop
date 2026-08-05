@@ -285,6 +285,18 @@ describe('toolHealth — blame for compound shell failures', () => {
     expect(row(r.builtin, 'npx')).toMatchObject({ calls: 1, errorCalls: 0 })
   })
 
+  it('charges a failure blamed on a navigation builtin to no binary at all', () => {
+    // `cd docs` failed, so `npm` never ran. `cd` is not a rostered binary, so the
+    // blame matches nothing and the error counts against neither — while the call
+    // still counts as one npm was part of.
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'cd docs && npm test', error: true, errorCategory: 'not_found', failedBinary: 'cd' },
+    ])
+    const r = toolHealth(store, { nowMs: NOW })
+    expect(row(r.builtin, 'npm')).toMatchObject({ calls: 1, errorCalls: 0 })
+    expect(row(r.builtin, 'cd')).toBeUndefined() // never a roster row
+  })
+
   it('keeps the multi-label when the output named nobody', () => {
     seedSession('s1', 'repoA', 2, [
       { name: 'Bash', action: 'shell', command: 'ls missing && npx tsc', error: true, errorCategory: 'command_failed' },
