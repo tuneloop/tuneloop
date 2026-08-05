@@ -41,10 +41,16 @@ via `parseInstalledMcp`.
 
 **Query `tool_calls` directly — never `capability_usage`.** The view is main-thread-only
 (`is_sidechain = 0`) and would silently undercount subagent MCP usage. Counts include
-sidechain calls, with a tooltip breakdown (skills precedent); the used/unused verdict
-stays main-thread via the shared `classify()` from
-`src/detectors/unused-capabilities.ts`, so this tab and the Recommendations tab can
-never disagree.
+sidechain calls, with a tooltip breakdown (skills precedent), **and so does the
+used/unused dot**: a server a subagent calls is in use, and removing it would break
+that subagent, so calling it unused would be advice to delete something live.
+
+The shared `classify()` from `src/detectors/unused-capabilities.ts` is still used, but
+for the remove/scope verdict behind `enoughData` and the scope-down chip — not for the
+dot. So the two tabs agree on removal ADVICE, and there is exactly one case where they
+read differently: a server called ONLY from a subagent is `used` here while the
+main-thread-scoped detector may still offer to remove it. Deliberate, and the safer
+direction of the two — but if that ever needs closing, it closes in the detector.
 
 ### Status + flags
 
@@ -215,8 +221,14 @@ In order, cloning the skill detail page skeleton:
    Recommendations ledger would drown the signals that need a decision.
 8. **Where it's used** — per-repo breakdown.
 9. **Details grid** — install scope + source file (MCP), type/url, first/last used.
-10. **Invocations list** (capped 100) with transcript deep-links + "Open in Sessions
-    tab" CTA.
+10. **Invocations list**, grouped by session, with transcript deep-links + "Open in
+    Sessions tab" CTA. Capped at 50 sessions × 25 items each, NOT a flat 100: a
+    global cap is spent on the first few busy sessions, which left 22 of 29 `echo`
+    groups expanding to nothing — including 8 that reported errors and listed none.
+    Worst case is therefore 1,250 items, and a busy binary reaches ~700 (~450 KB),
+    the page's largest payload. The caps bound the LISTING only; each group reports
+    its session's true total from an aggregate, so a capped list never understates
+    how often a tool ran.
 
 ## Empty-result tracking
 

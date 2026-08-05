@@ -11,6 +11,7 @@ import {
   HIGH_ERROR_SHARE,
   mcpServerFromToolName,
   toolErrorOccurrences,
+  toolErrorSamples,
   toolHealth,
   toolHealthDetail,
   TREND_MIN_CALLS,
@@ -314,6 +315,30 @@ describe('toolHealth — blame for compound shell failures', () => {
     expect(toolHealthDetail(store, 'builtin', 'npx', { nowMs: NOW })!.errorCategories).toEqual([])
     expect(toolErrorOccurrences(store, 'builtin', 'npx', 'not_found', { nowMs: NOW })).toEqual([])
     expect(toolErrorOccurrences(store, 'builtin', 'ls', 'not_found', { nowMs: NOW })).toHaveLength(1)
+  })
+
+  /**
+   * The advice pass reads these samples and pays an LLM to write a "Suggested fix"
+   * about the entity they belong to. Gathered without blame, `npx` would be handed
+   * `ls`'s failure and advised on someone else's error — the exact misattribution
+   * the blame rules exist to prevent, except here it is laundered through prose and
+   * cached under an evidence hash computed from the same polluted set.
+   */
+  it('keeps a blamed-away failure out of the other binary\'s advice evidence', () => {
+    seedSession('s1', 'repoA', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls missing && npx tsc', error: true, errorCategory: 'not_found', failedBinary: 'ls' },
+    ])
+    expect(toolErrorSamples(store, 'builtin', 'npx', { nowMs: NOW })).toEqual([])
+    expect(toolErrorSamples(store, 'builtin', 'ls', { nowMs: NOW })).toHaveLength(1)
+  })
+
+  /** An unattributed failure still counts for every binary involved — the honest multi-label. */
+  it('keeps an unattributed compound failure as evidence for each binary', () => {
+    seedSession('s2', 'repoB', 2, [
+      { name: 'Bash', action: 'shell', command: 'ls missing && npx tsc', error: true, errorCategory: 'not_found' },
+    ])
+    expect(toolErrorSamples(store, 'builtin', 'npx', { nowMs: NOW })).toHaveLength(1)
+    expect(toolErrorSamples(store, 'builtin', 'ls', { nowMs: NOW })).toHaveLength(1)
   })
 })
 
@@ -671,6 +696,33 @@ describe('toolErrorOccurrences', () => {
     expect(occ.map((o) => o.name)).toEqual(['mcp__sentry__a'])
   })
 
+  /**
+   * The category bars this list opens from are computed from a NARROWED collect()
+   * when a tool filter is on, so a list that ignores the filter contradicts the bar
+   * that was clicked — bar says 1, list shows every failure on the server.
+   */
+  it('narrows to one MCP tool when the page is filtered to it', () => {
+    seedSession('s1', 'repoA', 2, [
+      mcpCall('sentry', 'listIssues', { error: true, errorCategory: 'auth' }),
+      mcpCall('sentry', 'createIssue', { error: true, errorCategory: 'auth' }),
+    ])
+    const all = toolErrorOccurrences(store, 'mcp', 'sentry', 'auth', { nowMs: NOW }) as Array<{ name: string }>
+    expect(all.map((o) => o.name).sort()).toEqual(['mcp__sentry__createIssue', 'mcp__sentry__listIssues'])
+
+    const scoped = toolErrorOccurrences(store, 'mcp', 'sentry', 'auth', { nowMs: NOW }, {
+      tool: 'mcp__sentry__listIssues',
+    }) as Array<{ name: string }>
+    expect(scoped.map((o) => o.name)).toEqual(['mcp__sentry__listIssues'])
+  })
+
+  it("ignores a tool that is not one of the entity's own", () => {
+    seedSession('s1', 'repoA', 2, [mcpCall('sentry', 'listIssues', { error: true, errorCategory: 'auth' })])
+    const occ = toolErrorOccurrences(store, 'mcp', 'sentry', 'auth', { nowMs: NOW }, {
+      tool: 'mcp__other__thing',
+    }) as Array<{ name: string }>
+    expect(occ).toEqual([])
+  })
+
   it('stays inside the reported harness, so the list matches the category bar', () => {
     // Found on real data: `git` failures from a Pi session were listed under the
     // Claude Code roster, whose bar counted 3 while the list returned 4.
@@ -701,5 +753,34 @@ describe('toolErrorOccurrences', () => {
     const npm = toolErrorOccurrences(store, 'builtin', 'npm', 'test_failure', { nowMs: NOW })
     expect(npm.map((o) => o.binaryCount)).toEqual([2, 1])
     expect(toolErrorOccurrences(store, 'builtin', 'git', 'test_failure', { nowMs: NOW }).map((o) => o.binaryCount)).toEqual([2])
+  })
+})
+
+/**
+ * A harness you configured but have not used is the strongest case of the very
+ * state the "unused" flag exists to surface — and it was the one case the tab
+ * could not reach. Environment capture runs per adapter, gated only on the
+ * adapter having a reader, so `analyze` records a harness's MCP config whether or
+ * not it has ever made a tool call; discovering sources from tool_calls alone
+ * then hid exactly the servers nobody has called.
+ */
+describe('toolHealth — a source with MCP config but no tool calls', () => {
+  it('offers the harness and reports its servers as unused', () => {
+    seedSession('c1', 'repoA', 2, [mcpCall('sentry', 'a')]) // an active harness, so one exists to prefer
+    seedMcpConfig(store, { ghost: {}, spectre: {} }, 'codex')
+
+    const r = toolHealth(store, { nowMs: NOW, days: 30, source: 'codex' })
+    expect(r.availableSources).toContain('codex')
+    expect(r.source).toBe('codex')
+    expect(r.mcp.rows.map((x) => x.name).sort()).toEqual(['ghost', 'spectre'])
+    expect(r.mcp.totalUnused).toBe(2)
+    expect(r.mcp.totalUsed).toBe(0)
+  })
+
+  it('still prefers the harness that actually has calls when none is requested', () => {
+    seedSession('c1', 'repoA', 2, [mcpCall('sentry', 'a')])
+    seedMcpConfig(store, { ghost: {} }, 'codex')
+
+    expect(toolHealth(store, { nowMs: NOW, days: 30 }).source).toBe(SOURCE)
   })
 })

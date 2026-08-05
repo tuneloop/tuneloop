@@ -13,9 +13,14 @@
  *    signal worth a user's attention is a tool that keeps failing.
  *  - **Read `tool_calls`, never `capability_usage`.** That view is main-thread
  *    only and would silently undercount subagent MCP usage. Counts here include
- *    sidechain calls (broken out per row); the used/unused VERDICT still comes
- *    from the shared `classify()` in unused-capabilities, so this tab and the
- *    Recommendations tab can never disagree.
+ *    sidechain calls (broken out per row), and so does the used/unused DOT: a
+ *    server a subagent calls is in use, and removing it would break that subagent,
+ *    so reporting it as unused would be advice to delete something live.
+ *    `classify()` from unused-capabilities is still shared, but for the
+ *    remove/scope verdict behind `enoughData` and the scope-down chip — not for
+ *    the dot. That leaves one case where this tab and Recommendations can differ:
+ *    a server ONLY ever called from a subagent reads as used here while the
+ *    main-thread-scoped detector may still offer to remove it.
  *  - **One clock: tool-run time (`t.ts`).** Not session start. See health-window.
  *
  * Pure reads over the store — analyze WRITES, serve/this only READ.
@@ -72,6 +77,12 @@ const MAX_CALL_SESSIONS = 50
  * Per SESSION, not across all of them. A global cap was spent almost entirely on
  * the first few busy sessions — 22 of 29 groups for `echo` expanded to nothing,
  * and 8 that reported errors listed none of them.
+ *
+ * The two multiply: 1,250 items is the ceiling, and a busy binary really does reach
+ * ~700 items / ~450 KB (measured on `echo`, 1,570 calls). Stated rather than left to
+ * be discovered, since it is the page's largest payload by far. Lowering either
+ * number re-creates the starvation above; the way to shrink it is to fetch a
+ * group's items when it is expanded instead of shipping all of them up front.
  */
 const MAX_ITEMS_PER_SESSION = 25
 
@@ -433,10 +444,30 @@ function hasMcpInventory(store: Store, source: string): boolean {
   return !!row
 }
 
-/** Every source with tool calls, sorted — a neutral order, no harness privileged. */
+/**
+ * Every source the tab can say something about, sorted — a neutral order, no
+ * harness privileged.
+ *
+ * Tool calls are the obvious half. MCP config is the other: environment capture
+ * runs per adapter, gated only on the adapter having a reader, so `analyze` records
+ * a harness's servers whether or not it has ever made a call. Discovering sources
+ * from tool_calls alone therefore hid the one case the unused flag exists for — a
+ * harness you configured and never used, where EVERY server is unused.
+ *
+ * This only widens the chooser. `resolveSource` still prefers the harness with the
+ * most calls, so a configured-but-unused one never becomes the default view.
+ *
+ * `snapshot_json != 'null'` skips tombstones — a removed config is written as a null
+ * payload, and a harness that only ever had one has nothing to show. A harness that
+ * had real config, removed it, and never made a call still slips through to an empty
+ * roster; that is rare enough not to be worth a per-key newest-row subquery.
+ */
 function availableToolSources(store: Store): string[] {
   const rows = store.queryAll(
-    `SELECT DISTINCT s.source AS source FROM tool_calls t JOIN sessions s ON s.id = t.session_id`,
+    `SELECT DISTINCT s.source AS source FROM tool_calls t JOIN sessions s ON s.id = t.session_id
+     UNION
+     SELECT DISTINCT source FROM environment_snapshots
+      WHERE category = 'mcp' AND snapshot_json != 'null'`,
   ) as Array<{ source: string }>
   return rows.map((r) => r.source).sort((a, b) => a.localeCompare(b))
 }
@@ -607,8 +638,9 @@ function collect(store: Store, win: HealthWindow, rawName?: string): RosterData 
   // Seed a row for every installed-but-never-called server, so the roster can show it.
   if (!observedOnly) for (const name of installed.keys()) ensure('mcp', name)
 
-  // The used/unused verdict comes from the SHARED policy, main-thread scoped, so this
-  // tab and the Recommendations tab can never reach different conclusions.
+  // The remove/scope verdict comes from the SHARED policy, main-thread scoped, so the
+  // removal ADVICE this tab shows matches what Recommendations would say. The used/
+  // unused dot is set separately, from sidechain-inclusive counts — see the header.
   const sessionCounts = sessionCountsByRepo(store, source, sinceIso, untilIso)
   const installedCaps: InstalledCap[] = installedList.map((i) => ({ kind: 'mcp', name: i.name, scope: i.scope, repo: i.repo }))
   const invokedCaps = source
@@ -1167,6 +1199,7 @@ export function toolErrorOccurrences(
   name: string,
   category: string,
   win: HealthWindow = {},
+  opts: { tool?: string } = {},
 ): ErrorOccurrence[] {
   const data = collect(store, win)
   const agg = data.entities.get(entityKey(kind, name))
@@ -1174,7 +1207,13 @@ export function toolErrorOccurrences(
   // `to` is left off for an open-ended window rather than pinned to "now": the tool
   // clock is second-resolution, so a millisecond-bearing upper bound would drop a
   // call made in that same second.
-  const names = agg.kind === 'mcp' ? [...agg.perRawName.keys()] : agg.shell ? [] : [agg.name]
+  const allNames = agg.kind === 'mcp' ? [...agg.perRawName.keys()] : agg.shell ? [] : [agg.name]
+  // A narrowed page's category bars are computed from a narrowed collect(), so the
+  // list behind a bar has to narrow too or it contradicts the number that opened it.
+  // Filtered to a name this entity never called, the honest answer is nothing —
+  // falling back to every name would answer a question nobody asked.
+  const names = opts.tool ? allNames.filter((n) => n === opts.tool) : allNames
+  if (opts.tool && !names.length) return []
   return store.errorOccurrences(category, { from: data.sinceIso, to: data.untilIso }, names, {
     shellBinary: agg.shell ? agg.name : undefined,
     clock: 'tool',
@@ -1206,11 +1245,20 @@ export function toolErrorSamples(store: Store, kind: ToolKind, name: string, win
   const agg = data.entities.get(entityKey(kind, name))
   if (!agg) return []
   const scope = entityScope(agg)
+  // Blame applies to the numerator here exactly as it does to the roster's error
+  // counts: a compound failure pinned on another binary is not this one's evidence.
+  // Without it the advice pass pays an LLM to write a "Suggested fix" for `npx` out
+  // of `ls`'s error. Spelled against the entity's own name rather than the shared
+  // BLAMED fragment, whose `c.binary` lives inside entityScope's EXISTS subquery and
+  // is not in scope out here. Only shell entities carry blame — for everything else
+  // the columns are NULL, so the join would be dead weight.
+  const blame = agg.shell ? { sql: ` AND (${EFFECTIVE_BLAME} IS NULL OR ${EFFECTIVE_BLAME} = ?)`, params: [agg.name] } : { sql: '', params: [] }
   return store.queryAll(
     `SELECT t.session_id AS sessionId, t.idx AS idx, t.name AS name, t.command AS command,
             t.error_category AS category, t.error_message AS message, ${TS_NORM} AS ts
      FROM tool_calls t JOIN sessions s ON s.id = t.session_id
-     WHERE s.source = ? AND ${IN_WINDOW} AND t.is_error = 1 AND ${scope.sql}
+     ${agg.shell ? BLAME_JOIN : ''}
+     WHERE s.source = ? AND ${IN_WINDOW} AND t.is_error = 1 AND ${scope.sql}${blame.sql}
      ORDER BY ts DESC, t.idx ASC
      LIMIT ?`,
     data.source,
@@ -1218,6 +1266,7 @@ export function toolErrorSamples(store: Store, kind: ToolKind, name: string, win
     data.untilIso ?? null,
     data.untilIso ?? null,
     ...scope.params,
+    ...blame.params,
     limit,
   ) as ToolErrorSample[]
 }

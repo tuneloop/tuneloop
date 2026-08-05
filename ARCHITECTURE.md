@@ -126,9 +126,14 @@ interface Detector {
 - **X** — cross-session LLM: a rolling-window synthesis over many sessions — a new
   analysis-spend shape. *recurring-themes.*
 
-Detectors get a read-only view of the store (`ctx.store` for SQL, `loadSession` to
-hydrate a transcript, `unseenSessions()` for the incremental delta) and never write
-directly — the runner persists what `run()` returns. Adding one mirrors a
+Detectors read the store through `ctx.store` (SQL), `loadSession` (hydrate a
+transcript), and `unseenSessions()` (the incremental delta). The runner owns
+**insight** persistence: it writes what `run()` returns and marks sessions seen only
+if that write succeeds. A detector whose product is its own table writes that table
+directly — `kitchen-sink` → `kitchen_sink_verdict`, `tool-error-advice` →
+`tool_error_advice` — because `DetectorResult` carries only insights, cost and seen,
+and for an expensive LLM pass, writing each row as it is drafted means an
+interrupted run keeps what it already paid for. Adding one mirrors a
 processor: implement `Detector`, `registerDetector` it, and add the import to
 `src/detectors/index.ts`. The LLM detectors run in a shared "Step 2/2" phase after
 the processors on the cheap per-session model by default; a detector opts into the

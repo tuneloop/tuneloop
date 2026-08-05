@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { filterRows, isToolSelected, rollupTail, SHELL_TOP_N } from './tools-roster'
+import { detailStillCurrent, filterRows, isToolSelected, rollupTail, SHELL_TOP_N } from './tools-roster'
 import type { RosterRow } from './tools-roster'
 
 const row = (name: string, o: Partial<RosterRow> = {}): RosterRow => ({ name, flags: [], ...o })
@@ -80,5 +80,33 @@ describe('isToolSelected', () => {
     expect(isToolSelected(undefined, undefined)).toBe(false)
     expect(isToolSelected(undefined, '')).toBe(false)
     expect(isToolSelected('', '')).toBe(false)
+  })
+})
+
+describe('detailStillCurrent', () => {
+  const req = { kind: 'builtin', name: 'grep', filter: '', win: '90d' }
+
+  it('accepts a response for the page still on screen', () => {
+    expect(detailStillCurrent(req, { ...req })).toBe(true)
+  })
+
+  it('drops a response for an entity navigated away from', () => {
+    expect(detailStillCurrent(req, { ...req, name: 'rg' })).toBe(false)
+    expect(detailStillCurrent(req, { ...req, kind: 'mcp' })).toBe(false)
+  })
+
+  /**
+   * The two the old name-only guard let through. Both refetch WITHOUT changing the
+   * entity, so a late reply passed the check and was then cached under the new
+   * key — 90-day numbers filed as 30-day, served from cache and never correcting
+   * itself; or chip A's reply landing after chip B and reverting the filter.
+   */
+  it('drops a response whose window or filter the page has moved past', () => {
+    expect(detailStillCurrent(req, { ...req, win: '30d' })).toBe(false)
+    expect(detailStillCurrent(req, { ...req, filter: 'mcp__atlassian__getJiraIssue' })).toBe(false)
+  })
+
+  it('treats a missing filter and an empty one as the same page', () => {
+    expect(detailStillCurrent({ ...req, filter: undefined }, { ...req, filter: '' })).toBe(true)
   })
 })

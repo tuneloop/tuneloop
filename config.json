@@ -12,7 +12,7 @@
   },
   "detectors": {
     "cache-miss": { "enabled": true },
-    "unused-capabilities": { "enabled": true },
+    "unused-capabilities": { "enabled": false },
     "context-exhaustion": { "enabled": true },
     "recurring-themes": { "enabled": true },
     "kitchen-sink": { "enabled": true },

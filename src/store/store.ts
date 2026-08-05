@@ -72,6 +72,15 @@ export interface ErrorOccurrence {
   binaryCount?: number
 }
 
+/**
+ * Which roster a tool_error_advice row belongs to — the `kind` column's only two
+ * values. Spelled out here rather than imported from the server's `ToolKind`: the
+ * store is the lower layer and never imports from `server/`. Narrow rather than
+ * `string` so a transposed argument (`'sentry'` where a kind belongs) is a compile
+ * error instead of a row that is written and then never read back.
+ */
+export type ToolEntityKind = 'mcp' | 'builtin'
+
 /** The cached LLM "Suggested fix" card for one tool/server (see tool_error_advice). */
 export interface ToolErrorAdviceRow {
   diagnosis: string
@@ -3482,7 +3491,7 @@ export class Store {
    * never earned a high-error pill, or the pass declined it). The dashboard
    * hides the card entirely in that case rather than showing an empty section.
    */
-  toolErrorAdvice(source: string, kind: string, name: string): ToolErrorAdviceRow | null {
+  toolErrorAdvice(source: string, kind: ToolEntityKind, name: string): ToolErrorAdviceRow | null {
     const row = this.db
       .prepare(
         `SELECT diagnosis, snippet, evidence_hash AS evidenceHash, model, generated_at AS generatedAt
@@ -3495,7 +3504,7 @@ export class Store {
   /** Cache (or refresh) one entity's advice card, keyed on the evidence it was drafted from. */
   setToolErrorAdvice(
     source: string,
-    kind: string,
+    kind: ToolEntityKind,
     name: string,
     a: { diagnosis: string; snippet: string; evidenceHash: string; model?: string },
   ): void {

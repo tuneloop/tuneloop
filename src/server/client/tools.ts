@@ -19,7 +19,7 @@ import {
   fact, pageTile, rateChart, sectHead, sourceLabel, sparkline, TIME_PRESETS,
   trendChart, trendGranLabel, wireTrendTooltip, windowPhrase,
 } from './health-ui';
-import { filterRows, isToolSelected, rollupTail } from './tools-roster';
+import { detailStillCurrent, filterRows, isToolSelected, rollupTail } from './tools-roster';
 
 // Cached roster, keyed on the window+source it was fetched for. A window change
 // refetches; an unchanged window repaints from cache.
@@ -527,7 +527,8 @@ function backHead(kind) {
 
 // The detail page is served whole by /api/tool-health-detail (its headline row is
 // literally the roster's row, so the two can't disagree). Paints a loading frame,
-// then the page; a response for a page we've navigated away from is dropped.
+// then the page; a response the page has moved past is dropped — see
+// detailStillCurrent for why the entity name alone can't decide that.
 function paintToolPage(box, name) {
   var key = state.toolKind + ' ' + name + ' ' + (state.toolFilter || '');
   if (tlDetail && tlDetailKey === key + '|' + tlWinKey()) { renderToolPage(box, tlDetail); return; }
@@ -536,10 +537,14 @@ function paintToolPage(box, name) {
   var back = box.querySelector('#th-back');
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
 
-  get('/api/tool-health-detail?kind=' + encodeURIComponent(state.toolKind) + '&name=' + encodeURIComponent(name) +
-      (state.toolFilter ? '&tool=' + encodeURIComponent(state.toolFilter) : '') + '&' + tlWinQuery())
+  // Snapshot what this request IS, so the reply can be matched against the page as
+  // it stands when it lands rather than against whatever it happens to find there.
+  var sent = { kind: state.toolKind, name: name, filter: state.toolFilter || '', win: tlWinKey() };
+  get('/api/tool-health-detail?kind=' + encodeURIComponent(sent.kind) + '&name=' + encodeURIComponent(name) +
+      (sent.filter ? '&tool=' + encodeURIComponent(sent.filter) : '') + '&' + tlWinQuery())
     .then(function (d) {
       if (state.tool !== name) return;
+      if (!detailStillCurrent(sent, { kind: state.toolKind, name: state.tool, filter: state.toolFilter, win: tlWinKey() })) return;
       if (!d) { // the entity has nothing in this window (a stale link, or a narrowed window)
         state.tool = null;
         syncHash({ replace: true });
@@ -550,7 +555,9 @@ function paintToolPage(box, name) {
       // answer so the control and the numbers agree.
       state.toolFilter = d.tool || '';
       tlDetail = d;
-      tlDetailKey = state.toolKind + ' ' + name + ' ' + (state.toolFilter || '') + '|' + tlWinKey();
+      // Keyed on the window this response was REQUESTED for. Recomputing it here
+      // would file the answer under whatever window is current instead.
+      tlDetailKey = sent.kind + ' ' + name + ' ' + (state.toolFilter || '') + '|' + sent.win;
       renderToolPage($('#tool-health'), d);
     })
     .catch(function () {
@@ -711,9 +718,16 @@ function renderToolPage(box, d) {
  * rather than as "nothing to say here".
  */
 function loadFixCard(d) {
+  // Only ever requested for an unnarrowed page, so the filter it was sent under is ''.
+  // The host div is rendered on EVERY detail page (hidden until filled), so without
+  // this a reply landing after a chip click writes server-wide advice onto a page
+  // narrowed to one tool — the card then claims to describe "these failures" while
+  // every number above it says otherwise, and nothing re-hides it until you navigate.
+  var sent = { kind: d.kind, name: d.name, filter: '', win: tlWinKey() };
   get('/api/tool-error-advice?kind=' + encodeURIComponent(d.kind) + '&name=' + encodeURIComponent(d.name) + '&' + tlWinQuery())
     .then(function (a) {
       if (!a || state.tool !== d.name) return;
+      if (!detailStillCurrent(sent, { kind: state.toolKind, name: state.tool, filter: state.toolFilter, win: tlWinKey() })) return;
       var host = $('#th-fix');
       if (!host) return;
       var stamp = a.generatedAt ? ' · drafted ' + dayOf(a.generatedAt) : '';
@@ -989,8 +1003,12 @@ function toggleOcc(host, item, cat, tips, d) {
   if (panel.getAttribute('data-loaded')) return;
   panel.innerHTML = '<div class="occ-loading">Loading…</div>';
   var total = parseInt(item.getAttribute('data-total'), 10) || 0;
+  // Carry the page's tool filter: the bars are counted from narrowed aggregates, so
+  // a list fetched unnarrowed would answer with the whole server's failures under a
+  // number that describes one tool.
   get('/api/error-occurrences?category=' + encodeURIComponent(cat) +
-      '&kind=' + encodeURIComponent(d.kind) + '&name=' + encodeURIComponent(d.name) + '&' + tlWinQuery())
+      '&kind=' + encodeURIComponent(d.kind) + '&name=' + encodeURIComponent(d.name) +
+      (d.tool ? '&tool=' + encodeURIComponent(d.tool) : '') + '&' + tlWinQuery())
     .then(function (occ) {
       panel.setAttribute('data-loaded', '1');
       renderOcc(panel, cat, occ || [], tips, total);

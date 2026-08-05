@@ -39,6 +39,36 @@ export function isToolSelected(raw: string | null | undefined, active: string | 
   return !!raw && !!active && raw === active
 }
 
+/** Everything that decides WHICH detail page a response belongs to. */
+export interface DetailRequest {
+  kind: string
+  name: string
+  filter?: string | null
+  win: string
+}
+
+/**
+ * Is an arriving detail response still the page the user is looking at?
+ *
+ * The entity name alone is not enough, because the window selector and the tool
+ * filter both refetch the SAME entity. A late reply then passed the check and was
+ * cached under whatever key was current when it landed — 90-day numbers filed as
+ * 30-day, still served from cache afterwards because the key looked right. The
+ * filter case is worse than a wrong number: the handler copies the response's tool
+ * back into state, so chip A replying after chip B silently reverts the filter.
+ *
+ * Compare the request as SENT against state as it is now — not against anything in
+ * the response, which may legitimately differ when the server declines a filter.
+ */
+export function detailStillCurrent(sent: DetailRequest, now: DetailRequest): boolean {
+  return (
+    sent.kind === now.kind &&
+    sent.name === now.name &&
+    (sent.filter || '') === (now.filter || '') &&
+    sent.win === now.win
+  )
+}
+
 /**
  * Apply the status filter + name search. The empty status is each roster's
  * DEFAULT view: MCP hides installed-but-unused servers (hygiene, not today's

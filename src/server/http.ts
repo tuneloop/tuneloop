@@ -362,7 +362,15 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const kind = url.searchParams.get('kind')
     const name = url.searchParams.get('name')
     if ((kind === 'mcp' || kind === 'builtin') && name) {
-      sendJson(res, 200, toolErrorOccurrences(store, kind, name, category, skillWindowFrom(url.searchParams)))
+      // `tool` mirrors the detail page's own filter, so an expanded category bar
+      // lists the same failures it was counted from.
+      sendJson(
+        res,
+        200,
+        toolErrorOccurrences(store, kind, name, category, skillWindowFrom(url.searchParams), {
+          tool: url.searchParams.get('tool') ?? undefined,
+        }),
+      )
       return
     }
     const window = { from: url.searchParams.get('from') ?? undefined, to: url.searchParams.get('to') ?? undefined }
