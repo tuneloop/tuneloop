@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { filterRows, rollupTail, SHELL_TOP_N } from './tools-roster'
+import { filterRows, isToolSelected, rollupTail, SHELL_TOP_N } from './tools-roster'
 import type { RosterRow } from './tools-roster'
 
 const row = (name: string, o: Partial<RosterRow> = {}): RosterRow => ({ name, flags: [], ...o })
@@ -55,5 +55,30 @@ describe('rollupTail', () => {
   it('leaves non-shell built-ins alone — only the shell tail folds', () => {
     const rows = [...many(SHELL_TOP_N + 2), row('Read'), row('Edit')]
     expect(names(rollupTail(rows))).toEqual(['bin' + SHELL_TOP_N, 'bin' + (SHELL_TOP_N + 1)])
+  })
+})
+
+describe('isToolSelected', () => {
+  it('marks the row whose raw name is the active filter', () => {
+    expect(isToolSelected('mcp__atlassian__getJiraIssue', 'mcp__atlassian__getJiraIssue')).toBe(true)
+    expect(isToolSelected('mcp__atlassian__editJiraIssue', 'mcp__atlassian__getJiraIssue')).toBe(false)
+  })
+
+  it('selects nothing while the page is unfiltered', () => {
+    expect(isToolSelected('mcp__atlassian__getJiraIssue', undefined)).toBe(false)
+    expect(isToolSelected('mcp__atlassian__getJiraIssue', '')).toBe(false)
+    expect(isToolSelected('mcp__atlassian__getJiraIssue', null)).toBe(false)
+  })
+
+  /**
+   * The regression this exists for: a `serve` older than the payload's `raw` field
+   * sends rows without one, and the browser still loads the current app.js off
+   * disk. Bare `raw === active` then made every row `undefined === undefined` —
+   * the whole table lit up as selected, and every click filtered on "undefined".
+   */
+  it('never selects a row that has no raw name, even unfiltered', () => {
+    expect(isToolSelected(undefined, undefined)).toBe(false)
+    expect(isToolSelected(undefined, '')).toBe(false)
+    expect(isToolSelected('', '')).toBe(false)
   })
 })

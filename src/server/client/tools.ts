@@ -19,7 +19,7 @@ import {
   fact, pageTile, rateChart, sectHead, sourceLabel, sparkline, TIME_PRESETS,
   trendChart, trendGranLabel, wireTrendTooltip, windowPhrase,
 } from './health-ui';
-import { filterRows, rollupTail } from './tools-roster';
+import { filterRows, isToolSelected, rollupTail } from './tools-roster';
 
 // Cached roster, keyed on the window+source it was fetched for. A window change
 // refetches; an unchanged window repaints from cache.
@@ -655,7 +655,7 @@ function renderToolPage(box, d) {
   Array.prototype.forEach.call(box.querySelectorAll('.th-tool-row'), function (el) {
     el.onclick = function () {
       var raw = this.getAttribute('data-raw');
-      setToolFilter(raw === d.tool ? '' : raw);
+      setToolFilter(isToolSelected(raw, d.tool) ? '' : raw);
     };
   });
   var clear = box.querySelector('.th-scope-clear');
@@ -716,14 +716,18 @@ function toolTable(rows, active) {
   return '<div class="th-table">' +
     '<div class="th-tr th-th"><span>Tool</span><span>Calls</span><span>Errors</span><span>Last used</span></div>' +
     rows.map(function (t) {
-      var on = t.raw === active;
-      return '<button type="button" class="th-tr th-tool-row' + (on ? ' on' : '') + '" data-raw="' + esc(t.raw) + '"' +
-        ' title="' + esc(on ? 'Showing only ' + t.name + ' — click to clear' : 'Show only ' + t.name) + '">' +
+      var on = isToolSelected(t.raw, active);
+      // A row with no raw name cannot filter anything, so it renders as plain text
+      // rather than as a button that looks clickable and silently does nothing.
+      var cells =
         '<span class="th-tool-name">' + esc(t.name) + '</span>' +
         '<span>' + num(t.calls) + '</span>' +
         '<span' + (t.errorCalls > 0 ? ' class="th-metric-bad"' : '') + '>' + num(t.errorCalls) + '</span>' +
-        '<span>' + esc(t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : '—') + '</span>' +
-        '</button>';
+        '<span>' + esc(t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : '—') + '</span>';
+      if (!t.raw) return '<div class="th-tr">' + cells + '</div>';
+      return '<button type="button" class="th-tr th-tool-row' + (on ? ' on' : '') + '" data-raw="' + esc(t.raw) + '"' +
+        ' title="' + esc(on ? 'Showing only ' + t.name + ' — click to clear' : 'Show only ' + t.name) + '">' +
+        cells + '</button>';
     }).join('') + '</div>';
 }
 

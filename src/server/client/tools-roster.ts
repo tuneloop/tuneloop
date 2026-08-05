@@ -25,6 +25,21 @@ export interface RosterRow {
 export var SHELL_TOP_N = 15
 
 /**
+ * Is this per-tool row the page's active filter?
+ *
+ * Both operands must be real names. Plain `raw === active` looks right and is
+ * not: an unfiltered page has no active tool, so a row that also lacks a raw
+ * name matches `undefined === undefined` and selects itself. That is not
+ * hypothetical — client assets are read from disk per request while API handlers
+ * live in the running process, so a `serve` predating the payload's `raw` field
+ * serves the current app.js over rows that have none, and every row in the table
+ * lights up as selected while every click filters on the string "undefined".
+ */
+export function isToolSelected(raw: string | null | undefined, active: string | null | undefined): boolean {
+  return !!raw && !!active && raw === active
+}
+
+/**
  * Apply the status filter + name search. The empty status is each roster's
  * DEFAULT view: MCP hides installed-but-unused servers (hygiene, not today's
  * problem), while built-ins have no unused state to hide, so they show everything.
