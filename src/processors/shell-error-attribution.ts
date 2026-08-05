@@ -147,10 +147,14 @@ const SYSTEM_PROMPT = [
   'If the error came from the SHELL itself (a word it could not resolve, a syntax error) rather than from a',
   'program, it belongs to the segment containing the text the shell complained about.',
   '',
-  'Answer null — a perfectly good answer — when the output does not identify a culprit, when nothing ran at all',
-  '(the user declined the call, or the shell failed to parse it), or when the command was killed from outside',
-  '(a timeout, an interrupt); a kill is not a verdict on any command. A wrong attribution is worse than null,',
-  'because it moves a failure onto a tool that did its job.',
+  'Null is NOT a safe default. A failure with no named culprit is charged to EVERY binary in the chain, so',
+  'answering null on a three-command chain marks two innocent commands as having failed. Naming your best',
+  'candidate is wrong at most once. So when the output does not settle it, still commit: weigh what the shell',
+  'rules allow (which commands can have run at all), which one the surviving output is consistent with, and',
+  'which exit code fits — then name the one the evidence leans toward, even if you are not certain.',
+  '',
+  'Reserve null for when NOTHING ran and so no command failed: the user declined the call, the shell could not',
+  'parse it, or it was killed from outside (a timeout, an interrupt) — a kill is not a verdict on any command.',
   '',
   'Examples:',
   '',
@@ -174,9 +178,15 @@ const SYSTEM_PROMPT = [
   '  output:  ssh: connect to host backup-host port 22: Connection refused',
   '  answer:  ssh — a pipeline reports the last element\'s status.',
   '',
-  '  command: make clean && make build',
-  '  output:  Error: Exit code 2',
-  '  answer:  null — both are plausible and nothing here distinguishes them. Do not guess.',
+  '  command: mkdir -p dist && cp -r assets dist/ && zip -qr dist.zip dist',
+  '  output:  Error: Exit code 12',
+  '  answer:  zip — nothing names itself, so lean on what the evidence allows: mkdir -p and cp are the',
+  '           routine steps, exit 12 is not a code either of them returns, and zip is the one left. Commit to',
+  '           it rather than answering null, which would mark mkdir and cp as failed too.',
+  '',
+  '  command: rm -rf build && npm ci',
+  '  output:  User rejected tool use',
+  '  answer:  null — nothing ran, so no command failed. This is what null is for.',
   '',
   `Answer via the ${TOOL_NAME} tool.`,
 ].join('\n')
@@ -242,7 +252,11 @@ export const shellErrorAttribution: Processor = {
   //    them outright — `(eval):cd:1: no such file or directory: docs` — and
   //    without them in the candidate list that failure landed on whatever the
   //    chain would have run next.
-  version: 5,
+  // 6: stopped telling the model that a wrong answer is worse than null. It isn't:
+  //    null fans the failure across EVERY binary in the chain, so on three
+  //    commands it marks two innocent ones, where a wrong guess marks one. Null is
+  //    now reserved for "nothing ran".
+  version: 6,
   kind: 'enrichment',
   needs: { llm: true },
   async run(ctx: ProcessorContext): Promise<ProcessorResult> {

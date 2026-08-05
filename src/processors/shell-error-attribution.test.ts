@@ -82,7 +82,20 @@ describe('buildPrompt', () => {
     // the examples have to include ones that don't resolve that way.
     const { system } = buildPrompt(collectFailures(session([shell('a && b', false)])))
     expect(system).toContain('answer:  echo —') // beats pkg-config in its example
-    expect(system).toContain('answer:  null —') // abstaining is demonstrated, not just allowed
+  })
+
+  it('does not present null as the safe answer — it is an attribution to everyone', () => {
+    // A null verdict charges the failure to EVERY binary in the chain, so on three
+    // commands it marks two innocent ones where a wrong guess marks one. The prompt
+    // used to claim the opposite.
+    const { system } = buildPrompt(collectFailures(session([shell('a && b', false)])))
+    expect(system).not.toMatch(/wrong attribution is worse than null/i)
+    expect(system).not.toMatch(/do not guess/i)
+    expect(system).toMatch(/Null is NOT a safe default/)
+    expect(system).toMatch(/EVERY binary in the chain/)
+    // Null keeps exactly one job: nothing ran.
+    expect(system).toMatch(/Reserve null for when NOTHING ran/)
+    expect(system).toContain('answer:  null — nothing ran')
   })
 })
 
