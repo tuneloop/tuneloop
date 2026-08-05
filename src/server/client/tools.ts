@@ -211,19 +211,20 @@ function paintTools() {
 }
 
 /**
- * The two rosters are sub-tabs, styled as the top nav's tabs are.
+ * The two rosters are one dataset seen two ways, so they get the segmented control
+ * the Artifacts tab already uses for section scoping — not a tab row.
  *
- * Earlier passes put the switch in the far corner (easy to miss) and then in the
- * heading (read as a title with badges, and its count stuttered against the
- * SERVERS stat directly beneath). Borrowing the tab row's own visual language —
- * serif, muted until active, emerald underline — says "navigation" without
- * having to be decoded, and the stat strip below stays the only place numbers live.
+ * Earlier passes made this a corner control (missable), then the heading (read as a
+ * title with badges), then sub-tabs — but sub-tabs repeated the top nav's own
+ * language a row below it, leaving no cue which level you were on. A filled pill
+ * group shares no shape with a tab, so the emerald underline stays unambiguously
+ * "which page", and this stays "which half of the page".
  */
-function kindTabs() {
-  return '<div class="th-subtabs" role="tablist">' + KINDS.map(function (k) {
+function kindSeg() {
+  return '<div class="seg seg-primary th-kinds">' + KINDS.map(function (k) {
     var on = k.k === state.toolKind;
-    return '<button type="button" class="th-subtab' + (on ? ' on' : '') + '" data-k="' + k.k + '"' +
-      ' role="tab" aria-selected="' + (on ? 'true' : 'false') + '" title="' + esc(k.full) + '">' +
+    return '<button type="button"' + (on ? ' class="on"' : '') + ' data-k="' + k.k + '"' +
+      ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(k.full) + '">' +
       esc(k.l) + '</button>';
   }).join('') + '</div>';
 }
@@ -231,7 +232,7 @@ function kindTabs() {
 function paintRoster(box, d) {
   box.innerHTML =
     '<div class="panel sk-panel">' +
-      kindTabs() +
+      kindSeg() +
       '<div class="sk-overview" id="th-overview"></div>' +
       '<div class="th-overall" id="th-overall"></div>' +
       '<div class="filters sk-filters" id="th-filters"></div>' +
@@ -239,7 +240,7 @@ function paintRoster(box, d) {
       '<div class="th-roster-note" id="th-roster-note"></div>' +
     '</div>';
 
-  Array.prototype.forEach.call(box.querySelectorAll('.th-subtab'), function (b) {
+  Array.prototype.forEach.call(box.querySelectorAll('.th-kinds button'), function (b) {
     b.onclick = function () { openTool(this.getAttribute('data-k'), null); };
   });
 

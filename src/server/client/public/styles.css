@@ -1003,21 +1003,12 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
    Layout and typography come from the shared health tokens (.sk-*, see
    client/health-ui.ts); only the chrome that is unique to this tab lives here. */
 
-/* The two rosters are sub-tabs — see kindTabs(). Deliberately the same shape as
-   .tab in the top nav (serif, muted until active, emerald underline) so the row
-   reads as navigation on sight; only the scale is stepped down to keep it
-   subordinate. Counts live in the stat strip below, never on the tabs — the tab
-   label and the strip's first stat name the same thing, so a count here stutters. */
-.th-subtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
-.th-subtab {
-  border: 0; background: transparent; cursor: pointer;
-  padding: 2px 16px 11px; margin-bottom: -1px;
-  font-family: Georgia, serif; font-size: 15px; color: var(--muted);
-  border-bottom: 2px solid transparent;
-}
-.th-subtab:first-child { padding-left: 0; }
-.th-subtab:hover { color: var(--ink); }
-.th-subtab.on { color: var(--ink); border-bottom-color: var(--emerald); }
+/* The roster switch — see kindSeg(). It borrows .seg-primary wholesale from the
+   Artifacts tab's section scoper because it does the same job, and a filled pill
+   shares no shape with the top nav's underlined tabs: the underline can keep
+   meaning "which page" while this means "which half of this page". Counts stay in
+   the stat strip below, since the label and its first stat name the same thing. */
+.th-kinds { margin-bottom: 20px; }
 
 /* An error stat in the summary strip reads in its own colour once non-zero, so a
    problem is visible before you read the label. */
