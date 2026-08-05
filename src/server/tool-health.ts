@@ -420,7 +420,14 @@ interface RosterData {
   source: string
 }
 
-function collect(store: Store, win: HealthWindow): RosterData {
+/**
+ * `rawName` narrows every aggregate to ONE raw tool name — the mechanism behind an
+ * MCP server page filtered to a single tool. It is applied at entity resolution, so
+ * the stats, trend, categories, per-repo and calls all narrow together and cannot
+ * drift out of step with each other. The roster it produces is meaningless while
+ * narrowed; only the detail page uses it, and only for the one entity it asked for.
+ */
+function collect(store: Store, win: HealthWindow, rawName?: string): RosterData {
   const availableSources = availableToolSources(store)
   const source = resolveSource(store, availableSources, win.source)
   const { sinceIso, untilIso, sinceMs, spanMs, windowDays } = resolveWindow(store, source, win)
@@ -445,6 +452,7 @@ function collect(store: Store, win: HealthWindow): RosterData {
 
   /** The entity a raw tool call belongs to — the one place the MCP grammar is applied. */
   const resolveEntity = (name: string, action: string): { kind: ToolKind; name: string } | null => {
+    if (rawName && name !== rawName) return null // narrowed to one tool
     if (action === 'mcp_call') {
       const server = mcpServerFromToolName(name)
       return server ? { kind: 'mcp', name: server } : null // malformed: drop, don't invent
@@ -837,8 +845,14 @@ export interface ToolHealthDetail {
    * MCP only: the tools of this server that were actually CALLED. Observed-only —
    * an installed-but-never-called tool is invisible, because no tool inventory
    * exists (snapshots keep only `{type, url}`).
+   *
+   * Always the server's FULL tool list, even when `tool` narrows the rest of the
+   * page: it doubles as the filter's control, so it has to keep offering the
+   * options you are not currently looking at.
    */
-  perTool: Array<{ name: string; calls: number; errorCalls: number; lastUsedAt: string | null }>
+  perTool: Array<{ name: string; raw: string; calls: number; errorCalls: number; lastUsedAt: string | null }>
+  /** The raw tool name the page is narrowed to, when it is. */
+  tool?: string
   errorCategories: Array<{ category: string; calls: number }>
   /**
    * The calls, grouped by session and newest-session first. Grouped because a busy
@@ -868,8 +882,23 @@ export interface ToolHealthDetail {
  * page's headline stats are then literally the roster's row, so a number can
  * never differ between the two views. The extra cost is one aggregate pass.
  */
-export function toolHealthDetail(store: Store, kind: ToolKind, name: string, win: HealthWindow = {}): ToolHealthDetail | null {
-  const data = collect(store, win)
+export function toolHealthDetail(
+  store: Store,
+  kind: ToolKind,
+  name: string,
+  win: HealthWindow = {},
+  opts: { tool?: string } = {},
+): ToolHealthDetail | null {
+  // Two passes when narrowed: the unnarrowed one supplies the server's full tool
+  // list (which is also the filter's control) and its install details, while the
+  // narrowed one supplies every number the page shows.
+  const full = collect(store, win)
+  const fullAgg = full.entities.get(entityKey(kind, name))
+  if (!fullAgg) return null
+
+  // Only an MCP server has tools to narrow to, and only one it actually called.
+  const tool = kind === 'mcp' && opts.tool && fullAgg.perRawName.has(opts.tool) ? opts.tool : undefined
+  const data = tool ? collect(store, win, tool) : full
   const agg = data.entities.get(entityKey(kind, name))
   const row = data.report[kind === 'mcp' ? 'mcp' : 'builtin'].rows.find((r) => r.name === name)
   if (!agg || !row) return null
@@ -880,8 +909,8 @@ export function toolHealthDetail(store: Store, kind: ToolKind, name: string, win
 
   const perTool =
     kind === 'mcp'
-      ? [...agg.perRawName]
-          .map(([raw, r]) => ({ name: toolLabel(raw, name), calls: r.calls, errorCalls: r.errorCalls, lastUsedAt: r.lastUsedAt }))
+      ? [...fullAgg.perRawName]
+          .map(([raw, r]) => ({ name: toolLabel(raw, name), raw, calls: r.calls, errorCalls: r.errorCalls, lastUsedAt: r.lastUsedAt }))
           .sort((a, b) => b.calls - a.calls || a.name.localeCompare(b.name))
       : []
 
@@ -899,6 +928,7 @@ export function toolHealthDetail(store: Store, kind: ToolKind, name: string, win
     sparkBuckets: data.report.sparkBuckets,
     perRepo,
     perTool,
+    tool,
     errorCategories,
     sessions: loadSessionGroups(store, data, agg),
     details: {

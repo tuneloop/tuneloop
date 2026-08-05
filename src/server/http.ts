@@ -324,7 +324,9 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       sendJson(res, 400, { error: 'name required' })
       return
     }
-    sendJson(res, 200, toolHealthDetail(store, kind, name, skillWindowFrom(url.searchParams)))
+    // `tool` narrows an MCP server's page to one of its tools; ignored elsewhere.
+    const tool = url.searchParams.get('tool') ?? undefined
+    sendJson(res, 200, toolHealthDetail(store, kind, name, skillWindowFrom(url.searchParams), { tool }))
     return
   }
   if (path === '/api/tool-error-advice') {

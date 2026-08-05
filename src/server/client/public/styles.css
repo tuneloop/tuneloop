@@ -1026,11 +1026,28 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 
 .th-overall-card { margin-bottom: 18px; }
 
-/* Per-tool table on an MCP server's page. */
+/* Per-tool table on an MCP server's page — also the page's tool filter. */
 .th-table { display: flex; flex-direction: column; margin-top: 6px; }
 .th-tr {
   display: grid; grid-template-columns: 1fr 80px 80px 110px; gap: 12px;
   align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: 13.5px;
+}
+button.th-tool-row {
+  width: 100%; text-align: left; background: none; border-left: 0; border-right: 0; border-top: 0;
+  cursor: pointer; font: inherit; font-size: 13.5px; color: var(--ink);
+}
+button.th-tool-row:hover { background: var(--track); }
+button.th-tool-row.on { background: #dfe9e0; }
+button.th-tool-row.on .th-tool-name { color: var(--emerald); font-weight: 600; }
+
+/* Says the page is narrowed, next to the numbers that are narrowed. */
+.th-scoped {
+  margin: 14px 0 -4px; padding: 8px 12px; border-left: 3px solid var(--emerald);
+  background: var(--paper); font-size: 13px; color: var(--ink);
+}
+.th-scope-clear {
+  border: 0; background: none; padding: 0; margin-left: 4px;
+  color: var(--emerald); cursor: pointer; font: inherit; font-size: 13px; text-decoration: underline;
 }
 .th-tr:last-child { border-bottom: 0; }
 .th-th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }

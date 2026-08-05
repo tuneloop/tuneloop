@@ -109,6 +109,8 @@ export function getToolParams(): Record<string, string> {
   } else if (state.toolWin === 'all') q.win = 'all';
   else if (state.toolWin !== 30) q.win = String(state.toolWin);
   if (state.toolSource) q.source = state.toolSource;
+  // Only meaningful on an open entity page; on the roster it would be stale state.
+  if (state.tool && state.toolFilter) q.tool = state.toolFilter;
   return q;
 }
 
@@ -123,6 +125,7 @@ export function applyToolWin(query: Record<string, string>) {
   else if (win === '7' || win === '14' || win === '90') state.toolWin = parseInt(win, 10);
   else state.toolWin = 30;
   state.toolSource = (query && query.source) || '';
+  state.toolFilter = (query && query.tool) || '';
 }
 
 // Called once from main.ts to pre-render the tab. Safe to call again; repaints
@@ -158,6 +161,9 @@ export function openTool(kind, name, query?) {
   if (query) applyToolWin(query);
   var nextKind = kind === 'builtin' ? 'builtin' : 'mcp';
   if (nextKind !== state.toolKind) { tlStatus = ''; tlShowAllShell = false; } // each roster has its own default view
+  // A tool filter belongs to one server's page; carrying it to another entity (or
+  // back to the roster) would silently narrow a page that never asked for it.
+  if (!query && name !== state.tool) state.toolFilter = '';
   state.toolKind = nextKind;
   state.tool = name || null;
   syncHash();
@@ -204,7 +210,8 @@ function paintTools() {
 function paintRoster(box, d) {
   box.innerHTML =
     '<div class="panel sk-panel">' +
-      '<div class="panel-head"><h2>MCP/Tools</h2>' +
+      // Names what the roster below actually holds; the nav tab carries both.
+      '<div class="panel-head"><h2>' + (state.toolKind === 'mcp' ? 'MCP' : 'Tools') + '</h2>' +
         '<div class="seg th-kinds" id="th-kinds">' + KINDS.map(function (k) {
           return '<button type="button" data-k="' + k.k + '"' + (k.k === state.toolKind ? ' class="on"' : '') + '>' + esc(k.l) + '</button>';
         }).join('') + '</div>' +
@@ -467,14 +474,15 @@ function toolRow(r) {
 // literally the roster's row, so the two can't disagree). Paints a loading frame,
 // then the page; a response for a page we've navigated away from is dropped.
 function paintToolPage(box, name) {
-  var key = state.toolKind + ' ' + name;
+  var key = state.toolKind + ' ' + name + ' ' + (state.toolFilter || '');
   if (tlDetail && tlDetailKey === key + '|' + tlWinKey()) { renderToolPage(box, tlDetail); return; }
   box.innerHTML = '<div class="sk-page-head"><button class="sk-back" id="th-back">← All tools</button></div>' +
     '<div class="sk-empty">Loading ' + esc(name) + '…</div>';
   var back = box.querySelector('#th-back');
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
 
-  get('/api/tool-health-detail?kind=' + encodeURIComponent(state.toolKind) + '&name=' + encodeURIComponent(name) + '&' + tlWinQuery())
+  get('/api/tool-health-detail?kind=' + encodeURIComponent(state.toolKind) + '&name=' + encodeURIComponent(name) +
+      (state.toolFilter ? '&tool=' + encodeURIComponent(state.toolFilter) : '') + '&' + tlWinQuery())
     .then(function (d) {
       if (state.tool !== name) return;
       if (!d) { // the entity has nothing in this window (a stale link, or a narrowed window)
@@ -483,8 +491,11 @@ function paintToolPage(box, name) {
         paintTools();
         return;
       }
+      // The server may have declined the filter (a tool it never called); trust its
+      // answer so the control and the numbers agree.
+      state.toolFilter = d.tool || '';
       tlDetail = d;
-      tlDetailKey = key + '|' + tlWinKey();
+      tlDetailKey = state.toolKind + ' ' + name + ' ' + (state.toolFilter || '') + '|' + tlWinKey();
       renderToolPage($('#tool-health'), d);
     })
     .catch(function () {
@@ -513,6 +524,13 @@ function renderToolPage(box, d) {
     (r.repoLocal ? '<span class="th-kind-chip" title="Invoked by repo-relative path — this project\'s own script.">repo script</span>' : '') +
     chips +
     '</div>';
+
+  // Every number below is narrowed, so say so where the numbers are — a scoped page
+  // that looks unscoped is how you end up quoting a tool's error rate as a server's.
+  if (d.tool) {
+    html += '<div class="th-scoped">Showing <strong>' + esc(toolLabelOf(d, d.tool)) + '</strong> only. ' +
+      '<button type="button" class="th-scope-clear">show all of ' + esc(r.name) + '</button></div>';
+  }
 
   // Headline stats. Empty-result rate is its OWN tile, never folded into the error
   // rate: a call that succeeds and returns nothing is a different problem.
@@ -562,8 +580,8 @@ function renderToolPage(box, d) {
   // is invisible, because no tool inventory exists to compare against.
   if (mcp && d.perTool && d.perTool.length) {
     html += '<div class="sk-card">' +
-      sectHead('Tools used', 'The tools of this server the agent actually called. Only observed calls — there is no inventory of a server\'s full tool list, so a tool never called simply isn\'t here.') +
-      toolTable(d.perTool) +
+      sectHead('Tools used', 'The tools of this server the agent actually called, and the page\'s filter — pick one to narrow every number above to it. Only observed calls: there is no inventory of a server\'s full tool list, so a tool never called simply isn\'t here.') +
+      toolTable(d.perTool, d.tool) +
       '</div>';
   }
 
@@ -610,9 +628,21 @@ function renderToolPage(box, d) {
   var back = box.querySelector('#th-back');
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
   if (r.calls > 0) wireTrendTooltip(box.querySelector('#th-trend'));
-  loadFixCard(d);
+  // The suggested-fix card is written about the SERVER's failures, so its numbers
+  // would contradict a narrowed page. Show it only unnarrowed.
+  if (!d.tool) loadFixCard(d);
   wireCallGroups(box);
   if (d.errorCategories && d.errorCategories.length) renderErrorCats(box, d);
+
+  // The per-tool table doubles as the filter: a row toggles, the banner clears.
+  Array.prototype.forEach.call(box.querySelectorAll('.th-tool-row'), function (el) {
+    el.onclick = function () {
+      var raw = this.getAttribute('data-raw');
+      setToolFilter(raw === d.tool ? '' : raw);
+    };
+  });
+  var clear = box.querySelector('.th-scope-clear');
+  if (clear) clear.onclick = function () { setToolFilter(''); };
 }
 
 /**
@@ -657,17 +687,40 @@ function copySnippet(text, btn) {
 }
 
 // The per-tool table for an MCP server: calls, errors, last used.
-function toolTable(rows) {
+/**
+ * The server's tools — and the page's filter. Clicking a row narrows every number
+ * above it to that tool; clicking the active one clears it. A table rather than a
+ * dropdown because the counts are the reason you'd pick a tool at all.
+ *
+ * Always lists every tool, including while narrowed: it has to keep offering the
+ * options you are not currently looking at.
+ */
+function toolTable(rows, active) {
   return '<div class="th-table">' +
     '<div class="th-tr th-th"><span>Tool</span><span>Calls</span><span>Errors</span><span>Last used</span></div>' +
     rows.map(function (t) {
-      return '<div class="th-tr">' +
+      var on = t.raw === active;
+      return '<button type="button" class="th-tr th-tool-row' + (on ? ' on' : '') + '" data-raw="' + esc(t.raw) + '"' +
+        ' title="' + esc(on ? 'Showing only ' + t.name + ' — click to clear' : 'Show only ' + t.name) + '">' +
         '<span class="th-tool-name">' + esc(t.name) + '</span>' +
         '<span>' + num(t.calls) + '</span>' +
         '<span' + (t.errorCalls > 0 ? ' class="th-metric-bad"' : '') + '>' + num(t.errorCalls) + '</span>' +
         '<span>' + esc(t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : '—') + '</span>' +
-        '</div>';
+        '</button>';
     }).join('') + '</div>';
+}
+
+/** The short display name for a raw tool name, from the page's own tool list. */
+function toolLabelOf(d, raw) {
+  var hit = (d.perTool || []).filter(function (t) { return t.raw === raw; })[0];
+  return hit ? hit.name : raw;
+}
+
+/** Switch the page's tool filter (empty string clears it) and refetch. */
+function setToolFilter(raw) {
+  state.toolFilter = raw || '';
+  syncHash();
+  paintTools();
 }
 
 // A horizontal bar per repo, widest = most-used. The null (unattributed) bucket is

@@ -427,10 +427,47 @@ describe('toolHealthDetail', () => {
     const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW })!
     expect(d.perRepo.map((p) => p.repo)).toEqual(['repoA', 'repoB'])
     expect(d.perTool).toEqual([
-      { name: 'listIssues', calls: 2, errorCalls: 1, lastUsedAt: expect.any(String) },
-      { name: 'getEvent', calls: 1, errorCalls: 0, lastUsedAt: expect.any(String) },
+      { name: 'listIssues', raw: 'mcp__sentry__listIssues', calls: 2, errorCalls: 1, lastUsedAt: expect.any(String) },
+      { name: 'getEvent', raw: 'mcp__sentry__getEvent', calls: 1, errorCalls: 0, lastUsedAt: expect.any(String) },
     ])
     expect(d.details).toMatchObject({ type: 'http', url: 'https://sentry.io/mcp', scope: 'global' })
+  })
+
+  it('narrows every number on the page to one tool, together', () => {
+    // The whole page moves as a unit — tiles, categories, per-repo, calls — so a
+    // filtered view can't show one section's tool beside another section's server.
+    seedSession('s1', 'repoA', 2, [
+      mcpCall('sentry', 'listIssues'),
+      mcpCall('sentry', 'listIssues', { error: true, errorCategory: 'auth' }),
+      mcpCall('sentry', 'getEvent', { error: true, errorCategory: 'timeout' }),
+    ])
+    const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW }, { tool: 'mcp__sentry__listIssues' })!
+    expect(d.tool).toBe('mcp__sentry__listIssues')
+    expect(d.row).toMatchObject({ calls: 2, errorCalls: 1 })
+    expect(d.errorCategories).toEqual([{ category: 'auth', calls: 1 }]) // getEvent's timeout is gone
+    expect(d.perRepo[0]).toMatchObject({ calls: 2 })
+    expect(d.sessions.reduce((a, g) => a + g.calls, 0)).toBe(2)
+  })
+
+  it('keeps the FULL tool list while narrowed — it is the filter\'s own control', () => {
+    seedSession('s1', 'repoA', 2, [mcpCall('sentry', 'listIssues'), mcpCall('sentry', 'getEvent')])
+    const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW }, { tool: 'mcp__sentry__listIssues' })!
+    expect(d.perTool.map((t) => t.name).sort()).toEqual(['getEvent', 'listIssues'])
+    expect(d.row.calls).toBe(1) // …while the numbers are narrowed
+  })
+
+  it('ignores a tool filter that this server never called', () => {
+    seedSession('s1', 'repoA', 2, [mcpCall('sentry', 'listIssues')])
+    const d = toolHealthDetail(store, 'mcp', 'sentry', { nowMs: NOW }, { tool: 'mcp__sentry__nosuch' })!
+    expect(d.tool).toBeUndefined()
+    expect(d.row.calls).toBe(1)
+  })
+
+  it('has no tool filter for built-ins — there is nothing below a tool', () => {
+    seedSession('s1', 'repoA', 2, [{ name: 'Read', action: 'file_read' }])
+    const d = toolHealthDetail(store, 'builtin', 'Read', { nowMs: NOW }, { tool: 'anything' })!
+    expect(d.tool).toBeUndefined()
+    expect(d.perTool).toEqual([])
   })
 
   it('lists errors by category for that entity only', () => {

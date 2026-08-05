@@ -51,6 +51,11 @@ export interface ClientState {
   // is open (null = the roster). Mirrored into the URL as #/tools/<kind>[/<name>].
   toolKind: string
   tool: string | null
+  /**
+   * On an MCP server's page, the raw tool name it is narrowed to ('' = the whole
+   * server). Mirrored into the URL as ?tool= so a narrowed page is shareable.
+   */
+  toolFilter: string
   // Tools-tab window — same shape and defaults as the Skills tab's, and the same
   // URL params (?win= / ?from=&to= / ?source=). The clock is tool-run time.
   toolWin: number | 'all' | 'custom'
@@ -95,7 +100,7 @@ export interface ClientState {
 export var state: ClientState = {
   view: 'dashboard', open: null,
   artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '',
-  toolKind: 'mcp', tool: null, toolWin: 30, toolFrom: '', toolTo: '', toolSource: '',
+  toolKind: 'mcp', tool: null, toolFilter: '', toolWin: 30, toolFrom: '', toolTo: '', toolSource: '',
   overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
