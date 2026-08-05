@@ -24,7 +24,11 @@ import type { SegmentSep, ShellSegment } from './shell-binaries'
 const MAX_SCAN_LINES = 60
 
 /** `sh: line 3: pytest: command not found` — the wrapper reports, the inner name failed. */
-const SHELL_WRAPPER = /^(?:[\w./-]*\b(?:ba|z|k|da)?sh):\s+(?:line\s+\d+:\s+)?(\S+):\s/
+// The line number is optional AND spelled two ways: bash says `line 12:`, dash says
+// a bare `1:`. Without the bare form the number itself parses as the command name,
+// so every dash failure blames a binary called "1" — i.e. nobody. Invisible on macOS,
+// where /bin/sh is bash in sh-mode; on Linux /bin/sh IS dash.
+const SHELL_WRAPPER = /^(?:[\w./-]*\b(?:ba|z|k|da)?sh):\s+(?:(?:line\s+)?\d+:\s+)?(\S+):\s/
 
 /** `ls: …` / `psql: error: …` — a tool prefixing its own name onto the failure. */
 const SELF_PREFIX = /^([\w.@+/-]+):\s/

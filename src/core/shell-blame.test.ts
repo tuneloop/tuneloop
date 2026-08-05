@@ -93,6 +93,18 @@ describe('blameBinary — naming the segment that failed', () => {
     expect(blameBinary('/bin/sh: tsc: command not found', segs('tsc'))).toBe('tsc')
   })
 
+  /**
+   * dash writes a BARE line number where bash writes `line N:` — so the wrapper
+   * pattern read the number itself as the command name and blamed nobody. It never
+   * showed up on macOS, where /bin/sh is bash in sh-mode; on Linux, where /bin/sh
+   * IS dash, it silently cost every compound shell failure its attribution.
+   */
+  it("reads dash's bare line number, which bash spells as `line N:`", () => {
+    expect(blameBinary('/bin/dash: 1: notinstalledxyz: not found', segs('notinstalledxyz', 'echo'))).toBe('notinstalledxyz')
+    expect(blameBinary('sh: 12: pytest: not found', segs('pytest', 'echo'))).toBe('pytest')
+    expect(blameBinary('hi\n/bin/dash: 1: notinstalledxyz: not found', segs('echo', 'notinstalledxyz'))).toBe('notinstalledxyz')
+  })
+
   it('finds the blame line among surrounding output', () => {
     const out = ['total 24', 'drwxr-xr-x  5 me  staff   160 Aug  4 09:00 .', '--- direct run ---', 'psql: error: connection refused'].join('\n')
     expect(blameBinary(out, segs('ls', 'echo', 'psql'))).toBe('psql')

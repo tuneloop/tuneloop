@@ -17,7 +17,14 @@ import { describe, expect, it } from 'vitest'
 import { shellSegments } from './shell-binaries'
 import { blameBinary } from './shell-blame'
 
-const SHELLS = ['bash', 'zsh', 'sh'] as const
+/**
+ * `dash` is listed separately from `sh` because they are only the same program on
+ * some machines. On Linux /bin/sh IS dash; on macOS it is bash in sh-mode, so a
+ * dash-only format — its bare `1:` where bash writes `line 12:` — passed every
+ * local run and failed in CI. Naming dash explicitly means the machine that has it
+ * installed tests it, whatever /bin/sh happens to be there.
+ */
+const SHELLS = ['bash', 'zsh', 'sh', 'dash'] as const
 type Shell = (typeof SHELLS)[number]
 
 function available(shell: string): boolean {
@@ -48,32 +55,32 @@ const CASES: Array<{ label: string; cmd: string; want: Record<Shell, string | nu
   {
     label: 'a tool that names itself in the failure',
     cmd: 'echo hi && ls /nope/missing-xyz.txt',
-    want: { bash: 'ls', zsh: 'ls', sh: 'ls' },
+    want: { bash: 'ls', zsh: 'ls', sh: 'ls', dash: 'ls' },
   },
   {
     label: 'a command that is not installed (shell reports it, formats differ)',
     cmd: 'echo hi && notinstalledxyz --version',
-    want: { bash: 'notinstalledxyz', zsh: 'notinstalledxyz', sh: 'notinstalledxyz' },
+    want: { bash: 'notinstalledxyz', zsh: 'notinstalledxyz', sh: 'notinstalledxyz', dash: 'notinstalledxyz' },
   },
   {
     label: 'a bad flag, answered with a usage dump',
     cmd: 'echo hi && ls --badflagxyz',
-    want: { bash: 'ls', zsh: 'ls', sh: 'ls' },
+    want: { bash: 'ls', zsh: 'ls', sh: 'ls', dash: 'ls' },
   },
   {
     label: 'a traceback that names no command — abstain',
     cmd: 'echo hi && python3 -c "import nosuchmodulexyz"',
-    want: { bash: null, zsh: null, sh: null },
+    want: { bash: null, zsh: null, sh: null, dash: null },
   },
   {
     label: "a tool that prefixes 'error:' instead of its own name — abstain",
     cmd: 'echo hi && git checkout nonexistent-branch-xyz',
-    want: { bash: null, zsh: null, sh: null },
+    want: { bash: null, zsh: null, sh: null, dash: null },
   },
   {
     label: 'zsh equals expansion — a failure that only exists in zsh',
     cmd: 'echo A; echo ===; echo B',
-    want: { bash: null, zsh: 'echo', sh: null },
+    want: { bash: null, zsh: 'echo', sh: null, dash: null },
   },
 ]
 
