@@ -1003,24 +1003,21 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
    Layout and typography come from the shared health tokens (.sk-*, see
    client/health-ui.ts); only the chrome that is unique to this tab lives here. */
 
-/* The heading IS the switch between the two rosters — see kindSwitch(). The
-   inactive half stays full size and merely loses colour, so it reads as the other
-   half of one title rather than as a disabled control. */
-.th-switch { display: flex; align-items: baseline; gap: 10px; }
-.th-switch-opt {
-  border: 0; background: none; padding: 0; cursor: pointer;
-  font: inherit; font-size: inherit; color: var(--muted);
-  display: inline-flex; align-items: baseline; gap: 6px;
+/* The two rosters are sub-tabs — see kindTabs(). Deliberately the same shape as
+   .tab in the top nav (serif, muted until active, emerald underline) so the row
+   reads as navigation on sight; only the scale is stepped down to keep it
+   subordinate. Counts live in the stat strip below, never on the tabs — the tab
+   label and the strip's first stat name the same thing, so a count here stutters. */
+.th-subtabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+.th-subtab {
+  border: 0; background: transparent; cursor: pointer;
+  padding: 2px 16px 11px; margin-bottom: -1px;
+  font-family: Georgia, serif; font-size: 15px; color: var(--muted);
+  border-bottom: 2px solid transparent;
 }
-.th-switch-opt:hover { color: var(--ink); }
-.th-switch-opt.on { color: var(--ink); }
-.th-switch-sep { color: var(--line); font-size: 15px; }
-/* The count is data, not part of the title — so it never competes with the word. */
-.th-switch-n {
-  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted);
-  background: var(--track); border-radius: 999px; padding: 1px 8px;
-}
-.th-switch-opt.on .th-switch-n { color: var(--ink); }
+.th-subtab:first-child { padding-left: 0; }
+.th-subtab:hover { color: var(--ink); }
+.th-subtab.on { color: var(--ink); border-bottom-color: var(--emerald); }
 
 /* An error stat in the summary strip reads in its own colour once non-zero, so a
    problem is visible before you read the label. */

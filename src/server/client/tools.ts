@@ -40,8 +40,8 @@ var tlDetailKey = null;
 // The two sub-rosters. `mcp` has an install side (status + hygiene chips); `builtin`
 // has none — there is nothing to install or remove, so it carries error pills only.
 var KINDS = [
-  { k: 'mcp', l: 'MCP', full: 'MCP servers' },
-  { k: 'builtin', l: 'Tools', full: 'Built-in tools and shell binaries' }
+  { k: 'mcp', l: 'MCP servers', full: 'MCP servers the agent called, and any installed but unused' },
+  { k: 'builtin', l: 'Built-in tools', full: 'Built-in tools and the shell binaries they ran' }
 ];
 
 // Status presentation for MCP rows. Unused is GREY, not red: with deferred tool
@@ -211,28 +211,27 @@ function paintTools() {
 }
 
 /**
- * The heading IS the switch between the two rosters.
+ * The two rosters are sub-tabs, styled as the top nav's tabs are.
  *
- * It was a small segmented control in the far corner — 13px, muted, doing primary
- * navigation from the one spot nothing draws the eye to. As the heading it sits
- * where reading starts, and carrying each side's count means the inactive half
- * advertises what is behind it rather than just naming it.
+ * Earlier passes put the switch in the far corner (easy to miss) and then in the
+ * heading (read as a title with badges, and its count stuttered against the
+ * SERVERS stat directly beneath). Borrowing the tab row's own visual language —
+ * serif, muted until active, emerald underline — says "navigation" without
+ * having to be decoded, and the stat strip below stays the only place numbers live.
  */
-function kindSwitch(d) {
-  var counts = { mcp: (d.mcp.rows || []).length, builtin: (d.builtin.rows || []).length };
-  return '<h2 class="th-switch">' + KINDS.map(function (k, i) {
+function kindTabs() {
+  return '<div class="th-subtabs" role="tablist">' + KINDS.map(function (k) {
     var on = k.k === state.toolKind;
-    return (i ? '<span class="th-switch-sep">·</span>' : '') +
-      '<button type="button" class="th-switch-opt' + (on ? ' on' : '') + '" data-k="' + k.k + '"' +
-      ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(k.full) + '">' +
-      esc(k.l) + '<span class="th-switch-n">' + num(counts[k.k]) + '</span></button>';
-  }).join('') + '</h2>';
+    return '<button type="button" class="th-subtab' + (on ? ' on' : '') + '" data-k="' + k.k + '"' +
+      ' role="tab" aria-selected="' + (on ? 'true' : 'false') + '" title="' + esc(k.full) + '">' +
+      esc(k.l) + '</button>';
+  }).join('') + '</div>';
 }
 
 function paintRoster(box, d) {
   box.innerHTML =
     '<div class="panel sk-panel">' +
-      '<div class="panel-head">' + kindSwitch(d) + '</div>' +
+      kindTabs() +
       '<div class="sk-overview" id="th-overview"></div>' +
       '<div class="th-overall" id="th-overall"></div>' +
       '<div class="filters sk-filters" id="th-filters"></div>' +
@@ -240,7 +239,7 @@ function paintRoster(box, d) {
       '<div class="th-roster-note" id="th-roster-note"></div>' +
     '</div>';
 
-  Array.prototype.forEach.call(box.querySelectorAll('.th-switch-opt'), function (b) {
+  Array.prototype.forEach.call(box.querySelectorAll('.th-subtab'), function (b) {
     b.onclick = function () { openTool(this.getAttribute('data-k'), null); };
   });
 
