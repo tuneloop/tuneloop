@@ -691,9 +691,13 @@ function renderToolPage(box, d) {
   var back = box.querySelector('#th-back');
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
   if (r.calls > 0) wireTrendTooltip(box.querySelector('#th-trend'));
-  // The suggested-fix card is written about the SERVER's failures, so its numbers
-  // would contradict a narrowed page. Show it only unnarrowed.
-  if (!d.tool) loadFixCard(d);
+  // The card is written about the SERVER's failures, so it contradicts a page
+  // narrowed to one tool — and equally a page whose window contains no failures at
+  // all. The advice is cached against the entity, not the window, so at 7 days
+  // AskUserQuestion reports 0 errors of 6 calls while still holding a card drafted
+  // from 9 failures at 90. The card says it was written from "these failures"; the
+  // window's own error count is what decides whether that sentence is true.
+  if (!d.tool && r.errorCalls > 0) loadFixCard(d);
   wireCallGroups(box);
   if (d.errorCategories && d.errorCategories.length) renderErrorCats(box, d);
 

@@ -1277,6 +1277,12 @@ export function toolErrorSamples(store: Store, kind: ToolKind, name: string, win
  * server of the same name. Null when no card exists (the common case).
  */
 export function toolAdviceCard(store: Store, kind: ToolKind, name: string, win: HealthWindow = {}) {
+  // `win` selects the HARNESS, not the span: a card is cached per entity, drafted
+  // from whatever failures the advice pass last saw, so this can return one for a
+  // window in which the entity never failed — or never ran. Deciding whether the
+  // card still describes what is on screen needs the window's own error count, which
+  // the detail payload already carries; the caller gates on it rather than this
+  // re-deriving it through a second collect(). Kept a plain lookup on purpose.
   const source = resolveSource(store, availableToolSources(store), win.source)
   if (!source) return null
   const row = store.toolErrorAdvice(source, kind, name)
