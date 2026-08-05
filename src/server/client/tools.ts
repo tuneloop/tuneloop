@@ -487,13 +487,24 @@ function toolRow(r) {
 
 // ---- Per-entity detail page -------------------------------------------------
 
+/**
+ * The back link, named for the roster it actually returns to: an MCP page was
+ * reached from a list of servers, a built-in page from a list of tools. Shared by
+ * the loading frame and the rendered page, so the label can't change under the user
+ * as the fetch lands.
+ */
+function backHead(kind) {
+  return '<div class="sk-page-head"><button class="sk-back" id="th-back">← All ' +
+    (kind === 'mcp' ? 'servers' : 'tools') + '</button></div>';
+}
+
 // The detail page is served whole by /api/tool-health-detail (its headline row is
 // literally the roster's row, so the two can't disagree). Paints a loading frame,
 // then the page; a response for a page we've navigated away from is dropped.
 function paintToolPage(box, name) {
   var key = state.toolKind + ' ' + name + ' ' + (state.toolFilter || '');
   if (tlDetail && tlDetailKey === key + '|' + tlWinKey()) { renderToolPage(box, tlDetail); return; }
-  box.innerHTML = '<div class="sk-page-head"><button class="sk-back" id="th-back">← All tools</button></div>' +
+  box.innerHTML = backHead(state.toolKind) +
     '<div class="sk-empty">Loading ' + esc(name) + '…</div>';
   var back = box.querySelector('#th-back');
   if (back) back.onclick = function () { openTool(state.toolKind, null); };
@@ -532,7 +543,7 @@ function renderToolPage(box, d) {
   }).join('');
   var accent = hasFlag(r, 'high-error') ? 'var(--red)' : hasFlag(r, 'degrading') ? 'var(--amber)' : s ? s.color : 'var(--emerald)';
 
-  var html = '<div class="sk-page-head"><button class="sk-back" id="th-back">← All tools</button></div>';
+  var html = backHead(d.kind);
   html += '<div class="sk-page-title">' +
     (s ? '<span class="sk-dot sk-dot-lg" style="background:' + s.color + '"></span>' : '') +
     '<h2 class="sk-page-name">' + esc(r.name) + '</h2>' +
