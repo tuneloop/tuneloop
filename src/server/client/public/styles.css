@@ -1045,8 +1045,10 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 .th-chip.on { background: var(--emerald); border-color: var(--emerald); color: #f3efe6; }
 .th-chip-all { font-family: inherit; }
 .th-chip-n { font-size: 11px; opacity: .7; }
+/* The word "err" carries the meaning, so the colour is reinforcement rather than
+   the only signal — which is what lets it stay legible on the emerald active fill. */
 .th-chip-e { font-size: 11px; font-weight: 600; color: var(--red); }
-.th-chip.on .th-chip-e { color: #ffdcd4; }
+.th-chip.on .th-chip-e { color: #ffe9e4; }
 /* Carries the caveat the removed table's section heading used to hold. */
 .th-chips-info { margin-left: 2px; }
 

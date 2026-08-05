@@ -730,8 +730,11 @@ function toolChips(d) {
         ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(chipTip(t, on)) + '">' +
         esc(t.name) + '<span class="th-chip-n">' + num(t.calls) + '</span>' +
         // Errors ride along because a failing tool is the one you'd most want to
-        // scope to, and no column elsewhere reports them per tool any more.
-        (t.errorCalls > 0 ? '<span class="th-chip-e">' + num(t.errorCalls) + '</span>' : '') +
+        // scope to, and no column elsewhere reports them per tool any more. Labelled,
+        // not just red: two bare numbers on one chip give no clue which is which, and
+        // colour alone carries nothing for a colour-blind reader — or on the active
+        // chip, where the emerald fill leaves the red barely red.
+        (t.errorCalls > 0 ? '<span class="th-chip-e">' + num(t.errorCalls) + ' err</span>' : '') +
         '</button>';
     }).join('') +
     // The caveat outlived its section heading: without it, a short list reads as
