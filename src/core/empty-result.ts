@@ -22,11 +22,61 @@
  */
 import type { CanonicalAction } from './model'
 
-/** Actions whose result is a retrieval payload, where "nothing came back" is a signal. */
-const RETRIEVAL_ACTIONS = new Set<CanonicalAction>(['search', 'web', 'mcp_call'])
+/** Actions whose payload is ALWAYS a retrieval result, whatever the tool is called. */
+const RETRIEVAL_ACTIONS = new Set<CanonicalAction>(['search', 'web'])
 
-export function isRetrievalAction(action: CanonicalAction): boolean {
-  return RETRIEVAL_ACTIONS.has(action)
+/**
+ * Shell binaries whose entire job is to find or list, so printing nothing means
+ * "no matches" rather than "it worked".
+ *
+ * Shell used to be excluded wholesale, because for most of it silence IS success —
+ * `git push` says nothing when it works. But a `grep` that matches nothing is the
+ * exact silent-failure-then-retry this stat exists to catch, and since each call's
+ * binaries are now parsed at ingest, the question can be asked per binary.
+ */
+const RETRIEVAL_BINARIES = new Set([
+  'ack', 'ag', 'egrep', 'fd', 'fgrep', 'find', 'fgrep', 'grep', 'locate', 'ls', 'rg',
+])
+
+/**
+ * MCP tool-name verbs that read rather than write.
+ *
+ * A server is a mix — `searchJiraIssuesUsingJql` retrieves, `createJiraIssue` does
+ * not — so this cannot be decided at the server level. Judging there puts writes in
+ * the denominator and reads their empty acknowledgement as a failed retrieval.
+ *
+ * An allowlist, not a blocklist: an unrecognised verb is left out. Consistent with
+ * the rest of this module, a miss is cheaper than accusing a working tool.
+ */
+const MCP_READ_VERBS = new Set([
+  'browse', 'describe', 'fetch', 'find', 'get', 'list', 'lookup', 'query', 'read', 'search', 'show', 'view',
+])
+
+/** The leading verb of `getJiraIssue` / `search_issues` — camelCase and snake_case alike. */
+function leadingVerb(tool: string): string {
+  return /^[a-z]+/.exec(tool)?.[0] ?? ''
+}
+
+/** The tool half of `mcp__<server>__<tool>`, or '' when the name isn't that shape. */
+function mcpToolName(name: string): string {
+  if (!name.startsWith('mcp__')) return ''
+  const sep = name.indexOf('__', 5)
+  return sep > 5 ? name.slice(sep + 2) : ''
+}
+
+/**
+ * Is "nothing came back" meaningful for this call?
+ *
+ * `binaries` is the parsed binary list for a shell call, ignored otherwise. A call
+ * that ran more than one is excluded: the payload is the whole chain's, so silence
+ * can't be pinned on the search. `grep foo | head` printing nothing might be either
+ * of them, and `grep foo && ./deploy` says nothing about grep at all.
+ */
+export function isRetrievalCall(action: CanonicalAction, name: string, binaries: readonly string[] = []): boolean {
+  if (RETRIEVAL_ACTIONS.has(action)) return true
+  if (action === 'mcp_call') return MCP_READ_VERBS.has(leadingVerb(mcpToolName(name)))
+  if (action === 'shell') return binaries.length === 1 && RETRIEVAL_BINARIES.has(binaries[0] as string)
+  return false
 }
 
 /**
@@ -51,8 +101,14 @@ const NOTHING_FOUND =
  * a failed call (already counted as an error; counting it twice would make the
  * two stats overlap).
  */
-export function emptyResultFlag(action: CanonicalAction, ok: boolean, text: string): 0 | 1 | null {
-  if (!ok || !isRetrievalAction(action)) return null
+export function emptyResultFlag(
+  action: CanonicalAction,
+  name: string,
+  ok: boolean,
+  text: string,
+  binaries: readonly string[] = [],
+): 0 | 1 | null {
+  if (!ok || !isRetrievalCall(action, name, binaries)) return null
   const t = text.trim()
   if (!t) return 1
   if (t.length > MAX_EMPTY_LEN) return 0

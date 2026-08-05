@@ -7,7 +7,7 @@ import type { DB } from './db'
 import { parseApplyPatch } from './apply-patch'
 import { blockSpine, deterministicBlocks } from '../core/blocks'
 import type { Block } from '../core/blocks'
-import { emptyResultFlag, isRetrievalAction } from '../core/empty-result'
+import { emptyResultFlag, isRetrievalCall } from '../core/empty-result'
 import { classifyError, ERROR_CATEGORIES } from '../core/error-category'
 import { facetGroupCompatible, grainOf } from '../core/facets'
 import type { FacetSpec, FacetType, Grain } from '../core/facets'
@@ -264,7 +264,9 @@ export class Store {
         // The result payload is read twice over: to fingerprint a failure, and to
         // tell a successful-but-empty retrieval from a real one. Materialize it
         // only when one of those applies — most calls need neither.
-        const retrieval = isRetrievalAction(t.action)
+        // Retrieval-ness now depends on the tool name and, for shell, on which
+        // binaries ran — so it has to be asked after `binaries` is parsed above.
+        const retrieval = isRetrievalCall(t.action, t.name, binaries)
         const text = !t.result.ok || retrieval ? resultText(t.result.raw) : null
         // For failed calls, fingerprint a cross-harness category + keep a one-line
         // error snippet (both NULL when ok), computed at ingest. Clip before classify.
@@ -280,7 +282,7 @@ export class Store {
           t.result.isError ? 1 : 0,
           category,
           message,
-          emptyResultFlag(t.action, t.result.ok, text ?? ''),
+          emptyResultFlag(t.action, t.name, t.result.ok, text ?? '', binaries),
           shellSegs.length && !t.result.ok ? blameBinary(text ?? '', shellSegs) : null,
           t.target.paths?.[0] ?? null,
           t.target.command ?? null,

@@ -90,12 +90,20 @@ describe('ingest: tool_call_commands (AL-139)', () => {
 })
 
 describe('ingest: tool_calls.result_empty (AL-140)', () => {
-  const call = (id: string, action: ToolCall['action'], raw: unknown, ok = true): ToolCall => ({
+  // `name` and `command` both feed the retrieval decision now — an MCP call is judged
+  // by its tool verb, a shell call by the binaries its command parses to.
+  const call = (
+    id: string,
+    action: ToolCall['action'],
+    raw: unknown,
+    ok = true,
+    extra: { name?: string; command?: string } = {},
+  ): ToolCall => ({
     id,
-    name: 'X',
+    name: extra.name ?? 'X',
     action,
     input: {},
-    target: {},
+    target: extra.command ? { command: extra.command } : {},
     result: { ok, isError: !ok, raw },
     isSidechain: false,
   })
@@ -108,9 +116,9 @@ describe('ingest: tool_calls.result_empty (AL-140)', () => {
       session([
         call('t0', 'search', 'No matches found'),
         call('t1', 'search', 'src/a.ts:1: hit'),
-        call('t2', 'mcp_call', []),
+        call('t2', 'mcp_call', [], true, { name: 'mcp__jira__getIssue' }),
         call('t3', 'web', 'a real page of results'),
-        call('t4', 'shell', ''), // empty shell output is success, not a silent failure
+        call('t4', 'shell', '', true, { command: 'git push' }), // silence here IS success
         call('t5', 'file_read', ''),
       ]),
       0,
@@ -120,6 +128,31 @@ describe('ingest: tool_calls.result_empty (AL-140)', () => {
     )
 
     expect(flags(db)).toEqual([1, 0, 1, 0, null, null])
+  })
+
+  /**
+   * The two calls that made the old action-level rule wrong: a write whose empty
+   * acknowledgement means it worked, and a search whose empty output means it found
+   * nothing. Both are `mcp_call`/`shell`, so only the name and the binary separate them.
+   */
+  it('judges MCP by the tool verb and shell by the binary, not by the action', () => {
+    const db = openDb(':memory:')
+    new Store(db).ingestSession(
+      session([
+        call('t0', 'mcp_call', [], true, { name: 'mcp__jira__createIssue' }),
+        call('t1', 'mcp_call', [], true, { name: 'mcp__jira__searchIssues' }),
+        call('t2', 'shell', '', true, { command: 'grep -r needle src' }),
+        call('t3', 'shell', 'src/a.ts:1: needle', true, { command: 'grep -r needle src' }),
+        // One payload for the whole chain, so an empty one blames neither binary.
+        call('t4', 'shell', '', true, { command: 'grep -r needle src | head -5' }),
+      ]),
+      0,
+      [],
+      'test',
+      1,
+    )
+
+    expect(flags(db)).toEqual([null, 1, 1, 0, null])
   })
 
   it('leaves a failed retrieval call NULL — it is already counted as an error', () => {
@@ -134,7 +167,10 @@ describe('ingest: tool_calls.result_empty (AL-140)', () => {
   it('reads an MCP content-block payload, not its JSON envelope', () => {
     const db = openDb(':memory:')
     new Store(db).ingestSession(
-      session([call('t0', 'mcp_call', [{ type: 'text', text: 'No results found' }]), call('t1', 'mcp_call', [{ type: 'text', text: 'row 1\nrow 2' }])]),
+      session([
+        call('t0', 'mcp_call', [{ type: 'text', text: 'No results found' }], true, { name: 'mcp__jira__searchIssues' }),
+        call('t1', 'mcp_call', [{ type: 'text', text: 'row 1\nrow 2' }], true, { name: 'mcp__jira__searchIssues' }),
+      ]),
       0,
       [],
       'test',

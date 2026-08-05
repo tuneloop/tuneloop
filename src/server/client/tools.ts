@@ -601,10 +601,16 @@ function renderToolPage(box, d) {
     pageTile(num(r.sessions), 'Sessions', 'distinct sessions it ran in') +
     pageTile(r.calls > 0 ? pct(r.errorCalls / r.calls) : '—', 'Error rate',
       r.calls > 0 ? num(r.errorCalls) + ' of ' + num(r.calls) + ' calls failed' : 'no calls to measure') +
+    // The denominator is the retrieval calls, not all calls — a server mixes reads
+    // with writes, and a lone `grep` is measured where `grep | head` can't be. So the
+    // sub-line says what it counted rather than implying it covered everything.
     pageTile(r.emptyEligibleCalls > 0 ? pct(r.emptyCalls / r.emptyEligibleCalls) : '—', 'Empty results',
       r.emptyEligibleCalls > 0
-        ? num(r.emptyCalls) + ' of ' + num(r.emptyEligibleCalls) + ' successful calls returned nothing'
-        : 'not a retrieval tool — empty output is success here') +
+        ? num(r.emptyCalls) + ' of ' + num(r.emptyEligibleCalls) +
+          (r.emptyEligibleCalls === r.calls ? ' successful calls returned nothing' : ' retrieval calls returned nothing')
+        : mcp
+          ? 'no retrieval calls — this server\'s tools all write, or none succeeded'
+          : 'nothing retrieved here — empty output means success') +
     '</div>';
 
   html += '<div class="sk-advice" style="border-left-color:' + accent + '">' + esc(d.advice) + '</div>';
