@@ -597,15 +597,6 @@ function renderToolPage(box, d) {
       '</div>';
   }
 
-  // Per-tool table (MCP only). OBSERVED only — an installed-but-never-called tool
-  // is invisible, because no tool inventory exists to compare against.
-  if (mcp && d.perTool && d.perTool.length) {
-    html += '<div class="sk-card">' +
-      sectHead('Tools used', 'The tools of this server the agent actually called, and the page\'s filter — pick one to narrow every number above to it. Only observed calls: there is no inventory of a server\'s full tool list, so a tool never called simply isn\'t here.') +
-      toolTable(d.perTool, d.tool) +
-      '</div>';
-  }
-
   if (d.perRepo && d.perRepo.length) {
     html += '<div class="sk-card">' +
       '<div class="sk-sect-h">Where it\'s used</div>' + repoBreakdown(d.perRepo, accent) + '</div>';
@@ -721,6 +712,10 @@ function copySnippet(text, btn) {
  *
  * Always lists every tool, including while narrowed: a scope control has to keep
  * offering the options you are not currently looking at.
+ *
+ * This is also the only per-tool read-out on the page — the table that used to
+ * repeat it was removed as redundant — so the chip carries calls and errors inline
+ * and its tooltip carries the rest, recency included.
  */
 function toolChips(d) {
   var rows = (d.perTool || []).filter(function (t) { return !!t.raw; });
@@ -732,32 +727,25 @@ function toolChips(d) {
     rows.map(function (t) {
       var on = isToolSelected(t.raw, d.tool);
       return '<button type="button" class="th-chip' + (on ? ' on' : '') + '" data-raw="' + esc(t.raw) + '"' +
-        ' aria-pressed="' + (on ? 'true' : 'false') + '"' +
-        ' title="' + esc(on ? 'Showing ' + t.name + ' only — pick All to clear' : 'Show only ' + t.name) + '">' +
+        ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(chipTip(t, on)) + '">' +
         esc(t.name) + '<span class="th-chip-n">' + num(t.calls) + '</span>' +
         // Errors ride along because a failing tool is the one you'd most want to
-        // scope to; the table below still carries the full column for comparison.
-        (t.errorCalls > 0 ? '<span class="th-chip-e" title="' + esc(num(t.errorCalls) + ' failed') + '">' + num(t.errorCalls) + '</span>' : '') +
+        // scope to, and no column elsewhere reports them per tool any more.
+        (t.errorCalls > 0 ? '<span class="th-chip-e">' + num(t.errorCalls) + '</span>' : '') +
         '</button>';
-    }).join('') + '</div>';
+    }).join('') +
+    // The caveat outlived its section heading: without it, a short list reads as
+    // "this server has 9 tools" when it means "9 were called".
+    '<span class="sk-info th-chips-info" title="' + esc('Tools this agent actually called, and the page\'s filter — pick one to narrow every number below to it. Observed calls only: there is no inventory of a server\'s full tool list, so a tool never called simply isn\'t here. Hover a tool for its errors and when it was last used.') + '">?</span>' +
+    '</div>';
 }
 
-/**
- * The per-tool read-out: calls, errors, last used. Deliberately NOT interactive —
- * the chips above are the filter. Two controls over one piece of state is how the
- * two drift apart. The scoped row still highlights, as a cross-reference.
- */
-function toolTable(rows, active) {
-  return '<div class="th-table">' +
-    '<div class="th-tr th-th"><span>Tool</span><span>Calls</span><span>Errors</span><span>Last used</span></div>' +
-    rows.map(function (t) {
-      return '<div class="th-tr' + (isToolSelected(t.raw, active) ? ' th-tr-on' : '') + '">' +
-        '<span class="th-tool-name">' + esc(t.name) + '</span>' +
-        '<span>' + num(t.calls) + '</span>' +
-        '<span' + (t.errorCalls > 0 ? ' class="th-metric-bad"' : '') + '>' + num(t.errorCalls) + '</span>' +
-        '<span>' + esc(t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : '—') + '</span>' +
-        '</div>';
-    }).join('') + '</div>';
+/** Everything the chip's tooltip has to carry now that no table repeats it. */
+function chipTip(t, on) {
+  return (on ? 'Showing ' + t.name + ' only — pick All to clear' : 'Show only ' + t.name) +
+    '\n' + num(t.calls) + (t.calls === 1 ? ' call' : ' calls') +
+    ', ' + num(t.errorCalls) + (t.errorCalls === 1 ? ' error' : ' errors') +
+    ', last used ' + (t.lastUsedAt ? String(t.lastUsedAt).slice(0, 10) : 'never');
 }
 
 /** The short display name for a raw tool name, from the page's own tool list. */

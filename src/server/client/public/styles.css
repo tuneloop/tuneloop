@@ -1030,19 +1030,11 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 
 .th-overall-card { margin-bottom: 18px; }
 
-/* Per-tool table on an MCP server's page — also the page's tool filter. */
-.th-table { display: flex; flex-direction: column; margin-top: 6px; }
-.th-tr {
-  display: grid; grid-template-columns: 1fr 80px 80px 110px; gap: 12px;
-  align-items: center; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: 13.5px;
-}
-/* The read-out's cross-reference to the active chip — not a control. */
-.th-tr-on { background: #dfe9e0; }
-.th-tr-on .th-tool-name { color: var(--emerald); font-weight: 600; }
-
 /* The tool scope control — see toolChips(). Sits above the stats it scopes, so the
-   filled chip and the numbers it produced are read in one glance. */
-.th-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 4px; }
+   filled chip and the numbers it produced are read in one glance. It is also the
+   only per-tool read-out on the page: the table that repeated it was redundant once
+   the chips carried calls and errors, so it was removed. */
+.th-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 16px 0 4px; }
 .th-chip {
   display: inline-flex; align-items: center; gap: 6px;
   border: 1px solid var(--line); background: var(--paper); border-radius: 999px;
@@ -1055,15 +1047,14 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 .th-chip-n { font-size: 11px; opacity: .7; }
 .th-chip-e { font-size: 11px; font-weight: 600; color: var(--red); }
 .th-chip.on .th-chip-e { color: #ffdcd4; }
+/* Carries the caveat the removed table's section heading used to hold. */
+.th-chips-info { margin-left: 2px; }
 
 /* Says the page is narrowed, next to the numbers that are narrowed. */
 .th-scoped {
   margin: 14px 0 -4px; padding: 8px 12px; border-left: 3px solid var(--emerald);
   background: var(--paper); font-size: 13px; color: var(--ink);
 }
-.th-tr:last-child { border-bottom: 0; }
-.th-th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-.th-tool-name { font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The command / tool name on a call row in the invocations list. */
 .th-inv-what {
