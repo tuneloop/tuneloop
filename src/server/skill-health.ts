@@ -10,6 +10,17 @@
 import { basename } from 'node:path'
 import type { Store } from '../store/store'
 import {
+  buildSparkBuckets,
+  DAY_MS,
+  earliestSessionMs,
+  IN_WINDOW,
+  resolveWindow,
+  sessionCountsByRepo,
+  TS_NORM,
+  type HealthWindow,
+  type SparkBucket,
+} from './health-window'
+import {
   classify,
   mapScopeKeysToRepos,
   MIN_REMOVAL_TENURE_DAYS,
@@ -20,8 +31,6 @@ import {
   type InstalledCap,
 } from '../detectors/unused-capabilities'
 
-const DAY_MS = 86_400_000
-
 // ---- Shared SQL fragments -------------------------------------------------
 
 /** Any skill invocation — main-thread or inside a subagent. Usage facts (counts, trend,
@@ -30,18 +39,6 @@ const DAY_MS = 86_400_000
  *  need no extra filter — verdicts exist only where the outcomes processor could build an
  *  honest window (main thread + identifiable subagent threads). */
 const SKILL_CALL = `t.action = 'skill'`
-
-/**
- * The tool-run timestamp, normalized to UTC `Z`: strftime folds any stored offset to UTC
- * before we compare/min/max, so a future source storing offset timestamps can't produce
- * a wrong window boundary or a used/unused verdict that disagrees with the view. For
- * claude-code every ts is already `Z`, so this is a no-op there and a guard for any adapter
- * that stores an offset. Always used through `t` (join alias) — matches every query here.
- */
-const TS_NORM = `strftime('%Y-%m-%dT%H:%M:%SZ', t.ts)`
-
-/** The half-open tool-run window `[since, until)`; `until` NULL → open-ended (presets). Params: since, until, until. */
-const IN_WINDOW = `${TS_NORM} >= ? AND (? IS NULL OR ${TS_NORM} < ?)`
 
 /** Match a skill by its installed name OR a plugin-namespaced `<plugin>:<name>`. Params: name, '%:'+name. */
 const NAME_MATCH = `(t.name = ? OR t.name LIKE ?)`
@@ -70,50 +67,8 @@ function skillEntries(payload: unknown): Array<Record<string, unknown>> {
   return out
 }
 
-/** One trend bucket on the shared x-axis: its start (ms) and a human date label. */
-export interface SparkBucket {
-  startMs: number
-  endMs: number
-  label: string
-}
-
-/**
- * Build the shared trend x-axis: calendar-aligned buckets spanning [sinceMs, untilMs].
- * Granularity scales with the span so bars stay readable — daily for short windows,
- * weekly for medium, monthly for long. Every bucket in the range is emitted (including
- * empty ones) so the timeline is continuous. Labels are date-formatted for the axis.
- */
-function buildSparkBuckets(sinceMs: number, untilMs: number): SparkBucket[] {
-  const spanDays = (untilMs - sinceMs) / DAY_MS
-  const gran: 'day' | 'week' | 'month' = spanDays <= 31 ? 'day' : spanDays <= 182 ? 'week' : 'month'
-  const out: SparkBucket[] = []
-  const fmtDay = (ms: number) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
-  const fmtMonth = (ms: number) => new Date(ms).toLocaleDateString('en-US', { month: 'short', year: '2-digit', timeZone: 'UTC' })
-
-  if (gran === 'month') {
-    // Calendar months from the month containing sinceMs through untilMs.
-    const d = new Date(sinceMs)
-    let y = d.getUTCFullYear()
-    let m = d.getUTCMonth()
-    while (true) {
-      const startMs = Date.UTC(y, m, 1)
-      const endMs = Date.UTC(m === 11 ? y + 1 : y, (m + 1) % 12, 1)
-      if (startMs > untilMs) break
-      out.push({ startMs, endMs, label: fmtMonth(startMs) })
-      m = (m + 1) % 12
-      if (m === 0) y++
-    }
-    return out
-  }
-
-  // Day/week: fixed-width chunks aligned to the UTC day containing sinceMs.
-  const step = gran === 'day' ? DAY_MS : 7 * DAY_MS
-  const first = Date.UTC(new Date(sinceMs).getUTCFullYear(), new Date(sinceMs).getUTCMonth(), new Date(sinceMs).getUTCDate())
-  for (let s = first; s <= untilMs; s += step) {
-    out.push({ startMs: s, endMs: s + step, label: fmtDay(s) })
-  }
-  return out
-}
+/** Re-exported so the client keeps importing the trend axis type from the report's module. */
+export type { SparkBucket }
 
 /** An installed skill with the metadata the roster shows. */
 interface InstalledSkill {
@@ -193,27 +148,8 @@ export interface SkillHealthRow {
   bypassedCalls?: number
 }
 
-/**
- * The time window a report was computed over. A custom `from`/`to` range (ISO)
- * takes precedence; otherwise `days` (null = all-time; default 30) applies.
- */
-export interface SkillHealthWindow {
-  /** Preset length in days, or null for all-time. Default 30. Ignored when from/to set. */
-  days?: number | null
-  /** Custom range lower bound (ISO). When set (with `to`), overrides `days`. */
-  from?: string
-  /** Custom range upper bound (ISO). When set (with `from`), overrides `days`. */
-  to?: string
-  /** Evaluation "now" (ms). Defaults to Date.now(). */
-  nowMs?: number
-  /**
-   * Which harness's skills to report. One report = one source (every denominator — active
-   * repos, session counts, the classify session population — is source-scoped, so mixing
-   * sources would compute cross-agent nonsense). Absent → `resolveSource` picks the source
-   * with the most in-window skill activity, so a single-agent user never sees a chooser.
-   */
-  source?: string
-}
+/** The window a skill report is computed over — the shared shape (see health-window). */
+export type SkillHealthWindow = HealthWindow
 
 export interface SkillHealthReport {
   /** The harness this report reflects (the resolved source — see resolveSource). */
@@ -375,39 +311,6 @@ function querySpark(store: Store, source: string, sinceIso: string, buckets: Spa
 }
 
 /**
- * Distinct-session count per repo in the window — the trust denominator for verdicts.
- * Windowed on `started_at` (a session's own clock), NOT tool-run time: this must match
- * the denominator the shared `classify` policy uses (unused-capabilities' loadSessionCounts
- * counts sessions by started_at too), so the scope/remove verdict divides invocation
- * facts by the same session population the detector does. Invocation FACTS date by t.ts;
- * the session POPULATION dates by started_at — the two clocks are intentional.
- */
-function loadSessionCounts(store: Store, source: string, sinceIso: string, untilIso?: string): Map<string, number> {
-  const rows = store.queryAll(
-    `SELECT repo, COUNT(*) AS n FROM sessions
-     WHERE source = ? AND started_at >= ? AND (? IS NULL OR started_at < ?) AND repo IS NOT NULL GROUP BY repo`,
-    source,
-    sinceIso,
-    untilIso ?? null,
-    untilIso ?? null,
-  ) as Array<{ repo: string; n: number }>
-  return new Map(rows.map((r) => [r.repo, r.n]))
-}
-
-/**
- * The earliest session start for this source, as ms — the natural lower bound for
- * the all-time window's sparkline span. Null when there are no sessions.
- */
-function earliestSessionMs(store: Store, source: string): number | null {
-  const row = store.queryOne(
-    `SELECT MIN(started_at) AS earliest FROM sessions WHERE source = ?`,
-    source,
-  ) as { earliest: string | null } | undefined
-  const t = row?.earliest ? Date.parse(row.earliest) : NaN
-  return Number.isNaN(t) ? null : t
-}
-
-/**
  * Every source with skill data — a source that either INVOKED a skill (tool_calls) or has
  * a skills-category snapshot (installed inventory). Sorted alphabetically (a neutral,
  * stable order — no harness is privileged by name). This is what the client offers as the
@@ -453,53 +356,6 @@ function resolveSource(store: Store, available: string[], requested: string | un
   return ranked[0]!
 }
 
-interface ResolvedWindow {
-  sinceIso: string
-  /** Upper bound (ISO), or undefined for an open range (presets/all-time). */
-  untilIso?: string
-  sinceMs: number
-  spanMs: number
-  /** null = all-time; -1 = a custom range (UI shows the dates, not "N days"). */
-  windowDays: number | null
-}
-
-/**
- * Resolve a requested window into the concrete bounds the queries need: the ISO
- * lower bound (`sinceIso`), an optional upper bound (`untilIso`, set only for a custom
- * range), the sparkline span (`spanMs`) and its start (`sinceMs`), and the `windowDays`
- * echoed to the client. A custom from/to range wins; else `days` (null = all-time). For
- * all-time we anchor the span at the earliest session (falling back to WINDOW_DAYS when
- * the store is empty) so the sparkline still covers the real data range.
- */
-function resolveWindow(store: Store, source: string, win: SkillHealthWindow): ResolvedWindow {
-  const nowMs = win.nowMs ?? Date.now()
-  // Custom range takes precedence when both bounds are valid dates.
-  if (win.from && win.to) {
-    const sinceMs = Date.parse(win.from)
-    const untilMs = Date.parse(win.to)
-    if (!Number.isNaN(sinceMs) && !Number.isNaN(untilMs) && untilMs > sinceMs) {
-      return {
-        sinceIso: new Date(sinceMs).toISOString(),
-        untilIso: new Date(untilMs).toISOString(),
-        sinceMs,
-        spanMs: untilMs - sinceMs,
-        windowDays: -1, // sentinel: a custom range
-      }
-    }
-  }
-  if (win.days === null) {
-    const earliest = earliestSessionMs(store, source)
-    const sinceMs = earliest ?? nowMs - WINDOW_DAYS * 86_400_000
-    // Guard against a zero/negative span if the only session is "now".
-    const spanMs = Math.max(nowMs - sinceMs, 86_400_000)
-    return { sinceIso: new Date(sinceMs).toISOString(), sinceMs, spanMs, windowDays: null }
-  }
-  const days = win.days && win.days > 0 ? win.days : WINDOW_DAYS
-  const spanMs = days * 86_400_000
-  const sinceMs = nowMs - spanMs
-  return { sinceIso: new Date(sinceMs).toISOString(), sinceMs, spanMs, windowDays: days }
-}
-
 /**
  * Build the skill-health report. Installed skills come from config snapshots (with
  * descriptions); invocation facts from tool_calls. The remove/scope verdict reuses the
@@ -530,7 +386,7 @@ export function skillHealth(store: Store, win: SkillHealthWindow = {}): SkillHea
   const installed = loadInstalledSkills(store, source)
   const invokedDetail = queryInvokedDetail(store, source, sinceIso, untilIso)
   const spark = querySpark(store, source, sinceIso, sparkBuckets, untilIso)
-  const sessionCounts = loadSessionCounts(store, source, sinceIso, untilIso)
+  const sessionCounts = sessionCountsByRepo(store, source, sinceIso, untilIso)
 
   // Reuse the detector's classify to get remove(=dead)/scope verdicts, skill-side only.
   const installedCaps: InstalledCap[] = installed.map((s) => ({ kind: 'skill', name: s.name, scope: s.scope, repo: s.repo }))

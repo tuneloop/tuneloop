@@ -1,0 +1,223 @@
+/**
+ * The "Suggested fix" card for a tool or MCP server that keeps failing.
+ *
+ * The Tools tab already tells you WHICH tool is failing and how often, and its
+ * deterministic advice line names the dominant error category. What it can't do
+ * is read the errors. This pass does: for every entity wearing a `high-error`
+ * pill it pulls that entity's failures at FULL length out of the session blobs
+ * (the stored `error_message` is clipped to 200 characters) and drafts a short
+ * diagnosis plus a paste-ready agent-instructions snippet — usually a rule about
+ * how to invoke a CLI the agent keeps getting wrong.
+ *
+ * It is a detector rather than a processor because the pattern is cross-session:
+ * one failure is noise, the same failure across a fortnight is a habit. It emits
+ * NO insights — the deliverable is the card on the entity's page, not another row
+ * in the Recommendations ledger, where a per-tool card would drown the signals
+ * that need a decision.
+ *
+ * Cost is gated twice: only high-error entities are considered at all, and each
+ * one's evidence is hashed so an unchanged failure set reuses the cached card
+ * with no LLM call (the `theme.fix_hash` precedent).
+ */
+import { contentHash } from '../core/hash'
+import { addUsage, emptyUsage, type TokenUsage } from '../core/model'
+import { resultText } from '../core/result-text'
+import { registerDetector } from '../core/registry'
+import type { Detector, DetectorContext, DetectorResult } from '../core/detector'
+import type { JsonSchema, LlmClient } from '../llm/types'
+import { costOfUsage } from '../pricing/pricing'
+import type { Store } from '../store/store'
+// The read model is a pure read over the store — the same thing a detector would
+// otherwise hand-roll in SQL. Importing it keeps ONE definition of "which entities
+// are high-error", so the pill on the page and the card under it can't disagree.
+import { toolErrorSamples, toolHealth, type ToolErrorSample, type ToolHealthRow, type ToolKind } from '../server/tool-health'
+import { WINDOW_DAYS } from './unused-capabilities'
+
+const TOOL_NAME = 'draft_tool_fix'
+
+/** Failures fed to one draft. The most recent are representative; more is spend, not insight. */
+const MAX_SAMPLES = 20
+
+/** Per failure. Enough for a stack/usage dump, short of pasting a whole file. */
+const MAX_ERROR_CHARS = 1500
+
+/** A hard ceiling on cards drafted per run, so a store full of flaky tools can't run away. */
+const MAX_ENTITIES_PER_RUN = 12
+
+export interface ToolFixDraft {
+  diagnosis: string
+  /** Paste-ready agent-instructions block. '' when the pass had nothing worth pasting. */
+  snippet: string
+}
+
+const draftSchema: JsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['diagnosis'],
+  properties: {
+    diagnosis: {
+      type: 'string',
+      description:
+        'What is actually going wrong, in 1-2 sentences, grounded in the error text you were shown. Name the concrete mistake (a wrong flag, a missing auth step, a path that does not exist). Never restate the error rate.',
+    },
+    snippet: {
+      type: 'string',
+      description:
+        'A paste-ready block for the user\'s agent-instructions file (CLAUDE.md or equivalent): the rule that would stop this failure recurring. Markdown, imperative, a few lines at most. Omit entirely if the failures are environmental (a service being down, a rate limit) and no instruction would help.',
+    },
+  },
+}
+
+/**
+ * Stable hash of the failure set a card was drafted from — the regenerate gate.
+ * Built from the call coordinates plus the clipped messages, so it changes when
+ * new failures appear or the mix shifts, but not merely because the window slid.
+ */
+export function evidenceHash(samples: ToolErrorSample[]): string {
+  return contentHash(
+    samples
+      .map((s) => [s.sessionId, s.idx, s.category ?? '', (s.message ?? '').slice(0, 120)].join('\u0000'))
+      .sort()
+      .join('|'),
+  )
+}
+
+/**
+ * The full error text for each sample, read from the session blob. Falls back to
+ * the store's clipped message when the blob is missing — a short evidence line
+ * still beats dropping the failure from the picture entirely.
+ */
+export function collectErrorTexts(
+  samples: ToolErrorSample[],
+  loadSession: (id: string) => { toolCalls?: Array<{ result?: { raw?: unknown } }> } | null,
+): Array<ToolErrorSample & { text: string }> {
+  const blobs = new Map<string, ReturnType<typeof loadSession>>()
+  return samples.map((s) => {
+    if (!blobs.has(s.sessionId)) blobs.set(s.sessionId, loadSession(s.sessionId))
+    const call = blobs.get(s.sessionId)?.toolCalls?.[s.idx]
+    const full = call ? resultText(call.result?.raw).trim() : ''
+    return { ...s, text: (full || s.message || '').slice(0, MAX_ERROR_CHARS) }
+  })
+}
+
+/** Draft one entity's card from its failures. */
+export async function draftToolFix(
+  llm: LlmClient,
+  entity: { kind: ToolKind; name: string; calls: number; errorCalls: number; dominantErrorCategory?: string },
+  samples: Array<ToolErrorSample & { text: string }>,
+): Promise<{ draft: ToolFixDraft; usage: TokenUsage }> {
+  const what = entity.kind === 'mcp' ? `the MCP server \`${entity.name}\`` : `\`${entity.name}\``
+  const lines = samples
+    .map((s, i) => {
+      const head = `${i + 1}. ${s.command ? `command: ${s.command}` : `tool: ${s.name}`}${s.category ? ` · category: ${s.category}` : ''}`
+      return `${head}\n   error: ${s.text || '(no text captured)'}`
+    })
+    .join('\n')
+
+  const system =
+    'You diagnose why a coding agent keeps failing when it uses one particular tool, and write the instruction that ' +
+    'would stop it. You are shown the real error output from that tool across many sessions. Work ONLY from that ' +
+    'evidence: name the specific mistake it reveals. Do not guess at causes the errors do not show, and do not ' +
+    'invent flags, paths, or subcommands you were not shown. If the failures are environmental — a service down, a ' +
+    'rate limit, a user declining a prompt — say so in the diagnosis and omit the snippet, because no instruction ' +
+    `would help. Answer via the ${TOOL_NAME} tool.`
+
+  const user = [
+    `Tool: ${what}`,
+    `Failed ${entity.errorCalls} of ${entity.calls} calls${entity.dominantErrorCategory ? ` · most errors classified as ${entity.dominantErrorCategory}` : ''}`,
+    '',
+    `The failures (${samples.length} most recent):`,
+    lines,
+    '',
+    'Write the diagnosis. Add a snippet ONLY if a written rule in the agent\'s instructions file would plausibly ' +
+      'prevent these — e.g. the correct invocation to use, a precondition to check first, or a tool to prefer instead.',
+  ].join('\n')
+
+  const { data, usage } = await llm.completeStructured({ system, user, schema: draftSchema, toolName: TOOL_NAME, maxTokens: 1024 })
+  return {
+    draft: {
+      diagnosis: typeof data.diagnosis === 'string' ? data.diagnosis.trim() : '',
+      snippet: typeof data.snippet === 'string' ? data.snippet.trim() : '',
+    },
+    usage,
+  }
+}
+
+/** Every source with tool calls — one report per harness, like the tab itself. */
+function sourcesWithTools(store: Store): string[] {
+  return (
+    store.queryAll(`SELECT DISTINCT s.source AS source FROM tool_calls t JOIN sessions s ON s.id = t.session_id`) as Array<{
+      source: string
+    }>
+  )
+    .map((r) => r.source)
+    .sort((a, b) => a.localeCompare(b))
+}
+
+async function run(ctx: DetectorContext): Promise<DetectorResult> {
+  const { store, llm, log } = ctx
+  let usage = emptyUsage()
+  if (!llm) return { insights: [] }
+
+  // Collect the high-error entities across every harness first, so the per-run cap
+  // is applied to a busiest-first list rather than to whichever source sorted first.
+  const candidates: Array<{ source: string; row: ToolHealthRow }> = []
+  for (const source of sourcesWithTools(store)) {
+    const report = toolHealth(store, { days: WINDOW_DAYS, source })
+    for (const row of [...report.mcp.rows, ...report.builtin.rows]) {
+      if (row.flags.indexOf('high-error') >= 0) candidates.push({ source, row })
+    }
+  }
+  candidates.sort((a, b) => b.row.errorCalls - a.row.errorCalls)
+  const picked = candidates.slice(0, MAX_ENTITIES_PER_RUN)
+  if (candidates.length > picked.length) {
+    log.debug(`tool-error-advice: ${candidates.length} high-error entities, drafting the ${picked.length} with the most failures`)
+  }
+  ctx.progress?.addUnits(picked.length)
+
+  for (const { source, row } of picked) {
+    const samples = toolErrorSamples(store, row.kind, row.name, { days: WINDOW_DAYS, source }, MAX_SAMPLES)
+    if (!samples.length) continue
+    const hash = evidenceHash(samples)
+    const cached = store.toolErrorAdvice(source, row.kind, row.name)
+    if (cached && cached.evidenceHash === hash) continue // unchanged failures — reuse, no spend
+
+    try {
+      const withText = collectErrorTexts(samples, (id) => ctx.loadSession(id))
+      const { draft, usage: u } = await draftToolFix(llm, row, withText)
+      usage = addUsage(usage, u)
+      // A declined pass is still cached (empty snippet) so a quiet re-analyze doesn't
+      // re-ask; it re-evaluates as soon as the failures change.
+      store.setToolErrorAdvice(source, row.kind, row.name, {
+        diagnosis: draft.diagnosis,
+        snippet: draft.snippet,
+        evidenceHash: hash,
+        model: llm.model,
+      })
+      ctx.progress?.unitDone(costOfUsage(llm.provider, llm.model, u))
+      log.debug(`tool-error-advice: drafted ${row.kind}/${row.name} (${source})`)
+    } catch (e) {
+      // One entity failing to draft must not lose the cards already written.
+      log.warn(`tool-error-advice: could not draft ${row.kind}/${row.name}: ${String(e)}`)
+    }
+  }
+
+  return {
+    insights: [],
+    cost: { inTokens: usage.input, outTokens: usage.output, usd: costOfUsage(llm.provider, llm.model, usage), model: llm.model },
+  }
+}
+
+export const toolErrorAdvice: Detector = {
+  name: 'tool-error-advice',
+  version: 1,
+  tier: 'X',
+  needsLlm: true,
+  // The deliverable is user-facing config text drafted from raw error output —
+  // the same synthesis load as recurring-themes' fix pass, so it runs on the
+  // stronger model when one is configured.
+  model: 'heavy',
+  run,
+}
+
+registerDetector(toolErrorAdvice)

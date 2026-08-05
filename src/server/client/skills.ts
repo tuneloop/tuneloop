@@ -10,12 +10,10 @@
 import { state, $, esc, num, get } from './core';
 import { syncHash } from './router';
 import { filterBySkill, openDetail } from './sessions';
-
-// Usage-window presets for the Skills tab (mirrors the Sessions time bar). The
-// installed inventory is always current — only the invocation side windows.
-var SK_TIME_PRESETS = [
-  { d: 7, l: '7d' }, { d: 14, l: '14d' }, { d: 30, l: '30d' }, { d: 90, l: '90d' }, { d: 'all', l: 'All' }, { d: 'custom', l: 'Custom' }
-];
+import {
+  bucketRange, fact, pageTile, sectHead, sourceLabel, sparkline, TIME_PRESETS,
+  trendChart, trendGranLabel, wireTrendTooltip, windowPhrase,
+} from './health-ui';
 
 // Cached report, keyed on the window it was fetched for. A window change refetches
 // (the numbers are window-dependent); an unchanged window repaints from cache.
@@ -52,10 +50,6 @@ function flagTip(r, f) {
   return fl.tip;
 }
 
-// Display names for the harness sources (the source chooser + any source-scoped copy).
-var SOURCE_LABELS = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode', pi: 'Pi' };
-function sourceLabel(s) { return SOURCE_LABELS[s] || s; }
-
 // The API query fragment for the current window (+ source, when one is chosen). Custom →
 // from/to; else days=. An explicit source is appended so every skill endpoint reports the
 // same harness the roster resolved to.
@@ -68,20 +62,9 @@ function skWinQuery() {
   return q;
 }
 
-// The human window phrase for a subtitle/caption. `windowDays` is the report's echo:
-// null = all-time, -1 = a custom from/to range (show the dates, per resolveWindow's
-// sentinel), else the preset day count. `presetPrefix` leads the preset/custom form
-// ("in the last "/"over the last "); `allTime` is the standalone all-time phrase.
+// The window phrase for this tab's captions, reading the report's echoed windowDays.
 function winPhrase(presetPrefix, allTime) {
-  var wd = skReport && skReport.windowDays;
-  if (wd == null) return allTime;
-  if (wd < 0) {
-    // Custom range: the day count is a sentinel, so show the actual dates instead — a
-    // self-contained phrase, since "in the last 2026-01-01 → …" doesn't read.
-    if (state.skillFrom && state.skillTo) return 'from ' + state.skillFrom + ' to ' + state.skillTo;
-    return 'over a custom range';
-  }
-  return presetPrefix + num(wd) + (wd === 1 ? ' day' : ' days');
+  return windowPhrase(skReport && skReport.windowDays, presetPrefix, allTime, state.skillFrom, state.skillTo);
 }
 
 // A signature that changes whenever the fetched data would differ — the cache key.
@@ -271,7 +254,7 @@ function renderSkFilters(d) {
   var bar = $('#sk-filters');
   if (!bar) return;
 
-  var segBtns = SK_TIME_PRESETS.map(function (p) {
+  var segBtns = TIME_PRESETS.map(function (p) {
     return '<button type="button" data-d="' + p.d + '"' +
       (String(p.d) === String(state.skillWin) ? ' class="on"' : '') + '>' + p.l + '</button>';
   }).join('');
@@ -516,7 +499,7 @@ function paintSkillPage(box, r) {
   if (vs) vs.onclick = function () { filterBySkill(this.getAttribute('data-name')); };
 
   if (r.calls > 0) {
-    wireTrendTooltip();
+    wireTrendTooltip($('#sk-trend'));
     // Load the invocations list + co-occurrence + outcomes async (page paints instantly).
     loadInvocations(r.name);
     loadCoOccurrence(r.name);
@@ -948,20 +931,6 @@ function repoBreakdownNote(r) {
   return base;
 }
 
-function pageTile(value, label, sub) {
-  return '<div class="sk-tile">' +
-    '<div class="sk-tile-v">' + value + '</div>' +
-    '<div class="sk-tile-l">' + esc(label) + '</div>' +
-    (sub ? '<div class="sk-tile-s">' + esc(sub) + '</div>' : '') +
-    '</div>';
-}
-
-function fact(label, value, tag?, tip?) {
-  return '<div class="sk-fact"' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' +
-    '<div class="sk-fact-l">' + esc(label) + (tag ? ' <span class="sk-tag">' + esc(tag) + '</span>' : '') + '</div>' +
-    '<div class="sk-fact-v">' + esc(value) + '</div></div>';
-}
-
 // The one actionable sentence — status first, then the most useful flag hint. For an
 // unused skill the advice depends on enoughData: only recommend removal once enough
 // sessions have been observed to trust the absence (else suggest widening the window).
@@ -981,123 +950,4 @@ function advice(r) {
     return 'Used, but not found in your current config — a skill removed/relocated since it last ran, or a CLI-bundled skill we can\'t see on disk.';
   }
   return 'Actively used.';
-}
-
-// A section header with a small "?" info affordance carrying the explanation as a
-// hover tooltip — keeps the page uncluttered vs a paragraph of prose under every section.
-function sectHead(label, tip) {
-  return '<div class="sk-sect-h">' + esc(label) +
-    (tip ? ' <span class="sk-info" title="' + esc(tip) + '">?</span>' : '') + '</div>';
-}
-
-// Tiny inline SVG sparkline of per-bucket invocation counts. Flat baseline when
-// there's no usage. Bars (not a line) read clearly at this size. Width/height are
-// parameterized so the roster (small) and the detail page (larger) share it.
-function sparkline(spark, w?, h?) {
-  var width = w || 90, height = h || 20;
-  var vals = spark || [];
-  var max = 0;
-  for (var i = 0; i < vals.length; i++) if (vals[i] > max) max = vals[i];
-  var base = height - 1;
-  if (!max) return '<svg class="sk-spark-svg" width="' + width + '" height="' + height + '" aria-hidden="true"><line x1="0" y1="' + base + '" x2="' + width + '" y2="' + base + '" stroke="var(--line)" stroke-width="1"/></svg>';
-  var n = vals.length, bw = width / n, bars = '';
-  for (var j = 0; j < n; j++) {
-    var bh = vals[j] ? Math.max(2, Math.round((vals[j] / max) * (height - 2))) : 0;
-    if (!bh) continue;
-    bars += '<rect x="' + (j * bw).toFixed(1) + '" y="' + (base - bh) + '" width="' + Math.max(1, bw - 1).toFixed(1) +
-      '" height="' + bh + '" fill="var(--emerald)"></rect>';
-  }
-  return '<svg class="sk-spark-svg" width="' + width + '" height="' + height + '" aria-hidden="true">' + bars + '</svg>';
-}
-
-// The trend granularity word for the caption, inferred from the bucket width.
-function trendGranLabel(buckets) {
-  if (!buckets || buckets.length < 1) return 'period';
-  var days = (buckets[0].endMs - buckets[0].startMs) / 86400000;
-  return days <= 1.5 ? 'day' : days <= 8 ? 'week' : 'month';
-}
-
-// A bucket's full date-range label for the tooltip: "Jul 8" (day) or "Jul 8 – Jul 14".
-function bucketRange(b) {
-  var fmt = function (ms) { return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }); };
-  var days = (b.endMs - b.startMs) / 86400000;
-  return days <= 1.5 ? fmt(b.startMs) : fmt(b.startMs) + ' – ' + fmt(b.endMs - 86400000);
-}
-
-// The Usage-trend bar chart. Bars align 1:1 with the report's calendar buckets; every
-// bar carries data-* so wireTrendTooltip() can show an exact "date: N invocations" on
-// hover. A count Y-axis (0/mid/max) + evenly-spaced date x-ticks make it readable — a
-// real chart, not the roster's bare sparkline. Sized generously for the detail page.
-function trendChart(spark, buckets) {
-  var vals = spark || [];
-  var n = buckets && buckets.length ? buckets.length : vals.length;
-  var max = 0;
-  for (var i = 0; i < n; i++) if ((vals[i] || 0) > max) max = vals[i];
-  max = max || 1;
-  var W = 860, H = 220, padL = 34, padR = 12, padT = 14, padB = 34;
-  var plotW = W - padL - padR, plotH = H - padT - padB;
-  var base = padT + plotH, bw = plotW / n;
-  var yOf = function (v) { return padT + (1 - v / max) * plotH; };
-  var svg = '<svg class="sk-trend-svg" viewBox="0 0 ' + W + ' ' + H + '" width="100%" preserveAspectRatio="xMidYMid meet">';
-
-  // Y gridlines + integer count labels. Cap the tick set so counts stay whole.
-  var yTicks = max <= 4 ? range0(max) : [0, Math.round(max / 2), max];
-  yTicks.forEach(function (v) {
-    var y = yOf(v);
-    svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (W - padR) + '" y2="' + y + '" stroke="var(--line)"/>';
-    svg += '<text class="sk-trend-ax" x="' + (padL - 6) + '" y="' + (y + 3) + '" text-anchor="end">' + v + '</text>';
-  });
-
-  // Bars — every bucket (0-height buckets just render nothing but hold their slot),
-  // each an invisible full-height hit target + the visible bar, both carrying data-*.
-  var xStep = Math.max(1, Math.ceil(n / 8)); // ~8 x-labels max
-  for (var b = 0; b < n; b++) {
-    var x = padL + b * bw, w = Math.max(2, bw - 3), bx = x + (bw - w) / 2;
-    var c = vals[b] || 0;
-    var bk = buckets[b];
-    var range = bk ? bucketRange(bk) : '';
-    var tipCount = c + ' invocation' + (c === 1 ? '' : 's');
-    // Full-height transparent hover zone so hovering the empty space above a short bar still works.
-    svg += '<rect class="sk-trend-hit" x="' + x.toFixed(1) + '" y="' + padT + '" width="' + bw.toFixed(1) + '" height="' + plotH +
-      '" fill="transparent" data-range="' + esc(range) + '" data-count="' + esc(tipCount) + '"></rect>';
-    if (c > 0) {
-      var top = yOf(c);
-      svg += '<rect class="sk-trend-bar" x="' + bx.toFixed(1) + '" y="' + top.toFixed(1) + '" width="' + w.toFixed(1) +
-        '" height="' + (base - top).toFixed(1) + '" rx="2" fill="var(--emerald)"></rect>';
-    }
-    // Evenly-spaced date ticks along the x-axis.
-    if (bk && (b % xStep === 0 || b === n - 1)) {
-      var lbl = new Date(bk.startMs).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-      var anchor = b === 0 ? 'start' : b === n - 1 ? 'end' : 'middle';
-      var tx = anchor === 'start' ? padL : anchor === 'end' ? W - padR : x + bw / 2;
-      svg += '<text class="sk-trend-ax" x="' + tx.toFixed(1) + '" y="' + (H - 12) + '" text-anchor="' + anchor + '">' + esc(lbl) + '</text>';
-    }
-  }
-  svg += '</svg>';
-  return svg;
-}
-
-// [0..max] inclusive, integers — the small-range Y tick set.
-function range0(max) { var a = []; for (var i = 0; i <= max; i++) a.push(i); return a; }
-
-// Wire the trend chart's floating tooltip: hovering any bucket hit-zone shows a
-// positioned box with the date range + exact invocation count. One shared tooltip
-// element, positioned at the cursor; hidden on mouseleave.
-function wireTrendTooltip() {
-  var wrap = $('#sk-trend');
-  if (!wrap) return;
-  var tip = document.createElement('div');
-  tip.className = 'sk-trend-tip';
-  tip.style.display = 'none';
-  wrap.appendChild(tip);
-  Array.prototype.forEach.call(wrap.querySelectorAll('.sk-trend-hit'), function (hit) {
-    hit.onmousemove = function (e) {
-      tip.innerHTML = '<b>' + esc(hit.getAttribute('data-range')) + '</b><br>' + esc(hit.getAttribute('data-count'));
-      tip.style.display = 'block';
-      var wr = wrap.getBoundingClientRect();
-      tip.style.left = (e.clientX - wr.left + 12) + 'px';
-      tip.style.top = (e.clientY - wr.top + 12) + 'px';
-    };
-    hit.onmouseleave = function () { tip.style.display = 'none'; };
-  });
 }

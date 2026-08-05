@@ -94,21 +94,40 @@ describe('resolvePipeline — processor dependencies', () => {
   })
 })
 
+/**
+ * Components the shipped default deliberately leaves OFF, and why.
+ *
+ * Named here rather than simply tolerated, so switching one off stays a two-file
+ * decision: the guard below still fails if a registered component is missing from
+ * config.json entirely, or if anything not on this list ships disabled.
+ *
+ * - `unused-capabilities`: its recommendations have outlived their usefulness. The
+ *   module is NOT dead — `classify()`, `WINDOW_DAYS` and `MIN_SESSIONS` are still
+ *   imported by the Skills and MCP/Tools tabs; only the insight-producing detector
+ *   is off.
+ */
+const DISABLED_BY_DEFAULT = new Set(['unused-capabilities'])
+
 describe('shipped default config', () => {
-  it('enables every registered processor and detector (drift guard)', () => {
+  it('lists every registered processor and detector, disabling only the intended ones', () => {
     const cfg = loadPipelineConfig() // no path → the shipped default at DEFAULT_CONFIG_PATH
     const procNames = getProcessors().map((p) => p.name).sort()
     const detNames = getDetectors().map((d) => d.name).sort()
     expect(Object.keys(cfg.processors ?? {}).sort()).toEqual(procNames)
     expect(Object.keys(cfg.detectors ?? {}).sort()).toEqual(detNames)
-    for (const c of Object.values(cfg.processors ?? {})) expect(c.enabled).not.toBe(false)
-    for (const c of Object.values(cfg.detectors ?? {})) expect(c.enabled).not.toBe(false)
+    for (const [name, c] of Object.entries(cfg.processors ?? {}))
+      expect(c.enabled === false).toBe(DISABLED_BY_DEFAULT.has(name))
+    for (const [name, c] of Object.entries(cfg.detectors ?? {}))
+      expect(c.enabled === false).toBe(DISABLED_BY_DEFAULT.has(name))
   })
 
-  it('resolving the default selects the full registry', () => {
+  it('resolving the default selects the registry minus the deliberate opt-outs', () => {
     const r = resolvePipeline(loadPipelineConfig(), { processors: getProcessors(), detectors: getDetectors() }, silent)
-    expect(r.processors.length).toBe(getProcessors().length)
-    expect(r.detectors.length).toBe(getDetectors().length)
+    expect(r.processors.map((p) => p.name).sort()).toEqual(getProcessors().map((p) => p.name).sort())
+    expect(r.detectors.map((d) => d.name).sort()).toEqual(
+      getDetectors().map((d) => d.name).filter((n) => !DISABLED_BY_DEFAULT.has(n)).sort(),
+    )
+    expect(r.detectors.map((d) => d.name)).not.toContain('unused-capabilities')
   })
 
   it('DEFAULT_CONFIG_PATH points at a readable JSON file', () => {

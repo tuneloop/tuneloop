@@ -11,6 +11,7 @@ import { renderSrControls, loadSuccessRate } from './metrics/successRate'
 import { renderHighlights, paintHighlights, paintDashAsk, goHighlights } from './home'
 import { renderInsights, reopenInsight, clearCellSelection } from './insights'
 import { renderSkills } from './skills'
+import { renderTools, applyToolWin } from './tools'
 import { renderNotices } from './notice'
 import { clearAsked } from './askbanner'
 import { buildFilters, closeDrawer, setView, openDetail, applySessionParams, setBackToInsight, setOnDrawerClose, setOnFacetsChanged } from './sessions'
@@ -37,7 +38,7 @@ function init() {
   });
 
   // Highlights is the landing tab: an empty/partial hash lands there, while a deep
-  // link to any other view (e.g. a shared #/dashboard/ops or #/sessions?…) wins.
+  // link to any other view (e.g. a shared #/dashboard/sessions or #/sessions?…) wins.
   var hash = window.location.hash;
   var landHighlights = !hash || hash === '#' || hash === '#/';
 
@@ -48,6 +49,8 @@ function init() {
     state.artKind = route.artKind;
     state.metric = route.metric; // the KPI tile that's expanded (default cost_artifact)
     state.skill = route.skill; // the open per-skill page (null = the roster)
+    state.toolKind = route.toolKind; // which tools sub-roster (mcp | builtin)
+    state.tool = route.tool; // the open per-entity tools page (null = the roster)
     // Restore the artifacts table's search/sort only when we're landing there
     // (the query params are scoped to the active view).
     if (route.view === 'artifacts') {
@@ -58,11 +61,13 @@ function init() {
       if (q.from || q.to) { state.skillWin = 'custom'; state.skillFrom = q.from || ''; state.skillTo = q.to || ''; }
       else state.skillWin = q.win === 'all' ? 'all' : (q.win === '7' || q.win === '14' || q.win === '90') ? parseInt(q.win, 10) : 30;
     }
+    if (route.view === 'tools') applyToolWin(route.query);
     renderArtKindSeg();
     renderOpenMetric(); // pre-render the chosen dashboard metric's detail
     renderHighlights(); // pre-render the Highlights tab so it's ready whether we land there or tab in later
     renderInsights(); // same for the Insights tab (refetches only after its own mutations)
     renderSkills(); // pre-render the Skills tab (fetches its report once)
+    renderTools(); // same for the Tools tab
     setView(landHighlights ? 'highlights' : route.view);
     if (route.session) openDetail(route.session); // deep-linked drawer
   });

@@ -7,13 +7,15 @@
     "pr-content-match": { "enabled": true },
     "enrich-session": { "enabled": true },
     "skill-outcomes": { "enabled": true },
-    "steering": { "enabled": true }
+    "steering": { "enabled": true },
+    "shell-error-attribution": { "enabled": true }
   },
   "detectors": {
     "cache-miss": { "enabled": true },
-    "unused-capabilities": { "enabled": true },
+    "unused-capabilities": { "enabled": false },
     "context-exhaustion": { "enabled": true },
     "recurring-themes": { "enabled": true },
-    "kitchen-sink": { "enabled": true }
+    "kitchen-sink": { "enabled": true },
+    "tool-error-advice": { "enabled": true }
   }
 }

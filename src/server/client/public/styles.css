@@ -106,10 +106,6 @@ main { max-width: 1180px; margin: 0 auto; padding: 28px; }
 .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; margin-top: 22px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .panel-head h2 { margin: 0; font-size: 18px; }
-/* Ops error-rate head: Title → Filter → Break-down, left-aligned and wrapping, so
-   the break-down group drops to the next line as a whole once filters accumulate. */
-.panel-head.ops-erhead { justify-content: flex-start; flex-wrap: wrap; gap: 10px 14px; }
-.ops-flt { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; background: var(--paper); padding: 5px 12px; cursor: pointer; font-size: 13px; color: var(--muted); }
 .seg button.on { background: var(--ink); color: #f3efe6; }
@@ -998,3 +994,128 @@ button.sk-oc-ex:hover .sk-oc-ex-go { visibility: visible; }
 .tag-addf-btn { border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 4px; font-size: 12px; cursor: pointer; padding: 2px 8px; }
 .tag-addf-btn:hover { background: #dfe9e0; }
 .tag-addf input { border: 1px solid var(--line); background: var(--paper); color: var(--ink); border-radius: 6px; padding: 3px 8px; font-size: 12px; width: 130px; margin-right: 6px; }
+
+/* ---- Tools tab (MCP / built-in tool health) --------------------------------
+   Layout and typography come from the shared health tokens (.sk-*, see
+   client/health-ui.ts); only the chrome that is unique to this tab lives here. */
+
+/* The roster switch — see kindSeg(). It borrows .seg-primary wholesale from the
+   Artifacts tab's section scoper because it does the same job, and a filled pill
+   shares no shape with the top nav's underlined tabs: the underline can keep
+   meaning "which page" while this means "which half of this page". Counts stay in
+   the stat strip below, since the label and its first stat name the same thing. */
+.th-kinds { margin-bottom: 20px; }
+
+/* An error stat in the summary strip reads in its own colour once non-zero, so a
+   problem is visible before you read the label. */
+.th-stat-hero .sk-stat-v { color: var(--red); }
+.th-stat-hero.on .sk-stat-v { color: var(--red); }
+
+/* Built-in rows have no status dot (nothing to install or remove); the slot is
+   held so every row's name column starts at the same x. */
+.th-dot-none { background: transparent; }
+
+/* "shell" / "repo script" chips — what KIND of row this is, distinct from a flag. */
+.th-kind-chip {
+  flex: none; font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); background: var(--track); border-radius: 999px; padding: 2px 8px;
+}
+
+/* An error figure that earned the high-error pill. */
+.th-metric-bad .sk-mv, span.th-metric-bad { color: var(--red); }
+
+.th-overall-card { margin-bottom: 18px; }
+
+/* The tool scope control — see toolChips(). Sits above the stats it scopes, so the
+   filled chip and the numbers it produced are read in one glance. It is also the
+   only per-tool read-out on the page: the table that repeated it was redundant once
+   the chips carried calls and errors, so it was removed. */
+.th-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 16px 0 4px; }
+.th-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); background: var(--paper); border-radius: 999px;
+  padding: 4px 11px; cursor: pointer;
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted);
+}
+.th-chip:hover { color: var(--ink); border-color: var(--muted); }
+.th-chip.on { background: var(--emerald); border-color: var(--emerald); color: #f3efe6; }
+.th-chip-all { font-family: inherit; }
+.th-chip-n { font-size: 11px; opacity: .7; }
+/* The word "err" carries the meaning, so the colour is reinforcement rather than
+   the only signal — which is what lets it stay legible on the emerald active fill. */
+.th-chip-e { font-size: 11px; font-weight: 600; color: var(--red); }
+.th-chip.on .th-chip-e { color: #ffe9e4; }
+/* Carries the caveat the removed table's section heading used to hold. */
+.th-chips-info { margin-left: 2px; }
+
+/* Says the page is narrowed, next to the numbers that are narrowed. */
+.th-scoped {
+  margin: 14px 0 -4px; padding: 8px 12px; border-left: 3px solid var(--emerald);
+  background: var(--paper); font-size: 13px; color: var(--ink);
+}
+
+/* The command / tool name on a call row in the invocations list. */
+.th-inv-what {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted);
+}
+
+/* The semantics note under the built-in roster: why the rows don't sum. */
+.th-roster-note {
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: 12.5px; line-height: 1.55; color: var(--muted); max-width: 780px;
+}
+.th-roster-note code { font-size: 11.5px; background: var(--track); border-radius: 4px; padding: 1px 5px; }
+
+/* The rolled-up shell long tail — a count, not an entity, so it reads quieter
+   than a real row and its caret is a "+" rather than a chevron. */
+.th-rollup-name { color: var(--muted) !important; font-weight: 500 !important; font-style: italic; }
+.th-rollup .sk-caret { color: var(--muted); }
+.th-rollup-back { padding: 10px 4px; font-size: 12.5px; }
+.th-rollup-back a { cursor: pointer; }
+
+/* A failure that came from a command running several binaries. */
+.th-compound { color: var(--muted); border-color: var(--line); margin-left: 6px; }
+.occ-cmd .th-compound { font-size: 10px; margin: 0 6px 0 0; vertical-align: baseline; }
+
+/* The LLM "Suggested fix" card on a tool's page. */
+.th-fix-diag { font-size: 13.5px; line-height: 1.6; color: var(--ink); margin: 4px 0 12px; max-width: 760px; }
+.th-fix-snip { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--paper); }
+.th-fix-snip-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--track);
+  font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+}
+.th-fix-pre {
+  margin: 0; padding: 12px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px;
+  line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: var(--ink);
+}
+
+/* Grouped calls list on a tool's page. Capped so a busy tool can't push the rest
+   of the page (details, install info) off the bottom of a long scroll. */
+.th-calls { max-height: 420px; overflow-y: auto; margin-top: 6px; border-top: 1px solid var(--line); }
+.th-grp { border-bottom: 1px solid var(--line); }
+.th-grp-head {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: none; border: 0; padding: 9px 6px; cursor: pointer; font: inherit; font-size: 13px;
+}
+.th-grp-head:hover { background: var(--track); }
+.th-grp-caret { flex: none; width: 10px; color: var(--muted); transition: transform .12s ease; }
+.th-grp-head.open .th-grp-caret { transform: rotate(90deg); color: var(--emerald); }
+.th-grp-head.open .th-grp-title { color: var(--emerald); }
+.th-grp-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.th-grp-n { flex: none; color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.th-grp-errs {
+  flex: none; color: var(--red); font-size: 11px; border: 1px solid var(--red);
+  border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+}
+/* The expanded calls sit indented under their session, like the error accordion.
+   Capped and scrollable in its own right: one busy session can hold hundreds of
+   calls (246 for `echo` on a real store, ~7k px unbounded), which would fill the
+   outer list entirely and bury every other session. `overscroll-behavior` keeps
+   the inner scroll from chaining out to the page once it bottoms out. */
+.th-grp-items {
+  padding: 2px 0 8px 22px; border-left: 2px solid var(--line); margin-left: 10px;
+  max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
+}
+.th-grp-more { padding-left: 4px; }

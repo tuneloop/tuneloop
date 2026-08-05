@@ -9,7 +9,6 @@ import { renderSuccessRate } from './metrics/successRate'
 import { renderCostArtifact } from './metrics/costArtifact'
 import { renderTotalSpend } from './metrics/totalSpend'
 import { renderSessionsMetric } from './metrics/sessionsMetric'
-import { renderOps } from './metrics/ops'
 
 // The top-level window selector + caption. Sets the window every headline tile
 // AND every expansion's charts are computed over. Lives where the caption used
@@ -35,7 +34,7 @@ export function renderWindow() {
       // Every expansion's charts track the same window. Re-default each curve
       // bucket for the new span (clear manual picks), then re-render whichever
       // detail is open so its charts + labels follow N.
-      state.sr.bucket = ''; state.ca.bucket = ''; state.spend.bucket = ''; state.sm.bucket = ''; state.ops.bucket = '';
+      state.sr.bucket = ''; state.ca.bucket = ''; state.spend.bucket = ''; state.sm.bucket = '';
       renderOpenMetric();
     };
   });
@@ -49,7 +48,6 @@ export function renderOpenMetric() {
   else if (m === 'cost_artifact') renderCostArtifact();
   else if (m === 'total_spend') renderTotalSpend();
   else if (m === 'sessions') renderSessionsMetric();
-  else if (m === 'ops') renderOps();
 }
 
 // The most recent /api/kpis payload, kept so the tile row can repaint without a
@@ -130,9 +128,10 @@ export function paintKpis() {
     { label: 'Total spend', value: usd(cur.totalSpend),
       delta: kpiDelta(cur.totalSpend, prev.totalSpend, 'rel', null), sub: '', metric: 'total_spend' },
     { label: 'Sessions', value: num(cur.sessions),
-      delta: kpiDelta(cur.sessions, prev.sessions, 'rel', null), sub: '', metric: 'sessions' },
-    { label: 'Tool error rate', value: fmtVal(cur.errorRate, 'pct'),
-      delta: kpiDelta(cur.errorRate, prev.errorRate, 'points', 'down'), sub: 'of tool calls', metric: 'ops' }
+      delta: kpiDelta(cur.sessions, prev.sessions, 'rel', null), sub: '', metric: 'sessions' }
+    // Tool error rate lived here with Tools/Skills sub-tabs beneath it. Both now
+    // have top-level tabs of their own (MCP/Tools, Skills) that answer the same
+    // question with per-entity detail, so this was the same data one level worse.
   ];
   $('#kpis').innerHTML = tiles.map(function (t) {
     // Tiles with a metric key are clickable nav into that metric's detail view.

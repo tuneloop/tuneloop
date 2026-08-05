@@ -45,8 +45,7 @@ export interface BlockMembership {
  * that normalization changes, so EVERY vendor's sessions re-ingest. Combined with
  * each adapter's own `parseVersion` into the stored `parse_version` (see analyze.ts).
  */
-export const NORMALIZE_VERSION = 5 // 5: backfill sessions.first_prompt (opening-prompt title fallback)
-
+export const NORMALIZE_VERSION = 16 // 16: an empty stdout is empty output, not a JSON envelope
 
 /**
  * Assign a dense ordinal `seq` to every MAIN-THREAD event, in order. Sidechain

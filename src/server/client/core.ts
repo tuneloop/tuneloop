@@ -29,7 +29,7 @@ export interface SessTime {
 export interface ClientState {
   // The top-level tab the app is showing. Mirrored into the URL hash by the
   // router; setView() keeps it in step with the DOM.
-  view: 'highlights' | 'insights' | 'skills' | 'dashboard' | 'artifacts' | 'sessions'
+  view: 'highlights' | 'insights' | 'skills' | 'tools' | 'dashboard' | 'artifacts' | 'sessions'
   // The session whose detail drawer is open (null = drawer closed). Mirrored into
   // the URL as `?session=<id>` so a session is shareable / reload-survivable.
   open: string | null
@@ -47,6 +47,21 @@ export interface ClientState {
   // Which harness's skills the Skills tab shows ('' = let the server pick the default).
   // Only meaningful when >1 source has skill data; mirrored into the URL as ?source=.
   skillSource: string
+  // Tools tab: which sub-roster ('mcp' | 'builtin'), and the entity whose detail page
+  // is open (null = the roster). Mirrored into the URL as #/tools/<kind>[/<name>].
+  toolKind: string
+  tool: string | null
+  /**
+   * On an MCP server's page, the raw tool name it is narrowed to ('' = the whole
+   * server). Mirrored into the URL as ?tool= so a narrowed page is shareable.
+   */
+  toolFilter: string
+  // Tools-tab window — same shape and defaults as the Skills tab's, and the same
+  // URL params (?win= / ?from=&to= / ?source=). The clock is tool-run time.
+  toolWin: number | 'all' | 'custom'
+  toolFrom: string
+  toolTo: string
+  toolSource: string
   overview: any
   home: any // Explore (question-led) stats; null until fetched
   asked: any // the question the user clicked through from, for the grounding banner (null = none)
@@ -66,10 +81,6 @@ export interface ClientState {
   ca: { kind: string; defaultKind: string; userPicked: boolean; bucket: string; complexity: string }
   spend: { bucket: string; by: string; filters: Record<string, string[]> } // total-spend detail controls
   sm: { bucket: string; by: string; filters: Record<string, string[]> } // sessions detail controls
-  // operational detail: one shared bucket, a per-graph "break down by" choice
-  // ('' | 'name' | 'error_category'), and row-level scopes for the error-rate
-  // chart (tool names + error categories — ops-specific, not the shared facets).
-  ops: { bucket: string; tab: string; by: Record<string, string>; filters: { toolNames: string[]; errorCategories: string[] } }
   ac: { items: any[]; sel: number } // artifact-search typeahead state
   sessTime: SessTime // sessions-list time window (default 30d)
   // Sessions-list column sort + pager page (0-based). Sorting and paging are
@@ -84,7 +95,9 @@ export interface ClientState {
 
 export var state: ClientState = {
   view: 'dashboard', open: null,
-  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '', overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
+  artKind: 'feature', skill: null, skillWin: 30, skillFrom: '', skillTo: '', skillSource: '',
+  toolKind: 'mcp', tool: null, toolFilter: '', toolWin: 30, toolFrom: '', toolTo: '', toolSource: '',
+  overview: null, home: null, asked: null, filters: {}, facets: [], dist: {}, measures: [],
   metric: null,
   outcomeTypes: [],
   days: 14,
@@ -94,7 +107,6 @@ export var state: ClientState = {
   ca: { kind: 'pr', defaultKind: 'pr', userPicked: false, bucket: '', complexity: '' },
   spend: { bucket: '', by: '', filters: {} },
   sm: { bucket: '', by: '', filters: {} },
-  ops: { bucket: '', tab: 'tools', by: { tool_calls: 'name', error_rate: 'name', skill_usage: 'name' }, filters: { toolNames: [], errorCategories: [] } },
   ac: { items: [], sel: -1 },
   sessTime: { preset: 30, from: '', to: '' },
   sessTable: { sort: 'started', dir: 'desc', page: 0 },

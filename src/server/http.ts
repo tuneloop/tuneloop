@@ -7,6 +7,7 @@ import { RESERVED_SESSION_PARAMS, type Bucket, type SessionFilter, type Store } 
 import type { ShResult } from '../core/processor'
 import { ERROR_CATEGORIES } from '../core/error-category'
 import { skillHealth, skillInvocations, skillDrift, skillCoOccurrence, skillOutcomeStats } from './skill-health'
+import { toolAdviceCard, toolErrorOccurrences, toolHealth, toolHealthDetail } from './tool-health'
 
 export type ShFn = (cmd: string, args: string[]) => Promise<ShResult | null>
 
@@ -303,6 +304,45 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     sendJson(res, 200, skillOutcomeStats(store, name, skillWindowFrom(url.searchParams)))
     return
   }
+  if (path === '/api/tool-health') {
+    // Both rosters (MCP servers / built-in tools + promoted shell binaries) with
+    // per-entity stats, error pills, hygiene chips and trends. Same window params
+    // as skill-health; the clock is tool-run time throughout.
+    sendJson(res, 200, toolHealth(store, skillWindowFrom(url.searchParams)))
+    return
+  }
+  if (path === '/api/tool-health-detail') {
+    // One entity's drill-in: stats, per-repo, per-tool, errors by category,
+    // invocations, install details and the deterministic advice line.
+    const kind = url.searchParams.get('kind')
+    const name = url.searchParams.get('name')
+    if (kind !== 'mcp' && kind !== 'builtin') {
+      sendJson(res, 400, { error: 'kind must be mcp or builtin' })
+      return
+    }
+    if (!name) {
+      sendJson(res, 400, { error: 'name required' })
+      return
+    }
+    // `tool` narrows an MCP server's page to one of its tools; ignored elsewhere.
+    const tool = url.searchParams.get('tool') ?? undefined
+    sendJson(res, 200, toolHealthDetail(store, kind, name, skillWindowFrom(url.searchParams), { tool }))
+    return
+  }
+  if (path === '/api/tool-error-advice') {
+    // The LLM "Suggested fix" card for one entity — null until the
+    // tool-error-advice detector has drafted one (it only drafts for entities
+    // wearing a high-error pill, and only when an LLM provider is configured).
+    // The client hides the card on null rather than showing an empty section.
+    const kind = url.searchParams.get('kind')
+    const name = url.searchParams.get('name')
+    if ((kind !== 'mcp' && kind !== 'builtin') || !name) {
+      sendJson(res, 400, { error: 'kind (mcp|builtin) and name required' })
+      return
+    }
+    sendJson(res, 200, toolAdviceCard(store, kind, name, skillWindowFrom(url.searchParams)))
+    return
+  }
   if (path === '/api/error-categories') {
     // Taxonomy metadata (labels + tooltip descriptions) for the error-category widget.
     sendJson(res, 200, ERROR_CATEGORIES)
@@ -313,6 +353,24 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     const category = url.searchParams.get('category')
     if (!category) {
       sendJson(res, 400, { error: 'missing category' })
+      return
+    }
+    // Entity-scoped form (the tools tab): `kind` + `name` scope to one MCP server,
+    // built-in tool, or shell binary — and switch to the tool-run clock the rest of
+    // that tab uses. Without them this is the Ops widget's original session-clocked
+    // query, unchanged.
+    const kind = url.searchParams.get('kind')
+    const name = url.searchParams.get('name')
+    if ((kind === 'mcp' || kind === 'builtin') && name) {
+      // `tool` mirrors the detail page's own filter, so an expanded category bar
+      // lists the same failures it was counted from.
+      sendJson(
+        res,
+        200,
+        toolErrorOccurrences(store, kind, name, category, skillWindowFrom(url.searchParams), {
+          tool: url.searchParams.get('tool') ?? undefined,
+        }),
+      )
       return
     }
     const window = { from: url.searchParams.get('from') ?? undefined, to: url.searchParams.get('to') ?? undefined }
@@ -383,48 +441,6 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
       current: store.kpis(from, to, outcomes),
       previous: store.kpis(prevFrom, from, outcomes),
     })
-    return
-  }
-  if (path === '/api/ops-over-time') {
-    // Operational tool-call metrics over time. view = tool_calls | error_rate |
-    // skill_usage; by=name|error_category splits the series; bucket day|week|month.
-    // tool_name / error_category are repeatable ROW-level scopes for the error-rate
-    // chart (which calls count; which errors count); any other param is a generic
-    // session-level facet filter.
-    const q = url.searchParams
-    const rawView = q.get('view')
-    const view: 'tool_calls' | 'error_rate' | 'skill_usage' =
-      rawView === 'tool_calls' || rawView === 'skill_usage' ? rawView : 'error_rate'
-    const rawBucket = q.get('bucket')
-    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const rawBy = q.get('by')
-    const by = rawBy === 'name' || rawBy === 'error_category' ? rawBy : undefined
-    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to', 'topK', 'tool_name', 'error_category'])
-    const filters: Record<string, string[]> = {}
-    for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
-    }
-    const opsTopK = parseInt(q.get('topK') ?? '', 10)
-    sendJson(
-      res,
-      200,
-      store.opsOverTime({
-        view,
-        bucket,
-        by,
-        from: q.get('from') ?? undefined,
-        to: q.get('to') ?? undefined,
-        filters,
-        toolNames: q.getAll('tool_name').filter(Boolean),
-        errorCategories: q.getAll('error_category').filter(Boolean),
-        topK: Number.isFinite(opsTopK) && opsTopK > 0 ? opsTopK : undefined,
-      }),
-    )
-    return
-  }
-  if (path === '/api/tool-names') {
-    // Distinct tool names (busiest first) for the Ops error-rate tool filter.
-    sendJson(res, 200, store.toolNames())
     return
   }
   if (path === '/api/sessions-over-time') {

@@ -126,9 +126,14 @@ interface Detector {
 - **X** — cross-session LLM: a rolling-window synthesis over many sessions — a new
   analysis-spend shape. *recurring-themes.*
 
-Detectors get a read-only view of the store (`ctx.store` for SQL, `loadSession` to
-hydrate a transcript, `unseenSessions()` for the incremental delta) and never write
-directly — the runner persists what `run()` returns. Adding one mirrors a
+Detectors read the store through `ctx.store` (SQL), `loadSession` (hydrate a
+transcript), and `unseenSessions()` (the incremental delta). The runner owns
+**insight** persistence: it writes what `run()` returns and marks sessions seen only
+if that write succeeds. A detector whose product is its own table writes that table
+directly — `kitchen-sink` → `kitchen_sink_verdict`, `tool-error-advice` →
+`tool_error_advice` — because `DetectorResult` carries only insights, cost and seen,
+and for an expensive LLM pass, writing each row as it is drafted means an
+interrupted run keeps what it already paid for. Adding one mirrors a
 processor: implement `Detector`, `registerDetector` it, and add the import to
 `src/detectors/index.ts`. The LLM detectors run in a shared "Step 2/2" phase after
 the processors on the cheap per-session model by default; a detector opts into the
@@ -159,6 +164,7 @@ ones that need specifics.
 | `outcomes-git` | static + network | Detects commits and PRs the session **created or merged** from the transcript, then asks `gh` for live PR status (degrades gracefully offline). Also catches **explicit reviews** (`gh pr review`, GitHub MCP) as a deterministic "this session reviewed PR X". |
 | `pr-content-match` | network | Recovers the common case where you ask the agent to write code, then commit and push it yourself — so there's no `gh pr create` in the transcript. Matches the lines the agent authored against the added lines of each of *your own* candidate PRs; the matched fraction becomes the PR's AI-attribution. |
 | `enrich-session` | enrichment (LLM) | One batched structured LLM call per session: work type, complexity, autonomy, an intent summary, key decisions, a success judgment, and feature linkage. Skipped entirely with no LLM key. |
+| `shell-error-attribution` | enrichment (LLM) | Which segment of a failed **compound** shell command actually failed, read from its output, plus that failure's error category. Only failed shell calls involving more than one binary — a single-binary failure is already unambiguous. Never overrules the deterministic verdict from `core/shell-blame.ts`; it only fills the gaps that shell semantics can't close. Skipped entirely with no LLM key, leaving the coarser multi-label. |
 
 ## Blocks and cost attribution (`src/core/blocks.ts`)
 
@@ -185,6 +191,7 @@ pattern as an insight and, where possible, attaches a fix you can apply.
 | `context-exhaustion` | S | Repos whose sessions keep hitting the context window and compacting — a nudge to split work or lean on subagents. |
 | `kitchen-sink` | P | Single sessions that mixed several unrelated objectives — where the session should have been split. |
 | `recurring-themes` | X | Clusters the corrections and re-supplied context you had to repeat across sessions into themes, each with a generated fix. Gated to a Sonnet-class-or-stronger model. |
+| `tool-error-advice` | X | Reads the full error text of a tool that keeps failing and drafts a diagnosis + paste-ready agent-instructions snippet. The one detector that emits **no insights** — its output is the "Suggested fix" card on the Tools tab, not a row in the ledger. |
 
 **Fixes.** An insight's fix is one of four types, by the action it expects: a
 **fix-prompt** (a self-contained prompt — diagnosis, evidence excerpts, acceptance
@@ -207,6 +214,10 @@ The tables (`src/store/db.ts`):
 - `session_blobs` — gzipped normalized JSON, for the transcript viewer
 - `usage_facts` — per-assistant-message tokens/cost, so spend slices by model
 - `tool_calls` — one row per tool call
+- `tool_call_commands` — the binaries each shell call ran (`git`, `./deploy.sh`),
+  one row per binary: a chained command involves several
+- `tool_error_advice` — the LLM "Suggested fix" card per failing tool/server,
+  hash-gated on the failures it was drafted from
 - `blocks`, `block_usage`, `block_tool`, `block_annotations`, `block_artifacts` —
   the block partition and everything attributed to it
 - `artifacts` — polymorphic: `file` / `commit` / `pr` / `ticket` / `feature`,
@@ -353,7 +364,9 @@ src/
   llm/           provider presets + Anthropic/OpenAI clients + JSON coercion
   pricing/       static price table + OpenRouter backfill
   query/         read-only SQL runner for `tuneloop query`
-  server/        HTTP API (http.ts) + the dashboard client (client/)
+  server/        HTTP API (http.ts) + the dashboard client (client/); the health
+                 read models (skill-health, tool-health) share one clock and
+                 calendar axis via health-window.ts
   commands/      analyze / serve / query entry points
   cli.ts         argument parsing and command wiring
 ```
