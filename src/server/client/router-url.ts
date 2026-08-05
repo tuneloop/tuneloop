@@ -47,7 +47,9 @@ export const VIEWS = ['highlights', 'insights', 'skills', 'tools', 'dashboard', 
 // /api/insights call, and setView('insights') keeps the internal 'insights' id. The old
 // #/insights slug still resolves (legacy bookmarks) — see parseHash.
 const SLUG_TO_VIEW: Record<string, string> = { recommendations: 'insights' }
-export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions', 'ops']
+// 'ops' was removed with the Tool error rate KPI; an old #/dashboard/ops link is
+// simply an unknown metric, which parseHash already falls back to DEFAULT_METRIC on.
+export const METRICS = ['success_rate', 'cost_artifact', 'total_spend', 'sessions']
 export const ART_KINDS = ['feature', 'pr']
 export const TOOL_KINDS = ['mcp', 'builtin']
 export const DEFAULT_TOOL_KIND = 'mcp'

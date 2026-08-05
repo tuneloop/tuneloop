@@ -38,7 +38,7 @@ function init() {
   });
 
   // Highlights is the landing tab: an empty/partial hash lands there, while a deep
-  // link to any other view (e.g. a shared #/dashboard/ops or #/sessions?…) wins.
+  // link to any other view (e.g. a shared #/dashboard/sessions or #/sessions?…) wins.
   var hash = window.location.hash;
   var landHighlights = !hash || hash === '#' || hash === '#/';
 

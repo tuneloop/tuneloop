@@ -1151,20 +1151,11 @@ export class Store {
          FROM sessions s ${range}`,
       )
       .get(...oc, ...params) as { sessions: number; totalSpend: number; successRate: number | null }
-    // Tool-call error rate over the same session-start window (tool calls join up
-    // to their session for the time basis, consistent with the other KPIs).
-    const tc = this.db
-      .prepare(
-        `SELECT COUNT(*) AS calls, COALESCE(SUM(t.is_error),0) AS errs
-         FROM tool_calls t JOIN sessions s ON s.id = t.session_id ${range}`,
-      )
-      .get(...params) as { calls: number; errs: number }
     return {
       sessions: agg.sessions,
       totalSpend: agg.totalSpend,
       // Null (not 0) when the window has no sessions, so the UI shows "—" not "0%".
       successRate: agg.sessions ? (agg.successRate ?? 0) : null,
-      errorRate: tc.calls ? tc.errs / tc.calls : null,
       costPerFeature: this.costPerArtifact('feature', from, to),
       costPerPr: this.costPerArtifact('pr', from, to),
     }
@@ -1501,140 +1492,6 @@ export class Store {
     return { bucket, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated }
   }
 
-  /**
-   * Operational tool-call metrics over time. One anchor (tool_calls t JOIN
-   * sessions s, dated at session start); the `view` selects what to plot:
-   * tool_calls = COUNT(*), error_rate = SUM(is_error)/COUNT(*), skill_usage =
-   * COUNT(*) WHERE action='skill'. `by:'name'` splits by tool_calls.name (tool
-   * name in general; skill name when skills-only), ranked top-K by call volume.
-   */
-  opsOverTime(q: OpsOverTimeQuery): OpsOverTimeResult {
-    const bucket = q.bucket
-    const topK = q.topK ?? 6
-    const isRate = q.view === 'error_rate'
-    const time = bucketExpr('s.started_at', bucket)
-
-    const where: string[] = ['s.started_at IS NOT NULL']
-    const params: unknown[] = []
-    if (q.view === 'skill_usage') where.push("t.action = 'skill'")
-    if (q.from && q.to) {
-      where.push('s.started_at >= ? AND s.started_at < ?')
-      params.push(q.from, q.to)
-    }
-    for (const [k, v] of Object.entries(q.filters ?? {})) {
-      if (!v) continue
-      const spec = this.facet(k)
-      if (!spec) continue
-      const p = this.facetPredicate(spec, v)
-      where.push(p.sql)
-      params.push(...p.params)
-    }
-    // Row-level tool-name scope: restrict which calls are aggregated, so the rate
-    // becomes that tool's own (denominator + numerator both shrink to these tools).
-    const toolVals = (q.toolNames ?? []).filter(Boolean)
-    if (toolVals.length) {
-      where.push(`t.name IN (${toolVals.map(() => '?').join(', ')})`)
-      params.push(...toolVals)
-    }
-    const fromSql = 'FROM tool_calls t JOIN sessions s ON s.id = t.session_id'
-    const whereSql = 'WHERE ' + where.join(' AND ')
-    // Row-level error-category scope: redefine the numerator (which errors count)
-    // without touching the denominator — "rate of <these categories> among all
-    // in-scope calls". These params bind in the SELECT list, AHEAD of WHERE params.
-    const catVals = (q.errorCategories ?? []).filter(Boolean)
-    const errPh = catVals.map(() => '?').join(', ')
-    const errExpr = catVals.length
-      ? `COALESCE(SUM(CASE WHEN t.error_category IN (${errPh}) THEN 1 ELSE 0 END), 0)`
-      : 'COALESCE(SUM(t.is_error), 0)'
-    const val = (cnt: number, errs: number) => (isRate ? (cnt ? errs / cnt : null) : cnt)
-
-    const overallRows = this.db
-      .prepare(`SELECT ${time} AS tb, COUNT(*) AS cnt, ${errExpr} AS errs ${fromSql} ${whereSql} GROUP BY tb ORDER BY tb`)
-      .all(...catVals, ...params) as Array<{ tb: string; cnt: number; errs: number }>
-    const overallPoints: OpsPoint[] = overallRows.map((r) => ({
-      bucket: r.tb,
-      value: val(r.cnt, r.errs),
-      calls: r.cnt,
-      errors: r.errs,
-    }))
-    const tCnt = overallRows.reduce((a, r) => a + r.cnt, 0)
-    const tErr = overallRows.reduce((a, r) => a + r.errs, 0)
-    const overall = { points: overallPoints, total: val(tCnt, tErr) }
-
-    let series: OpsSeries[] | undefined
-    let truncated: { shown: number; total: number } | undefined
-    if (q.by === 'name') {
-      const rows = this.db
-        .prepare(`SELECT ${time} AS tb, t.name AS nm, COUNT(*) AS cnt, ${errExpr} AS errs ${fromSql} ${whereSql} GROUP BY tb, nm`)
-        .all(...catVals, ...params) as Array<{ tb: string; nm: string | null; cnt: number; errs: number }>
-      const byVal = new Map<string, { points: OpsPoint[]; cnt: number; errs: number }>()
-      for (const r of rows) {
-        if (r.nm == null) continue
-        const e = byVal.get(r.nm) ?? { points: [], cnt: 0, errs: 0 }
-        e.points.push({ bucket: r.tb, value: val(r.cnt, r.errs), calls: r.cnt, errors: r.errs })
-        e.cnt += r.cnt
-        e.errs += r.errs
-        byVal.set(r.nm, e)
-      }
-      let all: OpsSeries[] = Array.from(byVal.entries()).map(([key, e]) => ({
-        key,
-        points: e.points,
-        total: val(e.cnt, e.errs),
-        calls: e.cnt,
-      }))
-      all.sort((a, b) => b.calls - a.calls) // rank by call volume — the tools that matter
-      if (all.length > topK) {
-        truncated = { shown: topK, total: all.length }
-        all = all.slice(0, topK)
-      }
-      series = all
-    } else if (q.by === 'error_category') {
-      // Decompose the error rate by category: each line is a category's errored
-      // calls over ALL in-scope calls that bucket, so the lines sum to the overall
-      // rate. (A per-category denominator would be a flat 100% — the category
-      // column only exists on errored rows.) Honest only for the rate view.
-      const totalByBucket = new Map(overallRows.map((r) => [r.tb, r.cnt]))
-      const catWhere =
-        whereSql + ' AND t.error_category IS NOT NULL' + (catVals.length ? ` AND t.error_category IN (${errPh})` : '')
-      const rows = this.db
-        .prepare(`SELECT ${time} AS tb, t.error_category AS cat, COUNT(*) AS errs ${fromSql} ${catWhere} GROUP BY tb, cat`)
-        .all(...params, ...catVals) as Array<{ tb: string; cat: string | null; errs: number }>
-      const catLabel = new Map(ERROR_CATEGORIES.map((c) => [c.key, c.label]))
-      const byCat = new Map<string, { points: OpsPoint[]; errs: number }>()
-      for (const r of rows) {
-        if (r.cat == null) continue
-        const denom = totalByBucket.get(r.tb) ?? 0
-        const e = byCat.get(r.cat) ?? { points: [], errs: 0 }
-        e.points.push({ bucket: r.tb, value: denom ? r.errs / denom : null, calls: denom, errors: r.errs })
-        e.errs += r.errs
-        byCat.set(r.cat, e)
-      }
-      let all: OpsSeries[] = Array.from(byCat.entries()).map(([key, e]) => ({
-        key,
-        label: catLabel.get(key) ?? key,
-        points: e.points,
-        total: tCnt ? e.errs / tCnt : null,
-        calls: e.errs, // rank categories by error volume
-      }))
-      all.sort((a, b) => b.calls - a.calls)
-      if (all.length > topK) {
-        truncated = { shown: topK, total: all.length }
-        all = all.slice(0, topK)
-      }
-      series = all
-    }
-
-    return { view: q.view, bucket, by: q.by, buckets: this.fullAxis(overallPoints.map((p) => p.bucket), bucket, q.from, q.to), overall, series, truncated, format: isRate ? 'pct' : 'int' }
-  }
-
-  /** Distinct tool-call names, busiest first — feeds the Ops error-rate tool filter. */
-  toolNames(): string[] {
-    return (
-      this.db
-        .prepare('SELECT name FROM tool_calls WHERE name IS NOT NULL GROUP BY name ORDER BY COUNT(*) DESC')
-        .all() as Array<{ name: string }>
-    ).map((r) => r.name)
-  }
 
   /**
    * Outcome types present in the data, with the count of distinct sessions that
@@ -4308,8 +4165,6 @@ export interface KpiSnapshot {
   totalSpend: number
   /** Fraction of sessions judged success; null when the window has no sessions. */
   successRate: number | null
-  /** Tool-call error rate (fraction); null when the window has no tool calls. */
-  errorRate: number | null
   costPerFeature: { count: number; costPerUnit: number | null }
   costPerPr: { count: number; costPerUnit: number | null }
 }
@@ -4363,55 +4218,6 @@ export interface SuccessRateResult {
   series?: RateSeries[]
   /** Set when more facet values existed than were drawn. */
   truncated?: { shown: number; total: number }
-}
-
-/** One bucket of an operational (tool-call) series: count + error split. */
-export interface OpsPoint {
-  bucket: string
-  /** The plotted metric: call count (count views) or error rate (rate view), null if no calls. */
-  value: number | null
-  calls: number
-  errors: number
-}
-
-export interface OpsSeries {
-  key: string
-  /** Display label when the key isn't already human-readable (error categories). */
-  label?: string
-  points: OpsPoint[]
-  /** Total count, or overall error rate, depending on the view. */
-  total: number | null
-  /** Call volume — used to rank series (top-K most-used tools/skills). */
-  calls: number
-}
-
-export interface OpsOverTimeQuery {
-  /** tool_calls = count all; error_rate = AVG(is_error); skill_usage = count where action='skill'. */
-  view: 'tool_calls' | 'error_rate' | 'skill_usage'
-  bucket: Bucket
-  /** 'name' splits by tool name; 'error_category' decomposes the rate by category. */
-  by?: string
-  from?: string
-  to?: string
-  /** Generic session-level facet filters (harness/repo/model); unused by the Ops UI today. */
-  filters?: Record<string, string[]>
-  /** Row-level scope: only count calls of these tool names (denominator + numerator). */
-  toolNames?: string[]
-  /** Row-level scope: only these categories count as errors (numerator only). */
-  errorCategories?: string[]
-  topK?: number
-}
-
-export interface OpsOverTimeResult {
-  view: string
-  bucket: Bucket
-  /** The active breakdown dimension, echoed back so the client can label series. */
-  by?: string
-  buckets: string[]
-  overall: { points: OpsPoint[]; total: number | null }
-  series?: OpsSeries[]
-  truncated?: { shown: number; total: number }
-  format: 'int' | 'pct'
 }
 
 /** One bucket of a session-count series. */

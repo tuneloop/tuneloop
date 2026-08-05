@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseHash, serializeRoute, parseQuery, serializeQuery } from './router-url'
+import { DEFAULT_METRIC, parseHash, serializeRoute, parseQuery, serializeQuery } from './router-url'
 import type { NavState } from './router-url'
 
 describe('parseHash', () => {
@@ -47,7 +47,12 @@ describe('parseHash', () => {
 
   it('parses an open session drawer on any view', () => {
     expect(parseHash('#/sessions?session=opencode:abc')).toMatchObject({ view: 'sessions', session: 'opencode:abc' })
-    expect(parseHash('#/dashboard/ops?session=x1')).toMatchObject({ view: 'dashboard', metric: 'ops', session: 'x1' })
+    expect(parseHash('#/dashboard/sessions?session=x1')).toMatchObject({ view: 'dashboard', metric: 'sessions', session: 'x1' })
+  })
+
+  /** A bookmark from before the Tool error rate KPI was removed still opens the tab. */
+  it('falls back to the default metric for a retired one', () => {
+    expect(parseHash('#/dashboard/ops')).toMatchObject({ view: 'dashboard', metric: DEFAULT_METRIC })
   })
 
   it('exposes the full decoded query map (filtered-list state)', () => {

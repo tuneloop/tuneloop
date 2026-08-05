@@ -435,48 +435,6 @@ async function route(req: IncomingMessage, res: ServerResponse, store: Store, db
     })
     return
   }
-  if (path === '/api/ops-over-time') {
-    // Operational tool-call metrics over time. view = tool_calls | error_rate |
-    // skill_usage; by=name|error_category splits the series; bucket day|week|month.
-    // tool_name / error_category are repeatable ROW-level scopes for the error-rate
-    // chart (which calls count; which errors count); any other param is a generic
-    // session-level facet filter.
-    const q = url.searchParams
-    const rawView = q.get('view')
-    const view: 'tool_calls' | 'error_rate' | 'skill_usage' =
-      rawView === 'tool_calls' || rawView === 'skill_usage' ? rawView : 'error_rate'
-    const rawBucket = q.get('bucket')
-    const bucket: Bucket = rawBucket === 'day' || rawBucket === 'month' ? rawBucket : 'week'
-    const rawBy = q.get('by')
-    const by = rawBy === 'name' || rawBy === 'error_category' ? rawBy : undefined
-    const reserved = new Set(['view', 'bucket', 'by', 'from', 'to', 'topK', 'tool_name', 'error_category'])
-    const filters: Record<string, string[]> = {}
-    for (const [k, v] of q.entries()) {
-      if (!reserved.has(k) && v) (filters[k] ??= []).push(v)
-    }
-    const opsTopK = parseInt(q.get('topK') ?? '', 10)
-    sendJson(
-      res,
-      200,
-      store.opsOverTime({
-        view,
-        bucket,
-        by,
-        from: q.get('from') ?? undefined,
-        to: q.get('to') ?? undefined,
-        filters,
-        toolNames: q.getAll('tool_name').filter(Boolean),
-        errorCategories: q.getAll('error_category').filter(Boolean),
-        topK: Number.isFinite(opsTopK) && opsTopK > 0 ? opsTopK : undefined,
-      }),
-    )
-    return
-  }
-  if (path === '/api/tool-names') {
-    // Distinct tool names (busiest first) for the Ops error-rate tool filter.
-    sendJson(res, 200, store.toolNames())
-    return
-  }
   if (path === '/api/sessions-over-time') {
     // Session count per bucket, optionally split into one series per facet value.
     const q = url.searchParams
