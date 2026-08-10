@@ -251,7 +251,7 @@ are native; everything else speaks the OpenAI-compatible API.
 
 | `TUNELOOP_LLM_PROVIDER` | Key env | Notes |
 |---|---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` | native |
+| `anthropic` | `ANTHROPIC_API_KEY` | native; `TUNELOOP_LLM_BASE_URL` points it at a Claude-API proxy |
 | `openai` | `OPENAI_API_KEY` | native |
 | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` _(or standard AWS credentials)_ | Claude via AWS; set `AWS_REGION` |
 | `openrouter` | `OPENROUTER_API_KEY` | 400+ models via one key |
@@ -294,7 +294,9 @@ for one run; the API key is never a flag — set it in the env or paste it at th
 interactive prompt. For a gateway that authenticates by request headers instead of
 a key, use `openai-compatible-nokey` and pass the headers as a JSON object in
 `TUNELOOP_LLM_HEADERS` (applied to every request; a malformed value warns and
-enrichment stays off rather than sending unauthenticated requests). It's inexpensive: analyzing ~100 sessions runs about **$6**
+enrichment stays off rather than sending unauthenticated requests). Both
+`TUNELOOP_LLM_BASE_URL` and `TUNELOOP_LLM_HEADERS` also apply to the native
+`anthropic` and `bedrock` providers, for Claude behind a corporate gateway. It's inexpensive: analyzing ~100 sessions runs about **$6**
 with the default pairing — a cheap model (e.g. Claude Haiku) for the per-session
 enrichment and a Sonnet-class heavy model for the cross-session recommendation
 detectors. This cost shows up as **Analysis spend** in the summary,

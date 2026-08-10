@@ -3,10 +3,13 @@ import { createBedrockClient } from './bedrock'
 
 // Stub the SDK client so completeStructured never hits the network; the tests
 // assert what request the bedrock wrapper builds, not what AWS returns.
-const { create } = vi.hoisted(() => ({ create: vi.fn() }))
+const { create, ctor } = vi.hoisted(() => ({ create: vi.fn(), ctor: vi.fn() }))
 vi.mock('@anthropic-ai/bedrock-sdk', () => ({
   AnthropicBedrock: class {
     messages = { create }
+    constructor(opts: unknown) {
+      ctor(opts)
+    }
   },
 }))
 
@@ -14,6 +17,7 @@ const req = { system: 's', user: 'u', schema: { type: 'object' }, toolName: 'rec
 
 beforeEach(() => {
   create.mockReset()
+  ctor.mockReset()
   create.mockResolvedValue({
     content: [{ type: 'tool_use', name: 'record', input: { ok: true } }],
     usage: { input_tokens: 1, output_tokens: 2 },
@@ -36,5 +40,14 @@ describe('bedrock thinking gate', () => {
     const client = createBedrockClient('', 'us.anthropic.claude-haiku-4-5-20251001-v1:0')
     await client.completeStructured(req)
     expect(create.mock.calls[0]![0]).not.toHaveProperty('thinking')
+  })
+})
+
+describe('bedrock client construction', () => {
+  it('forwards baseURL and custom default headers to the SDK', () => {
+    createBedrockClient('k', 'm', { baseURL: 'http://gw', headers: { 'x-user-id': 'u-123' } })
+    expect(ctor).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'k', baseURL: 'http://gw', defaultHeaders: { 'x-user-id': 'u-123' } }),
+    )
   })
 })
