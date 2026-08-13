@@ -27,7 +27,9 @@ import { extractExecEnvelope } from './exec-envelope'
 // 8: capture EXPLICIT `$skill-name` invocations. Codex injects the skill body as a
 //    role:user <skill> envelope and answers directly (no shell SKILL.md read), so the
 //    shell-read heuristic misses it — synthesize a skill tool call from the envelope.
-export const PARSE_VERSION = 8
+// 9: recognize genuine prompts from Codex 0.147's `item_completed` UserMessage items
+//    (it dropped the `event_msg.user_message` echo the prompt oracle relied on).
+export const PARSE_VERSION = 9
 const SOURCE = 'codex'
 const PROVIDER = 'openai'
 
@@ -72,11 +74,12 @@ export async function parseCodex(path: string): Promise<Session | null> {
 
   // Two things gathered up front (some trail what they describe in file order):
   //  - tool call_id -> output string, so a call joins its result regardless of order.
-  //  - the set of GENUINE human prompts. Codex echoes every real prompt as an
-  //    `event_msg.user_message`, but NOT its injected `role:user` machinery
+  //  - the set of GENUINE human prompts, but NOT injected `role:user` machinery
   //    (<environment_context>, <turn_aborted>, <subagent_notification>, …). So this
   //    set is the oracle for telling a real user turn from machinery (ADR-0001 Q1),
-  //    which keeps core/turns.ts Claude-only and the block partition honest.
+  //    which keeps core/turns.ts Claude-only and the block partition honest. Codex
+  //    echoed every real prompt as an `event_msg.user_message`; 0.147 dropped that
+  //    for an `item_completed` UserMessage item. Both carry only genuine prompts.
   const resultById = new Map<string, string>()
   const humanPrompts = new Set<string>()
   for (const r of records) {
@@ -86,6 +89,9 @@ export async function parseCodex(path: string): Promise<Session | null> {
       if (typeof p.call_id === 'string') resultById.set(p.call_id, outputString(p.output ?? p.tools))
     } else if (r.type === 'event_msg' && p.type === 'user_message' && typeof p.message === 'string') {
       humanPrompts.add(p.message.trim())
+    } else if (r.type === 'event_msg' && p.type === 'item_completed' && (p.item as Raw)?.type === 'UserMessage') {
+      const text = textOf((p.item as Raw).content).trim()
+      if (text) humanPrompts.add(text)
     }
   }
 
