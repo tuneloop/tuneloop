@@ -394,6 +394,24 @@ describe('Codex explicit skill invocation ($skill-name)', () => {
   })
 })
 
+describe('Codex 0.147 item model', () => {
+  it('recognizes genuine prompts from item_completed UserMessage items (no user_message echo)', async () => {
+    const session = await parseRecords([
+      meta('s'),
+      { type: 'turn_context', payload: { model: 'gpt-5.6' } },
+      // Injected machinery: role:user, but not a real prompt — must stay a SystemEvent.
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>' }] } },
+      // 0.147 dropped event_msg.user_message; the genuine prompt is an item_completed UserMessage.
+      { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'hello whats up!' }] } } },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello whats up!' }] } },
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hey!' }] } },
+      tokenCount({ input_tokens: 100, output_tokens: 10 }, { input_tokens: 100, output_tokens: 10 }),
+    ])
+    const userTurns = session.events.filter((e) => e.kind === 'user')
+    expect(userTurns.map((e) => e.text)).toEqual(['hello whats up!'])
+  })
+})
+
 async function parseRecords(records: unknown[]): Promise<Session> {
   const dir = await mkdtemp(join(tmpdir(), 'tuneloop-codex-tools-'))
   const path = join(dir, 'rollout.jsonl')
