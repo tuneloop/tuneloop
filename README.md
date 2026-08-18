@@ -10,7 +10,7 @@ and recommendations for more effective usage grounded in your sessions.
 <br>
 
 <p align="center">
-  <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (cost per shipped artifact, session outcome rate, spend, sessions, tool error rate) above a per-PR cost breakdown treemap" width="900">
+  <img src="docs/img/cost_per_artifact.png" alt="tuneloop dashboard — headline metrics (cost per shipped artifact, session outcome rate, total spend, sessions) above a per-PR cost breakdown treemap" width="900">
 </p>
 
 <br>
@@ -24,6 +24,7 @@ Concretely, it enriches each session with:
 - **Work type**
 - **Key decisions**
 - **Tool error categories**
+- **Skill activation outcomes**
 
 and across sessions, identifies:
 - **Agent re-work / re-steer themes**
