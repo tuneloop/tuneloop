@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-08-18
+
+### Fixed
+
+- Codex 0.147 transcripts now correctly recognize user prompts from
+  `item_completed` items, which were previously dropped. ([#123])
+
 ## [0.8.0] - 2026-08-05
 
 ### Added
@@ -249,7 +256,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LLM enrichment for session intent and key-decision extraction.
 - `analyze` serves the dashboard by default.
 
-[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/tuneloop/tuneloop/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/tuneloop/tuneloop/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.8.0
 [0.7.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.7.0
 [0.6.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.6.0
@@ -261,6 +269,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.2.0
 [0.1.0]: https://github.com/tuneloop/tuneloop/releases/tag/v0.1.0
 
+[#123]: https://github.com/tuneloop/tuneloop/pull/123
 [#119]: https://github.com/tuneloop/tuneloop/pull/119
 [#117]: https://github.com/tuneloop/tuneloop/pull/117
 [#116]: https://github.com/tuneloop/tuneloop/pull/116
