@@ -16,7 +16,7 @@ import type { ClientOpts, LlmClient } from './types'
 export function createBedrockClient(apiKey: string, model: string, opts?: ClientOpts): LlmClient {
   // Empty key = "no bearer token" — leave apiKey unset so the SDK falls through
   // to AWS_BEARER_TOKEN_BEDROCK / the AWS credential chain on its own.
-  const client = new AnthropicBedrock({ apiKey: apiKey || undefined, baseURL: opts?.baseURL })
+  const client = new AnthropicBedrock({ apiKey: apiKey || undefined, baseURL: opts?.baseURL, defaultHeaders: opts?.headers })
   // Bedrock rejects forced tool_choice while thinking could run. Sonnet 5 thinks
   // by default so it needs the explicit opt-out; sent only for that family since
   // always-on-thinking models reject an explicit disable

@@ -7,9 +7,15 @@ export interface AnthropicMessagesClient {
   messages: { create(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> }
 }
 
-/** Anthropic-backed client. Data goes only to Anthropic, with the user's own key. */
+/**
+ * Anthropic-backed client. Data goes only to Anthropic — or, when `baseURL` is
+ * set (TUNELOOP_LLM_BASE_URL / --llm-base-url), to that Anthropic-shaped
+ * endpoint (e.g. a corporate Claude proxy) — with the user's own key. `headers`
+ * ride on every request for gateways that authenticate by header instead.
+ */
 export function createAnthropicClient(apiKey: string, model: string, opts?: ClientOpts): LlmClient {
-  return anthropicShapedClient(new Anthropic({ apiKey }), opts?.provider ?? 'anthropic', model)
+  const client = new Anthropic({ apiKey, baseURL: opts?.baseURL, defaultHeaders: opts?.headers })
+  return anthropicShapedClient(client, opts?.provider ?? 'anthropic', model)
 }
 
 /**

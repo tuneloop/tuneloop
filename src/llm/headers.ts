@@ -1,6 +1,7 @@
 /**
  * Parse `TUNELOOP_LLM_HEADERS` — a JSON object of extra HTTP headers attached to
- * every request to an OpenAI-compatible endpoint. It's the auth channel for an
+ * every enrichment request, whatever the provider shape (OpenAI-compatible,
+ * Anthropic, Bedrock). It's the auth channel for an
  * intranet gateway that identifies callers by `x-*` headers instead of an API key
  * (see the `openai-compatible-nokey` preset). Anything that isn't a flat object of
  * string values throws with a message naming the env var; createLlmClient's caller
