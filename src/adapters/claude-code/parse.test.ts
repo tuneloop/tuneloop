@@ -215,3 +215,102 @@ describe('claude-code explicit skill invocation (/skill-name)', () => {
     expect(skills.map((s) => s.name)).toEqual(['review', 'review'])
   })
 })
+
+// ── Shell-mediated edits (see shell-edits.ts) ─────────────────────────────────
+// A Bash call that edits files feeds no metric unless recovered from the
+// command text of calls that SUCCEEDED. Recoveries land as synthesized
+// ShellEdit file_write calls anchored to their Bash call.
+describe('claude-code shell-mediated edits', () => {
+  const EDIT_SID = 'cccc0000-1111-2222-3333-444444444444'
+  const line = (uuid: string, prev: string | null, msg: unknown, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ parentUuid: prev, isSidechain: false, type: 'assistant', cwd: '/repo', sessionId: EDIT_SID, uuid, timestamp: '2026-08-24T10:00:00.000Z', message: msg, ...extra })
+  const userResult = (uuid: string, prev: string, toolId: string, isError = false) =>
+    JSON.stringify({ parentUuid: prev, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EDIT_SID, uuid, timestamp: '2026-08-24T10:00:01.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolId, content: 'ok', is_error: isError }] } })
+  const bash = (uuid: string, prev: string, toolId: string, command: string) =>
+    line(uuid, prev, { id: `msg_${uuid}`, model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: toolId, name: 'Bash', input: { command } }], usage: { input_tokens: 1, output_tokens: 1 } })
+
+  const HEREDOC = "cat > src/new-file.ts <<'EOF'\nexport const fresh = 1\nEOF"
+  const PYREPLACE = "python3 - <<'PY'\ns=open('src/edited.ts').read()\ns=s.replace('const before = 0', 'const after = 1')\nopen('src/edited.ts','w').write(s)\nPY"
+  const SED = `sed -i '' 's/x/y/' src/sedded.ts`
+  const PERL = `perl -i -pe 's/complex/transform/' src/hooked.ts`
+
+  async function parseFixture() {
+    const d = mkdtempSync(join(tmpdir(), 'cc-shell-'))
+    const lines = [
+      JSON.stringify({ parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EDIT_SID, uuid: 'u1', timestamp: '2026-08-24T10:00:00.000Z', message: { role: 'user', content: 'go' } }),
+      bash('a1', 'u1', 'b1', HEREDOC), userResult('r1', 'a1', 'b1'),
+      bash('a2', 'r1', 'b2', PYREPLACE), userResult('r2', 'a2', 'b2'),
+      bash('a3', 'r2', 'b3', SED), userResult('r3', 'a3', 'b3'),
+      // b4: same edit idiom but the command FAILED — must recover nothing.
+      bash('a4', 'r3', 'b4', PYREPLACE.replace('edited', 'failed')), userResult('r4', 'a4', 'b4', true),
+      bash('a5', 'r4', 'b5', PERL), userResult('r5', 'a5', 'b5'),
+    ]
+    writeFileSync(join(d, `${EDIT_SID}.jsonl`), lines.join('\n'))
+    const session = await parseClaudeCode(join(d, `${EDIT_SID}.jsonl`))
+    expect(session).not.toBeNull()
+    return session!
+  }
+
+  const shellEdits = (s: Awaited<ReturnType<typeof parseFixture>>) => s.toolCalls.filter((t) => t.name === 'ShellEdit')
+
+  it('recovers heredoc content, replace pairs, and sed/perl paths — not the failed call', async () => {
+    const session = await parseFixture()
+    const synth = shellEdits(session)
+    // b1 heredoc + b2 replace + b3 sed path + b5 perl path; b4 failed → nothing.
+    // Paths are absolutized against the session cwd — the native-Edit frame.
+    expect(synth.map((t) => [t.parentId, (t.input as { file_path: string }).file_path])).toEqual([
+      ['b1', '/repo/src/new-file.ts'],
+      ['b2', '/repo/src/edited.ts'],
+      ['b3', '/repo/src/sedded.ts'],
+      ['b5', '/repo/src/hooked.ts'],
+    ])
+    expect((synth[0]!.input as { content: string }).content).toBe('export const fresh = 1')
+    expect((synth[1]!.input as { edits: unknown }).edits).toEqual([{ old_string: 'const before = 0', new_string: 'const after = 1' }])
+    expect(synth.every((t) => t.action === 'file_write')).toBe(true)
+  })
+
+  it('a Bash call with NO tool_result recovers nothing (never ran)', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'cc-shell-'))
+    const lines = [
+      JSON.stringify({ parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EDIT_SID, uuid: 'u1', timestamp: '2026-08-24T10:00:00.000Z', message: { role: 'user', content: 'go' } }),
+      bash('a1', 'u1', 'b9', HEREDOC), // no tool_result follows — interrupted session
+      bash('a2', 'a1', 'b10', SED), userResult('r2', 'a2', 'b10'),
+    ]
+    writeFileSync(join(d, `${EDIT_SID}.jsonl`), lines.join('\n'))
+    const session = await parseClaudeCode(join(d, `${EDIT_SID}.jsonl`))
+    const synth = session!.toolCalls.filter((t) => t.name === 'ShellEdit')
+    // b9 proposed a heredoc but never ran; only b10's sed recovers.
+    expect(synth.map((t) => t.parentId)).toEqual(['b10'])
+  })
+
+  it('derived calls are marked — analytics can exclude them', async () => {
+    const session = await parseFixture()
+    const synth = shellEdits(session)
+    expect(synth.length).toBeGreaterThan(0)
+    for (const t of synth) expect(t.derived).toBe(true)
+  })
+
+  it('feeds files-touched: every recovered path is a file_write target', async () => {
+    const session = await parseFixture()
+    const written = session.toolCalls
+      .filter((t) => t.action === 'file_write')
+      .flatMap((t) => t.target.paths ?? [])
+    expect(written).toContain('/repo/src/new-file.ts')
+    expect(written).toContain('/repo/src/edited.ts')
+    expect(written).toContain('/repo/src/sedded.ts')
+    expect(written).not.toContain('/repo/src/failed.ts') // the failed call earned nothing
+  })
+
+  it('synthesized edits sit right after their Bash call — chronological list', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'cc-shell-'))
+    const lines = [
+      JSON.stringify({ parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EDIT_SID, uuid: 'u1', timestamp: '2026-08-24T10:00:00.000Z', message: { role: 'user', content: 'go' } }),
+      bash('a1', 'u1', 'c1', "cat > src/first.ts <<'EOF'\nhello\nEOF"), userResult('r1', 'a1', 'c1'),
+      line('a2', 'r1', { id: 'm_a2', model: 'claude-fable-5', role: 'assistant', content: [{ type: 'tool_use', id: 'c2', name: 'Edit', input: { file_path: '/repo/src/first.ts', old_string: 'hello', new_string: 'world' } }], usage: { input_tokens: 1, output_tokens: 1 } }), userResult('r2', 'a2', 'c2'),
+    ]
+    writeFileSync(join(d, `${EDIT_SID}.jsonl`), lines.join('\n'))
+    const session = (await parseClaudeCode(join(d, `${EDIT_SID}.jsonl`)))!
+    // ShellEdit is INSERTED after its Bash, before the later native Edit.
+    expect(session.toolCalls.map((t) => t.name)).toEqual(['Bash', 'ShellEdit', 'Edit'])
+  })
+})

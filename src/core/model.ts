@@ -126,6 +126,9 @@ export interface ToolCall {
    * a transport envelope (for example Codex's JavaScript `exec` wrapper).
    */
   parentId?: string
+  /** Synthesized by an adapter (never invoked by the model) — e.g. a shell
+   *  edit recovered from a Bash call. Excluded from per-tool analytics. */
+  derived?: boolean
   name: string
   action: CanonicalAction
   input: unknown

@@ -539,7 +539,8 @@ function digest(s: Session): string {
 
   return [
     `Models: ${s.models.join(', ') || 'unknown'}`,
-    `User turns: ${turns.length} | Tool calls: ${s.toolCalls.length}`,
+    // Derived calls (shell-edit recoveries) are not invocations — match n_tool_calls.
+    `User turns: ${turns.length} | Tool calls: ${s.toolCalls.filter((t) => !t.derived).length}`,
     `Activity profile (distinct files for read/write, else call counts — gauges scope & exploration): ${activity}`,
     `Steering signal: ${followups.length} of ${turns.length} user turn(s) were follow-ups after the opening ` +
       `request (bare approvals like "yes"/"continue" already excluded). Judge how many GENUINELY steered the ` +

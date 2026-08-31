@@ -398,6 +398,7 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tool-block-body .fc-diff { margin: 0; }
 .tool-file-diff + .tool-file-diff { margin-top: 8px; }
 .tool-file-diff-path { margin-bottom: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; font-weight: 600; color: var(--muted); word-break: break-all; }
+.tool-file-diff-note { font-size: 10.5px; font-style: italic; color: var(--muted); padding: 2px 0 4px; }
 /* Tool overflow (>TOOLCAP) */
 .tool-rest { display: none; }
 .tool-rest.on { display: block; }
