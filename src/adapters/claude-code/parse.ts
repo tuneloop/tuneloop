@@ -34,10 +34,11 @@ import { editsFromCommand, synthShellEdit } from './shell-edits'
 //    the body's `sourceToolUseID`) are one invocation, so synthesize from a body only when
 //    it isn't the expansion of a real tool call.
 // 12: shell-mediated edits (see shell-edits.ts). Bash calls that edit files fed
-//    no metric — ~7% of all mutations. Recover them from the command text of
-//    SUCCEEDED Bash calls (heredoc body = the file; python literal replace =
-//    both sides; sed/perl = path only) and fold them in as synthesized
-//    file_write calls anchored to their Bash call, inserted chronologically.
+//    no metric. Recover them from the command text of SUCCEEDED Bash calls
+//    (heredoc body = the file; python literal replace = both sides; sed/perl =
+//    path only) and fold them in as synthesized file_write calls anchored to
+//    their Bash call, inserted chronologically. A file the same command rm-s
+//    after writing it was scratch, not an edit.
 export const PARSE_VERSION = 12
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'

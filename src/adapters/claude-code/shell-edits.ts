@@ -118,7 +118,40 @@ export function editsFromCommand(command: string): SynthesizedEdit[] {
     covered.add(p)
     out.push({ path: p })
   }
-  return out
+  // A file this same command REMOVES after writing it was scratch, not an edit
+  // (`cat > t.test.ts <<EOF …; vitest t.test.ts; rm -f t.test.ts`). Order
+  // matters: an rm BEFORE the write (`rm -f f; cat > f <<EOF`) is a rewrite
+  // and keeps its credit. Offsets in cmdOnly and withPython are comparable —
+  // masking replaces characters with spaces, never moves them.
+  const rms = rmSpans(cmdOnly)
+  return out.filter((e) => {
+    const rmEnd = rms.get(e.path)
+    if (rmEnd === undefined) return true
+    return withPython.lastIndexOf(e.path) > rmEnd
+  })
+}
+
+/** Files removed by a plain `rm` in the command → the END offset of the last
+ *  such rm span, for the order check above. Conservative: `-r` removals
+ *  (directories — matching a file INSIDE one needs path logic the miss doesn't
+ *  earn) and glob operands (a glob is not a path) are ignored. Heredoc bodies
+ *  are already masked out of `cmdOnly`, so an rm in written example text never
+ *  counts. */
+function rmSpans(cmdOnly: string): Map<string, number> {
+  const spans = new Map<string, number>()
+  const re = /(?:^|[;&|\n])\s*rm\s+([^\n;|&]+)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(cmdOnly))) {
+    const end = m.index + m[0].length
+    const args = m[1]!.trim().split(/\s+/)
+    if (args.some((a) => /^-[a-zA-Z]*r/i.test(a))) continue
+    for (const a of args) {
+      if (a.startsWith('-') || /[*?[]/.test(a)) continue
+      const prev = spans.get(a)
+      if (prev === undefined || end > prev) spans.set(a, end)
+    }
+  }
+  return spans
 }
 
 /**

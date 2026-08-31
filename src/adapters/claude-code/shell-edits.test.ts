@@ -115,6 +115,38 @@ describe('shell-edit parsing tier — editsFromCommand', () => {
 
 // Junk shapes found by replaying the LIVE corpus — each was wrongly recovered
 // as a file before the hardening pass.
+describe('shell-edit parsing tier — write-then-delete is scratch', () => {
+  it('a file rm-ed after being written earns nothing (throwaway test file)', () => {
+    const cmd = "cat > src/__scratch.test.ts <<'EOF'\nit('x', () => {})\nEOF\nnpx vitest run src/__scratch.test.ts; rm -f src/__scratch.test.ts"
+    expect(editsFromCommand(cmd)).toEqual([])
+  })
+
+  it('rm BEFORE the write is a rewrite — credit kept', () => {
+    const cmd = "rm -f src/rebuilt.ts\ncat > src/rebuilt.ts <<'EOF'\nfresh\nEOF"
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'src/rebuilt.ts', content: 'fresh' }])
+  })
+
+  it('a python-written file rm-ed afterwards earns nothing', () => {
+    const cmd = "python3 - <<'PY'\nopen('out.gen.ts','w').write('x')\nPY\nrm out.gen.ts"
+    expect(editsFromCommand(cmd)).toEqual([])
+  })
+
+  it('rm -r of a directory does not void a file inside it', () => {
+    const cmd = "cat > build/kept.ts <<'EOF'\nx\nEOF\nrm -rf build2"
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'build/kept.ts', content: 'x' }])
+  })
+
+  it('a glob rm does not void a concrete path', () => {
+    const cmd = "cat > src/real.ts <<'EOF'\nx\nEOF\nrm -f *.tmp"
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'src/real.ts', content: 'x' }])
+  })
+
+  it('an rm inside a WRITTEN script body is content, not a removal', () => {
+    const cmd = "cat > scripts/clean.sh <<'EOF'\nrm -f scripts/clean.sh\nEOF"
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'scripts/clean.sh', content: 'rm -f scripts/clean.sh' }])
+  })
+})
+
 describe('shell-edit parsing tier — live-corpus junk rejection', () => {
   it('the word sed inside a quoted python string is not a sed command', () => {
     const cmd = `python3 - <<'PY'\nMUT = re.compile(r"\\bsed\\s+(-[a-zA-Z]*\\s+)*-i\\b|>>\\s*src/")\nprint(MUT)\nPY`
