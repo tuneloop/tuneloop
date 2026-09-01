@@ -244,3 +244,75 @@ describe('shell-edit parsing tier — second-wave regressions', () => {
   })
 
 })
+
+describe('shell-edit parsing tier — third-wave review regressions', () => {
+  it('a <<< herestring is not a heredoc: following commands are never file content', () => {
+    const cmd = "cat <<< hello > src/x.ts\necho done\nsed -i s/a/b/ src/y.ts"
+    // No heredoc body exists, so nothing fabricates `echo done…` as content;
+    // the real sed edit after it survives.
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'src/y.ts' }])
+  })
+
+  it('a quoted "<<EOF" is text, not an opener', () => {
+    const cmd = "grep '<<EOF' src/a.ts\nsed -i s/x/y/ src/b.ts"
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'src/b.ts' }])
+  })
+
+  it('non-\\w markers (END-1) are real heredocs — captured AND masked', () => {
+    expect(editsFromCommand("cat > src/x.ts <<'END-1'\nbody line\nEND-1")).toEqual([
+      { path: 'src/x.ts', content: 'body line' },
+    ])
+    // …and a docs heredoc with such a marker masks its example script.
+    const docs = "cat > docs/notes.md <<'END-1'\ns=open('src/a.ts').read()\ns=s.replace('x','y')\nopen('src/a.ts','w').write(s)\nEND-1"
+    expect(editsFromCommand(docs)).toEqual([{ path: 'docs/notes.md', content: expect.stringContaining('replace') }])
+  })
+
+  it('an append is an Edit in shape, never a whole-file Write', () => {
+    expect(editsFromCommand("cat >> CHANGELOG.md <<'EOF'\n## v2\nEOF")).toEqual([
+      { path: 'CHANGELOG.md', edits: [{ old_string: '', new_string: '## v2' }] },
+    ])
+    expect(editsFromCommand("tee -a CHANGELOG.md <<'EOF'\n## v3\nEOF")).toEqual([
+      { path: 'CHANGELOG.md', edits: [{ old_string: '', new_string: '## v3' }] },
+    ])
+  })
+
+  it("a target FILENAME containing 'python' does not unmask the body", () => {
+    const cmd = "cat > docs/python-tips.md <<'EOF'\ns=open('src/a.ts').read()\ns=s.replace('x','y')\nopen('src/a.ts','w').write(s)\nEOF"
+    // The body is a doc, not a script: the real write only — no phantom src/a.ts edit.
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'docs/python-tips.md', content: expect.stringContaining('replace') }])
+  })
+
+  it('perl -Ilib (include flag) is not in-place — a read yields nothing', () => {
+    expect(editsFromCommand("perl -Ilib -ne 'print' data.csv")).toEqual([])
+  })
+
+  it("perl -i with a program FILE: the program is not an edited target", () => {
+    expect(editsFromCommand('perl -i fix.pl data.txt')).toEqual([{ path: 'data.txt' }])
+  })
+
+  it('an absolute-path binary still resolves (/usr/bin/sed)', () => {
+    expect(editsFromCommand("/usr/bin/sed -i s/a/b/ src/abs.ts")).toEqual([{ path: 'src/abs.ts' }])
+  })
+
+  it('a textual MENTION after the rm revives nothing — only writes count', () => {
+    const cmd = "cat > t.gen.ts <<'EOF'\nx\nEOF\nrm t.gen.ts\necho 'removed t.gen.ts'"
+    expect(editsFromCommand(cmd)).toEqual([])
+    const sub = "cat > x.gen.ts <<'EOF'\nx\nEOF\nrm x.gen.ts\ncp other x.gen.ts.bak"
+    expect(editsFromCommand(sub)).toEqual([])
+  })
+
+  it('a quoted rm sentence is a string, not a removal', () => {
+    const cmd = "cat > src/old.ts <<'EOF'\nkeep\nEOF\ngit commit -m \"cleanup: rm src/old.ts no longer needed\""
+    expect(editsFromCommand(cmd)).toEqual([{ path: 'src/old.ts', content: 'keep' }])
+  })
+
+  it('an rm inside sh -c "…" still voids — the tokenizer unwraps the wrapper', () => {
+    const cmd = "cat > src/f.gen.ts <<'EOF'\nx\nEOF\nsh -c \"npx vitest run src/f.gen.ts; rm src/f.gen.ts\""
+    expect(editsFromCommand(cmd)).toEqual([])
+  })
+
+  it('a python-written file rm-ed after the python segment is still scratch', () => {
+    const cmd = "python3 - <<'PY'\nopen('out.gen.ts','w').write('x')\nPY\nrm out.gen.ts"
+    expect(editsFromCommand(cmd)).toEqual([])
+  })
+})

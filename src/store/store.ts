@@ -2387,7 +2387,7 @@ export class Store {
       }
       // A derived path-only recovery carries no lines at all — flag it so the
       // Files tab says "content not recovered" instead of "no textual change".
-      const noContent = tc.derived === true && input.content == null && !Array.isArray(input.edits) && input.old_string == null && input.new_string == null
+      const noContent = tc.derived === true && shellEditNoContent(input)
       out.push({ path, op, hunks, ts: tc.ts, ...(noContent ? { noContent: true } : {}), turn: ref.turn, userTurn: ref.userTurn })
     }
     return out
@@ -4447,6 +4447,14 @@ export interface SessionDetail {
   transcript: Transcript
 }
 
+/** Whether a shell-edit recovery carries NO line content at all (a sed/perl or
+ *  computed-python path-only recovery). ONE predicate for every surface that
+ *  captions such an edit — recovered-but-EMPTY content ('') is content: an
+ *  empty file write is a real, fully-known write, not an unrecovered one. */
+function shellEditNoContent(input: Record<string, unknown>): boolean {
+  return input.content == null && !Array.isArray(input.edits) && input.old_string == null && input.new_string == null
+}
+
 /**
  * One successful file write in the session — a before/after (Edit), full content
  * (Write), or hunks (MultiEdit). Returned as a flat, chronological list so the
@@ -4756,16 +4764,22 @@ function buildTranscriptCore(session: Session): {
               // The children render as this row's diffs, not as rows — but the
               // Files tab still anchors each edit to a turn via toolTurn, so
               // their ids must map to THIS turn like the Bash call's does.
+              // Content classification is the SAME predicate fileChanges uses
+              // (shellEditNoContent): recovered-but-empty content ('') IS
+              // content, so the two surfaces tell one story about one edit.
               for (const child of candidate.foldChildren) ids.push(child.id)
               tool.fileDiffs = candidate.foldChildren.map((child) => {
                 const ci = (child.input ?? {}) as Record<string, unknown>
                 const hunks: { del: string; ins: string }[] = []
                 if (Array.isArray(ci.edits)) {
                   for (const e of ci.edits as Array<Record<string, unknown>>) {
-                    hunks.push({ del: clip(String(e.old_string ?? ''), 2000), ins: clip(String(e.new_string ?? ''), 2000) })
+                    hunks.push({
+                      del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
+                      ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
+                    })
                   }
-                } else if (typeof ci.content === 'string' && ci.content) {
-                  hunks.push({ del: '', ins: clip(ci.content, 2000) })
+                } else if (!shellEditNoContent(ci)) {
+                  hunks.push({ del: clip(String(ci.old_string ?? ci.oldString ?? ''), 2000), ins: clip(String(ci.new_string ?? ci.newString ?? ci.content ?? ''), 2000) })
                 }
                 return { path: String(ci.file_path ?? child.target.paths?.[0] ?? ''), hunks }
               })

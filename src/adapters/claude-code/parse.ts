@@ -104,6 +104,10 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
   let branch: string | undefined
   let firstTs: string | undefined
   let lastTs: string | undefined
+  // cwd IN EFFECT at each tool call — the transcript records cwd per event
+  // precisely because agents move around, and a shell edit's relative path
+  // must resolve against where the command RAN, not where the session ended.
+  const cwdByTool = new Map<string, string>()
 
   for (const r of records) {
     const ts: string | undefined = typeof r.timestamp === 'string' ? r.timestamp : undefined
@@ -186,6 +190,7 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
               isSidechain,
               ts,
             })
+            if (cwd) cwdByTool.set(b.id, cwd)
             if (mapped.action === 'skill') skillToolUseIds.add(b.id)
           }
         }
@@ -275,10 +280,11 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
     if (t.result.raw === undefined) continue
     const cmd = typeof (t.input as Raw)?.command === 'string' ? String((t.input as Raw).command) : ''
     if (!cmd) continue
+    const callCwd = cwdByTool.get(t.id) ?? cwd
     for (const e of editsFromCommand(cmd)) {
       // Typed paths are cwd-relative (commands run where the agent stands) —
-      // resolve them the way Codex's relative patch paths already are.
-      if (cwd && !isAbsolute(e.path)) e.path = resolve(cwd, e.path)
+      // resolve against the cwd AT this call, falling back to the session's.
+      if (callCwd && !isAbsolute(e.path)) e.path = resolve(callCwd, e.path)
       const list = synthByBash.get(t.id) ?? []
       list.push(synthShellEdit(e, { bashId: t.id, n: synthN++, ts: t.ts, isSidechain: t.isSidechain }))
       synthByBash.set(t.id, list)

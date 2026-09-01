@@ -301,6 +301,20 @@ describe('claude-code shell-mediated edits', () => {
     expect(written).not.toContain('/repo/src/failed.ts') // the failed call earned nothing
   })
 
+  it('paths resolve against the cwd AT the call, not the session tail', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'cc-shell-'))
+    const lines = [
+      JSON.stringify({ parentUuid: null, isSidechain: false, type: 'user', cwd: '/repo', sessionId: EDIT_SID, uuid: 'u1', timestamp: '2026-08-24T10:00:00.000Z', message: { role: 'user', content: 'go' } }),
+      bash('a1', 'u1', 'w1', SED), userResult('r1', 'a1', 'w1'),
+      // …the agent then moves into a worktree; the earlier edit must NOT follow.
+      JSON.stringify({ parentUuid: 'r1', isSidechain: false, type: 'user', cwd: '/repo/.worktrees/foo', sessionId: EDIT_SID, uuid: 'u2', timestamp: '2026-08-24T10:00:02.000Z', message: { role: 'user', content: 'now in the worktree' } }),
+    ]
+    writeFileSync(join(d, `${EDIT_SID}.jsonl`), lines.join('\n'))
+    const session = (await parseClaudeCode(join(d, `${EDIT_SID}.jsonl`)))!
+    const synth = session.toolCalls.filter((t) => t.name === 'ShellEdit')
+    expect(synth.map((t) => (t.input as { file_path: string }).file_path)).toEqual(['/repo/src/sedded.ts'])
+  })
+
   it('synthesized edits sit right after their Bash call — chronological list', async () => {
     const d = mkdtempSync(join(tmpdir(), 'cc-shell-'))
     const lines = [

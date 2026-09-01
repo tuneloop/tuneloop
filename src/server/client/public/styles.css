@@ -487,7 +487,11 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .fc-noop { color: var(--muted); font-size: 11.5px; font-style: italic; padding: 2px 0; }
 .dl-rest { display: none; }
 .dl-rest.on { display: block; }
-.fc-rows-more { display: block; width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--track); color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px; position: sticky; left: 0; }
+.fc-rows-more { display: block; width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--track); color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px; text-align: left; }
+/* Under the grid container the button stretches to the full content track (can be
+   several viewports wide) — sticky on the button is a no-op at that width, so the
+   LABEL sticks instead: it hugs the visible scrollport at any scroll position. */
+.fc-rows-more .fc-more-lbl { display: inline-block; position: sticky; left: 12px; }
 .fc-rows-more:hover { color: var(--emerald); }
 
 /* Truncated chip lists (files / features): overflow hidden behind a toggle */

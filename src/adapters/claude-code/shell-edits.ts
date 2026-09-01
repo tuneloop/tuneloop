@@ -15,7 +15,7 @@
  * call anchored to its Bash call via `parentId`; a PARSE_VERSION bump
  * re-derives every stored session on the next `analyze`.
  */
-import { shellSegments } from '../../core/shell-binaries'
+import { heredocSpans, shellSegments } from '../../core/shell-binaries'
 import type { ToolCall } from '../../core/model'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Raw = any
@@ -54,27 +54,18 @@ interface Heredoc {
   bodyEnd: number
 }
 
+/** Heredocs located by the SAME grammar the shell tokenizer uses (see
+ *  heredocSpans): quote-aware, `<<<`-is-a-herestring, any real delimiter. A
+ *  second regex grammar here once over-matched herestrings (fabricating the
+ *  FOLLOWING commands as file content) and under-matched END-1 style markers
+ *  (leaking unmasked bodies) — one grammar, two consumers, no drift. */
 function scanHeredocs(command: string): Heredoc[] {
-  const out: Heredoc[] = []
-  const opener = /<<\s*(-?)\s*(?:'(\w+)'|"(\w+)"|(\w+))[^\n]*\n/g
-  let m: RegExpExecArray | null
-  while ((m = opener.exec(command))) {
-    const marker = (m[2] ?? m[3] ?? m[4])!
-    const dash = m[1] === '-'
-    const lineStart = command.lastIndexOf('\n', m.index) + 1
-    const openerLine = command.slice(lineStart, command.indexOf('\n', m.index) === -1 ? command.length : m.index + m[0].length - 1)
-    const bodyStart = m.index + m[0].length
-    // Terminator is a WHOLE line (a body line merely starting with the marker
-    // does not end the capture); `<<-` allows tab indentation.
-    const term = new RegExp(`\\n${dash ? '\\t*' : ''}${marker}(?:\\n|$)`)
-    const hay = '\n' + command.slice(bodyStart)
-    const tm = term.exec(hay)
-    const bodyEnd = tm ? bodyStart + tm.index : command.length
-    out.push({ openerLine, body: hay.slice(1, tm ? tm.index : undefined), bodyStart, bodyEnd })
-    // Resume scanning AFTER the terminator — never inside the body.
-    opener.lastIndex = tm ? bodyStart + tm.index + tm[0].length : command.length
-  }
-  return out
+  return heredocSpans(command).map((h) => ({
+    openerLine: h.openerLine,
+    body: command.slice(h.bodyStart, h.bodyEnd),
+    bodyStart: h.bodyStart,
+    bodyEnd: h.bodyEnd,
+  }))
 }
 
 /** The command with heredoc bodies blanked out (newlines kept so segment
@@ -83,11 +74,19 @@ function scanHeredocs(command: string): Heredoc[] {
 function maskHeredocBodies(command: string, heredocs: Heredoc[], keepPython: boolean): string {
   let out = command
   for (const h of heredocs) {
-    if (keepPython && /\bpython3?\b/.test(h.openerLine)) continue
+    if (keepPython && pipesIntoPython(h.openerLine)) continue
     const masked = out.slice(h.bodyStart, h.bodyEnd).replace(/[^\n]/g, ' ')
     out = out.slice(0, h.bodyStart) + masked + out.slice(h.bodyEnd)
   }
   return out
+}
+
+/** Whether a heredoc's body is CONSUMED by a python interpreter — asked of
+ *  the opener line's segment binaries, never of its raw text: a target named
+ *  docs/python-tips.md must not turn its own body into a "script" (the
+ *  phantom-edit trap the masking exists to prevent). */
+function pipesIntoPython(openerLine: string): boolean {
+  return shellSegments(openerLine).some((seg) => seg.binary === 'python' || seg.binary === 'python3')
 }
 
 /** Idioms recovered from a Bash command. Only called for commands that
@@ -101,7 +100,10 @@ export function editsFromCommand(command: string): SynthesizedEdit[] {
 
   const out: SynthesizedEdit[] = []
   const covered = new Set<string>()
-  for (const e of [...heredocWrites(heredocs), ...pythonReplaces(withPython)]) {
+  // Paths written from INSIDE a python script: their write position in the
+  // command is the python segment itself, which the rm ordering below needs.
+  const pythonPaths = new Set<string>()
+  for (const e of heredocWrites(heredocs)) {
     // Content-carrying recoveries know their target with certainty (it is the
     // redirect/open target, not a guessed operand) — so only sanity-check the
     // token, never require an extension: `Dockerfile` and `Makefile` count.
@@ -109,49 +111,84 @@ export function editsFromCommand(command: string): SynthesizedEdit[] {
     covered.add(e.path)
     out.push(e)
   }
+  for (const e of pythonReplaces(withPython)) {
+    if (!isSanePath(e.path) || covered.has(e.path)) continue
+    covered.add(e.path)
+    pythonPaths.add(e.path)
+    out.push(e)
+  }
   // Path-only recovery for the idioms whose lines are not in the command: a
   // sed/perl pattern is not the lines it matched, and a computed python edit
   // carries no literals. The path alone still lights up files-touched — but a
   // path that already earned a full entry above must not gain a duplicate.
-  for (const p of [...sedPerlTargets(cmdOnly), ...pythonWriteTargets(withPython)]) {
+  for (const p of sedPerlTargets(cmdOnly)) {
     if (covered.has(p)) continue
     covered.add(p)
     out.push({ path: p })
   }
-  // A file this same command REMOVES after writing it was scratch, not an edit
-  // (`cat > t.test.ts <<EOF …; vitest t.test.ts; rm -f t.test.ts`). Order
-  // matters: an rm BEFORE the write (`rm -f f; cat > f <<EOF`) is a rewrite
-  // and keeps its credit. Offsets in cmdOnly and withPython are comparable —
-  // masking replaces characters with spaces, never moves them.
-  const rms = rmSpans(cmdOnly)
-  return out.filter((e) => {
-    const rmEnd = rms.get(e.path)
-    if (rmEnd === undefined) return true
-    return withPython.lastIndexOf(e.path) > rmEnd
-  })
+  for (const p of pythonWriteTargets(withPython)) {
+    if (covered.has(p)) continue
+    covered.add(p)
+    pythonPaths.add(p)
+    out.push({ path: p })
+  }
+  // A file this same command REMOVES after (last) writing it was scratch, not
+  // an edit (`cat > t.test.ts <<EOF …; vitest t.test.ts; rm -f t.test.ts`). An
+  // rm BEFORE the write (delete-then-rewrite) keeps its credit.
+  const removed = scratchRemoved(cmdOnly, pythonPaths)
+  return out.filter((e) => !removed.has(e.path))
 }
 
-/** Files removed by a plain `rm` in the command → the END offset of the last
- *  such rm span, for the order check above. Conservative: `-r` removals
- *  (directories — matching a file INSIDE one needs path logic the miss doesn't
- *  earn) and glob operands (a glob is not a path) are ignored. Heredoc bodies
- *  are already masked out of `cmdOnly`, so an rm in written example text never
- *  counts. */
-function rmSpans(cmdOnly: string): Map<string, number> {
-  const spans = new Map<string, number>()
-  const re = /(?:^|[;&|\n])\s*rm\s+([^\n;|&]+)/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(cmdOnly))) {
-    const end = m.index + m[0].length
-    const args = m[1]!.trim().split(/\s+/)
-    if (args.some((a) => /^-[a-zA-Z]*r/i.test(a))) continue
-    for (const a of args) {
-      if (a.startsWith('-') || /[*?[]/.test(a)) continue
-      const prev = spans.get(a)
-      if (prev === undefined || end > prev) spans.set(a, end)
+/**
+ * Paths whose LAST write/remove event in segment order is a removal. Both
+ * event kinds come from the tokenizer's segments, so a quoted "rm …" sentence
+ * (a commit message, an echo) is one token of another command — never a
+ * removal — and a later textual MENTION of a path revives nothing: only
+ * write-shaped events (redirect targets, tee/sed/perl operands, a python
+ * segment for the paths its masked script wrote) count as writes.
+ * Conservative where matching gets fuzzy: `-r` directory removals and glob
+ * operands are ignored, and an rm hidden inside `sh -c "…"` is invisible to
+ * the tokenizer, so its file keeps credit rather than guessing.
+ */
+function scratchRemoved(cmdOnly: string, pythonPaths: Set<string>): Set<string> {
+  const lastWrite = new Map<string, number>()
+  const lastRm = new Map<string, number>()
+  let lastPy = -1
+  shellSegments(cmdOnly).forEach((seg, k) => {
+    if (seg.binary === 'python' || seg.binary === 'python3') lastPy = k
+    if (seg.binary === 'rm') {
+      const args = seg.tokens.slice(binaryIndex(seg.tokens, 'rm') + 1)
+      if (args.some((a) => /^-[a-zA-Z]*r/i.test(a))) return // directory removal — out of scope
+      for (const a of args) {
+        if (a.startsWith('-') || /[*?[]/.test(a)) continue
+        lastRm.set(a, k)
+      }
+      return
     }
+    for (let i = 0; i < seg.tokens.length; i++) {
+      const t = seg.tokens[i]!
+      if ((t === '>' || t === '>>') && seg.tokens[i + 1]) lastWrite.set(seg.tokens[i + 1]!, k)
+      else if (t.startsWith('>') && t.length > 1 && !t.startsWith('>&')) lastWrite.set(t.replace(/^>{1,2}/, ''), k)
+    }
+    if (seg.binary === 'tee') {
+      for (const t of seg.tokens.slice(binaryIndex(seg.tokens, 'tee') + 1)) if (!t.startsWith('-')) lastWrite.set(t, k)
+    }
+    if (seg.binary === 'sed' || seg.binary === 'perl') {
+      for (const p of inPlaceOperands(seg)) lastWrite.set(p, k)
+    }
+  })
+  const out = new Set<string>()
+  for (const [p, rmK] of lastRm) {
+    const wK = Math.max(lastWrite.get(p) ?? -1, pythonPaths.has(p) ? lastPy : -1)
+    if (rmK > wK) out.add(p)
   }
-  return spans
+  return out
+}
+
+/** Index of the segment's binary token — matched by name OR trailing path
+ *  component, so `/usr/bin/sed` resolves instead of silently yielding -1. */
+function binaryIndex(tokens: string[], binary: string): number {
+  return tokens.findIndex((t) => t === binary || t.endsWith('/' + binary))
 }
 
 /**
@@ -166,20 +203,30 @@ function heredocWrites(heredocs: Heredoc[]): SynthesizedEdit[] {
   for (const h of heredocs) {
     for (const seg of shellSegments(h.openerLine)) {
       let path: string | undefined
+      let append = false
       for (let i = 0; i < seg.tokens.length; i++) {
         const t = seg.tokens[i]!
-        if ((t === '>' || t === '>>') && seg.tokens[i + 1]) path = seg.tokens[i + 1]
-        else if (t.startsWith('>') && t.length > 1 && !t.startsWith('>&')) path = t.replace(/^>{1,2}/, '')
+        if ((t === '>' || t === '>>') && seg.tokens[i + 1]) {
+          path = seg.tokens[i + 1]
+          append = t === '>>'
+        } else if (t.startsWith('>') && t.length > 1 && !t.startsWith('>&')) {
+          path = t.replace(/^>{1,2}/, '')
+          append = t.startsWith('>>')
+        }
       }
       if (!path && seg.binary === 'tee') {
         path = seg.tokens.slice(1).find((t) => !t.startsWith('-'))
+        append = seg.tokens.includes('-a')
       }
       if (path) {
         // Only cat/tee pass their input through verbatim — for them the body
         // IS the file. Any other binary with a redirect certainly WROTE the
         // file, but its output is not the heredoc body: path-only.
         const verbatim = seg.binary === 'cat' || seg.binary === 'tee' || seg.binary === null
-        out.push(verbatim ? { path, content: h.body } : { path })
+        // An APPEND knows what was added but not the file's content — that is
+        // an Edit in shape (old side empty), never a Write: claiming the body
+        // as whole-file content would replay a false full rewrite downstream.
+        out.push(!verbatim ? { path } : append ? { path, edits: [{ old_string: '', new_string: h.body }] } : { path, content: h.body })
         break
       }
     }
@@ -257,17 +304,32 @@ function sedPerlTargets(command: string): string[] {
   const out: string[] = []
   for (const seg of shellSegments(command)) {
     if (seg.binary !== 'sed' && seg.binary !== 'perl') continue
-    const args = seg.tokens.slice(seg.tokens.indexOf(seg.binary) + 1)
-    if (!args.some((t) => /^-[a-zA-Z]*i/.test(t))) continue
-    let scriptConsumed = seg.binary === 'perl' || args.some((t) => /^-\w*e$/.test(t) || /^-\w*e./.test(t))
-    for (const t of args) {
-      if (t.startsWith('-')) continue
-      if (!scriptConsumed) {
-        scriptConsumed = true // sed's inline script, not a file
-        continue
-      }
-      if (looksLikeFile(t)) out.push(t)
+    out.push(...inPlaceOperands(seg).filter(looksLikeFile))
+  }
+  return out
+}
+
+/** File operands of an in-place sed/perl segment; [] when not in-place.
+ *  In-place is the LOWERCASE `-i` flag (possibly bundled: -pi, -i.bak) —
+ *  case-exact, because perl's `-Ilib` include flag also contains an i and a
+ *  read-only `perl -Ilib -ne …` must never yield a phantom write. With no
+ *  `-e`, the first non-option operand is the SCRIPT — sed's inline program or
+ *  perl's program FILE — never an edited target. */
+function inPlaceOperands(seg: { binary: string | null; tokens: string[] }): string[] {
+  if (seg.binary !== 'sed' && seg.binary !== 'perl') return []
+  const bi = binaryIndex(seg.tokens, seg.binary)
+  if (bi < 0) return []
+  const args = seg.tokens.slice(bi + 1)
+  if (!args.some((t) => /^-[a-z]*i/.test(t))) return []
+  let scriptConsumed = args.some((t) => /^-\w*e$/.test(t) || /^-\w*e./.test(t))
+  const out: string[] = []
+  for (const t of args) {
+    if (t.startsWith('-')) continue
+    if (!scriptConsumed) {
+      scriptConsumed = true // the inline script / program file, not a target
+      continue
     }
+    out.push(t)
   }
   return out
 }

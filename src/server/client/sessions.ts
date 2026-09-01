@@ -861,7 +861,7 @@ function editHtml(e, showNarr) {
   var head = rows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
   var rest = rows.length > DIFF_ROW_CAP
     ? '<div class="dl-rest">' + rows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
-      '<button class="fc-rows-more" type="button">+ ' + (rows.length - DIFF_ROW_CAP) + ' more lines</button>'
+      '<button class="fc-rows-more" type="button"><span class="fc-more-lbl">+ ' + (rows.length - DIFF_ROW_CAP) + ' more lines</span></button>'
     : '';
   var verb = e.op === 'write' ? (e._first ? 'Created' : 'Rewrote') : e.op === 'multiedit' ? 'Edited · ' + e.hunks.length + ' hunks' : 'Edited';
   var stat = ' (+' + e._add + (e._del ? ' −' + e._del : '') + ')';
@@ -1142,7 +1142,7 @@ export function openDetail(id, focus?: any) {
       var diffHead = diffRows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
       var diffRest = diffRows.length > DIFF_ROW_CAP
         ? '<div class="dl-rest">' + diffRows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
-          '<button class="fc-rows-more" type="button">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</button>'
+          '<button class="fc-rows-more" type="button"><span class="fc-more-lbl">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</span></button>'
         : '';
       return '<div class="fc-diff">' + diffHead + diffRest + '</div>';
     }
