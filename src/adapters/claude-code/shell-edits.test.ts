@@ -121,6 +121,16 @@ describe('shell-edit parsing tier — write-then-delete is scratch', () => {
     expect(editsFromCommand(cmd)).toEqual([])
   })
 
+  it.each([
+    ['./t.ts', 't.ts'],
+    ['t.ts', './t.ts'],
+    ['src//t.ts', 'src/t.ts'],
+    ['src/./t.ts', 'src/t.ts'],
+  ])('equivalent path spellings still identify one scratch file: %s → %s', (written, removed) => {
+    const cmd = `cat > ${written} <<'EOF'\nx\nEOF\nrm ${removed}`
+    expect(editsFromCommand(cmd)).toEqual([])
+  })
+
   it('rm BEFORE the write is a rewrite — credit kept', () => {
     const cmd = "rm -f src/rebuilt.ts\ncat > src/rebuilt.ts <<'EOF'\nfresh\nEOF"
     expect(editsFromCommand(cmd)).toEqual([{ path: 'src/rebuilt.ts', content: 'fresh' }])

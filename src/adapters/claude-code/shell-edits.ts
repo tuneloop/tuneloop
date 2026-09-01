@@ -136,7 +136,22 @@ export function editsFromCommand(command: string): SynthesizedEdit[] {
   // an edit (`cat > t.test.ts <<EOF …; vitest t.test.ts; rm -f t.test.ts`). An
   // rm BEFORE the write (delete-then-rewrite) keeps its credit.
   const removed = scratchRemoved(cmdOnly, pythonPaths)
-  return out.filter((e) => !removed.has(e.path))
+  return out.filter((e) => !removed.has(scratchPathKey(e.path)))
+}
+
+/**
+ * Comparison identity for paths within one shell command. Empty and `.` path
+ * components do not change traversal, so `./t.ts`, `t.ts`, and `src//x.ts`
+ * can safely share a key. Deliberately preserve `..` (symlinks can change its
+ * meaning) and a leading `//` (implementation-defined by POSIX): this is not a
+ * claim to canonicalize arbitrary filesystem paths.
+ */
+function scratchPathKey(path: string): string {
+  if (path.startsWith('//')) return path
+  const absolute = path.startsWith('/')
+  const parts = path.split('/').filter((part) => part && part !== '.')
+  const joined = parts.join('/')
+  return absolute ? `/${joined}` : joined
 }
 
 /**
@@ -153,6 +168,7 @@ export function editsFromCommand(command: string): SynthesizedEdit[] {
 function scratchRemoved(cmdOnly: string, pythonPaths: Set<string>): Set<string> {
   const lastWrite = new Map<string, number>()
   const lastRm = new Map<string, number>()
+  const pythonPathKeys = new Set([...pythonPaths].map(scratchPathKey))
   let lastPy = -1
   shellSegments(cmdOnly).forEach((seg, k) => {
     if (seg.binary === 'python' || seg.binary === 'python3') lastPy = k
@@ -161,25 +177,27 @@ function scratchRemoved(cmdOnly: string, pythonPaths: Set<string>): Set<string> 
       if (args.some((a) => /^-[a-zA-Z]*r/i.test(a))) return // directory removal — out of scope
       for (const a of args) {
         if (a.startsWith('-') || /[*?[]/.test(a)) continue
-        lastRm.set(a, k)
+        lastRm.set(scratchPathKey(a), k)
       }
       return
     }
     for (let i = 0; i < seg.tokens.length; i++) {
       const t = seg.tokens[i]!
-      if ((t === '>' || t === '>>') && seg.tokens[i + 1]) lastWrite.set(seg.tokens[i + 1]!, k)
-      else if (t.startsWith('>') && t.length > 1 && !t.startsWith('>&')) lastWrite.set(t.replace(/^>{1,2}/, ''), k)
+      if ((t === '>' || t === '>>') && seg.tokens[i + 1]) lastWrite.set(scratchPathKey(seg.tokens[i + 1]!), k)
+      else if (t.startsWith('>') && t.length > 1 && !t.startsWith('>&')) lastWrite.set(scratchPathKey(t.replace(/^>{1,2}/, '')), k)
     }
     if (seg.binary === 'tee') {
-      for (const t of seg.tokens.slice(binaryIndex(seg.tokens, 'tee') + 1)) if (!t.startsWith('-')) lastWrite.set(t, k)
+      for (const t of seg.tokens.slice(binaryIndex(seg.tokens, 'tee') + 1)) {
+        if (!t.startsWith('-')) lastWrite.set(scratchPathKey(t), k)
+      }
     }
     if (seg.binary === 'sed' || seg.binary === 'perl') {
-      for (const p of inPlaceOperands(seg)) lastWrite.set(p, k)
+      for (const p of inPlaceOperands(seg)) lastWrite.set(scratchPathKey(p), k)
     }
   })
   const out = new Set<string>()
   for (const [p, rmK] of lastRm) {
-    const wK = Math.max(lastWrite.get(p) ?? -1, pythonPaths.has(p) ? lastPy : -1)
+    const wK = Math.max(lastWrite.get(p) ?? -1, pythonPathKeys.has(p) ? lastPy : -1)
     if (rmK > wK) out.add(p)
   }
   return out
