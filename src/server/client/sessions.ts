@@ -861,13 +861,15 @@ function editHtml(e, showNarr) {
   var head = rows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
   var rest = rows.length > DIFF_ROW_CAP
     ? '<div class="dl-rest">' + rows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
-      '<button class="fc-rows-more" type="button">+ ' + (rows.length - DIFF_ROW_CAP) + ' more lines</button>'
+      '<button class="fc-rows-more" type="button"><span class="fc-more-lbl">+ ' + (rows.length - DIFF_ROW_CAP) + ' more lines</span></button>'
     : '';
   var verb = e.op === 'write' ? (e._first ? 'Created' : 'Rewrote') : e.op === 'multiedit' ? 'Edited · ' + e.hunks.length + ' hunks' : 'Edited';
   var stat = ' (+' + e._add + (e._del ? ' −' + e._del : '') + ')';
   var narr = showNarr && e._narr ? '<div class="fc-narr" title="' + esc(clipLine(e._narr, 600)) + '">▸ ' + esc(clipLine(e._narr, 240)) + '</div>' : '';
   var diff = rows.length ? '<div class="fc-diff">' + head + rest + '</div>'
-    : '<div class="fc-noop">no textual change (or beyond the captured window)</div>';
+    : e.noContent
+      ? '<div class="fc-noop">edited via shell — content not recovered</div>'
+      : '<div class="fc-noop">no textual change (or beyond the captured window)</div>';
   return '<div class="fc-edit">' + narr +
     '<div class="fc-edit-h"><span class="fc-op">' + esc(verb) + stat + '</span></div>' + diff + '</div>';
 }
@@ -1140,7 +1142,7 @@ export function openDetail(id, focus?: any) {
       var diffHead = diffRows.slice(0, DIFF_ROW_CAP).map(rowHtml).join('');
       var diffRest = diffRows.length > DIFF_ROW_CAP
         ? '<div class="dl-rest">' + diffRows.slice(DIFF_ROW_CAP).map(rowHtml).join('') + '</div>' +
-          '<button class="fc-rows-more" type="button">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</button>'
+          '<button class="fc-rows-more" type="button"><span class="fc-more-lbl">+ ' + (diffRows.length - DIFF_ROW_CAP) + ' more lines</span></button>'
         : '';
       return '<div class="fc-diff">' + diffHead + diffRest + '</div>';
     }
@@ -1169,12 +1171,23 @@ export function openDetail(id, focus?: any) {
       var body = '';
       var toggle = '';
       if (tl.fileDiffs && tl.fileDiffs.length) {
-        body = '<div class="tool-block-body"><div class="tool-file-diffs">' + tl.fileDiffs.map(function (file) {
+        var diffSections = tl.fileDiffs.map(function (file) {
+          // A shell-edit recovery may know only the PATH (sed/perl/computed
+          // python — the changed lines were never in the command text): show
+          // the file with an honest note rather than an empty diff.
+          var inner = file.hunks && file.hunks.length
+            ? toolDiffHtml(file.hunks)
+            : '<div class="tool-file-diff-note">edited via shell — content not recovered</div>';
           return '<section class="tool-file-diff"><div class="tool-file-diff-path">' + esc(file.path) + '</div>' +
-            toolDiffHtml(file.hunks) + '</section>';
-        }).join('') + '</div></div>';
+            inner + '</section>';
+        }).join('');
+        // A Bash row with recovered diffs still HAS output (the command's
+        // stdout) — keep it viewable inside the same body, never evicted.
+        var outBlock = tl.output && tl.ok ? '<pre class="tool-output-pre">' + esc(tl.output) + '</pre>' : '';
+        body = '<div class="tool-block-body"><div class="tool-file-diffs">' + diffSections + '</div>' + outBlock + '</div>';
         toggle = '<button class="tool-out-toggle" type="button">diff' +
-          (tl.fileDiffs.length > 1 ? ' · ' + tl.fileDiffs.length + ' files' : '') + '</button>';
+          (tl.fileDiffs.length > 1 ? ' · ' + tl.fileDiffs.length + ' files' : '') +
+          (outBlock ? ' + output' : '') + '</button>';
       } else if (tl.hunks && tl.hunks.length) {
         // Edit/Write: render as inline diff (same style as Files tab)
         body = '<div class="tool-block-body">' + toolDiffHtml(tl.hunks) + '</div>';

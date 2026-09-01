@@ -262,8 +262,15 @@ function segments(command: string): RawSegment[] {
       continue
     }
     // Heredoc: remember the delimiter, drop the operator, and skip the body when
-    // the line ends. `<<<` is a herestring, not a heredoc — leave it as text.
-    if (c === '<' && command[i + 1] === '<' && command[i + 2] !== '<') {
+    // the line ends. `<<<` is a herestring, not a heredoc — but its whole
+    // operator must be CONSUMED, or the walk re-matches its tail `<<` one
+    // character later and swallows the rest of the command as a phantom body.
+    if (c === '<' && command[i + 1] === '<') {
+      if (command[i + 2] === '<') {
+        endToken()
+        i += 3
+        continue
+      }
       const [delim, next] = readHeredocDelimiter(command, i + 2)
       if (delim) pending.push(delim)
       endToken()
@@ -375,6 +382,91 @@ function skipBalanced(s: string, start: number): number {
     i += 1
   }
   return s.length
+}
+
+/** One heredoc's location within a command — see heredocSpans. */
+export interface HeredocSpan {
+  /** The command line containing the `<<MARKER` opener. */
+  openerLine: string
+  /** [start, end) offsets of the body within the command. */
+  bodyStart: number
+  bodyEnd: number
+}
+
+/**
+ * Every heredoc in a command, located by the SAME grammar the segment walk
+ * above uses: quote-aware (a quoted "<<EOF" is text), comment-aware, `<<<` is
+ * a herestring with no body, and delimiters may be quoted or carry any
+ * non-metacharacter (END-1, END-OF-DOC). Exposed so shell-edit recovery reads
+ * heredocs through one grammar instead of growing a second one that drifts.
+ */
+export function heredocSpans(command: string): HeredocSpan[] {
+  const out: HeredocSpan[] = []
+  let pending: string[] = []
+  let atWordStart = true
+  let i = 0
+  const n = command.length
+  while (i < n) {
+    const c = command[i]!
+    if (c === "'" || c === '"') {
+      const [, next] = readQuoted(command, i)
+      i = next
+      atWordStart = false
+      continue
+    }
+    if (c === '#' && atWordStart) {
+      const nl = command.indexOf('\n', i)
+      i = nl === -1 ? n : nl
+      continue
+    }
+    if (c === '<' && command[i + 1] === '<') {
+      // `<<<` is a herestring: consume the whole operator, or the scan would
+      // re-match its tail `<<` as a heredoc opener one character later.
+      if (command[i + 2] === '<') {
+        i += 3
+        atWordStart = false
+        continue
+      }
+      const [delim, next] = readHeredocDelimiter(command, i + 2)
+      if (delim) pending.push(delim)
+      i = next
+      atWordStart = false
+      continue
+    }
+    if (c === '\n') {
+      const lineStart = command.lastIndexOf('\n', i - 1) + 1
+      const openerLine = command.slice(lineStart, i)
+      let at = i + 1
+      for (const delim of pending) {
+        const bodyStart = at
+        let bodyEnd = n
+        let j = at
+        for (;;) {
+          const nl2 = command.indexOf('\n', j)
+          const end = nl2 === -1 ? n : nl2
+          if (command.slice(j, end).trim() === delim) {
+            bodyEnd = Math.max(bodyStart, j - 1) // exclude the newline before the terminator
+            at = nl2 === -1 ? n : nl2 + 1
+            break
+          }
+          if (nl2 === -1) {
+            bodyEnd = n // unterminated — body runs to the end
+            at = n
+            break
+          }
+          j = nl2 + 1
+        }
+        out.push({ openerLine, bodyStart, bodyEnd })
+      }
+      pending = []
+      i = at
+      atWordStart = true
+      continue
+    }
+    atWordStart = /[\s;|&(]/.test(c)
+    i += 1
+  }
+  return out
 }
 
 /** After `<<`, read the (possibly quoted, possibly `-`-prefixed) body delimiter. */

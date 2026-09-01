@@ -237,7 +237,9 @@ export class Store {
           session.startedAt ?? null,
           session.endedAt ?? null,
           nTurns,
-          session.toolCalls.length,
+          // Derived calls (adapter-synthesized, e.g. shell-edit recoveries) are
+          // not tool INVOCATIONS — the model never called them. Count real ones.
+          session.toolCalls.filter((t) => !t.derived).length,
           JSON.stringify(session.models),
           session.tokens.input,
           session.tokens.output,
@@ -266,6 +268,10 @@ export class Store {
         'INSERT INTO tool_call_commands (session_id, idx, seq, binary) VALUES (?,?,?,?)',
       )
       session.toolCalls.forEach((t, idx) => {
+        // Derived calls stay out of per-tool analytics (tool health would list
+        // a phantom always-ok 'ShellEdit' tool); idx keeps the blob's array
+        // position so anchors from either side agree.
+        if (t.derived) return
         // Which binaries this shell call ran, and — when it failed — which of them
         // the error text blames. Computed here so both ride the same parse.
         const shellSegs = t.action === 'shell' && t.target.command ? shellSegments(t.target.command) : []
@@ -2379,7 +2385,10 @@ export class Store {
           },
         ]
       }
-      out.push({ path, op, hunks, ts: tc.ts, turn: ref.turn, userTurn: ref.userTurn })
+      // A derived path-only recovery carries no lines at all — flag it so the
+      // Files tab says "content not recovered" instead of "no textual change".
+      const noContent = tc.derived === true && shellEditNoContent(input)
+      out.push({ path, op, hunks, ts: tc.ts, ...(noContent ? { noContent: true } : {}), turn: ref.turn, userTurn: ref.userTurn })
     }
     return out
   }
@@ -4438,6 +4447,14 @@ export interface SessionDetail {
   transcript: Transcript
 }
 
+/** Whether a shell-edit recovery carries NO line content at all (a sed/perl or
+ *  computed-python path-only recovery). ONE predicate for every surface that
+ *  captions such an edit — recovered-but-EMPTY content ('') is content: an
+ *  empty file write is a real, fully-known write, not an unrecovered one. */
+function shellEditNoContent(input: Record<string, unknown>): boolean {
+  return input.content == null && !Array.isArray(input.edits) && input.old_string == null && input.new_string == null
+}
+
 /**
  * One successful file write in the session — a before/after (Edit), full content
  * (Write), or hunks (MultiEdit). Returned as a flat, chronological list so the
@@ -4448,6 +4465,9 @@ export interface FileEdit {
   op: 'edit' | 'multiedit' | 'write'
   hunks: Array<{ del: string; ins: string }>
   ts?: string
+  /** Shell-edit recovery that knew only the PATH (sed/computed python — the
+   *  lines were never in the command): render an honest note, not an empty diff. */
+  noContent?: boolean
   /** Index into the transcript turns of the assistant turn that made the edit. */
   turn: number
   /** Index of the preceding (non-synthetic) user turn — the prompting intent, or -1. */
@@ -4673,9 +4693,15 @@ function buildTranscriptCore(session: Session): {
         else if (b.type === 'tool_use') {
           const direct = tcById.get(b.id)
           const children = childrenByParent.get(b.id) ?? []
-          const candidates: Array<{ tc?: ToolCall; name: string; input: unknown; semantic?: boolean }> =
+          // A block with BOTH a direct call and semantic children is a Bash
+          // call whose shell-edit recovery synthesized file_write operations
+          // (children by parentId). Render them the way Codex's apply_patch
+          // renders: ONE row — the command — carrying a per-file diff toggle
+          // built from the children, not extra rows. Codex's exec wrapper
+          // (no direct call) keeps rendering children alone.
+          const candidates: Array<{ tc?: ToolCall; name: string; input: unknown; semantic?: boolean; foldChildren?: ToolCall[] }> =
             direct
-              ? [{ tc: direct, name: b.name, input: b.input }]
+              ? [{ tc: direct, name: b.name, input: b.input, foldChildren: children.length ? children : undefined }]
               : children.length
                 ? children.map((tc) => ({ tc, name: tc.name, input: tc.input, semantic: true }))
                 : [{ name: b.name, input: b.input }]
@@ -4728,6 +4754,35 @@ function buildTranscriptCore(session: Session): {
                   if (content) tool.hunks = [{ del: '', ins: content }]
                 }
               }
+            }
+            // Shell-edit recoveries fold into their Bash row as per-file diffs —
+            // the same rendering Codex's multi-file apply_patch gets. A path-only
+            // recovery (sed/perl/computed python — the lines were never in the
+            // command) contributes its path with no hunks; the client shows the
+            // path with a "content not recovered" note instead of an empty diff.
+            if (candidate.foldChildren) {
+              // The children render as this row's diffs, not as rows — but the
+              // Files tab still anchors each edit to a turn via toolTurn, so
+              // their ids must map to THIS turn like the Bash call's does.
+              // Content classification is the SAME predicate fileChanges uses
+              // (shellEditNoContent): recovered-but-empty content ('') IS
+              // content, so the two surfaces tell one story about one edit.
+              for (const child of candidate.foldChildren) ids.push(child.id)
+              tool.fileDiffs = candidate.foldChildren.map((child) => {
+                const ci = (child.input ?? {}) as Record<string, unknown>
+                const hunks: { del: string; ins: string }[] = []
+                if (Array.isArray(ci.edits)) {
+                  for (const e of ci.edits as Array<Record<string, unknown>>) {
+                    hunks.push({
+                      del: clip(String(e.old_string ?? e.oldString ?? e.oldText ?? ''), 2000),
+                      ins: clip(String(e.new_string ?? e.newString ?? e.newText ?? ''), 2000),
+                    })
+                  }
+                } else if (!shellEditNoContent(ci)) {
+                  hunks.push({ del: clip(String(ci.old_string ?? ci.oldString ?? ''), 2000), ins: clip(String(ci.new_string ?? ci.newString ?? ci.content ?? ''), 2000) })
+                }
+                return { path: String(ci.file_path ?? child.target.paths?.[0] ?? ''), hunks }
+              })
             }
             if (!ok) tool.error = clipError(resultText(res?.raw))
             const spawned = spawnToAgent.get(tc?.id ?? b.id) ?? spawnToAgent.get(b.id)

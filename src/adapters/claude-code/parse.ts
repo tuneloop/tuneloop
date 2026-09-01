@@ -1,5 +1,5 @@
 import { readFile } from 'node:fs/promises'
-import { basename } from 'node:path'
+import { basename, isAbsolute, resolve } from 'node:path'
 import { contentHash } from '../../core/hash'
 import { addUsage, emptyUsage } from '../../core/model'
 import type {
@@ -15,6 +15,7 @@ import type {
 } from '../../core/model'
 import { synthSkillCall } from '../skill-invocation'
 import { explicitSkillName, mapAction } from './actions'
+import { editsFromCommand, synthShellEdit } from './shell-edits'
 
 // Bump when ingest-time derivation changes so stored sessions are rebuilt on the
 // same bytes (see analyze.ts). 4: capture subagent identity (agentId on events +
@@ -32,7 +33,13 @@ import { explicitSkillName, mapAction } from './actions'
 // 11: don't double-count — a `Skill` tool call and the SKILL.md body it injects (linked by
 //    the body's `sourceToolUseID`) are one invocation, so synthesize from a body only when
 //    it isn't the expansion of a real tool call.
-export const PARSE_VERSION = 11
+// 12: shell-mediated edits (see shell-edits.ts). Bash calls that edit files fed
+//    no metric. Recover them from the command text of SUCCEEDED Bash calls
+//    (heredoc body = the file; python literal replace = both sides; sed/perl =
+//    path only) and fold them in as synthesized file_write calls anchored to
+//    their Bash call, inserted chronologically. A file the same command rm-s
+//    after writing it was scratch, not an edit.
+export const PARSE_VERSION = 12
 const SOURCE = 'claude-code'
 const PROVIDER = 'anthropic'
 
@@ -97,6 +104,10 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
   let branch: string | undefined
   let firstTs: string | undefined
   let lastTs: string | undefined
+  // cwd IN EFFECT at each tool call — the transcript records cwd per event
+  // precisely because agents move around, and a shell edit's relative path
+  // must resolve against where the command RAN, not where the session ended.
+  const cwdByTool = new Map<string, string>()
 
   for (const r of records) {
     const ts: string | undefined = typeof r.timestamp === 'string' ? r.timestamp : undefined
@@ -179,6 +190,7 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
               isSidechain,
               ts,
             })
+            if (cwd) cwdByTool.set(b.id, cwd)
             if (mapped.action === 'skill') skillToolUseIds.add(b.id)
           }
         }
@@ -250,6 +262,44 @@ export async function parseClaudeCode(path: string): Promise<Session | null> {
 
   // Skip sessions where the model was never reached (e.g. only synthetic messages).
   if (!events.some((e) => e.kind === 'assistant')) return null
+
+  // ── Shell-mediated edits (see shell-edits.ts) ──────────────────────────────
+  // Recover file edits from the command text of SUCCEEDED Bash calls. Only
+  // succeeded — a failed command edited nothing, whatever it intended.
+  // Synthesized edits are collected per Bash call and INSERTED right after it,
+  // never appended at the end: every consumer of session.toolCalls (the Files
+  // tab's replay order, tool-health's what-happened-next window, future
+  // readers) assumes the list is chronological, and derived calls must not
+  // break that contract.
+  let synthN = 0
+  const synthByBash = new Map<string, ToolCall[]>()
+  for (const t of toolCalls) {
+    if (t.action !== 'shell' || t.result.isError) continue
+    // "Not an error" is not "succeeded": a call with NO tool_result at all
+    // (session interrupted before the command ran) must recover nothing.
+    if (t.result.raw === undefined) continue
+    const cmd = typeof (t.input as Raw)?.command === 'string' ? String((t.input as Raw).command) : ''
+    if (!cmd) continue
+    const callCwd = cwdByTool.get(t.id) ?? cwd
+    for (const e of editsFromCommand(cmd)) {
+      // Typed paths are cwd-relative (commands run where the agent stands) —
+      // resolve against the cwd AT this call, falling back to the session's.
+      if (callCwd && !isAbsolute(e.path)) e.path = resolve(callCwd, e.path)
+      const list = synthByBash.get(t.id) ?? []
+      list.push(synthShellEdit(e, { bashId: t.id, n: synthN++, ts: t.ts, isSidechain: t.isSidechain }))
+      synthByBash.set(t.id, list)
+    }
+  }
+  if (synthByBash.size) {
+    const merged: ToolCall[] = []
+    for (const t of toolCalls) {
+      merged.push(t)
+      const kids = synthByBash.get(t.id)
+      if (kids) merged.push(...kids)
+    }
+    toolCalls.length = 0
+    toolCalls.push(...merged)
+  }
 
   // A sidechain file carries one (occasionally more) subagent. Its sibling
   // `<file>.meta.json` names the subagent type/description and the parent tool

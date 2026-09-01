@@ -398,6 +398,7 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .tool-block-body .fc-diff { margin: 0; }
 .tool-file-diff + .tool-file-diff { margin-top: 8px; }
 .tool-file-diff-path { margin-bottom: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; font-weight: 600; color: var(--muted); word-break: break-all; }
+.tool-file-diff-note { font-size: 10.5px; font-style: italic; color: var(--muted); padding: 2px 0 4px; }
 /* Tool overflow (>TOOLCAP) */
 .tool-rest { display: none; }
 .tool-rest.on { display: block; }
@@ -473,8 +474,8 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .fc-op { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .fc-why { flex: none; border: 1px solid var(--line); background: var(--paper); color: var(--emerald); border-radius: 6px; padding: 2px 9px; font-size: 11.5px; cursor: pointer; }
 .fc-why:hover { background: var(--emerald); color: #fbfaf6; border-color: var(--emerald); }
-.fc-diff { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.5; border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; }
-.dl { display: flex; white-space: pre; padding: 0 4px; }
+.fc-diff { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; line-height: 1.5; border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; display: grid; }
+.dl { display: flex; white-space: pre; padding: 0 4px; box-sizing: border-box; }
 .dl .dg { flex: none; width: 1.4em; text-align: center; color: var(--muted); user-select: none; }
 .dl .dt { flex: 1; }
 .dl.add { background: #e4f1ea; }
@@ -486,7 +487,11 @@ svg text { font-family: ui-monospace, Menlo, monospace; font-size: 10px; fill: v
 .fc-noop { color: var(--muted); font-size: 11.5px; font-style: italic; padding: 2px 0; }
 .dl-rest { display: none; }
 .dl-rest.on { display: block; }
-.fc-rows-more { display: block; width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--track); color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px; }
+.fc-rows-more { display: block; width: 100%; border: 0; border-top: 1px solid var(--line); background: var(--track); color: var(--muted); font-size: 11px; cursor: pointer; padding: 4px; text-align: left; }
+/* Under the grid container the button stretches to the full content track (can be
+   several viewports wide) — sticky on the button is a no-op at that width, so the
+   LABEL sticks instead: it hugs the visible scrollport at any scroll position. */
+.fc-rows-more .fc-more-lbl { display: inline-block; position: sticky; left: 12px; }
 .fc-rows-more:hover { color: var(--emerald); }
 
 /* Truncated chip lists (files / features): overflow hidden behind a toggle */

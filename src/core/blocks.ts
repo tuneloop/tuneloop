@@ -280,8 +280,11 @@ export function blockSpine(session: Session, blocks: Block[]): string {
       }
     }
     const tcs = toolsByBlock.get(b.idx) ?? []
-    const writes = tcs.filter((t) => t.action === 'file_write').length
-    const shells = tcs.filter((t) => t.action === 'shell').length
+    // Derived calls (shell-edit recoveries) are not invocations — the same
+    // rule n_tool_calls and the enrich digest apply, or the two LLM-facing
+    // summaries of one session contradict each other (more writes than calls).
+    const writes = tcs.filter((t) => t.action === 'file_write' && !t.derived).length
+    const shells = tcs.filter((t) => t.action === 'shell' && !t.derived).length
     const acts = [writes ? `${writes} file write${writes > 1 ? 's' : ''}` : '', shells ? `${shells} shell` : '']
       .filter(Boolean)
       .join(', ')
