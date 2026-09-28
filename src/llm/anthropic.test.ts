@@ -1,5 +1,16 @@
-import { describe, expect, it, vi } from 'vitest'
-import { anthropicShapedClient, type AnthropicMessagesClient } from './anthropic'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { anthropicShapedClient, createAnthropicClient, type AnthropicMessagesClient } from './anthropic'
+
+const mocks = vi.hoisted(() => ({ ctor: vi.fn() }))
+
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: class Anthropic {
+    messages = { create: vi.fn() }
+    constructor(opts: unknown) {
+      mocks.ctor(opts)
+    }
+  },
+}))
 
 /** A fake Messages client that records the params it was called with. */
 function fakeClient() {
@@ -10,6 +21,24 @@ function fakeClient() {
   const client = { messages: { create } } as unknown as AnthropicMessagesClient
   return { client, create }
 }
+
+// A gateway deployment (corporate Claude proxy) needs the base URL and header
+// overrides to reach the SDK — same contract the OpenAI-shaped client honors.
+describe('Anthropic client construction', () => {
+  beforeEach(() => mocks.ctor.mockReset())
+
+  it('forwards baseURL and custom default headers to the SDK', () => {
+    createAnthropicClient('k', 'claude-x', { baseURL: 'http://gw', headers: { 'x-user-id': 'u-123' } })
+    expect(mocks.ctor).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'k', baseURL: 'http://gw', defaultHeaders: { 'x-user-id': 'u-123' } }),
+    )
+  })
+
+  it('leaves baseURL and defaultHeaders unset when none are configured', () => {
+    createAnthropicClient('k', 'claude-x')
+    expect(mocks.ctor).toHaveBeenCalledWith({ apiKey: 'k', baseURL: undefined, defaultHeaders: undefined })
+  })
+})
 
 describe('Anthropic system prompt caching', () => {
   it('marks the system block cacheable when cacheSystem is set', async () => {
